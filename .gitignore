@@ -1,0 +1,14 @@
+.venv/
+.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Phase 0 keeps reproducible summaries in reports/, while raw responses stay local.
+data/raw/
+data/normalized/
+
+# Keep only the reproducible latest summaries in Git; timestamped runs stay local.
+reports/phase0/20*/

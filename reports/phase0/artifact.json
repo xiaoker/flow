@@ -1,0 +1,694 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "交易台 Phase 0 数据可行性报告",
+    "description": "官方 ETF、两融和互联互通数据的三交易日可用性与质量结论",
+    "generatedAt": "2026-07-16T00:33:55+08:00",
+    "sources": [
+      {
+        "id": "headline-sql",
+        "label": "报告核心质量指标",
+        "path": "reports/phase0/sql/headline.sql",
+        "query": {
+          "sql": "SELECT\n  counts.pass_count AS passed_checks,\n  counts.fail_count AS failed_checks,\n  counts.warn_count AS warning_checks,\n  (\n    SELECT COUNT(*)\n    FROM dataset_profiles\n    WHERE dataset IN ('sse_etf', 'sse_margin', 'szse_margin', 'stock_connect_summary')\n      AND coverage = '完整'\n  ) AS complete_three_day_chains\nFROM quality_counts AS counts;\n\n",
+          "description": "报告核心质量指标",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-16T00:33:55+08:00",
+          "tables_used": [
+            "quality_counts",
+            "dataset_profiles"
+          ],
+          "filters": [
+            "仅本次 Phase 0 run 的三个请求交易日"
+          ],
+          "metric_definitions": [
+            "通过项：status=pass 的质量规则数量",
+            "警告项：不阻断规范化数据使用但需要显式约束的规则数量",
+            "三日覆盖链路：请求的三个交易日均存在数据的核心数据集数量"
+          ]
+        }
+      },
+      {
+        "id": "coverage-sql",
+        "label": "数据集日期覆盖",
+        "path": "reports/phase0/sql/coverage.sql",
+        "query": {
+          "sql": "SELECT\n  dataset,\n  dataset_label,\n  rows,\n  date_count,\n  target_date_count,\n  coverage,\n  dates\nFROM dataset_profiles\nORDER BY dataset;\n\n",
+          "description": "数据集日期覆盖",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-16T00:33:55+08:00",
+          "tables_used": [
+            "dataset_profiles"
+          ],
+          "filters": [
+            "仅本次 Phase 0 run 的三个请求交易日"
+          ],
+          "metric_definitions": []
+        }
+      },
+      {
+        "id": "warnings-sql",
+        "label": "非通过质量发现",
+        "path": "reports/phase0/sql/warnings.sql",
+        "query": {
+          "sql": "SELECT\n  dataset,\n  severity,\n  message,\n  remediation\nFROM quality_findings\nWHERE status <> 'pass'\nORDER BY severity, dataset, check_id;\n\n",
+          "description": "非通过质量发现",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-16T00:33:55+08:00",
+          "tables_used": [
+            "quality_findings"
+          ],
+          "filters": [
+            "仅本次 Phase 0 run 的三个请求交易日"
+          ],
+          "metric_definitions": []
+        }
+      },
+      {
+        "id": "unit-sql",
+        "label": "两融单位一致性检查",
+        "path": "reports/phase0/sql/unit_checks.sql",
+        "query": {
+          "sql": "SELECT\n  dataset,\n  CASE WHEN status = 'pass' THEN '通过' ELSE '失败' END AS status,\n  max_abs_delta_yuan,\n  tolerance_yuan\nFROM quality_findings\nWHERE check_id = 'consistency.margin_total'\nORDER BY dataset;\n\n",
+          "description": "两融单位一致性检查",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-16T00:33:55+08:00",
+          "tables_used": [
+            "quality_findings"
+          ],
+          "filters": [
+            "仅本次 Phase 0 run 的三个请求交易日"
+          ],
+          "metric_definitions": []
+        }
+      },
+      {
+        "id": "daily-sql",
+        "label": "三日市场级规范化证据",
+        "path": "reports/phase0/sql/daily_market.sql",
+        "query": {
+          "sql": "WITH margin_daily AS (\n  SELECT\n    trade_date,\n    SUM(financing_balance_yuan) / 1000000000.0 AS financing_balance_billion_yuan\n  FROM normalized_margin\n  GROUP BY trade_date\n),\nsouthbound_daily AS (\n  SELECT\n    trade_date,\n    SUM(net_buy) / 1000000000.0 AS southbound_net_buy_billion_hkd\n  FROM normalized_connect_summary\n  WHERE direction = 'southbound'\n  GROUP BY trade_date\n),\nnorthbound_daily AS (\n  SELECT\n    trade_date,\n    SUM(total_turnover) / 1000000000.0 AS northbound_turnover_billion_rmb\n  FROM normalized_connect_summary\n  WHERE direction = 'northbound'\n  GROUP BY trade_date\n)\nSELECT\n  margin_daily.trade_date,\n  ROUND(margin_daily.financing_balance_billion_yuan, 3) AS financing_balance_billion_yuan,\n  ROUND(southbound_daily.southbound_net_buy_billion_hkd, 3) AS southbound_net_buy_billion_hkd,\n  ROUND(northbound_daily.northbound_turnover_billion_rmb, 3) AS northbound_turnover_billion_rmb\nFROM margin_daily\nJOIN southbound_daily USING (trade_date)\nJOIN northbound_daily USING (trade_date)\nORDER BY margin_daily.trade_date;\n\n",
+          "description": "三日市场级规范化证据",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-16T00:33:55+08:00",
+          "tables_used": [
+            "normalized_margin",
+            "normalized_connect_summary"
+          ],
+          "filters": [
+            "仅本次 Phase 0 run 的三个请求交易日"
+          ],
+          "metric_definitions": [
+            "沪深融资余额：上交所融资余额与深交所融资余额之和，单位人民币十亿元",
+            "南向净买入：港股通沪与港股通深买入成交额减卖出成交额之和，单位港币十亿元",
+            "北向成交额：沪股通与深股通总成交额之和，单位人民币十亿元；不是净流入"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "passed-card",
+        "dataset": "headline",
+        "sourceId": "headline-sql",
+        "description": "完成的自动化数据质量规则",
+        "metrics": [
+          {
+            "label": "通过检查",
+            "field": "passed_checks",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "failed-card",
+        "dataset": "headline",
+        "sourceId": "headline-sql",
+        "description": "会阻断 Phase 0 的失败规则",
+        "metrics": [
+          {
+            "label": "失败检查",
+            "field": "failed_checks",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "coverage-card",
+        "dataset": "headline",
+        "sourceId": "headline-sql",
+        "description": "官方源可覆盖全部三个请求交易日的核心链路",
+        "metrics": [
+          {
+            "label": "三日完整链路",
+            "field": "complete_three_day_chains",
+            "format": "number"
+          },
+          {
+            "label": "高等级警告",
+            "field": "warning_checks",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "coverage-chart",
+        "title": "数据链路交易日覆盖",
+        "subtitle": "实际可用日期数；参考线为本次验证目标 3 个交易日",
+        "showDescription": true,
+        "intent": "comparison",
+        "question": "哪些官方数据链路覆盖了全部三个请求交易日？",
+        "rationale": "六条链路是离散类别，横向条形图便于比较长标签，并用目标参考线突出唯一缺口。",
+        "comparisonContext": {
+          "baseline": "3 个请求交易日",
+          "grain": "数据链路",
+          "unit": "交易日数"
+        },
+        "type": "horizontalBar",
+        "dataset": "coverage",
+        "sourceId": "coverage-sql",
+        "encodings": {
+          "x": {
+            "field": "dataset_label",
+            "type": "nominal",
+            "label": "数据链路"
+          },
+          "y": {
+            "field": "date_count",
+            "type": "quantitative",
+            "label": "实际覆盖",
+            "unit": "交易日"
+          },
+          "tooltip": [
+            {
+              "field": "rows",
+              "type": "quantitative",
+              "label": "行数"
+            },
+            {
+              "field": "dates",
+              "type": "text",
+              "label": "可用日期"
+            },
+            {
+              "field": "coverage",
+              "type": "text",
+              "label": "覆盖状态"
+            }
+          ]
+        },
+        "yAxisTitle": "实际覆盖交易日数",
+        "valueFormat": "number",
+        "unit": "个交易日",
+        "referenceLines": [
+          {
+            "axis": "y",
+            "value": 3,
+            "label": "目标 3 天",
+            "color": "neutral",
+            "lineStyle": "dashed"
+          }
+        ],
+        "labels": {
+          "values": "all"
+        },
+        "maxRows": 6,
+        "emptyState": "没有可用于覆盖比较的数据"
+      }
+    ],
+    "tables": [
+      {
+        "id": "coverage-table",
+        "title": "数据链路覆盖",
+        "subtitle": "本次请求的三个交易日；深交所 ETF 为单一当前快照",
+        "showDescription": true,
+        "dataset": "coverage",
+        "defaultSort": {
+          "field": "dataset",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "sourceId": "coverage-sql",
+        "columns": [
+          {
+            "field": "dataset",
+            "label": "数据集",
+            "type": "text"
+          },
+          {
+            "field": "rows",
+            "label": "行数",
+            "format": "number"
+          },
+          {
+            "field": "date_count",
+            "label": "日期数",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "覆盖状态",
+            "type": "text"
+          },
+          {
+            "field": "dates",
+            "label": "可用日期",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "daily-table",
+        "title": "三日市场级验证值",
+        "subtitle": "两融为人民币十亿元；南向净买入为港币十亿元；北向仅为人民币成交额",
+        "showDescription": true,
+        "dataset": "daily",
+        "defaultSort": {
+          "field": "trade_date",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "sourceId": "daily-sql",
+        "columns": [
+          {
+            "field": "trade_date",
+            "label": "交易日",
+            "type": "date"
+          },
+          {
+            "field": "financing_balance_billion_yuan",
+            "label": "沪深融资余额（十亿元）",
+            "format": "number"
+          },
+          {
+            "field": "southbound_net_buy_billion_hkd",
+            "label": "南向净买入（十亿港元）",
+            "format": "number",
+            "movement": true
+          },
+          {
+            "field": "northbound_turnover_billion_rmb",
+            "label": "北向成交额（十亿元）",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "warning-table",
+        "title": "剩余质量约束",
+        "subtitle": "均来自深交所 ETF 当前快照的日期语义和历史覆盖限制",
+        "showDescription": true,
+        "dataset": "warnings",
+        "defaultSort": {
+          "field": "severity",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "sourceId": "warnings-sql",
+        "columns": [
+          {
+            "field": "dataset",
+            "label": "数据集",
+            "type": "text"
+          },
+          {
+            "field": "severity",
+            "label": "等级",
+            "type": "text"
+          },
+          {
+            "field": "message",
+            "label": "发现",
+            "type": "text"
+          },
+          {
+            "field": "remediation",
+            "label": "处理",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "unit-table",
+        "title": "两融单位一致性",
+        "subtitle": "总余额与融资余额加融券余额的绝对差；深交所允许亿元展示舍入",
+        "showDescription": true,
+        "dataset": "unit_checks",
+        "defaultSort": {
+          "field": "dataset",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "sourceId": "unit-sql",
+        "columns": [
+          {
+            "field": "dataset",
+            "label": "数据集",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "结果",
+            "type": "text"
+          },
+          {
+            "field": "max_abs_delta_yuan",
+            "label": "最大差额（元）",
+            "format": "number"
+          },
+          {
+            "field": "tolerance_yuan",
+            "label": "容差（元）",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# 交易台 Phase 0 数据可行性报告"
+      },
+      {
+        "id": "summary",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "headline-sql",
+        "body": "## 技术结论：可进入 Phase 1，但深交所 ETF 需带约束\n\n本次三交易日验证得到 **46 项通过、0 项失败、2 项警告**。上交所 ETF、沪深两融和港交所互联互通已形成可重放的官方数据链路。深交所 ETF 官方下载只有无统计日期的当前快照，因此结论是 `conditional_pass`：可以继续开发，但不得宣称可官方回填其历史份额。"
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "passed-card",
+          "failed-card",
+          "coverage-card"
+        ]
+      },
+      {
+        "id": "coverage-heading",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 四条核心链路完成三日覆盖，深交所 ETF 例外\n\n覆盖表按数据集列出实际日期。这个限制影响历史 ETF 申赎计算，但不影响从正式定时采集日起向前建立份额序列。"
+      },
+      {
+        "id": "coverage-visual",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "coverage-chart"
+      },
+      {
+        "id": "coverage",
+        "type": "table",
+        "layout": "full",
+        "tableId": "coverage-table"
+      },
+      {
+        "id": "values-heading",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 市场级数值通过单位和披露口径校验\n\n表中的北向字段是官方总成交额，不是净流入；南向净买入由两个南向通道的买入减卖出得到。三天样本用于接口和单位验证，不足以解释趋势。"
+      },
+      {
+        "id": "daily",
+        "type": "table",
+        "layout": "full",
+        "tableId": "daily-table"
+      },
+      {
+        "id": "definitions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 口径和方法已固定为可审计契约\n\n上交所两融源字段是元和股；深交所页面明确以亿元和亿股/亿份展示，标准化时乘以 `1e8`。港交所摘要金额以百万元展示，标准化时乘以 `1e6`。北向买卖额和净流入在当前披露机制下保持空值。"
+      },
+      {
+        "id": "unit",
+        "type": "table",
+        "layout": "full",
+        "tableId": "unit-table"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 当前存在一个数据源限制和一个云端验证缺口\n\n只有三个交易日，尚不能评价月度稳定性、节假日边界或长期字段漂移，因此没有绘制趋势图。深交所 ETF 的统计日期由采集任务推断；正式系统必须保存每日原始 XLSX、哈希和观察时间，并在积累三个真实定时快照前持续显示质量警告。本轮也没有配置 GitHub/Cloudflare 资源和密钥，因此 R2/D1 写入链路尚未实测，不计入已完成验收项。"
+      },
+      {
+        "id": "warnings",
+        "type": "table",
+        "layout": "full",
+        "tableId": "warning-table"
+      },
+      {
+        "id": "next",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 建议下一步：开始 Phase 1 骨架，同时连续观察深交所快照\n\n- 建立 D1 schema、数据域发布状态机和只读 Worker API。\n- 创建临时 D1/R2 资源并配置 GitHub Environment secrets，先完成一次可回滚的云端写入冒烟。\n- 再把当前采集命令放入 GitHub Actions，连续保存深交所 ETF 快照。\n- 累计 20 个交易日后再评估趋势、分布漂移和异常阈值。"
+      },
+      {
+        "id": "questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 后续需要继续验证的问题\n\n- 深交所 ETF XLSX 是否在交易日夜间固定时间更新？\n- ETF 拆分、折算和新上市产品在两个交易所接口中如何表达？\n- GitHub Actions 的云端出口是否会触发交易所限流，是否需要错峰或代理降级？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-16T00:33:55+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "passed_checks": 46,
+          "failed_checks": 0,
+          "warning_checks": 2,
+          "complete_three_day_chains": 4
+        }
+      ],
+      "coverage": [
+        {
+          "dataset": "sse_etf",
+          "dataset_label": "上交所 ETF",
+          "rows": 2634,
+          "date_count": 3,
+          "target_date_count": 3,
+          "coverage": "完整",
+          "dates": "2026-07-10、2026-07-13、2026-07-14"
+        },
+        {
+          "dataset": "sse_margin",
+          "dataset_label": "上交所两融",
+          "rows": 3,
+          "date_count": 3,
+          "target_date_count": 3,
+          "coverage": "完整",
+          "dates": "2026-07-10、2026-07-13、2026-07-14"
+        },
+        {
+          "dataset": "stock_connect_summary",
+          "dataset_label": "互联互通汇总",
+          "rows": 12,
+          "date_count": 3,
+          "target_date_count": 3,
+          "coverage": "完整",
+          "dates": "2026-07-10、2026-07-13、2026-07-14"
+        },
+        {
+          "dataset": "stock_connect_top",
+          "dataset_label": "互联互通前十",
+          "rows": 120,
+          "date_count": 3,
+          "target_date_count": 3,
+          "coverage": "完整",
+          "dates": "2026-07-10、2026-07-13、2026-07-14"
+        },
+        {
+          "dataset": "szse_etf",
+          "dataset_label": "深交所 ETF",
+          "rows": 1007,
+          "date_count": 1,
+          "target_date_count": 3,
+          "coverage": "受限",
+          "dates": "2026-07-15"
+        },
+        {
+          "dataset": "szse_margin",
+          "dataset_label": "深交所两融",
+          "rows": 3,
+          "date_count": 3,
+          "target_date_count": 3,
+          "coverage": "完整",
+          "dates": "2026-07-10、2026-07-13、2026-07-14"
+        }
+      ],
+      "warnings": [
+        {
+          "dataset": "szse_etf",
+          "severity": "high",
+          "message": "未覆盖全部请求日期",
+          "remediation": "深交所只提供当前快照；从正式上线日起每日留存，不宣称可官方回填。"
+        },
+        {
+          "dataset": "szse_etf",
+          "severity": "high",
+          "message": "统计日期由采集任务推断",
+          "remediation": "只从当日定时快照向前积累，不把推断日期用于历史回填。"
+        }
+      ],
+      "daily": [
+        {
+          "trade_date": "2026-07-10",
+          "financing_balance_billion_yuan": 2913.769,
+          "southbound_net_buy_billion_hkd": -5.995,
+          "northbound_turnover_billion_rmb": 449.28
+        },
+        {
+          "trade_date": "2026-07-13",
+          "financing_balance_billion_yuan": 2880.236,
+          "southbound_net_buy_billion_hkd": 9.038,
+          "northbound_turnover_billion_rmb": 417.811
+        },
+        {
+          "trade_date": "2026-07-14",
+          "financing_balance_billion_yuan": 2869.278,
+          "southbound_net_buy_billion_hkd": 10.997,
+          "northbound_turnover_billion_rmb": 415.904
+        }
+      ],
+      "unit_checks": [
+        {
+          "dataset": "sse_margin",
+          "status": "通过",
+          "max_abs_delta_yuan": 0.0,
+          "tolerance_yuan": 100000000.0
+        },
+        {
+          "dataset": "szse_margin",
+          "status": "通过",
+          "max_abs_delta_yuan": 1000000.0,
+          "tolerance_yuan": 100000000.0
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "headline-sql",
+      "label": "报告核心质量指标",
+      "path": "reports/phase0/sql/headline.sql",
+      "query": {
+        "sql": "SELECT\n  counts.pass_count AS passed_checks,\n  counts.fail_count AS failed_checks,\n  counts.warn_count AS warning_checks,\n  (\n    SELECT COUNT(*)\n    FROM dataset_profiles\n    WHERE dataset IN ('sse_etf', 'sse_margin', 'szse_margin', 'stock_connect_summary')\n      AND coverage = '完整'\n  ) AS complete_three_day_chains\nFROM quality_counts AS counts;\n\n",
+        "description": "报告核心质量指标",
+        "engine": "SQLite",
+        "language": "sql",
+        "executed_at": "2026-07-16T00:33:55+08:00",
+        "tables_used": [
+          "quality_counts",
+          "dataset_profiles"
+        ],
+        "filters": [
+          "仅本次 Phase 0 run 的三个请求交易日"
+        ],
+        "metric_definitions": [
+          "通过项：status=pass 的质量规则数量",
+          "警告项：不阻断规范化数据使用但需要显式约束的规则数量",
+          "三日覆盖链路：请求的三个交易日均存在数据的核心数据集数量"
+        ]
+      }
+    },
+    {
+      "id": "coverage-sql",
+      "label": "数据集日期覆盖",
+      "path": "reports/phase0/sql/coverage.sql",
+      "query": {
+        "sql": "SELECT\n  dataset,\n  dataset_label,\n  rows,\n  date_count,\n  target_date_count,\n  coverage,\n  dates\nFROM dataset_profiles\nORDER BY dataset;\n\n",
+        "description": "数据集日期覆盖",
+        "engine": "SQLite",
+        "language": "sql",
+        "executed_at": "2026-07-16T00:33:55+08:00",
+        "tables_used": [
+          "dataset_profiles"
+        ],
+        "filters": [
+          "仅本次 Phase 0 run 的三个请求交易日"
+        ],
+        "metric_definitions": []
+      }
+    },
+    {
+      "id": "warnings-sql",
+      "label": "非通过质量发现",
+      "path": "reports/phase0/sql/warnings.sql",
+      "query": {
+        "sql": "SELECT\n  dataset,\n  severity,\n  message,\n  remediation\nFROM quality_findings\nWHERE status <> 'pass'\nORDER BY severity, dataset, check_id;\n\n",
+        "description": "非通过质量发现",
+        "engine": "SQLite",
+        "language": "sql",
+        "executed_at": "2026-07-16T00:33:55+08:00",
+        "tables_used": [
+          "quality_findings"
+        ],
+        "filters": [
+          "仅本次 Phase 0 run 的三个请求交易日"
+        ],
+        "metric_definitions": []
+      }
+    },
+    {
+      "id": "unit-sql",
+      "label": "两融单位一致性检查",
+      "path": "reports/phase0/sql/unit_checks.sql",
+      "query": {
+        "sql": "SELECT\n  dataset,\n  CASE WHEN status = 'pass' THEN '通过' ELSE '失败' END AS status,\n  max_abs_delta_yuan,\n  tolerance_yuan\nFROM quality_findings\nWHERE check_id = 'consistency.margin_total'\nORDER BY dataset;\n\n",
+        "description": "两融单位一致性检查",
+        "engine": "SQLite",
+        "language": "sql",
+        "executed_at": "2026-07-16T00:33:55+08:00",
+        "tables_used": [
+          "quality_findings"
+        ],
+        "filters": [
+          "仅本次 Phase 0 run 的三个请求交易日"
+        ],
+        "metric_definitions": []
+      }
+    },
+    {
+      "id": "daily-sql",
+      "label": "三日市场级规范化证据",
+      "path": "reports/phase0/sql/daily_market.sql",
+      "query": {
+        "sql": "WITH margin_daily AS (\n  SELECT\n    trade_date,\n    SUM(financing_balance_yuan) / 1000000000.0 AS financing_balance_billion_yuan\n  FROM normalized_margin\n  GROUP BY trade_date\n),\nsouthbound_daily AS (\n  SELECT\n    trade_date,\n    SUM(net_buy) / 1000000000.0 AS southbound_net_buy_billion_hkd\n  FROM normalized_connect_summary\n  WHERE direction = 'southbound'\n  GROUP BY trade_date\n),\nnorthbound_daily AS (\n  SELECT\n    trade_date,\n    SUM(total_turnover) / 1000000000.0 AS northbound_turnover_billion_rmb\n  FROM normalized_connect_summary\n  WHERE direction = 'northbound'\n  GROUP BY trade_date\n)\nSELECT\n  margin_daily.trade_date,\n  ROUND(margin_daily.financing_balance_billion_yuan, 3) AS financing_balance_billion_yuan,\n  ROUND(southbound_daily.southbound_net_buy_billion_hkd, 3) AS southbound_net_buy_billion_hkd,\n  ROUND(northbound_daily.northbound_turnover_billion_rmb, 3) AS northbound_turnover_billion_rmb\nFROM margin_daily\nJOIN southbound_daily USING (trade_date)\nJOIN northbound_daily USING (trade_date)\nORDER BY margin_daily.trade_date;\n\n",
+        "description": "三日市场级规范化证据",
+        "engine": "SQLite",
+        "language": "sql",
+        "executed_at": "2026-07-16T00:33:55+08:00",
+        "tables_used": [
+          "normalized_margin",
+          "normalized_connect_summary"
+        ],
+        "filters": [
+          "仅本次 Phase 0 run 的三个请求交易日"
+        ],
+        "metric_definitions": [
+          "沪深融资余额：上交所融资余额与深交所融资余额之和，单位人民币十亿元",
+          "南向净买入：港股通沪与港股通深买入成交额减卖出成交额之和，单位港币十亿元",
+          "北向成交额：沪股通与深股通总成交额之和，单位人民币十亿元；不是净流入"
+        ]
+      }
+    }
+  ]
+}

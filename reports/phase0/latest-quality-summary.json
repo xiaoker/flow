@@ -1,0 +1,914 @@
+{
+  "counts": {
+    "pass": 46,
+    "warn": 2,
+    "fail": 0
+  },
+  "release_eligible": true,
+  "findings": [
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 2634
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "date_basis",
+          "instrument_code",
+          "market",
+          "shares",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market",
+          "instrument_code"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "validity.nonnegative.shares",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "shares 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.nav",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "nav 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.instrument_code",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "ETF 代码格式正确",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "检查 Excel 数值转换是否丢失前导零。"
+    },
+    {
+      "check_id": "timeliness.source_date",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "统计日期由源站提供",
+      "evidence": {
+        "inferred_rows": 0,
+        "total_rows": 2634
+      },
+      "remediation": "只从当日定时快照向前积累，不把推断日期用于历史回填。"
+    },
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 1007
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "date_basis",
+          "instrument_code",
+          "market",
+          "shares",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market",
+          "instrument_code"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "validity.nonnegative.shares",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "shares 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.nav",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "nav 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.instrument_code",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "ETF 代码格式正确",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "检查 Excel 数值转换是否丢失前导零。"
+    },
+    {
+      "check_id": "timeliness.source_date",
+      "dataset": "szse_etf",
+      "status": "warn",
+      "severity": "high",
+      "message": "统计日期由采集任务推断",
+      "evidence": {
+        "inferred_rows": 1007,
+        "total_rows": 1007
+      },
+      "remediation": "只从当日定时快照向前积累，不把推断日期用于历史回填。"
+    },
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 3
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "financing_balance_yuan",
+          "financing_buy_yuan",
+          "margin_total_balance_yuan",
+          "market",
+          "securities_lending_balance_yuan",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "validity.nonnegative.financing_balance_yuan",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "financing_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.financing_buy_yuan",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "financing_buy_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.securities_lending_balance_yuan",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "securities_lending_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.margin_total_balance_yuan",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "margin_total_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "consistency.margin_total",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "两融总额与分项一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "max_abs_delta_yuan": 0.0,
+        "tolerance_yuan": 100000000
+      },
+      "remediation": "核对深交所亿元单位和四舍五入，上交所应接近精确相等。"
+    },
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 3
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "financing_balance_yuan",
+          "financing_buy_yuan",
+          "margin_total_balance_yuan",
+          "market",
+          "securities_lending_balance_yuan",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "validity.nonnegative.financing_balance_yuan",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "financing_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.financing_buy_yuan",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "financing_buy_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.securities_lending_balance_yuan",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "securities_lending_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.margin_total_balance_yuan",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "margin_total_balance_yuan 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "consistency.margin_total",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "两融总额与分项一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "max_abs_delta_yuan": 1000000.0,
+        "tolerance_yuan": 100000000
+      },
+      "remediation": "核对深交所亿元单位和四舍五入，上交所应接近精确相等。"
+    },
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 12
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "currency",
+          "direction",
+          "etf_turnover",
+          "market",
+          "total_trade_count",
+          "total_turnover",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market",
+          "direction"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "validity.nonnegative.total_turnover",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "total_turnover 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.buy_turnover",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "buy_turnover 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.sell_turnover",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "sell_turnover 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "validity.nonnegative.etf_turnover",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "etf_turnover 无负数",
+      "evidence": {
+        "invalid_rows": 0
+      },
+      "remediation": "核对单位、哨兵值和源站字段含义。"
+    },
+    {
+      "check_id": "consistency.southbound_turnover",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "南向总成交额等于买入加卖出",
+      "evidence": {
+        "invalid_rows": 0,
+        "max_abs_delta": 3.814697265625e-06
+      },
+      "remediation": "检查 HKD 百万元到港元的单位转换和页面舍入。"
+    },
+    {
+      "check_id": "policy.northbound_no_net_flow",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "北向未伪造买卖额或净流入",
+      "evidence": {
+        "rows_with_buy_or_sell": 0
+      },
+      "remediation": "2024-08-19 后仅展示官方总成交额、笔数、ETF 成交额和前十活跃证券。"
+    },
+    {
+      "check_id": "completeness.non_empty",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "数据集非空",
+      "evidence": {
+        "rows": 120
+      },
+      "remediation": "保持上一 ACTIVE 版本并在下次任务重试。"
+    },
+    {
+      "check_id": "schema.required_columns",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "必填字段齐全",
+      "evidence": {
+        "missing": [],
+        "required": [
+          "direction",
+          "instrument_code",
+          "market",
+          "rank",
+          "total_turnover",
+          "trade_date"
+        ]
+      },
+      "remediation": "更新适配器映射并保留失败响应作为契约 fixture。"
+    },
+    {
+      "check_id": "uniqueness.business_key",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "业务主键唯一",
+      "evidence": {
+        "keys": [
+          "trade_date",
+          "market",
+          "direction",
+          "rank"
+        ],
+        "duplicate_rows": 0
+      },
+      "remediation": "阻断发布，检查分页、重复抓取或主键定义。"
+    },
+    {
+      "check_id": "completeness.top10",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "每个通道包含完整前十",
+      "evidence": {
+        "invalid_rank_rows": 0,
+        "invalid_group_count": 0,
+        "group_sizes": {
+          "2026-07-10|SSE|northbound": 10,
+          "2026-07-10|SSE|southbound": 10,
+          "2026-07-10|SZSE|northbound": 10,
+          "2026-07-10|SZSE|southbound": 10,
+          "2026-07-13|SSE|northbound": 10,
+          "2026-07-13|SSE|southbound": 10,
+          "2026-07-13|SZSE|northbound": 10,
+          "2026-07-13|SZSE|southbound": 10,
+          "2026-07-14|SSE|northbound": 10,
+          "2026-07-14|SSE|southbound": 10,
+          "2026-07-14|SZSE|northbound": 10,
+          "2026-07-14|SZSE|southbound": 10
+        }
+      },
+      "remediation": "检查 HKEX 页面结构、交易日状态和解析逻辑。"
+    },
+    {
+      "check_id": "timeliness.requested_date_coverage",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "覆盖全部请求日期",
+      "evidence": {
+        "expected_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "observed_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "missing_dates": []
+      },
+      "remediation": null
+    },
+    {
+      "check_id": "timeliness.requested_date_coverage",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "覆盖全部请求日期",
+      "evidence": {
+        "expected_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "observed_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "missing_dates": []
+      },
+      "remediation": null
+    },
+    {
+      "check_id": "timeliness.requested_date_coverage",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "覆盖全部请求日期",
+      "evidence": {
+        "expected_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "observed_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "missing_dates": []
+      },
+      "remediation": null
+    },
+    {
+      "check_id": "timeliness.requested_date_coverage",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "覆盖全部请求日期",
+      "evidence": {
+        "expected_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "observed_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "missing_dates": []
+      },
+      "remediation": null
+    },
+    {
+      "check_id": "timeliness.requested_date_coverage",
+      "dataset": "szse_etf",
+      "status": "warn",
+      "severity": "high",
+      "message": "未覆盖全部请求日期",
+      "evidence": {
+        "expected_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ],
+        "observed_dates": [
+          "2026-07-15"
+        ],
+        "missing_dates": [
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14"
+        ]
+      },
+      "remediation": "深交所只提供当前快照；从正式上线日起每日留存，不宣称可官方回填。"
+    }
+  ],
+  "phase0_gate_status": "conditional_pass",
+  "phase0_gate_passed": false,
+  "phase1_entry_recommendation": "proceed_with_szse_forward_snapshot_constraint",
+  "profiles": {
+    "sse_etf": {
+      "rows": 2634,
+      "columns": [
+        "trade_date",
+        "market",
+        "instrument_code",
+        "instrument_name",
+        "etf_type",
+        "investment_type",
+        "shares",
+        "nav",
+        "date_basis",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "instrument_code": 0.0,
+        "instrument_name": 0.0,
+        "etf_type": 0.0,
+        "investment_type": 1.0,
+        "shares": 0.0,
+        "nav": 1.0,
+        "date_basis": 0.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-10",
+        "2026-07-13",
+        "2026-07-14"
+      ]
+    },
+    "szse_etf": {
+      "rows": 1007,
+      "columns": [
+        "trade_date",
+        "market",
+        "instrument_code",
+        "instrument_name",
+        "etf_type",
+        "investment_type",
+        "shares",
+        "nav",
+        "date_basis",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "instrument_code": 0.0,
+        "instrument_name": 0.0,
+        "etf_type": 0.0,
+        "investment_type": 0.0,
+        "shares": 0.0,
+        "nav": 0.026812,
+        "date_basis": 0.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-15"
+      ]
+    },
+    "sse_margin": {
+      "rows": 3,
+      "columns": [
+        "trade_date",
+        "market",
+        "financing_balance_yuan",
+        "financing_buy_yuan",
+        "securities_lending_balance_yuan",
+        "securities_lending_volume_shares",
+        "securities_lending_sell_volume_shares",
+        "margin_total_balance_yuan",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "financing_balance_yuan": 0.0,
+        "financing_buy_yuan": 0.0,
+        "securities_lending_balance_yuan": 0.0,
+        "securities_lending_volume_shares": 0.0,
+        "securities_lending_sell_volume_shares": 0.0,
+        "margin_total_balance_yuan": 0.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-10",
+        "2026-07-13",
+        "2026-07-14"
+      ]
+    },
+    "szse_margin": {
+      "rows": 3,
+      "columns": [
+        "trade_date",
+        "market",
+        "financing_balance_yuan",
+        "financing_buy_yuan",
+        "securities_lending_balance_yuan",
+        "securities_lending_volume_shares",
+        "securities_lending_sell_volume_shares",
+        "margin_total_balance_yuan",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "financing_balance_yuan": 0.0,
+        "financing_buy_yuan": 0.0,
+        "securities_lending_balance_yuan": 0.0,
+        "securities_lending_volume_shares": 0.0,
+        "securities_lending_sell_volume_shares": 0.0,
+        "margin_total_balance_yuan": 0.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-10",
+        "2026-07-13",
+        "2026-07-14"
+      ]
+    },
+    "stock_connect_summary": {
+      "rows": 12,
+      "columns": [
+        "trade_date",
+        "market",
+        "direction",
+        "currency",
+        "total_turnover",
+        "buy_turnover",
+        "sell_turnover",
+        "net_buy",
+        "total_trade_count",
+        "buy_trade_count",
+        "sell_trade_count",
+        "etf_turnover",
+        "daily_quota_balance",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "direction": 0.0,
+        "currency": 0.0,
+        "total_turnover": 0.0,
+        "buy_turnover": 0.5,
+        "sell_turnover": 0.5,
+        "net_buy": 0.5,
+        "total_trade_count": 0.0,
+        "buy_trade_count": 0.5,
+        "sell_trade_count": 0.5,
+        "etf_turnover": 0.0,
+        "daily_quota_balance": 1.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-10",
+        "2026-07-13",
+        "2026-07-14"
+      ]
+    },
+    "stock_connect_top": {
+      "rows": 120,
+      "columns": [
+        "trade_date",
+        "market",
+        "direction",
+        "currency",
+        "rank",
+        "instrument_code",
+        "instrument_name",
+        "buy_turnover",
+        "sell_turnover",
+        "total_turnover",
+        "source_id",
+        "source_grade",
+        "observed_at"
+      ],
+      "null_rates": {
+        "trade_date": 0.0,
+        "market": 0.0,
+        "direction": 0.0,
+        "currency": 0.0,
+        "rank": 0.0,
+        "instrument_code": 0.0,
+        "instrument_name": 0.0,
+        "buy_turnover": 0.5,
+        "sell_turnover": 0.5,
+        "total_turnover": 0.0,
+        "source_id": 0.0,
+        "source_grade": 0.0,
+        "observed_at": 0.0
+      },
+      "distinct_trade_dates": [
+        "2026-07-10",
+        "2026-07-13",
+        "2026-07-14"
+      ]
+    }
+  },
+  "errors": []
+}

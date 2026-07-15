@@ -1,0 +1,34 @@
+dataset,field,canonical_type,unit,nullable,date_semantics,source_grade,definition
+etf_scale,trade_date,date,day,false,source_or_inferred,A,ETF 份额对应日期；深交所当前快照为采集任务推断日期
+etf_scale,market,string,enum,false,not_applicable,A,SSE 或 SZSE
+etf_scale,instrument_code,string,code,false,not_applicable,A,六位交易所基金代码
+etf_scale,instrument_name,string,text,true,not_applicable,A,交易所基金简称
+etf_scale,etf_type,string,enum,true,not_applicable,A,源站 ETF 或基金类别
+etf_scale,investment_type,string,enum,true,not_applicable,A,深交所投资类别
+etf_scale,shares,number,share,false,trade_date,A,基金份额；上交所源字段万份已乘 10000
+etf_scale,nav,number,currency_per_share,true,trade_date,A,深交所当前列表净值
+etf_scale,date_basis,string,enum,false,not_applicable,A,source_published 或 collector_inferred_current_snapshot
+margin_market_daily,trade_date,date,day,false,source_published,A,交易所两融汇总交易日
+margin_market_daily,financing_balance_yuan,number,CNY,false,trade_date,A,融资余额；深交所亿元已乘 1e8
+margin_market_daily,financing_buy_yuan,number,CNY,false,trade_date,A,融资买入额；深交所亿元已乘 1e8
+margin_market_daily,securities_lending_balance_yuan,number,CNY,false,trade_date,A,融券余额；深交所亿元已乘 1e8
+margin_market_daily,securities_lending_volume_shares,number,share,true,trade_date,A,融券余量；深交所亿股或亿份已乘 1e8
+margin_market_daily,securities_lending_sell_volume_shares,number,share,true,trade_date,A,融券卖出量；深交所亿股或亿份已乘 1e8
+margin_market_daily,margin_total_balance_yuan,number,CNY,false,trade_date,A,融资融券余额
+stock_connect_summary,trade_date,date,day,false,source_published,A,港交所历史日统计日期
+stock_connect_summary,market,string,enum,false,not_applicable,A,SSE 或 SZSE 通道
+stock_connect_summary,direction,string,enum,false,not_applicable,A,northbound 或 southbound
+stock_connect_summary,currency,string,enum,false,not_applicable,A,北向 RMB；南向 HKD
+stock_connect_summary,total_turnover,number,base_currency,false,trade_date,A,总成交额；源站百万元已乘 1e6
+stock_connect_summary,buy_turnover,number,base_currency,true,trade_date,A,南向买入成交额；北向 2024-08-19 后不披露
+stock_connect_summary,sell_turnover,number,base_currency,true,trade_date,A,南向卖出成交额；北向 2024-08-19 后不披露
+stock_connect_summary,net_buy,number,base_currency,true,trade_date,B,南向买入成交额减卖出成交额；北向为空
+stock_connect_summary,total_trade_count,integer,trade,false,trade_date,A,买卖成交笔数合计
+stock_connect_summary,etf_turnover,number,base_currency,false,trade_date,A,ETF 成交额；源站百万元已乘 1e6
+stock_connect_top,rank,integer,rank,false,trade_date,A,各通道成交最活跃证券排名 1 至 10
+stock_connect_top,instrument_code,string,code,false,trade_date,A,证券代码
+stock_connect_top,instrument_name,string,text,true,trade_date,A,港交所英文证券简称
+stock_connect_top,buy_turnover,number,base_currency,true,trade_date,A,南向前十买入成交额；北向不披露
+stock_connect_top,sell_turnover,number,base_currency,true,trade_date,A,南向前十卖出成交额；北向不披露
+stock_connect_top,total_turnover,number,base_currency,false,trade_date,A,前十证券总成交额
+

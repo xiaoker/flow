@@ -1,0 +1,244 @@
+{
+  "run_id": "20260716T003352+0800",
+  "started_at": "2026-07-16T00:33:52+08:00",
+  "finished_at": "2026-07-16T00:33:55+08:00",
+  "requested_dates": [
+    "2026-07-10",
+    "2026-07-13",
+    "2026-07-14"
+  ],
+  "szse_etf_inferred_date": "2026-07-15",
+  "artifacts": [
+    {
+      "source": {
+        "source_id": "sse",
+        "publisher": "上海证券交易所",
+        "dataset": "etf_scale",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-10",
+      "observed_at": "2026-07-16T00:33:52+08:00",
+      "status_code": 200,
+      "content_type": "application/json;charset=UTF-8",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-10/20260716T003352+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-10/20260716T003352+0800.metadata.json",
+      "sha256": "fe5329445852e717910103f2d6811346ba54cbe1544a8968c9cf6f9bf60090a0",
+      "row_count": 878,
+      "normalized_path": "data/normalized/etf_scale/2026-07-10/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "sse",
+        "publisher": "上海证券交易所",
+        "dataset": "etf_scale",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-13",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json;charset=UTF-8",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-13/20260716T003352+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-13/20260716T003352+0800.metadata.json",
+      "sha256": "1a5c2c471252d6071630fc359a6e1f3a59bd81019541964c28ceed5bc592dcd1",
+      "row_count": 878,
+      "normalized_path": "data/normalized/etf_scale/2026-07-13/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "sse",
+        "publisher": "上海证券交易所",
+        "dataset": "etf_scale",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-14",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json;charset=UTF-8",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-14/20260716T003352+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-14/20260716T003352+0800.metadata.json",
+      "sha256": "daa1e645ca4220ff4287329e1482932752b4659cb064e86f87ee7e9771836003",
+      "row_count": 878,
+      "normalized_path": "data/normalized/etf_scale/2026-07-14/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "szse",
+        "publisher": "深圳证券交易所",
+        "dataset": "etf_scale",
+        "url": "https://fund.szse.cn/api/report/ShowReport",
+        "source_grade": "A",
+        "date_semantics": "collector_inferred_current_snapshot"
+      },
+      "requested_date": null,
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=GBK",
+      "raw_path": "data/raw/szse/etf_scale/current/20260716T003352+0800.xlsx",
+      "metadata_path": "data/raw/szse/etf_scale/current/20260716T003352+0800.metadata.json",
+      "sha256": "2c51336de9aa9f9916671cfcd8dc05ab20242415b4147f7714ff76716d22c24a",
+      "row_count": 1007,
+      "normalized_path": "data/normalized/etf_scale/2026-07-15/20260716T003352+0800.csv",
+      "warnings": [
+        "深交所 ETF 官方下载只提供当前快照且未包含统计日期；trade_date 来自采集任务预期日期，不能用于历史回填。"
+      ]
+    },
+    {
+      "source": {
+        "source_id": "sse",
+        "publisher": "上海证券交易所",
+        "dataset": "margin_market_daily",
+        "url": "https://query.sse.com.cn/marketdata/tradedata/queryMargin.do",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-10_2026-07-14",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json;charset=UTF-8",
+      "raw_path": "data/raw/sse/margin_market_daily/2026-07-10_2026-07-14/20260716T003352+0800.json",
+      "metadata_path": "data/raw/sse/margin_market_daily/2026-07-10_2026-07-14/20260716T003352+0800.metadata.json",
+      "sha256": "658b1b0dfd35f5b822a5b5315bc91ce87c288dcc0d51a50764b310065210b894",
+      "row_count": 3,
+      "normalized_path": "data/normalized/margin_market_daily/2026-07-10_2026-07-14/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "szse",
+        "publisher": "深圳证券交易所",
+        "dataset": "margin_market_daily",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-10",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-10/20260716T003352+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-10/20260716T003352+0800.metadata.json",
+      "sha256": "6aa0126367a9d4dbad1dea1d8532a8b8246b608c16332cbba294c7669d5b62ba",
+      "row_count": 1,
+      "normalized_path": "data/normalized/margin_market_daily/2026-07-10/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "szse",
+        "publisher": "深圳证券交易所",
+        "dataset": "margin_market_daily",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-13",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T003352+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T003352+0800.metadata.json",
+      "sha256": "b2c30900532ac0c5f35b3c394ce8bcccc274ec2271eb84bf655c78f4591b7d04",
+      "row_count": 1,
+      "normalized_path": "data/normalized/margin_market_daily/2026-07-13/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "szse",
+        "publisher": "深圳证券交易所",
+        "dataset": "margin_market_daily",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-14",
+      "observed_at": "2026-07-16T00:33:53+08:00",
+      "status_code": 200,
+      "content_type": "application/json",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T003352+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T003352+0800.metadata.json",
+      "sha256": "f029d1610da53a4d532f97229cbb6cd3cc73b621addece23235cc1dc3b3cdcc3",
+      "row_count": 1,
+      "normalized_path": "data/normalized/margin_market_daily/2026-07-14/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "hkex",
+        "publisher": "香港交易所",
+        "dataset": "stock_connect_daily",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-10",
+      "observed_at": "2026-07-16T00:33:54+08:00",
+      "status_code": 200,
+      "content_type": "application/javascript",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-10/20260716T003352+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-10/20260716T003352+0800.metadata.json",
+      "sha256": "63fe39b23e465bd16eee7b2937450c13fdac8df30af58e6070670c39ccfc06f6",
+      "row_count": 44,
+      "normalized_path": "data/normalized/stock_connect_summary/2026-07-10/20260716T003352+0800.csv;data/normalized/stock_connect_top/2026-07-10/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "hkex",
+        "publisher": "香港交易所",
+        "dataset": "stock_connect_daily",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-13",
+      "observed_at": "2026-07-16T00:33:55+08:00",
+      "status_code": 200,
+      "content_type": "application/javascript",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T003352+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T003352+0800.metadata.json",
+      "sha256": "1a26e3df878bdaf263dc784e5877f7b96e1c171518aa025432b9e7cef1c80128",
+      "row_count": 44,
+      "normalized_path": "data/normalized/stock_connect_summary/2026-07-13/20260716T003352+0800.csv;data/normalized/stock_connect_top/2026-07-13/20260716T003352+0800.csv",
+      "warnings": []
+    },
+    {
+      "source": {
+        "source_id": "hkex",
+        "publisher": "香港交易所",
+        "dataset": "stock_connect_daily",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A",
+        "date_semantics": "source_published"
+      },
+      "requested_date": "2026-07-14",
+      "observed_at": "2026-07-16T00:33:55+08:00",
+      "status_code": 200,
+      "content_type": "application/javascript",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T003352+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T003352+0800.metadata.json",
+      "sha256": "da8c0843177875ee181a4cf4f40b22b7dafd7c83a338b674bd56b3b2346cc061",
+      "row_count": 44,
+      "normalized_path": "data/normalized/stock_connect_summary/2026-07-14/20260716T003352+0800.csv;data/normalized/stock_connect_top/2026-07-14/20260716T003352+0800.csv",
+      "warnings": []
+    }
+  ],
+  "combined_paths": {
+    "sse_etf": "data/normalized/phase0_combined_sse_etf/20260716T003352+0800/20260716T003352+0800.csv",
+    "szse_etf": "data/normalized/phase0_combined_szse_etf/20260716T003352+0800/20260716T003352+0800.csv",
+    "sse_margin": "data/normalized/phase0_combined_sse_margin/20260716T003352+0800/20260716T003352+0800.csv",
+    "szse_margin": "data/normalized/phase0_combined_szse_margin/20260716T003352+0800/20260716T003352+0800.csv",
+    "stock_connect_summary": "data/normalized/phase0_combined_stock_connect_summary/20260716T003352+0800/20260716T003352+0800.csv",
+    "stock_connect_top": "data/normalized/phase0_combined_stock_connect_top/20260716T003352+0800/20260716T003352+0800.csv"
+  },
+  "quality_summary_path": "reports/phase0/20260716T003352+0800/quality-summary.json"
+}
