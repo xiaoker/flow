@@ -6,6 +6,7 @@ interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   RAW_BUCKET: R2Bucket;
+  INGEST_API_KEY: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

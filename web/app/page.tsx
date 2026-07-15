@@ -1,6 +1,8 @@
 import { Dashboard } from "./dashboard";
-import { dashboardSnapshot } from "./lib/dashboard-data";
+import { getDashboardSnapshot } from "./lib/dashboard-store";
 
-export default function Home() {
-  return <Dashboard snapshot={dashboardSnapshot} />;
+export const dynamic = "force-dynamic";
+
+export default async function Home() {
+  return <Dashboard snapshot={await getDashboardSnapshot()} />;
 }

@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { dashboardSnapshot } from "@/app/lib/dashboard-data";
+import { getDashboardSnapshot } from "@/app/lib/dashboard-store";
 
-export const dynamic = "force-static";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json(dashboardSnapshot, {
+  return NextResponse.json(await getDashboardSnapshot(), {
     headers: {
       "Cache-Control": "public, max-age=300, stale-while-revalidate=3600",
-      "X-Data-Mode": "phase0-snapshot",
+      "X-Data-Mode": "latest-published-snapshot",
     },
   });
 }

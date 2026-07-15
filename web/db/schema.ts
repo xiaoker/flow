@@ -33,6 +33,21 @@ export const dataReleases = sqliteTable("data_release", {
   index("data_release_active_idx").on(table.domain, table.status, table.tradeDate),
 ]);
 
+export const dashboardSnapshots = sqliteTable("dashboard_snapshot", {
+  id: text("id").primaryKey(),
+  asOf: text("as_of").notNull(),
+  observedAt: text("observed_at").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  publishedAt: text("published_at").notNull(),
+  qualityPass: integer("quality_pass").notNull(),
+  qualityWarn: integer("quality_warn").notNull(),
+  qualityFail: integer("quality_fail").notNull(),
+  r2ObjectKey: text("r2_object_key").notNull(),
+}, (table) => [
+  index("dashboard_snapshot_latest_idx").on(table.publishedAt),
+  index("dashboard_snapshot_as_of_idx").on(table.asOf, table.publishedAt),
+]);
+
 export const etfDaily = sqliteTable("etf_daily", {
   releaseId: text("release_id").notNull(),
   tradeDate: text("trade_date").notNull(),

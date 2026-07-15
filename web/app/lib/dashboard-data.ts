@@ -1,19 +1,52 @@
 export type FlowDirection = "inflow" | "outflow";
 
-export type DashboardSnapshot = typeof dashboardSnapshot;
+export type FlowTone = "positive" | "negative" | "neutral";
 
-export const dashboardSnapshot = {
+export interface DashboardSnapshot {
+  asOf: string;
+  observedAt: string;
+  mode: string;
+  gate: string;
+  quality: { pass: number; warn: number; fail: number };
+  metrics: Array<{
+    id: string;
+    eyebrow: string;
+    value: string;
+    unit: string;
+    delta: string;
+    tone: FlowTone;
+    note: string;
+  }>;
+  etfFlows: Record<FlowDirection, Array<{ code: string; name: string; value: number }>>;
+  marginSeries: Array<{ date: string; balance: number; label: string }>;
+  connect: Array<{
+    name: string;
+    value: string;
+    unit: string;
+    description: string;
+    tone: FlowTone;
+  }>;
+  dataStatus: Array<{
+    name: string;
+    status: "ready" | "warning";
+    asOf: string;
+    detail: string;
+  }>;
+}
+
+export const dashboardSnapshot: DashboardSnapshot = {
   asOf: "2026-07-14",
   observedAt: "2026-07-16 00:33 CST",
   mode: "Phase 0 本地实数快照",
   gate: "conditional_pass",
+  quality: { pass: 46, warn: 2, fail: 0 },
   metrics: [
     {
       id: "etf",
       eyebrow: "上交所 ETF 份额净变化",
-      value: "+81.41",
+      value: "+79.89",
       unit: "亿份",
-      delta: "296 只增加 · 226 只减少",
+      delta: "299 只增加 · 229 只减少",
       tone: "positive",
       note: "份额口径，非净申购金额",
     },
@@ -78,4 +111,4 @@ export const dashboardSnapshot = {
     { name: "融资融券", status: "ready", asOf: "07-14", detail: "沪深完整" },
     { name: "互联互通", status: "ready", asOf: "07-14", detail: "4 通道" },
   ],
-} as const;
+};
