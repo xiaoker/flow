@@ -295,7 +295,7 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 @media (max-width: 1000px) {
   .terminal-topbar { grid-template-columns: 1fr auto; }
   .desk-nav { position: fixed; right: 0; bottom: 0; left: 0; z-index: 50; justify-content: center; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: rgba(9,17,27,.98); backdrop-filter: blur(16px); }
-  .desk-nav button { min-width: 0; height: 58px; flex: 1; justify-content: center; border-radius: 0; }
+  .desk-nav button { min-width: 0; height: 58px; flex: 1; justify-content: center; gap: 4px; padding: 0 4px; border-radius: 0; }
   .desk-nav button span { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
   .desk-nav button.active::after { top: -1px; bottom: auto; }
   .top-actions .refresh-toggle, .top-actions > .icon-button:first-of-type { display: none; }
