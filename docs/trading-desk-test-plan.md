@@ -4,7 +4,17 @@
 
 适用范围：Phase 0 数据可行性验证与 Phase 1 MVP
 
-状态：数据、发布链路与 Access 私有入口均已配置，生产安全冒烟验收进行中
+状态：数据、发布链路与 Access 私有入口均已配置，生产安全冒烟验收已通过
+
+## 0. 生产验收记录
+
+2026-07-16 已完成以下实测：
+
+- 未登录访问 `https://flow.xiaoker.com/` 被 Cloudflare Access 重定向至身份验证页；
+- GitHub Actions `Cloudflare Access smoke #2` 从海外 Runner 使用 Service Auth 身份读取 `/api/v1/data-status` 并通过响应契约校验；
+- 直接访问 `flow.xiaoker.workers.dev` 返回 `404`，Worker Preview URL 已关闭；
+- `Daily market data #3` 已完成官方数据采集、质量门禁、D1/R2 发布和证据保留；
+- 短时间内重复手动执行时，上交所接口可能对 GitHub 海外 Runner 返回 `403`。此时任务在采集阶段失败，不执行发布，生产继续读取上一个有效快照。日常定时任务保持每个工作日一次，不连续手动重跑。
 
 ## 1. 测试目标
 
