@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
-import { dashboardSnapshot } from "@/app/lib/dashboard-data";
+import { getDashboardSnapshot } from "@/app/lib/dashboard-store";
 
-export const dynamic = "force-static";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const dashboardSnapshot = await getDashboardSnapshot();
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     observedAt: dashboardSnapshot.observedAt,
     gate: dashboardSnapshot.gate,
     mode: dashboardSnapshot.mode,
-    quality: { pass: 46, warn: 2, fail: 0 },
+    quality: dashboardSnapshot.quality,
     domains: dashboardSnapshot.dataStatus,
   });
 }

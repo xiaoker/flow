@@ -12,3 +12,4 @@ data/normalized/
 
 # Keep only the reproducible latest summaries in Git; timestamped runs stay local.
 reports/phase0/20*/
+dashboard-snapshot.json

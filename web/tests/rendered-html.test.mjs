@@ -46,3 +46,17 @@ test("exposes the machine-readable data status endpoint", async () => {
   assert.deepEqual(payload.quality, { pass: 46, warn: 2, fail: 0 });
   assert.equal(payload.domains.length, 4);
 });
+
+test("rejects unauthenticated snapshot imports", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }),
+    env,
+    context,
+  );
+  assert.equal(response.status, 401);
+});

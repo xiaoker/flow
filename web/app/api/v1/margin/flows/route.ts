@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { dashboardSnapshot } from "@/app/lib/dashboard-data";
+import { getDashboardSnapshot } from "@/app/lib/dashboard-store";
 
-export const dynamic = "force-static";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const dashboardSnapshot = await getDashboardSnapshot();
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     currency: "CNY",
