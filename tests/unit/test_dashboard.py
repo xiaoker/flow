@@ -69,4 +69,7 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["metrics"][0]["value"] == "+0.00"
     assert snapshot["metrics"][1]["value"] == "+0.00"
     assert snapshot["etfFlows"]["inflow"][0]["code"] == "000001"
+    assert snapshot["etfTerminal"]["availablePeriods"] == ["1d", "3d"]
+    assert snapshot["etfTerminal"]["dailySeries"][-1]["coverage"] == 2
+    assert snapshot["etfTerminal"]["instruments"][0]["periods"]["3d"] is not None
     assert snapshot["dataStatus"][1]["status"] == "warning"

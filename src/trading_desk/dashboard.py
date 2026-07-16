@@ -71,6 +71,119 @@ def _latest_etf_flows(frame: pd.DataFrame, dates: list[str]) -> tuple[dict[str, 
     return {"inflow": rows(False), "outflow": rows(True)}, summary
 
 
+def _classify_etf(name: str) -> str:
+    normalized = name.upper()
+    rules = (
+        ("科技", ("半导", "芯片", "通信", "5G", "软件", "计算机", "人工智能", "AI", "机器人", "科创")),
+        ("医药", ("医药", "医疗", "创新药", "生物", "疫苗")),
+        ("港股海外", ("恒生", "港股", "中概", "纳指", "标普", "日经", "德国", "法国", "海外")),
+        ("商品", ("黄金", "有色", "煤炭", "钢铁", "化工", "豆粕", "能源", "商品")),
+        ("红利价值", ("红利", "价值", "低波", "央企")),
+        ("金融地产", ("银行", "证券", "券商", "金融", "地产")),
+        ("新能源制造", ("新能源", "光伏", "电池", "汽车", "军工", "机械", "制造")),
+        ("债券货币", ("债", "货币", "现金", "短融", "同业存单")),
+        ("宽基", ("300", "500", "1000", "2000", "A50", "上证", "创业板", "中证", "沪深")),
+    )
+    for category, keywords in rules:
+        if any(keyword in normalized for keyword in keywords):
+            return category
+    return "其他"
+
+
+def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str, Any]:
+    available_dates = [
+        trade_date
+        for trade_date in dates
+        if frame["trade_date"].astype(str).eq(trade_date).any()
+    ]
+    if len(available_dates) < 2:
+        return {"dailySeries": [], "instruments": [], "groupPeriods": []}
+
+    selected = frame.loc[
+        frame["trade_date"].astype(str).isin(available_dates),
+        ["trade_date", "instrument_code", "instrument_name", "shares"],
+    ].copy()
+    selected["trade_date"] = selected["trade_date"].astype(str)
+    selected["instrument_code"] = selected["instrument_code"].astype(str).str.zfill(6)
+    selected["shares"] = pd.to_numeric(selected["shares"], errors="coerce")
+
+    names = (
+        selected.sort_values("trade_date")
+        .drop_duplicates("instrument_code", keep="last")
+        .set_index("instrument_code")["instrument_name"]
+    )
+    pivot = selected.pivot_table(
+        index="instrument_code", columns="trade_date", values="shares", aggfunc="last"
+    )
+    latest_date, previous_date, first_date = (
+        available_dates[-1],
+        available_dates[-2],
+        available_dates[0],
+    )
+    latest_delta = pivot[latest_date] - pivot[previous_date]
+    window_delta = pivot[latest_date] - pivot[first_date]
+
+    instruments = []
+    for code in pivot.index:
+        name = str(names.get(code, code))
+        one_day = latest_delta.get(code)
+        window = window_delta.get(code)
+        latest_shares = pivot.at[code, latest_date] if latest_date in pivot.columns else None
+        instruments.append(
+            {
+                "code": str(code),
+                "name": name,
+                "category": _classify_etf(name),
+                "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
+                "periods": {
+                    "1d": None if pd.isna(one_day) else round(float(one_day) / 100_000_000, 2),
+                    "3d": None if pd.isna(window) else round(float(window) / 100_000_000, 2),
+                },
+                "coverage": int(pivot.loc[code, available_dates].notna().sum()),
+            }
+        )
+    instruments.sort(
+        key=lambda item: abs(item["periods"]["1d"] or 0), reverse=True
+    )
+
+    daily_series = []
+    for previous, current in zip(available_dates, available_dates[1:]):
+        comparable = pivot[[previous, current]].dropna()
+        delta = comparable[current] - comparable[previous]
+        daily_series.append(
+            {
+                "date": current[5:],
+                "value": round(float(delta.sum()) / 100_000_000, 2),
+                "coverage": int(comparable.shape[0]),
+            }
+        )
+
+    groups: dict[str, dict[str, float]] = {}
+    for item in instruments:
+        category = item["category"]
+        aggregate = groups.setdefault(category, {"1d": 0.0, "3d": 0.0})
+        for period in ("1d", "3d"):
+            value = item["periods"][period]
+            if value is not None:
+                aggregate[period] += value
+    group_periods = [
+        {
+            "name": name,
+            "periods": {key: round(value, 2) for key, value in periods.items()},
+        }
+        for name, periods in groups.items()
+    ]
+    group_periods.sort(key=lambda item: abs(item["periods"]["1d"]), reverse=True)
+
+    return {
+        "dailySeries": daily_series,
+        "instruments": instruments,
+        "groupPeriods": group_periods,
+        "availablePeriods": ["1d", "3d"],
+        "classification": "基金简称关键词映射",
+    }
+
+
 def build_dashboard_snapshot(
     *, manifest_path: Path, quality_path: Path, workspace_root: Path
 ) -> dict[str, Any]:
@@ -87,6 +200,7 @@ def build_dashboard_snapshot(
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
 
     etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
+    etf_terminal = _build_etf_terminal_data(sse_etf, dates)
     margin = pd.concat([sse_margin, szse_margin], ignore_index=True)
     margin_daily = (
         margin.groupby("trade_date", as_index=False)
@@ -198,6 +312,7 @@ def build_dashboard_snapshot(
             },
         ],
         "etfFlows": etf_flows,
+        "etfTerminal": etf_terminal,
         "marginSeries": margin_series,
         "connect": connect_rows,
         "dataStatus": [

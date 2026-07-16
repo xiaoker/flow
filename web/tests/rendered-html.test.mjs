@@ -26,11 +26,12 @@ test("server-renders the trading flow dashboard", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>[^<]*流向台[^<]*<\/title>/i);
-  assert.match(html, /今天的资金/);
-  assert.match(html, /上交所 ETF 份额净变化/);
+  assert.match(html, /个人资金流交易台/);
+  assert.match(html, /板块资金轮动/);
+  assert.match(html, /ETF 雷达/);
   assert.match(html, /南向净买入/);
   assert.match(html, /当前官方不披露北向净流入/);
-  assert.match(html, /深交所 ETF 历史限制/);
+  assert.match(html, /份额变化不等同资金金额/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
@@ -46,6 +47,20 @@ test("exposes the machine-readable data status endpoint", async () => {
   assert.equal(payload.gate, "conditional_pass");
   assert.deepEqual(payload.quality, { pass: 46, warn: 2, fail: 0 });
   assert.equal(payload.domains.length, 4);
+});
+
+test("exposes ETF terminal coverage without inventing unavailable periods", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/etf/flows"),
+    env,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.terminal.availablePeriods, ["1d"]);
+  assert.equal(payload.terminal.instruments[0].periods["1d"], 13.98);
+  assert.equal(payload.terminal.instruments[0].periods["1w"], undefined);
 });
 
 test("rejects unauthenticated snapshot imports", async () => {

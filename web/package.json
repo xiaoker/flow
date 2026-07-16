@@ -17,7 +17,11 @@
     "db:migrate:remote": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler d1 migrations apply flow --remote"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@tanstack/react-table": "^8.21.3",
     "drizzle-orm": "0.45.2",
+    "echarts": "^6.1.0",
+    "echarts-for-react": "^3.0.6",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6"

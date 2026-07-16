@@ -36,7 +36,11 @@ export function isDashboardSnapshot(value: unknown): value is DashboardSnapshot 
       Array.isArray(candidate.etfFlows.outflow) &&
       Array.isArray(candidate.marginSeries) &&
       Array.isArray(candidate.connect) &&
-      Array.isArray(candidate.dataStatus),
+      Array.isArray(candidate.dataStatus) &&
+      (!candidate.etfTerminal ||
+        (Array.isArray(candidate.etfTerminal.dailySeries) &&
+          Array.isArray(candidate.etfTerminal.instruments) &&
+          Array.isArray(candidate.etfTerminal.groupPeriods))),
   );
 }
 

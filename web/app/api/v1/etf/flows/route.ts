@@ -11,5 +11,6 @@ export async function GET() {
     scope: "SSE only",
     methodology: "adjacent trading-day share difference",
     flows: dashboardSnapshot.etfFlows,
+    terminal: dashboardSnapshot.etfTerminal ?? null,
   });
 }

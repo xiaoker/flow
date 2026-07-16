@@ -2,6 +2,28 @@ export type FlowDirection = "inflow" | "outflow";
 
 export type FlowTone = "positive" | "negative" | "neutral";
 
+export type FlowPeriod = "1d" | "3d" | "1w" | "2w" | "1m" | "3m" | "6m" | "ytd" | "12m";
+
+export interface EtfTerminalInstrument {
+  code: string;
+  name: string;
+  category: string;
+  shares: number | null;
+  periods: Partial<Record<FlowPeriod, number | null>>;
+  coverage: number;
+}
+
+export interface EtfTerminalData {
+  dailySeries: Array<{ date: string; value: number; coverage: number }>;
+  instruments: EtfTerminalInstrument[];
+  groupPeriods: Array<{
+    name: string;
+    periods: Partial<Record<FlowPeriod, number | null>>;
+  }>;
+  availablePeriods?: FlowPeriod[];
+  classification?: string;
+}
+
 export interface DashboardSnapshot {
   asOf: string;
   observedAt: string;
@@ -32,6 +54,7 @@ export interface DashboardSnapshot {
     asOf: string;
     detail: string;
   }>;
+  etfTerminal?: EtfTerminalData;
 }
 
 export const dashboardSnapshot: DashboardSnapshot = {
@@ -111,4 +134,28 @@ export const dashboardSnapshot: DashboardSnapshot = {
     { name: "融资融券", status: "ready", asOf: "07-14", detail: "沪深完整" },
     { name: "互联互通", status: "ready", asOf: "07-14", detail: "4 通道" },
   ],
+  etfTerminal: {
+    dailySeries: [{ date: "07-14", value: 79.89, coverage: 878 }],
+    availablePeriods: ["1d"],
+    classification: "基金简称关键词映射",
+    groupPeriods: [
+      { name: "科技", periods: { "1d": 38.51 } },
+      { name: "宽基", periods: { "1d": 5.08 } },
+      { name: "医药", periods: { "1d": -8.39 } },
+      { name: "商品", periods: { "1d": -4.36 } },
+      { name: "港股海外", periods: { "1d": -7.02 } },
+    ],
+    instruments: [
+      { code: "588170", name: "科创半导", category: "科技", shares: null, periods: { "1d": 13.98 }, coverage: 2 },
+      { code: "515880", name: "通信ETF", category: "科技", shares: null, periods: { "1d": 11.2 }, coverage: 2 },
+      { code: "515050", name: "5GETF", category: "科技", shares: null, periods: { "1d": 7.06 }, coverage: 2 },
+      { code: "560780", name: "半导设备", category: "科技", shares: null, periods: { "1d": 6.27 }, coverage: 2 },
+      { code: "512100", name: "1000ETF", category: "宽基", shares: null, periods: { "1d": 5.08 }, coverage: 2 },
+      { code: "512170", name: "医疗ETF", category: "医药", shares: null, periods: { "1d": -5.36 }, coverage: 2 },
+      { code: "513130", name: "恒生科技", category: "港股海外", shares: null, periods: { "1d": -5 }, coverage: 2 },
+      { code: "560860", name: "工业有色", category: "商品", shares: null, periods: { "1d": -4.36 }, coverage: 2 },
+      { code: "512010", name: "医药ETF", category: "医药", shares: null, periods: { "1d": -3.03 }, coverage: 2 },
+      { code: "513770", name: "港股互联", category: "港股海外", shares: null, periods: { "1d": -2.02 }, coverage: 2 },
+    ],
+  },
 };
