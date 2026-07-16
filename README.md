@@ -4,7 +4,7 @@ Phase 1 动态版已经上线。系统从交易所官方来源采集 ETF、互�
 
 2026-07-16 已完成所有者 Cloudflare 资源的云端端到端验证：快照日期为 `2026-07-15`，质量门禁为 `conditional_pass`，46 项通过、2 项警告、0 项失败。流水线、写入接口和读取端均会拒绝质量失败的快照覆盖上一个有效版本。
 
-Cloudflare 自有资源版：[flow.xiaoker.workers.dev](https://flow.xiaoker.workers.dev)
+Cloudflare 自有资源版：[flow.xiaoker.com](https://flow.xiaoker.com)（Cloudflare Access 私有入口，仅项目所有者可登录）
 
 ## 本地运行
 
@@ -39,7 +39,7 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 - 北京时间每周二至周六 00:10 运行，采集刚结束交易日及此前两个交易日；
 - 也可在 Actions 页面手动执行，并可选传入三个 ISO 日期；
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
-- 发布需要私有仓库 Actions Secret：`FLOW_INGEST_API_KEY`。
+- 发布需要私有仓库 Actions Secrets：`FLOW_INGEST_API_KEY`、`FLOW_CF_ACCESS_CLIENT_ID` 和 `FLOW_CF_ACCESS_CLIENT_SECRET`。后两项只用于通过 Cloudflare Access 的 Service Auth 策略。
 
 ## Cloudflare 资源归属
 
@@ -50,7 +50,7 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
 上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
 
-当前 `workers.dev` 读取入口仍可匿名访问，管理写入接口已由独立 Bearer 密钥保护。下一个托管收尾步骤是绑定 `flow.xiaoker.com`、启用 Cloudflare Access 白名单，并关闭公开的 `workers.dev` 入口。
+生产域名 `flow.xiaoker.com` 由 Cloudflare Access 默认拒绝，仅允许项目所有者邮箱登录；GitHub Actions 使用独立 Service Token 访问写入路由。`workers.dev` 与 Worker Preview URL 均已在部署配置中关闭，管理写入接口仍叠加独立 Bearer 密钥，不允许仅凭 Access 身份写入数据。
 
 本地生成同结构快照：
 

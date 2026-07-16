@@ -152,7 +152,7 @@ ETF 估算净申购金额 = (当日基金份额 - 前一交易日基金份额) �
 | 计算与校验 | pandas + PyArrow + Pydantic + pytest | 适合日频小数据集，规则明确且容易测试 |
 | 调度 | GitHub Actions | 支持 Python、定时运行和手动补跑，代码与流水线统一管理 |
 | 部署 | Cloudflare Workers + Static Assets + Wrangler | 一个所有者管理的 Worker 同时承载页面和 API |
-| 访问保护 | Cloudflare Access（待启用） | 收尾后仅允许指定邮箱访问页面和只读 API |
+| 访问保护 | Cloudflare Access | 自定义域名仅允许项目所有者邮箱访问，GitHub Actions 使用独立 Service Auth 策略 |
 
 第一版不采用 Kubernetes、ClickHouse、Kafka、Redis、微服务或实时流处理。这些组件不能改善当前日频个人场景，只会增加维护成本。
 
@@ -381,16 +381,16 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 
 ### 9.6 私有访问与入口收敛
 
-目标安全边界是“默认拒绝、仅本人邮箱可访问”。当前 `workers.dev` 入口仍可匿名读取，因此本节是尚未全部达成的上线收尾门槛：
+目标安全边界是“默认拒绝、仅本人邮箱可访问”。2026-07-16 已完成自定义域名、邮箱白名单和 GitHub Actions Service Auth 配置；部署配置同时关闭默认入口：
 
 - 自定义域名整体接入 Cloudflare Access，只允许指定邮箱登录；
-- Worker 以同源 `/api/*` 路由提供接口，并验证 `Cf-Access-Jwt-Assertion`，不得仅信任可伪造的身份请求头；
+- Worker 以同源 `/api/*` 路由提供接口，Cloudflare Access 在边缘验证用户会话或 Service Token；Worker 不根据信任可伪造的身份请求头自行放行；
 - 设置 `workers_dev = false`，关闭 Worker 的公共 `workers.dev` 入口；
 - Worker Preview URL 禁用，或纳入相同的 Access 策略；
 - R2 Bucket 不公开，只允许采集任务和 Worker 通过最小权限凭证访问；
-- GitHub Actions 分离“部署”和“数据写入”令牌，令牌只保存在 GitHub Secrets，不进入前端构建产物。
+- GitHub Actions 分离“部署”“Access 服务身份”和“数据写入”令牌，令牌只保存在 GitHub Secrets，不进入前端构建产物。
 
-页面和 API 必须处于同一访问策略下。应用层认证失败返回 `401`，通过认证但无权限返回 `403`；任何未受保护的默认域名都视为阻断上线的问题。
+页面和 API 必须处于同一 Access 应用和访问策略下。未通过 Access 的请求在到达 Worker 前被拦截；任何未受保护的默认域名都视为阻断上线的问题。
 
 ## 10. 数据质量门槛
 
@@ -574,7 +574,7 @@ Phase 0 和 Phase 1 首轮云端闭环已于 2026-07-16 完成。GitHub 私有�
 
 2026-07-16 的生产验证使用 `2026-07-15` 快照：46 项通过、2 项警告、0 项失败。同日曾遇到深交所两融接口超时，暴露出“质量失败快照仍可覆盖最新数据”的发布缺口。现已在 GitHub Actions、Worker 导入接口和 D1 读取查询三层修复，并完成线上回归。
 
-剩余托管任务为：绑定 `flow.xiaoker.com`，对页面和只读 API 启用 Cloudflare Access 邮箱白名单，为 GitHub Actions 配置 Access 服务身份或受限路径策略，关闭公开 `workers.dev` 入口，再退役临时 Sites 版本。代码自动部署也待所有者完成 Cloudflare 与 GitHub 的连接授权。
+`flow.xiaoker.com` 已绑定 Cloudflare Access，页面和只读 API 仅允许项目所有者邮箱访问；GitHub Actions 已使用独立 Service Auth 策略，公开 `workers.dev` 和 Worker Preview URL 已在部署配置中关闭。生产安全冒烟验证通过后退役临时 Sites 版本。代码自动部署仍待所有者完成 Cloudflare 与 GitHub 的连接授权。
 
 ## 20. 参考资料
 
