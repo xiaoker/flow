@@ -25,7 +25,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import ReactECharts from "echarts-for-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardSnapshot,
   EtfTerminalData,
@@ -121,6 +121,8 @@ export function Dashboard({ snapshot }: DashboardProps) {
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [notice, setNotice] = useState("");
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const lastFocusedElement = useRef<HTMLElement | null>(null);
   const terminal = useMemo(() => snapshot.etfTerminal ?? fallbackTerminal(snapshot), [snapshot]);
   const categories = useMemo(() => Array.from(new Set(terminal.instruments.map((item) => item.category))).sort(), [terminal.instruments]);
   const availablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
@@ -295,6 +297,31 @@ export function Dashboard({ snapshot }: DashboardProps) {
     setSorting([{ id: next, desc: true }]);
   };
 
+  useEffect(() => {
+    if (!selected) return;
+    lastFocusedElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelected(null);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", closeOnEscape);
+      document.body.style.overflow = previousOverflow;
+      window.requestAnimationFrame(() => lastFocusedElement.current?.focus());
+    };
+  }, [selected]);
+
+  const clearRadarFilters = () => {
+    setQuery("");
+    setDirection("all");
+    setMarketFilter("all");
+    setCategoryFilter("all");
+  };
+
   return (
     <main className="terminal-shell">
       <header className="terminal-topbar">
@@ -305,11 +332,11 @@ export function Dashboard({ snapshot }: DashboardProps) {
         <nav className="desk-nav" aria-label="交易台导航">
           {navigation.map((item) => {
             const Icon = item.icon;
-            return <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => setView(item.id)} type="button"><Icon size={17} /><span>{item.label}</span></button>;
+            return <button aria-current={view === item.id ? "page" : undefined} className={view === item.id ? "active" : ""} key={item.id} onClick={() => setView(item.id)} type="button"><Icon size={17} /><span>{item.label}</span></button>;
           })}
         </nav>
         <div className="top-actions">
-          <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} placeholder="搜索基金或代码" value={query} /></label>
+          <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim()) setView("radar"); }} placeholder="搜索基金或代码，回车查看" value={query} /></label>
           <button className="icon-button" title="打印或保存当前页面" onClick={() => window.print()} type="button"><Camera size={19} /></button>
           <button className={`refresh-toggle ${autoRefresh ? "enabled" : ""}`} aria-pressed={autoRefresh} onClick={() => setAutoRefresh((value) => !value)} type="button"><span /><em>自动更新</em></button>
           <button className="icon-button" title="刷新数据" onClick={() => window.location.reload()} type="button"><ArrowsClockwise size={19} /></button>
@@ -404,10 +431,14 @@ export function Dashboard({ snapshot }: DashboardProps) {
             </div>
             <div className="table-scroll-hint"><ArrowsLeftRight size={15} />左右滑动查看全部周期</div>
             <div className="radar-table-wrap">
-              <table className="radar-table">
-                <thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th className={header.id === period ? "current-period" : ""} key={header.id}><button disabled={!header.column.getCanSort()} onClick={header.column.getToggleSortingHandler()} type="button">{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}{header.column.getIsSorted() ? <CaretDown className={header.column.getIsSorted() === "asc" ? "sort-asc" : ""} size={13} weight="bold" /> : null}</button></th>)}</tr>)}</thead>
-                <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id} onClick={() => setSelected(row.original)}>{row.getVisibleCells().map((cell) => <td className={cell.column.id === period ? "current-period" : ""} key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody>
-              </table>
+              {table.getRowModel().rows.length ? (
+                <table className="radar-table">
+                  <thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th className={header.id === period ? "current-period" : ""} key={header.id}><button disabled={!header.column.getCanSort()} onClick={header.column.getToggleSortingHandler()} type="button">{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}{header.column.getIsSorted() ? <CaretDown className={header.column.getIsSorted() === "asc" ? "sort-asc" : ""} size={13} weight="bold" /> : null}</button></th>)}</tr>)}</thead>
+                  <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id} onClick={() => setSelected(row.original)}>{row.getVisibleCells().map((cell) => <td className={cell.column.id === period ? "current-period" : ""} key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody>
+                </table>
+              ) : (
+                <div aria-live="polite" className="radar-empty"><MagnifyingGlass size={30} /><strong>没有匹配的 ETF</strong><span>试试基金代码、简称或主分类；也可以清除当前筛选后重新查看。</span><button onClick={clearRadarFilters} type="button">清除筛选</button></div>
+              )}
             </div>
             <div className="table-footer"><span>第 {table.getState().pagination.pageIndex + 1} / {Math.max(1, table.getPageCount())} 页 · {filteredInstruments.length} 条结果</span><div><button disabled={!table.getCanPreviousPage()} onClick={() => table.previousPage()} type="button"><CaretLeft size={15} />上一页</button><button disabled={!table.getCanNextPage()} onClick={() => table.nextPage()} type="button">下一页<CaretRight size={15} /></button></div></div>
           </section>
@@ -443,7 +474,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
       {selected && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
-            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} type="button"><X size={19} /></button></div>
+            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
             <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.coverage} 个官方快照</small></div>
             <div className="drawer-periods">{periods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
             <div className="drawer-note"><Info size={18} /><p><strong>如何阅读</strong>当前指标是 ETF 份额变化，不包含净值，因此不等同于资金金额。{selected.market === "SZSE" ? "深市当前只有官方单日快照，变化值保持为空。" : "历史周期会随每日快照自然积累。"}</p></div>
