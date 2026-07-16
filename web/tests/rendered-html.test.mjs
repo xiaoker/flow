@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isPublishableSnapshot } from "../app/lib/snapshot-policy.mjs";
 
 async function loadWorker() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -59,4 +60,19 @@ test("rejects unauthenticated snapshot imports", async () => {
     context,
   );
   assert.equal(response.status, 401);
+});
+
+test("blocks failed snapshots from replacing the active dashboard", () => {
+  assert.equal(
+    isPublishableSnapshot({ gate: "conditional_pass", quality: { fail: 0 } }),
+    true,
+  );
+  assert.equal(
+    isPublishableSnapshot({ gate: "blocked", quality: { fail: 0 } }),
+    false,
+  );
+  assert.equal(
+    isPublishableSnapshot({ gate: "conditional_pass", quality: { fail: 1 } }),
+    false,
+  );
 });

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
+import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,16 @@ export async function POST(request: Request) {
   }
   if (!isDashboardSnapshot(payload)) {
     return NextResponse.json({ error: "invalid_snapshot" }, { status: 422 });
+  }
+  if (!isPublishableSnapshot(payload)) {
+    return NextResponse.json(
+      {
+        error: "snapshot_not_publishable",
+        gate: payload.gate,
+        qualityFail: payload.quality.fail,
+      },
+      { status: 422 },
+    );
   }
 
   const publishedAt = new Date().toISOString();

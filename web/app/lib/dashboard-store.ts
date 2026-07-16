@@ -1,4 +1,5 @@
 import { dashboardSnapshot, type DashboardSnapshot } from "./dashboard-data";
+import { isPublishableSnapshot } from "./snapshot-policy.mjs";
 
 type RuntimeEnv = {
   DB?: D1Database;
@@ -48,13 +49,16 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
       .prepare(
         `SELECT payload_json
          FROM dashboard_snapshot
+         WHERE quality_fail = 0
          ORDER BY published_at DESC
          LIMIT 1`,
       )
       .first<{ payload_json: string }>();
     if (!row) return dashboardSnapshot;
     const parsed: unknown = JSON.parse(row.payload_json);
-    return isDashboardSnapshot(parsed) ? parsed : dashboardSnapshot;
+    return isDashboardSnapshot(parsed) && isPublishableSnapshot(parsed)
+      ? parsed
+      : dashboardSnapshot;
   } catch {
     return dashboardSnapshot;
   }
