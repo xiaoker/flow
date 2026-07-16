@@ -1,25 +1,29 @@
-# Flow v0.2 Design QA
+# Flow v0.3 Design QA
 
 Reference inputs:
 
-- `docs/audits/2026-07-16-flow-reverse-engineering/01-sector-rotation.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/02-market-etf-trend.png`
 - `docs/audits/2026-07-16-flow-reverse-engineering/04-etf-radar-heatmap.png`
 
 Implementation captures:
 
-- `docs/audits/2026-07-16-flow-reverse-engineering/08-v02-overview.png`
-- `docs/audits/2026-07-16-flow-reverse-engineering/09-v02-radar.png`
-- `docs/audits/2026-07-16-flow-reverse-engineering/10-v02-mobile.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/11-v03-overview.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/12-v03-radar.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/13-v03-connect.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/14-v03-margin.png`
+- `docs/audits/2026-07-16-flow-reverse-engineering/15-v03-mobile.png`
 
 ## Findings
 
 - P0: none.
-- P1 data fidelity: periods without enough official snapshots must not look populated. Resolved by disabling unavailable periods, rendering explicit coverage states, and keeping amount estimation disabled until NAV data exists.
-- P1 responsive layout: dense tables and controls must not overflow the viewport. Verified at 1840px desktop and 390px mobile; page-level horizontal overflow is zero and the radar table scrolls inside its own container.
-- P1 interaction coverage: navigation, period selection, direction filters, search, sorting, pagination, refresh state, and ETF drill-down are implemented. Search and drill-down were browser-tested.
-- P2 visual fidelity: matched the reference's near-black canvas, blue-gray panel hierarchy, cyan active states, Chinese-market red/green semantics, compact controls, monospace numbers, and high-density table treatment.
-- P2 content fidelity: the product uses official share-change and disclosure terminology. Northbound turnover is not mislabeled as net flow; name-based ETF classification is disclosed.
-- Accessibility: semantic controls and table markup are present, keyboard focus is visible, reduced motion is honored, and the mobile navigation retains practical tap targets.
-- Browser console: no warnings or errors during the verified overview, radar, search, and drawer states.
+- P1 product scope: ETF beta pressure and stock-holding penetration are absent from navigation, data contracts, and the active roadmap, matching the user's explicit exclusion.
+- P1 data fidelity: the generated 2026-07-15 snapshot contains 1,886 official-list ETF instruments: 878 SSE and 1,008 SZSE. Only 877 instruments with comparable official snapshots receive period changes; current-only SZSE rows remain blank rather than being treated as zero.
+- P1 classification: official investment type is used before name keywords. Broad-index tokens such as `科创50` are evaluated before technology-theme keywords; classification version and source are returned with the snapshot.
+- P1 responsive layout: verified at 1840x1080 desktop and 390x844 mobile. Mobile document width equals viewport width (390px), and the dense radar keeps horizontal scrolling inside the table.
+- P1 interaction coverage: ETF market/category/direction filters, native category selection, radar sorting, navigation, connect charts, and margin metric switching were browser-tested. Selecting `科技` reduced the fixture table from 10 to 4 rows, and the margin metric control changed to the active state.
+- P2 visual fidelity: side-by-side comparison with the supplied ETF radar confirms the near-black canvas, blue-gray separators, cyan control states, Chinese-market red/green semantics, fixed first columns, heat cells, compact typography, and dense terminal hierarchy.
+- P2 trend fidelity: connect and margin views now use the same terminal visual language and make the official disclosure boundary visible. Northbound turnover is not presented as net flow; financing balance change is not renamed to inflow.
+- Accessibility: semantic buttons, labels, native select, table markup, visible keyboard focus, signed numeric direction, and reduced-motion rules are present.
+- Browser console: no errors during overview, radar, connect, margin, filter, and responsive states.
 
 final result: passed

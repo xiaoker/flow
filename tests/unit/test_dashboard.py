@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading_desk.dashboard import build_dashboard_snapshot
+from trading_desk.dashboard import _classify_etf, build_dashboard_snapshot
 
 
 def _write(frame: pd.DataFrame, path: Path) -> str:
@@ -39,7 +39,7 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
 
     combined_paths = {
         "sse_etf": _write(pd.DataFrame(etf_rows), tmp_path / "sse_etf.csv"),
-        "szse_etf": _write(pd.DataFrame([{"trade_date": "2026-07-14"}]), tmp_path / "szse_etf.csv"),
+        "szse_etf": _write(pd.DataFrame([{"trade_date": "2026-07-14", "instrument_code": "159001", "instrument_name": "货币ETF", "shares": 300, "nav": 100.0, "investment_type": "货币市场基金"}]), tmp_path / "szse_etf.csv"),
         "sse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "sse_margin.csv"),
         "szse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "szse_margin.csv"),
         "stock_connect_summary": _write(pd.DataFrame(connect_rows), tmp_path / "connect.csv"),
@@ -72,4 +72,17 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["etfTerminal"]["availablePeriods"] == ["1d", "3d"]
     assert snapshot["etfTerminal"]["dailySeries"][-1]["coverage"] == 2
     assert snapshot["etfTerminal"]["instruments"][0]["periods"]["3d"] is not None
+    szse_item = next(item for item in snapshot["etfTerminal"]["instruments"] if item["market"] == "SZSE")
+    assert szse_item["category"] == "债券货币"
+    assert szse_item["periods"] == {"1d": None, "3d": None}
+    assert snapshot["etfTerminal"]["universe"]["marketCounts"] == {"SSE": 2, "SZSE": 1}
+    assert snapshot["marginSeries"][-1]["change"] == 0.0
+    assert snapshot["marginSeries"][-1]["sseBalance"] == 0.0
+    assert len(snapshot["connectSeries"]) == 3
     assert snapshot["dataStatus"][1]["status"] == "warning"
+
+
+def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
+    assert _classify_etf("科创50ETF") == "宽基"
+    assert _classify_etf("科创半导体ETF") == "科技"
+    assert _classify_etf("深市现金ETF", "货币市场基金") == "债券货币"

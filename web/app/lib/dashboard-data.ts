@@ -7,8 +7,12 @@ export type FlowPeriod = "1d" | "3d" | "1w" | "2w" | "1m" | "3m" | "6m" | "ytd" 
 export interface EtfTerminalInstrument {
   code: string;
   name: string;
+  market?: "SSE" | "SZSE";
   category: string;
+  assetClass?: string;
+  classificationSource?: string;
   shares: number | null;
+  nav?: number | null;
   periods: Partial<Record<FlowPeriod, number | null>>;
   coverage: number;
 }
@@ -22,6 +26,13 @@ export interface EtfTerminalData {
   }>;
   availablePeriods?: FlowPeriod[];
   classification?: string;
+  classificationVersion?: string;
+  universe?: {
+    total: number;
+    marketCounts: Record<string, number>;
+    categoryCounts: Record<string, number>;
+    periodComparable: number;
+  };
 }
 
 export interface DashboardSnapshot {
@@ -40,13 +51,34 @@ export interface DashboardSnapshot {
     note: string;
   }>;
   etfFlows: Record<FlowDirection, Array<{ code: string; name: string; value: number }>>;
-  marginSeries: Array<{ date: string; balance: number; label: string }>;
+  marginSeries: Array<{
+    date: string;
+    balance: number;
+    label: string;
+    change?: number | null;
+    financingBuy?: number;
+    lendingBalance?: number;
+    lendingSellVolume?: number;
+    totalBalance?: number;
+    sseBalance?: number;
+    szseBalance?: number;
+  }>;
   connect: Array<{
     name: string;
     value: string;
     unit: string;
     description: string;
     tone: FlowTone;
+  }>;
+  connectSeries?: Array<{
+    date: string;
+    southboundNet: number;
+    southboundTurnover: number;
+    southboundSseNet: number;
+    southboundSzseNet: number;
+    northboundTurnover: number;
+    northboundEtfTurnover: number;
+    northboundTradeCount: number;
   }>;
   dataStatus: Array<{
     name: string;
@@ -118,15 +150,20 @@ export const dashboardSnapshot: DashboardSnapshot = {
     ],
   },
   marginSeries: [
-    { date: "07-10", balance: 29137.69, label: "2.9138 万亿" },
-    { date: "07-13", balance: 28802.36, label: "2.8802 万亿" },
-    { date: "07-14", balance: 28692.78, label: "2.8693 万亿" },
+    { date: "07-10", balance: 29137.69, label: "2.9138 万亿", change: null, financingBuy: 3203.38, lendingBalance: 219.69, lendingSellVolume: 1.32, totalBalance: 29357.38, sseBalance: 14712.72, szseBalance: 14424.97 },
+    { date: "07-13", balance: 28802.36, label: "2.8802 万亿", change: -335.33, financingBuy: 2322.52, lendingBalance: 210.61, lendingSellVolume: 1.03, totalBalance: 29012.97, sseBalance: 14575.17, szseBalance: 14227.19 },
+    { date: "07-14", balance: 28692.78, label: "2.8693 万亿", change: -109.58, financingBuy: 2408.55, lendingBalance: 213.21, lendingSellVolume: 0.88, totalBalance: 28905.99, sseBalance: 14520.14, szseBalance: 14172.64 },
   ],
   connect: [
     { name: "沪港通南向", value: "+82.05", unit: "亿港元", description: "成交 751.20 亿港元", tone: "positive" },
     { name: "深港通南向", value: "+27.92", unit: "亿港元", description: "成交 538.52 亿港元", tone: "positive" },
     { name: "沪股通北向", value: "1,823.28", unit: "亿元", description: "仅官方成交额", tone: "neutral" },
     { name: "深股通北向", value: "2,335.77", unit: "亿元", description: "仅官方成交额", tone: "neutral" },
+  ],
+  connectSeries: [
+    { date: "07-10", southboundNet: -59.95, southboundTurnover: 1554.56, southboundSseNet: -33.44, southboundSzseNet: -26.51, northboundTurnover: 4492.8, northboundEtfTurnover: 69.76, northboundTradeCount: 16965597 },
+    { date: "07-13", southboundNet: 90.38, southboundTurnover: 1272.25, southboundSseNet: 78.74, southboundSzseNet: 11.64, northboundTurnover: 4178.11, northboundEtfTurnover: 89.61, northboundTradeCount: 17355529 },
+    { date: "07-14", southboundNet: 109.97, southboundTurnover: 1289.72, southboundSseNet: 82.05, southboundSzseNet: 27.92, northboundTurnover: 4159.04, northboundEtfTurnover: 65.6, northboundTradeCount: 17561612 },
   ],
   dataStatus: [
     { name: "上交所 ETF", status: "ready", asOf: "07-14", detail: "878 只·3 日" },
@@ -137,7 +174,9 @@ export const dashboardSnapshot: DashboardSnapshot = {
   etfTerminal: {
     dailySeries: [{ date: "07-14", value: 79.89, coverage: 878 }],
     availablePeriods: ["1d"],
-    classification: "基金简称关键词映射",
+    classification: "官方投资类型优先，基金简称关键词补充",
+    classificationVersion: "2026-07-v2",
+    universe: { total: 10, marketCounts: { SSE: 10, SZSE: 0 }, categoryCounts: { "科技": 4, "宽基": 1, "医药": 2, "商品": 1, "港股海外": 2 }, periodComparable: 10 },
     groupPeriods: [
       { name: "科技", periods: { "1d": 38.51 } },
       { name: "宽基", periods: { "1d": 5.08 } },
@@ -146,16 +185,16 @@ export const dashboardSnapshot: DashboardSnapshot = {
       { name: "港股海外", periods: { "1d": -7.02 } },
     ],
     instruments: [
-      { code: "588170", name: "科创半导", category: "科技", shares: null, periods: { "1d": 13.98 }, coverage: 2 },
-      { code: "515880", name: "通信ETF", category: "科技", shares: null, periods: { "1d": 11.2 }, coverage: 2 },
-      { code: "515050", name: "5GETF", category: "科技", shares: null, periods: { "1d": 7.06 }, coverage: 2 },
-      { code: "560780", name: "半导设备", category: "科技", shares: null, periods: { "1d": 6.27 }, coverage: 2 },
-      { code: "512100", name: "1000ETF", category: "宽基", shares: null, periods: { "1d": 5.08 }, coverage: 2 },
-      { code: "512170", name: "医疗ETF", category: "医药", shares: null, periods: { "1d": -5.36 }, coverage: 2 },
-      { code: "513130", name: "恒生科技", category: "港股海外", shares: null, periods: { "1d": -5 }, coverage: 2 },
-      { code: "560860", name: "工业有色", category: "商品", shares: null, periods: { "1d": -4.36 }, coverage: 2 },
-      { code: "512010", name: "医药ETF", category: "医药", shares: null, periods: { "1d": -3.03 }, coverage: 2 },
-      { code: "513770", name: "港股互联", category: "港股海外", shares: null, periods: { "1d": -2.02 }, coverage: 2 },
+      { code: "588170", name: "科创半导", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 13.98 }, coverage: 2 },
+      { code: "515880", name: "通信ETF", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 11.2 }, coverage: 2 },
+      { code: "515050", name: "5GETF", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 7.06 }, coverage: 2 },
+      { code: "560780", name: "半导设备", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 6.27 }, coverage: 2 },
+      { code: "512100", name: "1000ETF", market: "SSE", category: "宽基", assetClass: "股票", shares: null, periods: { "1d": 5.08 }, coverage: 2 },
+      { code: "512170", name: "医疗ETF", market: "SSE", category: "医药", assetClass: "股票", shares: null, periods: { "1d": -5.36 }, coverage: 2 },
+      { code: "513130", name: "恒生科技", market: "SSE", category: "港股海外", assetClass: "跨境", shares: null, periods: { "1d": -5 }, coverage: 2 },
+      { code: "560860", name: "工业有色", market: "SSE", category: "商品", assetClass: "商品", shares: null, periods: { "1d": -4.36 }, coverage: 2 },
+      { code: "512010", name: "医药ETF", market: "SSE", category: "医药", assetClass: "股票", shares: null, periods: { "1d": -3.03 }, coverage: 2 },
+      { code: "513770", name: "港股互联", market: "SSE", category: "港股海外", assetClass: "跨境", shares: null, periods: { "1d": -2.02 }, coverage: 2 },
     ],
   },
 };

@@ -32,7 +32,23 @@ test("server-renders the trading flow dashboard", async () => {
   assert.match(html, /南向净买入/);
   assert.match(html, /当前官方不披露北向净流入/);
   assert.match(html, /份额变化不等同资金金额/);
+  assert.doesNotMatch(html, /β\s*压强/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("exposes connect trend series without inventing northbound direction", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/connect/flows"),
+    env,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.northboundDisclosure, "turnover_only");
+  assert.equal(payload.series.length, 3);
+  assert.equal(payload.series[2].southboundNet, 109.97);
+  assert.equal("northboundNet" in payload.series[2], false);
 });
 
 test("exposes the machine-readable data status endpoint", async () => {

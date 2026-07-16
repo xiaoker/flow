@@ -36,6 +36,8 @@ import type {
 type DashboardProps = { snapshot: DashboardSnapshot };
 type DeskView = "overview" | "radar" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
+type MarketFilter = "all" | "SSE" | "SZSE";
+type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
 
 const periods: Array<{ id: FlowPeriod; label: string }> = [
   { id: "1d", label: "最近1日" },
@@ -56,6 +58,12 @@ const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> 
   { id: "margin", label: "融资融券", icon: Pulse },
 ];
 
+const marginMetricDefinitions: Record<MarginDisplayMetric, { label: string; unit: string; note: string }> = {
+  balance: { label: "融资余额", unit: "亿元", note: "沪深融资余额合计" },
+  financingBuy: { label: "融资买入额", unit: "亿元", note: "当日新增融资买入" },
+  lendingBalance: { label: "融券余额", unit: "亿元", note: "沪深融券余额合计" },
+};
+
 function formatFlow(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
@@ -72,7 +80,9 @@ function fallbackTerminal(snapshot: DashboardSnapshot): EtfTerminalData {
   };
   const instruments = [...snapshot.etfFlows.inflow, ...snapshot.etfFlows.outflow].map((item) => ({
     ...item,
+    market: "SSE" as const,
     category: category(item.name),
+    assetClass: "股票",
     shares: null,
     periods: { "1d": item.value },
     coverage: 2,
@@ -85,6 +95,7 @@ function fallbackTerminal(snapshot: DashboardSnapshot): EtfTerminalData {
     groupPeriods: Array.from(grouped, ([name, value]) => ({ name, periods: { "1d": value } })),
     availablePeriods: ["1d"],
     classification: "基金简称关键词映射",
+    universe: { total: instruments.length, marketCounts: { SSE: instruments.length, SZSE: 0 }, categoryCounts: Object.fromEntries(Array.from(grouped, ([name]) => [name, instruments.filter((item) => item.category === name).length])), periodComparable: instruments.length },
   };
 }
 
@@ -102,12 +113,16 @@ export function Dashboard({ snapshot }: DashboardProps) {
   const [view, setView] = useState<DeskView>("overview");
   const [period, setPeriod] = useState<FlowPeriod>("1d");
   const [direction, setDirection] = useState<DirectionFilter>("all");
+  const [marketFilter, setMarketFilter] = useState<MarketFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [marginDisplayMetric, setMarginDisplayMetric] = useState<MarginDisplayMetric>("balance");
   const [query, setQuery] = useState("");
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [notice, setNotice] = useState("");
   const terminal = useMemo(() => snapshot.etfTerminal ?? fallbackTerminal(snapshot), [snapshot]);
+  const categories = useMemo(() => Array.from(new Set(terminal.instruments.map((item) => item.category))).sort(), [terminal.instruments]);
   const availablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
   const activeValue = (item: EtfTerminalInstrument) => item.periods[period] ?? null;
 
@@ -117,9 +132,11 @@ export function Dashboard({ snapshot }: DashboardProps) {
       const value = item.periods[period];
       const matchesDirection = direction === "all" || (direction === "inflow" ? (value ?? 0) > 0 : (value ?? 0) < 0);
       const matchesQuery = !normalized || item.name.toLowerCase().includes(normalized) || item.code.includes(normalized) || item.category.includes(normalized);
-      return matchesDirection && matchesQuery;
+      const matchesMarket = marketFilter === "all" || item.market === marketFilter;
+      const matchesCategory = categoryFilter === "all" || item.category === categoryFilter;
+      return matchesDirection && matchesQuery && matchesMarket && matchesCategory;
     });
-  }, [direction, period, query, terminal.instruments]);
+  }, [categoryFilter, direction, marketFilter, period, query, terminal.instruments]);
 
   const periodMaxima = useMemo(() => {
     const maxima = new Map<FlowPeriod, number>();
@@ -137,7 +154,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
       cell: ({ row }) => (
         <button className="fund-cell" type="button" onClick={() => setSelected(row.original)}>
           <span className="fund-rank">{String(row.index + 1).padStart(2, "0")}</span>
-          <span><strong>{row.original.name}</strong><small>{row.original.code} · {row.original.category}</small></span>
+          <span><strong>{row.original.name}</strong><small>{row.original.code} · {row.original.market === "SZSE" ? "深市" : "沪市"} · {row.original.category}</small></span>
           <CaretRight size={15} weight="bold" />
         </button>
       ),
@@ -185,6 +202,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
     .map((item) => ({ name: item.name, value: item.periods[period] ?? 0 }))
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)), [period, terminal.groupPeriods]);
   const totalGroupFlow = groupRows.reduce((sum, item) => sum + item.value, 0);
+  const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (item.periods[period] ?? 0), 0);
   const positiveGroups = groupRows.filter((item) => item.value > 0);
   const crowding = positiveGroups.length
     ? Math.round((positiveGroups.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / positiveGroups.reduce((sum, item) => sum + item.value, 0)) * 100)
@@ -213,6 +231,55 @@ export function Dashboard({ snapshot }: DashboardProps) {
     series: [{ type: "bar", barMaxWidth: 22, data: terminal.dailySeries.map((item) => ({ value: item.value, itemStyle: { color: item.value >= 0 ? "#e36464" : "#55b887", borderRadius: item.value >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) }],
   }), [terminal.dailySeries]);
 
+  const connectSeries = useMemo(() => snapshot.connectSeries ?? [], [snapshot.connectSeries]);
+  const connectTrendOption = useMemo(() => ({
+    animationDuration: 450,
+    legend: { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 },
+    grid: { left: 16, right: 20, top: 44, bottom: 26, containLabel: true },
+    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    yAxis: [
+      { type: "value", name: "南向净买入", nameTextStyle: { color: "#76859a", fontSize: 9 }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+      { type: "value", name: "北向成交", nameTextStyle: { color: "#76859a", fontSize: 9 }, splitLine: { show: false }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    ],
+    series: [
+      { name: "南向净买入（亿港元）", type: "bar", barMaxWidth: 30, data: connectSeries.map((item) => ({ value: item.southboundNet, itemStyle: { color: item.southboundNet >= 0 ? "#e36464" : "#55b887", borderRadius: item.southboundNet >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) },
+      { name: "北向成交（亿元）", type: "line", yAxisIndex: 1, smooth: true, symbolSize: 7, lineStyle: { width: 2, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" }, data: connectSeries.map((item) => item.northboundTurnover) },
+    ],
+  }), [connectSeries]);
+
+  const channelOption = useMemo(() => ({
+    animationDuration: 450,
+    legend: { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 },
+    grid: { left: 12, right: 14, top: 42, bottom: 26, containLabel: true },
+    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    yAxis: { type: "value", splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    series: [
+      { name: "沪港通南向", type: "bar", data: connectSeries.map((item) => item.southboundSseNet), itemStyle: { color: "#d95e61" } },
+      { name: "深港通南向", type: "bar", data: connectSeries.map((item) => item.southboundSzseNet), itemStyle: { color: "#f08b67" } },
+    ],
+  }), [connectSeries]);
+
+  const marginTrendOption = useMemo(() => {
+    const definition = marginMetricDefinitions[marginDisplayMetric];
+    const data = snapshot.marginSeries.map((item) => item[marginDisplayMetric] ?? null);
+    const isBalance = marginDisplayMetric === "balance";
+    return {
+      animationDuration: 450,
+      legend: isBalance ? { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 } : { show: false },
+      grid: { left: 14, right: 18, top: 42, bottom: 28, containLabel: true },
+      tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" }, valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${definition.unit}` },
+      xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+      yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+      series: isBalance ? [
+        { name: "沪深合计", type: "line", smooth: true, symbolSize: 7, data, lineStyle: { width: 3, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" } },
+        { name: "上交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.sseBalance ?? null), lineStyle: { width: 1.5, color: "#e36464" }, itemStyle: { color: "#e36464" } },
+        { name: "深交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.szseBalance ?? null), lineStyle: { width: 1.5, color: "#f1ae42" }, itemStyle: { color: "#f1ae42" } },
+      ] : [{ name: definition.label, type: "bar", barMaxWidth: 36, data, itemStyle: { color: marginDisplayMetric === "financingBuy" ? "#e36464" : "#f1ae42", borderRadius: [4, 4, 0, 0] } }],
+    };
+  }, [marginDisplayMetric, snapshot.marginSeries]);
+
   const latestMetric = metricValue(snapshot, "etf");
   const marginMetric = metricValue(snapshot, "margin");
   const southboundMetric = metricValue(snapshot, "southbound");
@@ -240,7 +307,6 @@ export function Dashboard({ snapshot }: DashboardProps) {
             const Icon = item.icon;
             return <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => setView(item.id)} type="button"><Icon size={17} /><span>{item.label}</span></button>;
           })}
-          <button className="coming-soon" disabled title="等待 ETF 持仓快照积累" type="button"><Database size={17} /><span>β 压强</span><small>准备中</small></button>
         </nav>
         <div className="top-actions">
           <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} placeholder="搜索基金或代码" value={query} /></label>
@@ -269,7 +335,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
         <div className="period-tabs" aria-label="观察周期">
           {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${availablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
         </div>
-        <div className="coverage-chip"><Database size={16} /><span>{availablePeriods.size} 个可用周期</span><strong>{terminal.instruments.length} 只 ETF</strong></div>
+        <div className="coverage-chip"><Database size={16} /><span>{availablePeriods.size} 个可用周期</span><strong>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
       </section>
 
       {notice && <div className="toast" role="status"><Info size={17} />{notice}</div>}
@@ -323,11 +389,15 @@ export function Dashboard({ snapshot }: DashboardProps) {
         {view === "radar" && (
           <section className="terminal-panel radar-panel">
             <div className="radar-heading">
-              <div><span className="eyebrow">ETF 份额雷达</span><h2>横向比较资金持续性</h2><p>{terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 空值不参与排序</p></div>
-              <div className="radar-stats"><span><small>{currentPeriod}净变化</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}<em>亿份</em></strong></span><span><small>分类方式</small><strong className="text-cyan">简称映射</strong></span></div>
+              <div><span className="eyebrow">ETF 份额雷达</span><h2>横向比较资金持续性</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 深市单日快照不生成变化值</p></div>
+              <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>亿份</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{terminal.universe?.periodComparable ?? terminal.instruments.length}<em>只</em></strong></span></div>
             </div>
             <div className="radar-toolbar">
-              <div className="direction-tabs">{(["all", "inflow", "outflow"] as DirectionFilter[]).map((item) => <button className={direction === item ? "active" : ""} key={item} onClick={() => setDirection(item)} type="button">{item === "all" ? "全部" : item === "inflow" ? "份额增加" : "份额减少"}</button>)}</div>
+              <div className="radar-filters">
+                <div className="direction-tabs">{(["all", "inflow", "outflow"] as DirectionFilter[]).map((item) => <button className={direction === item ? "active" : ""} key={item} onClick={() => setDirection(item)} type="button">{item === "all" ? "全部" : item === "inflow" ? "份额增加" : "份额减少"}</button>)}</div>
+                <div className="market-tabs">{(["all", "SSE", "SZSE"] as MarketFilter[]).map((item) => <button className={marketFilter === item ? "active" : ""} key={item} onClick={() => setMarketFilter(item)} type="button">{item === "all" ? "沪深" : item === "SSE" ? "沪市" : "深市"}</button>)}</div>
+                <label className="category-select"><span>主分类</span><select aria-label="ETF 主分类" onChange={(event) => setCategoryFilter(event.target.value)} value={categoryFilter}><option value="all">全部分类</option>{categories.map((category) => <option key={category} value={category}>{category} ({terminal.universe?.categoryCounts[category] ?? terminal.instruments.filter((item) => item.category === category).length})</option>)}</select></label>
+              </div>
               <span className="sort-status"><ArrowsLeftRight size={16} />当前排序：{periods.find((item) => item.id === (sorting[0]?.id ?? period))?.label ?? currentPeriod} · {sorting[0]?.desc ? "降序" : "升序"}</span>
             </div>
             <div className="radar-table-wrap">
@@ -342,15 +412,25 @@ export function Dashboard({ snapshot }: DashboardProps) {
 
         {view === "connect" && (
           <section className="detail-grid">
-            <article className="terminal-panel detail-main"><div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通资金面</h2><p>南向展示净买入；北向仅展示官方成交总额</p></div></div><div className="large-stat-grid">{snapshot.connect.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div></article>
-            <aside className="terminal-panel methodology"><Info size={24} /><h3>披露边界</h3><p>北向资金当前不公开买入额、卖出额和净流入，因此系统不会用成交额替代净流入，也不会做方向推断。</p><span>口径状态：官方可验证</span></aside>
+            <article className="terminal-panel detail-main connect-detail">
+              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通资金面</h2><p>南向看净买入方向；北向看成交活跃度</p></div><div className="panel-kpis"><span><small>南向最新</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
+              {connectSeries.length ? <div className="detail-chart-grid"><div><h3>跨境资金走势</h3><ReactECharts className="detail-chart" option={connectTrendOption} notMerge lazyUpdate /></div><div><h3>南向通道拆分</h3><ReactECharts className="detail-chart" option={channelOption} notMerge lazyUpdate /></div></div> : <div className="empty-chart"><Database size={30} /><strong>等待连续交易日</strong></div>}
+              <div className="connect-kpi-strip">{snapshot.connect.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
+            </article>
+            <aside className="terminal-panel methodology"><Info size={24} /><h3>披露边界</h3><p>北向资金当前不公开买入额、卖出额和净流入，因此系统不会用成交额替代净流入，也不会做方向推断。</p><span>口径状态：官方可验证</span><div className="method-list"><p><b>南向</b>买入额 − 卖出额，单位亿港元</p><p><b>北向</b>展示总成交额与 ETF 成交额</p><p><b>更新</b>每个交易日生成快照</p></div></aside>
           </section>
         )}
 
         {view === "margin" && (
           <section className="detail-grid">
-            <article className="terminal-panel detail-main"><div className="panel-heading"><div><span className="eyebrow">沪深两市合计</span><h2>融资余额变化</h2><p>观察杠杆资金规模，不直接解释为看多或看空</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div><div className="margin-history">{snapshot.marginSeries.map((item, index) => { const previous = snapshot.marginSeries[index - 1]?.balance; const delta = previous === undefined ? null : item.balance - previous; return <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={delta === null ? "" : delta >= 0 ? "text-in" : "text-out"}>{delta === null ? "基准" : `${formatFlow(delta, 2)} 亿元`}</span></div>; })}</div></article>
-            <aside className="terminal-panel methodology"><Pulse size={24} /><h3>当前判断</h3><p>{marginMetric?.delta}。连续回落说明杠杆规模收缩，需要与指数趋势和成交额一起观察。</p><span>最新：{snapshot.asOf}</span></aside>
+            <article className="terminal-panel detail-main margin-detail">
+              <div className="panel-heading"><div><span className="eyebrow">沪深两市合计</span><h2>两融资金趋势</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；不直接解释为看多或看空</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
+              <div className="margin-metric-tabs">{(Object.keys(marginMetricDefinitions) as MarginDisplayMetric[]).map((item) => <button className={marginDisplayMetric === item ? "active" : ""} key={item} onClick={() => setMarginDisplayMetric(item)} type="button">{marginMetricDefinitions[item].label}</button>)}</div>
+              <ReactECharts className="margin-detail-chart" option={marginTrendOption} notMerge lazyUpdate />
+              <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div></div>
+              <div className="margin-history compact-history">{snapshot.marginSeries.map((item) => <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={item.change === null || item.change === undefined ? "" : item.change >= 0 ? "text-in" : "text-out"}>{item.change === null || item.change === undefined ? "基准" : `${formatFlow(item.change, 2)} 亿元`}</span></div>)}</div>
+            </article>
+            <aside className="terminal-panel methodology"><Pulse size={24} /><h3>当前判断</h3><p>{marginMetric?.delta}。连续回落说明杠杆规模收缩，需要与指数趋势和成交额一起观察。</p><span>最新：{snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模</p><p><b>融资买入</b>当日新增活跃度</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>
           </section>
         )}
       </div>
@@ -360,10 +440,10 @@ export function Dashboard({ snapshot }: DashboardProps) {
       {selected && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
-            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.category}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} type="button"><X size={19} /></button></div>
+            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} type="button"><X size={19} /></button></div>
             <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.coverage} 个官方快照</small></div>
             <div className="drawer-periods">{periods.map((item) => <div key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
-            <div className="drawer-note"><Info size={18} /><p><strong>如何阅读</strong>当前指标是 ETF 份额变化，不包含净值，因此不等同于资金金额。历史周期会随每日快照自然积累。</p></div>
+            <div className="drawer-note"><Info size={18} /><p><strong>如何阅读</strong>当前指标是 ETF 份额变化，不包含净值，因此不等同于资金金额。{selected.market === "SZSE" ? "深市当前只有官方单日快照，变化值保持为空。" : "历史周期会随每日快照自然积累。"}</p></div>
           </aside>
         </div>
       )}

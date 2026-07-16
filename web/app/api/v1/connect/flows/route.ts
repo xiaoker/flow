@@ -9,5 +9,6 @@ export async function GET() {
     asOf: dashboardSnapshot.asOf,
     northboundDisclosure: "turnover_only",
     channels: dashboardSnapshot.connect,
+    series: dashboardSnapshot.connectSeries ?? [],
   });
 }

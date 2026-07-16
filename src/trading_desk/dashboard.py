@@ -71,8 +71,15 @@ def _latest_etf_flows(frame: pd.DataFrame, dates: list[str]) -> tuple[dict[str, 
     return {"inflow": rows(False), "outflow": rows(True)}, summary
 
 
-def _classify_etf(name: str) -> str:
+def _etf_dimensions(name: str, investment_type: str | None = None) -> tuple[str, str, str]:
     normalized = name.upper()
+    official_type = "" if pd.isna(investment_type) else str(investment_type)
+    if "货币" in official_type or any(keyword in normalized for keyword in ("货币", "现金", "快线")):
+        return "债券货币", "货币", "official_investment_type" if official_type else "name_keyword"
+    if "债券" in official_type or any(keyword in normalized for keyword in ("国债", "政金债", "信用债", "可转债", "短融", "同业存单")):
+        return "债券货币", "债券", "official_investment_type" if official_type else "name_keyword"
+    if any(keyword in normalized for keyword in ("沪深300", "中证500", "中证1000", "中证2000", "中证A500", "上证50", "科创50", "创业板", "深证100", "A50", "上证180")):
+        return "宽基", "股票", "name_keyword"
     rules = (
         ("科技", ("半导", "芯片", "通信", "5G", "软件", "计算机", "人工智能", "AI", "机器人", "科创")),
         ("医药", ("医药", "医疗", "创新药", "生物", "疫苗")),
@@ -81,16 +88,23 @@ def _classify_etf(name: str) -> str:
         ("红利价值", ("红利", "价值", "低波", "央企")),
         ("金融地产", ("银行", "证券", "券商", "金融", "地产")),
         ("新能源制造", ("新能源", "光伏", "电池", "汽车", "军工", "机械", "制造")),
-        ("债券货币", ("债", "货币", "现金", "短融", "同业存单")),
         ("宽基", ("300", "500", "1000", "2000", "A50", "上证", "创业板", "中证", "沪深")),
     )
     for category, keywords in rules:
         if any(keyword in normalized for keyword in keywords):
-            return category
-    return "其他"
+            asset_class = "跨境" if category == "港股海外" else "商品" if category == "商品" else "股票"
+            return category, asset_class, "name_keyword"
+    asset_class = "股票" if "股票" in official_type else "其他"
+    return "其他", asset_class, "official_investment_type" if official_type else "name_keyword"
 
 
-def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str, Any]:
+def _classify_etf(name: str, investment_type: str | None = None) -> str:
+    return _etf_dimensions(name, investment_type)[0]
+
+
+def _build_etf_terminal_data(
+    frame: pd.DataFrame, szse_frame: pd.DataFrame, dates: list[str]
+) -> dict[str, Any]:
     available_dates = [
         trade_date
         for trade_date in dates
@@ -101,16 +115,25 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
 
     selected = frame.loc[
         frame["trade_date"].astype(str).isin(available_dates),
-        ["trade_date", "instrument_code", "instrument_name", "shares"],
-    ].copy()
+    ].reindex(
+        columns=[
+            "trade_date",
+            "instrument_code",
+            "instrument_name",
+            "shares",
+            "nav",
+            "etf_type",
+            "investment_type",
+        ]
+    ).copy()
     selected["trade_date"] = selected["trade_date"].astype(str)
     selected["instrument_code"] = selected["instrument_code"].astype(str).str.zfill(6)
     selected["shares"] = pd.to_numeric(selected["shares"], errors="coerce")
 
-    names = (
+    metadata = (
         selected.sort_values("trade_date")
         .drop_duplicates("instrument_code", keep="last")
-        .set_index("instrument_code")["instrument_name"]
+        .set_index("instrument_code")
     )
     pivot = selected.pivot_table(
         index="instrument_code", columns="trade_date", values="shares", aggfunc="last"
@@ -125,7 +148,10 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
 
     instruments = []
     for code in pivot.index:
-        name = str(names.get(code, code))
+        row_metadata = metadata.loc[code]
+        name = str(row_metadata.get("instrument_name", code))
+        investment_type = row_metadata.get("investment_type")
+        category, asset_class, classification_source = _etf_dimensions(name, investment_type)
         one_day = latest_delta.get(code)
         window = window_delta.get(code)
         latest_shares = pivot.at[code, latest_date] if latest_date in pivot.columns else None
@@ -133,8 +159,12 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
             {
                 "code": str(code),
                 "name": name,
-                "category": _classify_etf(name),
+                "market": "SSE",
+                "category": category,
+                "assetClass": asset_class,
+                "classificationSource": classification_source,
                 "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
+                "nav": None if pd.isna(row_metadata.get("nav")) else round(float(row_metadata.get("nav")), 4),
                 "periods": {
                     "1d": None if pd.isna(one_day) else round(float(one_day) / 100_000_000, 2),
                     "3d": None if pd.isna(window) else round(float(window) / 100_000_000, 2),
@@ -142,6 +172,45 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
                 "coverage": int(pivot.loc[code, available_dates].notna().sum()),
             }
         )
+
+    if not szse_frame.empty and "instrument_code" in szse_frame.columns:
+        szse_selected = szse_frame.reindex(
+            columns=[
+                "trade_date",
+                "instrument_code",
+                "instrument_name",
+                "shares",
+                "nav",
+                "etf_type",
+                "investment_type",
+            ]
+        ).dropna(subset=["instrument_code"])
+        if not szse_selected.empty:
+            szse_selected["instrument_code"] = szse_selected["instrument_code"].astype(str).str.zfill(6)
+            szse_latest_date = szse_selected["trade_date"].astype(str).max()
+            szse_latest = (
+                szse_selected.loc[szse_selected["trade_date"].astype(str).eq(szse_latest_date)]
+                .drop_duplicates("instrument_code", keep="last")
+            )
+            for row in szse_latest.itertuples():
+                name = str(row.instrument_name)
+                category, asset_class, classification_source = _etf_dimensions(
+                    name, row.investment_type
+                )
+                instruments.append(
+                    {
+                        "code": str(row.instrument_code),
+                        "name": name,
+                        "market": "SZSE",
+                        "category": category,
+                        "assetClass": asset_class,
+                        "classificationSource": classification_source,
+                        "shares": None if pd.isna(row.shares) else round(float(row.shares) / 100_000_000, 2),
+                        "nav": None if pd.isna(row.nav) else round(float(row.nav), 4),
+                        "periods": {"1d": None, "3d": None},
+                        "coverage": 1,
+                    }
+                )
     instruments.sort(
         key=lambda item: abs(item["periods"]["1d"] or 0), reverse=True
     )
@@ -160,6 +229,8 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
 
     groups: dict[str, dict[str, float]] = {}
     for item in instruments:
+        if all(item["periods"].get(period) is None for period in ("1d", "3d")):
+            continue
         category = item["category"]
         aggregate = groups.setdefault(category, {"1d": 0.0, "3d": 0.0})
         for period in ("1d", "3d"):
@@ -175,13 +246,58 @@ def _build_etf_terminal_data(frame: pd.DataFrame, dates: list[str]) -> dict[str,
     ]
     group_periods.sort(key=lambda item: abs(item["periods"]["1d"]), reverse=True)
 
+    market_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    for item in instruments:
+        market_counts[item["market"]] = market_counts.get(item["market"], 0) + 1
+        category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+
     return {
         "dailySeries": daily_series,
         "instruments": instruments,
         "groupPeriods": group_periods,
         "availablePeriods": ["1d", "3d"],
-        "classification": "基金简称关键词映射",
+        "classification": "官方投资类型优先，基金简称关键词补充",
+        "classificationVersion": "2026-07-v2",
+        "universe": {
+            "total": len(instruments),
+            "marketCounts": market_counts,
+            "categoryCounts": category_counts,
+            "periodComparable": sum(1 for item in instruments if item["periods"].get("1d") is not None),
+        },
     }
+
+
+def _build_connect_series(frame: pd.DataFrame, dates: list[str]) -> list[dict[str, Any]]:
+    def total(rows: pd.DataFrame, field: str) -> float:
+        if field not in rows.columns:
+            return 0.0
+        return float(pd.to_numeric(rows[field], errors="coerce").fillna(0).sum())
+
+    series = []
+    for trade_date in dates:
+        daily = frame[frame["trade_date"].astype(str).eq(trade_date)]
+        southbound = daily[daily["direction"].eq("southbound")]
+        northbound = daily[daily["direction"].eq("northbound")]
+        if daily.empty:
+            continue
+        south_by_market = {
+            str(row.market): float(row.net_buy) / 100_000_000
+            for row in southbound.itertuples()
+        }
+        series.append(
+            {
+                "date": trade_date[5:],
+                "southboundNet": round(float(southbound["net_buy"].sum()) / 100_000_000, 2),
+                "southboundTurnover": round(float(southbound["total_turnover"].sum()) / 100_000_000, 2),
+                "southboundSseNet": round(south_by_market.get("SSE", 0.0), 2),
+                "southboundSzseNet": round(south_by_market.get("SZSE", 0.0), 2),
+                "northboundTurnover": round(total(northbound, "total_turnover") / 100_000_000, 2),
+                "northboundEtfTurnover": round(total(northbound, "etf_turnover") / 100_000_000, 2),
+                "northboundTradeCount": int(total(northbound, "total_trade_count")),
+            }
+        )
+    return series
 
 
 def build_dashboard_snapshot(
@@ -200,12 +316,43 @@ def build_dashboard_snapshot(
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
 
     etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
-    etf_terminal = _build_etf_terminal_data(sse_etf, dates)
+    etf_terminal = _build_etf_terminal_data(sse_etf, szse_etf, dates)
+    if "market" not in sse_margin.columns:
+        sse_margin = sse_margin.assign(market="SSE")
+    if "market" not in szse_margin.columns:
+        szse_margin = szse_margin.assign(market="SZSE")
     margin = pd.concat([sse_margin, szse_margin], ignore_index=True)
+    margin_columns = [
+        "financing_balance_yuan",
+        "financing_buy_yuan",
+        "securities_lending_balance_yuan",
+        "securities_lending_sell_volume_shares",
+        "margin_total_balance_yuan",
+    ]
+    for column in margin_columns:
+        if column not in margin.columns:
+            margin[column] = 0
+        margin[column] = pd.to_numeric(margin[column], errors="coerce").fillna(0)
     margin_daily = (
         margin.groupby("trade_date", as_index=False)
-        .agg(financing_balance_yuan=("financing_balance_yuan", "sum"))
+        .agg(
+            financing_balance_yuan=("financing_balance_yuan", "sum"),
+            financing_buy_yuan=("financing_buy_yuan", "sum"),
+            securities_lending_balance_yuan=("securities_lending_balance_yuan", "sum"),
+            securities_lending_sell_volume_shares=("securities_lending_sell_volume_shares", "sum"),
+            margin_total_balance_yuan=("margin_total_balance_yuan", "sum"),
+        )
         .sort_values("trade_date")
+    )
+    market_balance = (
+        margin.pivot_table(
+            index="trade_date",
+            columns="market",
+            values="financing_balance_yuan",
+            aggfunc="sum",
+        )
+        .fillna(0)
+        .to_dict("index")
     )
     latest_margin = float(margin_daily.iloc[-1]["financing_balance_yuan"])
     previous_margin = float(margin_daily.iloc[-2]["financing_balance_yuan"])
@@ -252,14 +399,27 @@ def build_dashboard_snapshot(
                     }
                 )
 
-    margin_series = [
-        {
-            "date": str(row.trade_date)[5:],
-            "balance": round(float(row.financing_balance_yuan) / 100_000_000, 2),
-            "label": f"{float(row.financing_balance_yuan) / 1_000_000_000_000:.4f} 万亿",
-        }
-        for row in margin_daily.itertuples()
-    ]
+    margin_series = []
+    previous_balance: float | None = None
+    for row in margin_daily.itertuples():
+        trade_date = str(row.trade_date)
+        balance = float(row.financing_balance_yuan) / 100_000_000
+        split = market_balance.get(row.trade_date, market_balance.get(trade_date, {}))
+        margin_series.append(
+            {
+                "date": trade_date[5:],
+                "balance": round(balance, 2),
+                "label": f"{float(row.financing_balance_yuan) / 1_000_000_000_000:.4f} 万亿",
+                "change": None if previous_balance is None else round(balance - previous_balance, 2),
+                "financingBuy": round(float(row.financing_buy_yuan) / 100_000_000, 2),
+                "lendingBalance": round(float(row.securities_lending_balance_yuan) / 100_000_000, 2),
+                "lendingSellVolume": round(float(row.securities_lending_sell_volume_shares) / 100_000_000, 2),
+                "totalBalance": round(float(row.margin_total_balance_yuan) / 100_000_000, 2),
+                "sseBalance": round(float(split.get("SSE", 0)) / 100_000_000, 2),
+                "szseBalance": round(float(split.get("SZSE", 0)) / 100_000_000, 2),
+            }
+        )
+        previous_balance = balance
     counts = quality["counts"]
     szse_date = str(szse_etf["trade_date"].max())
     south_market_values = {
@@ -315,6 +475,7 @@ def build_dashboard_snapshot(
         "etfTerminal": etf_terminal,
         "marginSeries": margin_series,
         "connect": connect_rows,
+        "connectSeries": _build_connect_series(connect, dates),
         "dataStatus": [
             {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"{etf_summary['latest_count']} 只·3 日"},
             {"name": "深交所 ETF", "status": "warning", "asOf": szse_date[5:], "detail": "当前快照"},
