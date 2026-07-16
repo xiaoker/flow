@@ -4,7 +4,7 @@
 
 适用范围：Phase 0 数据可行性验证与 Phase 1 MVP
 
-状态：数据与发布链路已验证，Access 私有入口验收待完成
+状态：数据、发布链路与 Access 私有入口均已配置，生产安全冒烟验收进行中
 
 ## 1. 测试目标
 
@@ -22,7 +22,7 @@
 
 - 本地：Python 流水线、临时 SQLite/D1、Worker 本地环境和前端 fixture；
 - CI：Pull Request 中运行 lint、类型检查、单元测试、契约测试和构建；
-- 预览：待收尾的 Cloudflare Access 受保护 Worker Preview；
+- 预览：Worker Preview URL 已关闭，避免形成绕过 Access 的入口；
 - 生产：仅执行只读冒烟测试和一次最小数据发布验证。
 
 每个数据源至少保留以下 fixture：正常交易日、空响应、超时、字段新增、字段删除、字段改名、单位变化、重复记录、非交易日和一份真实异常样本。Fixture 必须记录抓取时间、源 URL、响应哈希和适配器版本。

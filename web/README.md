@@ -32,7 +32,7 @@ npx wrangler secret put INGEST_API_KEY
 npm run deploy
 ```
 
-当前 `workers.dev` 读取入口可匿名访问；写入接口已要求独立的 `INGEST_API_KEY`。私有化收尾后，生产页面和只读 API 将由所有者账号中的 Cloudflare Access 管理；写入接口仍保留独立密钥，不允许仅凭 Access 身份写入数据。
+生产入口为 `https://flow.xiaoker.com`，页面和只读 API 由所有者账号中的 Cloudflare Access 管理，仅允许项目所有者邮箱登录。GitHub Actions 通过独立 Service Auth 策略访问写入路由；写入接口仍要求独立的 `INGEST_API_KEY`。`workers.dev` 与 Worker Preview URL 均已关闭。
 
 ## Useful Commands
 
