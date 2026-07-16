@@ -400,6 +400,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
               </div>
               <span className="sort-status"><ArrowsLeftRight size={16} />当前排序：{periods.find((item) => item.id === (sorting[0]?.id ?? period))?.label ?? currentPeriod} · {sorting[0]?.desc ? "降序" : "升序"}</span>
             </div>
+            <div className="table-scroll-hint"><ArrowsLeftRight size={15} />左右滑动查看全部周期</div>
             <div className="radar-table-wrap">
               <table className="radar-table">
                 <thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th className={header.id === period ? "current-period" : ""} key={header.id}><button disabled={!header.column.getCanSort()} onClick={header.column.getToggleSortingHandler()} type="button">{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}{header.column.getIsSorted() ? <CaretDown className={header.column.getIsSorted() === "asc" ? "sort-asc" : ""} size={13} weight="bold" /> : null}</button></th>)}</tr>)}</thead>
