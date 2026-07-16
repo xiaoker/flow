@@ -330,13 +330,15 @@ export function Dashboard({ snapshot }: DashboardProps) {
         </div>
       </section>
 
-      <section className="period-strip">
-        <div className="metric-switch" aria-label="指标口径"><button className="active" type="button">份额（亿份）</button><button disabled title="等待 ETF 净值字段" type="button">金额估算</button></div>
-        <div className="period-tabs" aria-label="观察周期">
-          {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${availablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
-        </div>
-        <div className="coverage-chip"><Database size={16} /><span>{availablePeriods.size} 个可用周期</span><strong>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
-      </section>
+      {(view === "overview" || view === "radar") && (
+        <section className="period-strip" aria-label="ETF 观察口径">
+          <div className="metric-switch" aria-label="指标口径"><button className="active" type="button">份额（亿份）</button><button disabled title="等待 ETF 净值字段" type="button">金额估算</button></div>
+          <div className="period-tabs" aria-label="观察周期">
+            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${availablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
+          </div>
+          <div className="coverage-chip"><Database size={16} /><span>{availablePeriods.size} 个可用周期</span><strong>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
+        </section>
+      )}
 
       {notice && <div className="toast" role="status"><Info size={17} />{notice}</div>}
 
