@@ -8,8 +8,15 @@ export async function GET() {
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     unit: "100m shares",
-    scope: "SSE only",
+    scope: "SSE headline; SSE and SZSE terminal universe",
     methodology: "adjacent trading-day share difference",
+    evidence: {
+      kind: "calculated",
+      source: "official exchange share snapshots",
+      formula: "current shares - previous trading-day shares",
+      isCashFlow: false,
+    },
+    limitations: ["SZSE current file has no source-published statistical date"],
     flows: dashboardSnapshot.etfFlows,
     terminal: dashboardSnapshot.etfTerminal ?? null,
   });

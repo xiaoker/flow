@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "流向台 · 个人资金雷达",
-  description: "用官方日频数据观察 ETF、互联互通和融资融券资金流向。",
+  title: "FLOW · 个人市场数据台",
+  description: "区分官方事实与公式计算，观察 ETF 份额、互联互通成交和融资融券数据。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

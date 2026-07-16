@@ -8,6 +8,10 @@ export async function GET() {
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     northboundDisclosure: "turnover_only",
+    evidence: {
+      southbound: { kind: "calculated", formula: "official buy turnover - official sell turnover" },
+      northbound: { kind: "official", field: "total turnover", directionAvailable: false },
+    },
     channels: dashboardSnapshot.connect,
     series: dashboardSnapshot.connectSeries ?? [],
   });

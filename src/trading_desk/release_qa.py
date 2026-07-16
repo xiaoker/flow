@@ -822,7 +822,7 @@ def run_release_qa(
             "verdict": "pass" if summary["counts"]["fail"] == 0 else "blocked",
             "known_limitations": [
                 "深交所 ETF 文件不含统计日期，日期来自采集时点推断，只能从上线日起向前留存。",
-                "ETF 资金流向当前使用份额变化口径，不等同于精确申赎金额。",
+                "ETF 页面当前展示份额变化，不等同于精确申赎金额。",
                 "北向自披露调整后不提供买入额、卖出额或净流入，页面只展示官方成交总额。",
             ],
         }

@@ -25,13 +25,19 @@ test("server-renders the trading flow dashboard", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>[^<]*流向台[^<]*<\/title>/i);
-  assert.match(html, /个人资金流交易台/);
-  assert.match(html, /板块资金轮动/);
+  assert.match(html, /<title>[^<]*市场数据台[^<]*<\/title>/i);
+  assert.match(html, /个人市场数据交易台/);
+  assert.match(html, /板块份额变化/);
   assert.match(html, /ETF 雷达/);
   assert.match(html, /南向净买入/);
+  assert.match(html, /ETF 份额变化/);
+  assert.match(html, /官方事实/);
+  assert.match(html, /公式计算/);
+  assert.match(html, /日期推断/);
+  assert.match(html, /未披露的数据不展示、不补造/);
   assert.match(html, /当前官方不披露北向净流入/);
   assert.match(html, /份额变化不等同资金金额/);
+  assert.doesNotMatch(html, /板块资金轮动|资金流全景/);
   assert.doesNotMatch(html, /β\s*压强/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
@@ -49,6 +55,9 @@ test("exposes connect trend series without inventing northbound direction", asyn
   assert.equal(payload.series.length, 3);
   assert.equal(payload.series[2].southboundNet, 109.97);
   assert.equal("northboundNet" in payload.series[2], false);
+  assert.equal(payload.evidence.southbound.kind, "calculated");
+  assert.equal(payload.evidence.northbound.kind, "official");
+  assert.equal(payload.evidence.northbound.directionAvailable, false);
 });
 
 test("exposes the machine-readable data status endpoint", async () => {
@@ -63,6 +72,26 @@ test("exposes the machine-readable data status endpoint", async () => {
   assert.equal(payload.gate, "conditional_pass");
   assert.deepEqual(payload.quality, { pass: 46, warn: 2, fail: 0 });
   assert.equal(payload.domains.length, 4);
+  assert.equal(payload.domains[0].basis, "official");
+  assert.equal(payload.domains[1].basis, "inferred_date");
+  assert.match(payload.domains[1].detail, /日期推断/);
+});
+
+test("exposes evidence levels for headline metrics", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  const metrics = Object.fromEntries(payload.metrics.map((metric) => [metric.id, metric]));
+  assert.equal(metrics.etf.basis.kind, "calculated");
+  assert.equal(metrics.southbound.basis.kind, "calculated");
+  assert.equal(metrics.margin.basis.kind, "official");
+  assert.equal(metrics.northbound.basis.kind, "official");
+  assert.match(metrics.etf.note, /不是资金金额/);
 });
 
 test("exposes ETF terminal coverage without inventing unavailable periods", async () => {
@@ -77,6 +106,21 @@ test("exposes ETF terminal coverage without inventing unavailable periods", asyn
   assert.deepEqual(payload.terminal.availablePeriods, ["1d"]);
   assert.equal(payload.terminal.instruments[0].periods["1d"], 13.98);
   assert.equal(payload.terminal.instruments[0].periods["1w"], undefined);
+  assert.equal(payload.evidence.kind, "calculated");
+  assert.equal(payload.evidence.isCashFlow, false);
+});
+
+test("labels margin fields as official balances rather than net capital flow", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/margin/flows"),
+    env,
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.evidence.kind, "official");
+  assert.match(payload.evidence.interpretation, /not net capital flow/);
 });
 
 test("rejects unauthenticated snapshot imports", async () => {

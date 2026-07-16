@@ -94,12 +94,21 @@ h1, h2, h3 { text-wrap: balance; }
 .command-metrics { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); }
 .command-metrics > span { display: flex; min-width: 120px; flex-direction: column; justify-content: center; gap: 4px; padding: 0 21px; border-left: 1px solid var(--line-soft); }
 .command-metrics small, .panel-kpis small, .radar-stats small { color: var(--muted); font-size: var(--text-sm); }
+.command-metrics small { display: flex; align-items: center; gap: 7px; }
 .command-metrics strong { font-family: var(--font-geist-mono), monospace; font-size: 20px; }
 strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist-sans), sans-serif; font-size: 13px; font-style: normal; font-weight: 550; }
 .text-in { color: var(--inflow) !important; }
 .text-out { color: var(--outflow) !important; }
 .text-cyan { color: var(--cyan) !important; }
 .text-amber { color: var(--amber) !important; }
+
+.evidence-badge { display: inline-flex; min-height: 22px; align-items: center; justify-content: center; padding: 2px 7px; border: 1px solid; border-radius: 999px; font-size: var(--text-xs); font-weight: 750; letter-spacing: .02em; line-height: 1; white-space: nowrap; }
+.evidence-official { border-color: rgba(85,187,135,.42); background: var(--outflow-soft); color: #8ee0b2; }
+.evidence-calculated { border-color: rgba(80,183,217,.42); background: var(--cyan-soft); color: #8edbf2; }
+.evidence-inferred { border-color: rgba(241,174,66,.45); background: var(--amber-soft); color: #f5c46f; }
+.evidence-legend { display: flex; min-height: 48px; align-items: center; gap: 18px; padding: 8px 24px; border-bottom: 1px solid var(--line); background: #080f18; color: var(--muted); font-size: 13px; }
+.evidence-legend > span { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.evidence-legend > strong { margin-left: auto; color: var(--muted-strong); font-size: 13px; font-weight: 650; }
 
 .period-strip { display: flex; align-items: center; gap: 16px; min-height: 62px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: #09111b; }
 .metric-switch, .period-tabs { display: flex; align-items: center; gap: 4px; }
@@ -294,7 +303,7 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 
 @media (max-width: 1000px) {
   .terminal-topbar { grid-template-columns: 1fr auto; }
-  .desk-nav { position: fixed; right: 0; bottom: 0; left: 0; z-index: 50; justify-content: center; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: rgba(9,17,27,.98); backdrop-filter: blur(16px); }
+  .desk-nav { position: fixed; top: calc(100dvh - 59px - env(safe-area-inset-bottom)); right: 0; bottom: auto; left: 0; z-index: 50; justify-content: center; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: rgba(9,17,27,.98); backdrop-filter: blur(16px); }
   .desk-nav button { min-width: 0; height: 58px; flex: 1; justify-content: center; gap: 4px; padding: 0 4px; border-radius: 0; }
   .desk-nav button span { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
   .desk-nav button.active::after { top: -1px; bottom: auto; }
@@ -302,6 +311,8 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .command-strip { flex-direction: column; gap: 16px; }
   .command-metrics { width: 100%; }
   .command-metrics > span:first-child { border-left: 0; padding-left: 0; }
+  .evidence-legend { flex-wrap: wrap; gap: 8px 16px; }
+  .evidence-legend > strong { width: 100%; margin-left: 0; }
   .overview-grid, .signal-grid, .detail-grid { grid-template-columns: 1fr; }
   .trend-panel { order: -1; }
   .terminal-footer { margin-bottom: calc(58px + env(safe-area-inset-bottom)); }
@@ -318,6 +329,9 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .command-metrics { grid-template-columns: repeat(2, 1fr); gap: 10px 0; }
   .command-metrics > span { min-width: 0; padding: 0 10px; }
   .command-metrics > span:nth-child(3) { border-left: 0; padding-left: 0; }
+  .command-metrics small { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .evidence-legend { padding: 10px 12px; }
+  .evidence-legend > span { width: 100%; white-space: normal; }
   .period-strip { align-items: flex-start; flex-direction: column; gap: 8px; padding: 10px 12px; }
   .metric-switch { width: 100%; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .period-tabs { width: 100%; }

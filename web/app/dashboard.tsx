@@ -28,6 +28,7 @@ import ReactECharts from "echarts-for-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardSnapshot,
+  EvidenceKind,
   EtfTerminalData,
   EtfTerminalInstrument,
   FlowPeriod,
@@ -52,7 +53,7 @@ const periods: Array<{ id: FlowPeriod; label: string }> = [
 ];
 
 const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> = [
-  { id: "overview", label: "资金总览", icon: ChartLineUp },
+  { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
   { id: "connect", label: "互联互通", icon: ArrowsLeftRight },
   { id: "margin", label: "融资融券", icon: Pulse },
@@ -107,6 +108,17 @@ function heatClass(value: number | null | undefined, max: number) {
 
 function metricValue(snapshot: DashboardSnapshot, id: string) {
   return snapshot.metrics.find((metric) => metric.id === id);
+}
+
+const defaultMetricBasis: Record<string, { kind: EvidenceKind; label: string; detail: string }> = {
+  etf: { kind: "calculated", label: "公式计算", detail: "当日官方份额 − 前一交易日官方份额" },
+  southbound: { kind: "calculated", label: "公式计算", detail: "港交所官方买入成交额 − 卖出成交额" },
+  margin: { kind: "official", label: "官方汇总", detail: "上交所与深交所融资余额合计" },
+  northbound: { kind: "official", label: "官方汇总", detail: "港交所北向成交总额，不推断资金方向" },
+};
+
+function EvidenceBadge({ kind, label, detail }: { kind: EvidenceKind; label: string; detail: string }) {
+  return <span className={`evidence-badge evidence-${kind}`} title={detail}>{label}</span>;
 }
 
 export function Dashboard({ snapshot }: DashboardProps) {
@@ -285,6 +297,8 @@ export function Dashboard({ snapshot }: DashboardProps) {
   const latestMetric = metricValue(snapshot, "etf");
   const marginMetric = metricValue(snapshot, "margin");
   const southboundMetric = metricValue(snapshot, "southbound");
+  const northboundMetric = metricValue(snapshot, "northbound");
+  const evidenceFor = (id: string, basis?: { kind: EvidenceKind; label: string; detail: string }) => basis ?? defaultMetricBasis[id];
   const currentPeriod = periods.find((item) => item.id === period)?.label ?? "最近1日";
 
   const choosePeriod = (next: FlowPeriod) => {
@@ -327,7 +341,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
       <header className="terminal-topbar">
         <div className="brand-block">
           <span className="brand-mark" aria-hidden="true"><Pulse size={20} weight="bold" /></span>
-          <div><strong>FLOW</strong><span>个人资金流交易台</span></div>
+          <div><strong>FLOW</strong><span>个人市场数据交易台</span></div>
         </div>
         <nav className="desk-nav" aria-label="交易台导航">
           {navigation.map((item) => {
@@ -345,16 +359,23 @@ export function Dashboard({ snapshot }: DashboardProps) {
 
       <section className="command-strip" aria-label="数据摘要">
         <div className="command-title">
-          <span className="eyebrow">官方资金快照</span>
-          <strong>{view === "overview" ? "资金流全景" : view === "radar" ? "ETF 份额雷达" : view === "connect" ? "互联互通" : "融资融券"}</strong>
+          <span className="eyebrow">官方事实与复算指标</span>
+          <strong>{view === "overview" ? "市场数据全景" : view === "radar" ? "ETF 份额雷达" : view === "connect" ? "互联互通" : "融资融券"}</strong>
           <span>截至 {snapshot.asOf} · {snapshot.mode}</span>
         </div>
         <div className="command-metrics">
-          <span><small>ETF 净变化</small><strong className={latestMetric?.tone === "positive" ? "text-in" : "text-out"}>{latestMetric?.value}<em>{latestMetric?.unit}</em></strong></span>
-          <span><small>南向净买入</small><strong className="text-in">{southboundMetric?.value}<em>{southboundMetric?.unit}</em></strong></span>
-          <span><small>融资余额</small><strong>{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></span>
-          <span><small>质量闸门</small><strong className="text-cyan">{snapshot.quality.pass}/{snapshot.quality.pass + snapshot.quality.warn}</strong></span>
+          <span><small>ETF 份额变化<EvidenceBadge {...evidenceFor("etf", latestMetric?.basis)} /></small><strong className={latestMetric?.tone === "positive" ? "text-in" : "text-out"}>{latestMetric?.value}<em>{latestMetric?.unit}</em></strong></span>
+          <span><small>南向净买入<EvidenceBadge {...evidenceFor("southbound", southboundMetric?.basis)} /></small><strong className="text-in">{southboundMetric?.value}<em>{southboundMetric?.unit}</em></strong></span>
+          <span><small>融资余额<EvidenceBadge {...evidenceFor("margin", marginMetric?.basis)} /></small><strong>{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></span>
+          <span><small>北向成交额<EvidenceBadge {...evidenceFor("northbound", northboundMetric?.basis)} /></small><strong className="text-cyan">{northboundMetric?.value}<em>{northboundMetric?.unit}</em></strong></span>
         </div>
+      </section>
+
+      <section className="evidence-legend" aria-label="数据证据等级">
+        <span><EvidenceBadge kind="official" label="官方事实" detail="交易所直接披露或两市官方值相加" />交易所直接披露或官方汇总</span>
+        <span><EvidenceBadge kind="calculated" label="公式计算" detail="只使用官方字段按公开公式复算" />可从官方字段独立复算</span>
+        <span><EvidenceBadge kind="inferred" label="日期推断" detail="数值来自官方文件，但文件未提供统计日期" />仅深交所 ETF 当前快照日期</span>
+        <strong>未披露的数据不展示、不补造</strong>
       </section>
 
       {(view === "overview" || view === "radar") && (
@@ -375,12 +396,12 @@ export function Dashboard({ snapshot }: DashboardProps) {
             <section className="overview-grid">
               <article className="terminal-panel rotation-panel">
                 <div className="panel-heading">
-                  <div><span className="eyebrow">ETF 分类样本</span><h2>板块资金轮动</h2><p>按基金简称归类 · 当前展示 {currentPeriod} 份额变化</p></div>
+                  <div><span className="eyebrow">ETF 分类样本 · 公式计算</span><h2>板块份额变化</h2><p>按基金简称归类 · 当前展示 {currentPeriod} 官方份额差</p></div>
                   <div className="panel-kpis"><span><small>样本净变化</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
                 </div>
                 <ReactECharts className="rotation-chart" option={rotationOption} notMerge lazyUpdate />
                 <div className="insight-row">
-                  <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中资金变化最显著。</p></span>
+                  <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中份额变化最显著。</p></span>
                   <span><i>02</i><p><strong>集中度 {crowding}%</strong>前三流入方向占可见流入样本。</p></span>
                   <span><i>03</i><p><strong>口径有限</strong>分类来自简称映射，点击雷达核对 ETF。</p></span>
                 </div>
@@ -407,7 +428,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
                 <p className="method-note"><Info size={15} />当前官方不披露北向净流入，仅展示成交总额。</p>
               </article>
               <article className="terminal-panel compact-panel">
-                <div className="panel-heading"><div><span className="eyebrow">融资融券</span><h2>杠杆资金连续变化</h2></div><button className="link-button" onClick={() => setView("margin")} type="button">展开<CaretRight size={15} /></button></div>
+                <div className="panel-heading"><div><span className="eyebrow">融资融券 · 官方汇总</span><h2>杠杆余额连续变化</h2></div><button className="link-button" onClick={() => setView("margin")} type="button">展开<CaretRight size={15} /></button></div>
                 <div className="margin-spark">{snapshot.marginSeries.map((item, index) => <div key={item.date}><span className={index === snapshot.marginSeries.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...snapshot.marginSeries.map((point) => point.balance))) / Math.max(1, Math.max(...snapshot.marginSeries.map((point) => point.balance)) - Math.min(...snapshot.marginSeries.map((point) => point.balance)))) * 42}%` }} /><strong>{item.date}</strong><small>{item.label}</small></div>)}</div>
                 <p className="method-note"><Info size={15} />余额变化代表杠杆规模扩张或收缩，不直接等同多空方向。</p>
               </article>
@@ -418,7 +439,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
         {view === "radar" && (
           <section className="terminal-panel radar-panel">
             <div className="radar-heading">
-              <div><span className="eyebrow">ETF 份额雷达</span><h2>横向比较资金持续性</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 深市单日快照不生成变化值</p></div>
+              <div><span className="eyebrow">ETF 份额雷达 · 公式计算</span><h2>横向比较份额变化</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 深市单日快照不生成变化值</p></div>
               <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>亿份</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{terminal.universe?.periodComparable ?? terminal.instruments.length}<em>只</em></strong></span></div>
             </div>
             <div className="radar-toolbar">
@@ -447,24 +468,24 @@ export function Dashboard({ snapshot }: DashboardProps) {
         {view === "connect" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main connect-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通资金面</h2><p>南向看净买入方向；北向看成交活跃度</p></div><div className="panel-kpis"><span><small>南向最新</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
-              {connectSeries.length ? <div className="detail-chart-grid"><div><h3>跨境资金走势</h3><ReactECharts className="detail-chart" option={connectTrendOption} notMerge lazyUpdate /></div><div><h3>南向通道拆分</h3><ReactECharts className="detail-chart" option={channelOption} notMerge lazyUpdate /></div></div> : <div className="empty-chart"><Database size={30} /><strong>等待连续交易日</strong></div>}
+              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度</p></div><div className="panel-kpis"><span><small>南向最新 · 公式计算</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交 · 官方</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
+              {connectSeries.length ? <div className="detail-chart-grid"><div><h3>互联互通走势</h3><ReactECharts className="detail-chart" option={connectTrendOption} notMerge lazyUpdate /></div><div><h3>南向通道拆分</h3><ReactECharts className="detail-chart" option={channelOption} notMerge lazyUpdate /></div></div> : <div className="empty-chart"><Database size={30} /><strong>等待连续交易日</strong></div>}
               <div className="connect-kpi-strip">{snapshot.connect.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
             </article>
-            <aside className="terminal-panel methodology"><Info size={24} /><h3>披露边界</h3><p>北向资金当前不公开买入额、卖出额和净流入，因此系统不会用成交额替代净流入，也不会做方向推断。</p><span>口径状态：官方可验证</span><div className="method-list"><p><b>南向</b>买入额 − 卖出额，单位亿港元</p><p><b>北向</b>展示总成交额与 ETF 成交额</p><p><b>更新</b>每个交易日生成快照</p></div></aside>
+            <aside className="terminal-panel methodology"><Info size={24} /><h3>披露边界</h3><p>北向当前不公开买入额、卖出额和净流入，因此系统不会用成交额替代净流入，也不会做方向推断。</p><span>北向：官方事实 · 南向：公式计算</span><div className="method-list"><p><b>南向 · 公式计算</b>买入额 − 卖出额，单位亿港元</p><p><b>北向 · 官方事实</b>仅展示总成交额与 ETF 成交额</p><p><b>未披露</b>北向方向和净流入保持缺失</p></div></aside>
           </section>
         )}
 
         {view === "margin" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main margin-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪深两市合计</span><h2>两融资金趋势</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；不直接解释为看多或看空</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
+              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；不直接解释为资金流入或看多看空</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
               <div className="margin-metric-tabs">{(Object.keys(marginMetricDefinitions) as MarginDisplayMetric[]).map((item) => <button className={marginDisplayMetric === item ? "active" : ""} key={item} onClick={() => setMarginDisplayMetric(item)} type="button">{marginMetricDefinitions[item].label}</button>)}</div>
               <ReactECharts className="margin-detail-chart" option={marginTrendOption} notMerge lazyUpdate />
               <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div></div>
               <div className="margin-history compact-history">{snapshot.marginSeries.map((item) => <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={item.change === null || item.change === undefined ? "" : item.change >= 0 ? "text-in" : "text-out"}>{item.change === null || item.change === undefined ? "基准" : `${formatFlow(item.change, 2)} 亿元`}</span></div>)}</div>
             </article>
-            <aside className="terminal-panel methodology"><Pulse size={24} /><h3>当前判断</h3><p>{marginMetric?.delta}。连续回落说明杠杆规模收缩，需要与指数趋势和成交额一起观察。</p><span>最新：{snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模</p><p><b>融资买入</b>当日新增活跃度</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>
+            <aside className="terminal-panel methodology"><Pulse size={24} /><h3>如何阅读</h3><p>{marginMetric?.delta}。余额变化只说明杠杆存量扩张或收缩，需要与指数趋势和成交额一起观察。</p><span>官方汇总 · 最新 {snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模，不叫净流入</p><p><b>融资买入</b>当日融资买入成交额</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>
           </section>
         )}
       </div>

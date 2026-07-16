@@ -68,6 +68,8 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["quality"] == {"pass": 10, "warn": 1, "fail": 0}
     assert snapshot["metrics"][0]["value"] == "+0.00"
     assert snapshot["metrics"][1]["value"] == "+0.00"
+    assert snapshot["metrics"][0]["basis"]["kind"] == "calculated"
+    assert snapshot["metrics"][2]["basis"]["kind"] == "official"
     assert snapshot["etfFlows"]["inflow"][0]["code"] == "000001"
     assert snapshot["etfTerminal"]["availablePeriods"] == ["1d", "3d"]
     assert snapshot["etfTerminal"]["dailySeries"][-1]["coverage"] == 2
@@ -80,6 +82,8 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["marginSeries"][-1]["sseBalance"] == 0.0
     assert len(snapshot["connectSeries"]) == 3
     assert snapshot["dataStatus"][1]["status"] == "warning"
+    assert snapshot["dataStatus"][1]["basis"] == "inferred_date"
+    assert "日期推断" in snapshot["dataStatus"][1]["detail"]
 
 
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:

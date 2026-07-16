@@ -436,12 +436,17 @@ def build_dashboard_snapshot(
         "metrics": [
             {
                 "id": "etf",
-                "eyebrow": "上交所 ETF 份额净变化",
+                "eyebrow": "上交所 ETF 份额变化",
                 "value": _signed(etf_summary["net"]),
                 "unit": "亿份",
                 "delta": f"{etf_summary['increasers']} 只增加 · {etf_summary['decreasers']} 只减少",
                 "tone": "positive" if etf_summary["net"] >= 0 else "negative",
-                "note": "份额口径，非净申购金额",
+                "note": "相邻官方快照份额差，不是资金金额",
+                "basis": {
+                    "kind": "calculated",
+                    "label": "公式计算",
+                    "detail": "当日官方份额 − 前一交易日官方份额",
+                },
             },
             {
                 "id": "southbound",
@@ -451,6 +456,11 @@ def build_dashboard_snapshot(
                 "delta": f"沪港通 {south_market_values['沪港通南向']} · 深港通 {south_market_values['深港通南向']}",
                 "tone": "positive" if southbound_net >= 0 else "negative",
                 "note": "官方买入额 − 卖出额",
+                "basis": {
+                    "kind": "calculated",
+                    "label": "公式计算",
+                    "detail": "港交所官方买入成交额 − 卖出成交额",
+                },
             },
             {
                 "id": "margin",
@@ -460,6 +470,11 @@ def build_dashboard_snapshot(
                 "delta": f"较前日 {_signed((latest_margin - previous_margin) / 100_000_000)} 亿元",
                 "tone": "positive" if latest_margin >= previous_margin else "negative",
                 "note": "沪深两市合计",
+                "basis": {
+                    "kind": "official",
+                    "label": "官方汇总",
+                    "detail": "上交所与深交所融资余额合计",
+                },
             },
             {
                 "id": "northbound",
@@ -469,6 +484,11 @@ def build_dashboard_snapshot(
                 "delta": f"沪股通 {north_rows[0]['value']} · 深股通 {north_rows[1]['value']}",
                 "tone": "neutral",
                 "note": "当前官方不披露北向净流入",
+                "basis": {
+                    "kind": "official",
+                    "label": "官方汇总",
+                    "detail": "港交所北向成交总额，不推断资金方向",
+                },
             },
         ],
         "etfFlows": etf_flows,
@@ -477,9 +497,9 @@ def build_dashboard_snapshot(
         "connect": connect_rows,
         "connectSeries": _build_connect_series(connect, dates),
         "dataStatus": [
-            {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"{etf_summary['latest_count']} 只·3 日"},
-            {"name": "深交所 ETF", "status": "warning", "asOf": szse_date[5:], "detail": "当前快照"},
-            {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "沪深完整"},
-            {"name": "互联互通", "status": "ready", "asOf": as_of[5:], "detail": "4 通道"},
+            {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"官方日期 · {etf_summary['latest_count']} 只·3 日", "basis": "official"},
+            {"name": "深交所 ETF", "status": "warning", "asOf": szse_date[5:], "detail": "官方当前快照 · 日期推断", "basis": "inferred_date"},
+            {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深汇总", "basis": "official"},
+            {"name": "互联互通", "status": "ready", "asOf": as_of[5:], "detail": "南向复算 · 北向官方成交", "basis": "mixed"},
         ],
     }

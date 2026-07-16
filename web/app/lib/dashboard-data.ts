@@ -2,6 +2,8 @@ export type FlowDirection = "inflow" | "outflow";
 
 export type FlowTone = "positive" | "negative" | "neutral";
 
+export type EvidenceKind = "official" | "calculated" | "inferred";
+
 export type FlowPeriod = "1d" | "3d" | "1w" | "2w" | "1m" | "3m" | "6m" | "ytd" | "12m";
 
 export interface EtfTerminalInstrument {
@@ -49,6 +51,11 @@ export interface DashboardSnapshot {
     delta: string;
     tone: FlowTone;
     note: string;
+    basis?: {
+      kind: EvidenceKind;
+      label: string;
+      detail: string;
+    };
   }>;
   etfFlows: Record<FlowDirection, Array<{ code: string; name: string; value: number }>>;
   marginSeries: Array<{
@@ -85,6 +92,7 @@ export interface DashboardSnapshot {
     status: "ready" | "warning";
     asOf: string;
     detail: string;
+    basis?: "official" | "inferred_date" | "mixed";
   }>;
   etfTerminal?: EtfTerminalData;
 }
@@ -98,12 +106,13 @@ export const dashboardSnapshot: DashboardSnapshot = {
   metrics: [
     {
       id: "etf",
-      eyebrow: "上交所 ETF 份额净变化",
+      eyebrow: "上交所 ETF 份额变化",
       value: "+79.89",
       unit: "亿份",
       delta: "299 只增加 · 229 只减少",
       tone: "positive",
-      note: "份额口径，非净申购金额",
+      note: "相邻官方快照份额差，不是资金金额",
+      basis: { kind: "calculated", label: "公式计算", detail: "当日官方份额 − 前一交易日官方份额" },
     },
     {
       id: "southbound",
@@ -113,6 +122,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
       delta: "沪港通 +82.05 · 深港通 +27.92",
       tone: "positive",
       note: "官方买入额 − 卖出额",
+      basis: { kind: "calculated", label: "公式计算", detail: "港交所官方买入成交额 − 卖出成交额" },
     },
     {
       id: "margin",
@@ -122,6 +132,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
       delta: "较前日 −109.58 亿元",
       tone: "negative",
       note: "沪深两市合计",
+      basis: { kind: "official", label: "官方汇总", detail: "上交所与深交所融资余额合计" },
     },
     {
       id: "northbound",
@@ -131,6 +142,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
       delta: "沪股通 1,823.28 · 深股通 2,335.77",
       tone: "neutral",
       note: "当前官方不披露北向净流入",
+      basis: { kind: "official", label: "官方汇总", detail: "港交所北向成交总额，不推断资金方向" },
     },
   ],
   etfFlows: {
@@ -166,10 +178,10 @@ export const dashboardSnapshot: DashboardSnapshot = {
     { date: "07-14", southboundNet: 109.97, southboundTurnover: 1289.72, southboundSseNet: 82.05, southboundSzseNet: 27.92, northboundTurnover: 4159.04, northboundEtfTurnover: 65.6, northboundTradeCount: 17561612 },
   ],
   dataStatus: [
-    { name: "上交所 ETF", status: "ready", asOf: "07-14", detail: "878 只·3 日" },
-    { name: "深交所 ETF", status: "warning", asOf: "07-15", detail: "当前快照" },
-    { name: "融资融券", status: "ready", asOf: "07-14", detail: "沪深完整" },
-    { name: "互联互通", status: "ready", asOf: "07-14", detail: "4 通道" },
+    { name: "上交所 ETF", status: "ready", asOf: "07-14", detail: "官方日期 · 878 只·3 日", basis: "official" },
+    { name: "深交所 ETF", status: "warning", asOf: "07-15", detail: "官方当前快照 · 日期推断", basis: "inferred_date" },
+    { name: "融资融券", status: "ready", asOf: "07-14", detail: "官方沪深汇总", basis: "official" },
+    { name: "互联互通", status: "ready", asOf: "07-14", detail: "南向复算 · 北向官方成交", basis: "mixed" },
   ],
   etfTerminal: {
     dailySeries: [{ date: "07-14", value: 79.89, coverage: 878 }],

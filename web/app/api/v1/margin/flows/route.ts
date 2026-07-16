@@ -9,6 +9,11 @@ export async function GET() {
     asOf: dashboardSnapshot.asOf,
     currency: "CNY",
     unit: "100m yuan",
+    evidence: {
+      kind: "official",
+      source: "SSE and SZSE margin trading summaries",
+      interpretation: "balance and turnover data; not net capital flow",
+    },
     series: dashboardSnapshot.marginSeries,
   });
 }
