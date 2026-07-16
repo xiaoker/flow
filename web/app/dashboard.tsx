@@ -211,36 +211,36 @@ export function Dashboard({ snapshot }: DashboardProps) {
   const rotationOption = useMemo(() => ({
     animationDuration: 450,
     grid: { left: 112, right: 92, top: 18, bottom: 28 },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" }, formatter: (items: Array<{ name: string; value: number }>) => `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} 亿份` },
-    xAxis: { type: "value", axisLine: { lineStyle: { color: "#394759" } }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
-    yAxis: { type: "category", data: groupRows.map((item) => item.name), axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: "#dce4ee", fontWeight: 600 } },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 12 }, formatter: (items: Array<{ name: string; value: number }>) => `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} 亿份` },
+    xAxis: { type: "value", axisLine: { lineStyle: { color: "#394759" } }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
+    yAxis: { type: "category", data: groupRows.map((item) => item.name), axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: "#dce4ee", fontSize: 12, fontWeight: 600 } },
     series: [{
       type: "bar",
       data: groupRows.map((item) => ({ value: item.value, itemStyle: { color: item.value >= 0 ? "#e36464" : "#55b887", borderRadius: item.value >= 0 ? [0, 5, 5, 0] : [5, 0, 0, 5] } })),
       barMaxWidth: 18,
-      label: { show: true, position: "right", color: "#aab6c6", fontFamily: "monospace", formatter: ({ value }: { value: number }) => formatFlow(value, 1) },
+      label: { show: true, position: "right", color: "#bec8d5", fontFamily: "monospace", fontSize: 11, formatter: ({ value }: { value: number }) => formatFlow(value, 1) },
     }],
   }), [groupRows]);
 
   const trendOption = useMemo(() => ({
     animationDuration: 450,
     grid: { left: 12, right: 16, top: 22, bottom: 24, containLabel: true },
-    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" } },
-    xAxis: { type: "category", data: terminal.dailySeries.map((item) => item.date), axisLine: { lineStyle: { color: "#394759" } }, axisTick: { show: false }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
-    yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 12 } },
+    xAxis: { type: "category", data: terminal.dailySeries.map((item) => item.date), axisLine: { lineStyle: { color: "#394759" } }, axisTick: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
+    yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
     series: [{ type: "bar", barMaxWidth: 22, data: terminal.dailySeries.map((item) => ({ value: item.value, itemStyle: { color: item.value >= 0 ? "#e36464" : "#55b887", borderRadius: item.value >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) }],
   }), [terminal.dailySeries]);
 
   const connectSeries = useMemo(() => snapshot.connectSeries ?? [], [snapshot.connectSeries]);
   const connectTrendOption = useMemo(() => ({
     animationDuration: 450,
-    legend: { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 },
+    legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
     grid: { left: 16, right: 20, top: 44, bottom: 26, containLabel: true },
-    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" } },
-    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 12 } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
     yAxis: [
-      { type: "value", name: "南向净买入", nameTextStyle: { color: "#76859a", fontSize: 9 }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
-      { type: "value", name: "北向成交", nameTextStyle: { color: "#76859a", fontSize: 9 }, splitLine: { show: false }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+      { type: "value", name: "南向净买入", nameTextStyle: { color: "#8795a8", fontSize: 11 }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
+      { type: "value", name: "北向成交", nameTextStyle: { color: "#8795a8", fontSize: 11 }, splitLine: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
     ],
     series: [
       { name: "南向净买入（亿港元）", type: "bar", barMaxWidth: 30, data: connectSeries.map((item) => ({ value: item.southboundNet, itemStyle: { color: item.southboundNet >= 0 ? "#e36464" : "#55b887", borderRadius: item.southboundNet >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) },
@@ -250,11 +250,11 @@ export function Dashboard({ snapshot }: DashboardProps) {
 
   const channelOption = useMemo(() => ({
     animationDuration: 450,
-    legend: { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 },
+    legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
     grid: { left: 12, right: 14, top: 42, bottom: 26, containLabel: true },
-    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" } },
-    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
-    yAxis: { type: "value", splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+    tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 12 } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
+    yAxis: { type: "value", splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
     series: [
       { name: "沪港通南向", type: "bar", data: connectSeries.map((item) => item.southboundSseNet), itemStyle: { color: "#d95e61" } },
       { name: "深港通南向", type: "bar", data: connectSeries.map((item) => item.southboundSzseNet), itemStyle: { color: "#f08b67" } },
@@ -267,11 +267,11 @@ export function Dashboard({ snapshot }: DashboardProps) {
     const isBalance = marginDisplayMetric === "balance";
     return {
       animationDuration: 450,
-      legend: isBalance ? { top: 2, right: 10, textStyle: { color: "#8e9aad", fontSize: 10 }, itemWidth: 14, itemHeight: 8 } : { show: false },
+      legend: isBalance ? { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 11 }, itemWidth: 14, itemHeight: 8 } : { show: false },
       grid: { left: 14, right: 18, top: 42, bottom: 28, containLabel: true },
-      tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5" }, valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${definition.unit}` },
-      xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
-      yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#76859a", fontFamily: "monospace" } },
+      tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 12 }, valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${definition.unit}` },
+      xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
+      yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 } },
       series: isBalance ? [
         { name: "沪深合计", type: "line", smooth: true, symbolSize: 7, data, lineStyle: { width: 3, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" } },
         { name: "上交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.sseBalance ?? null), lineStyle: { width: 1.5, color: "#e36464" }, itemStyle: { color: "#e36464" } },
