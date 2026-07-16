@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 20
     env:
       INPUT_DATES: ${{ inputs.dates }}
-      PUBLISH_URL: https://flow-desk.xiaoaoker.chatgpt.site/api/v1/admin/import
+      PUBLISH_URL: https://flow.xiaoker.workers.dev/api/v1/admin/import
     steps:
       - uses: actions/checkout@v4
 
@@ -65,15 +65,13 @@ jobs:
       - name: Publish snapshot to D1 and R2
         env:
           INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
-          SITES_BYPASS_TOKEN: ${{ secrets.FLOW_SITES_BYPASS_TOKEN }}
         run: |
-          if [[ -z "$INGEST_API_KEY" || -z "$SITES_BYPASS_TOKEN" ]]; then
-            echo "FLOW_INGEST_API_KEY and FLOW_SITES_BYPASS_TOKEN must both be configured." >&2
+          if [[ -z "$INGEST_API_KEY" ]]; then
+            echo "FLOW_INGEST_API_KEY must be configured." >&2
             exit 1
           fi
           curl --fail-with-body --retry 3 --retry-all-errors \
             --header "Authorization: Bearer $INGEST_API_KEY" \
-            --header "OAI-Sites-Authorization: Bearer $SITES_BYPASS_TOKEN" \
             --header "Content-Type: application/json" \
             --data-binary @dashboard-snapshot.json \
             "$PUBLISH_URL"

@@ -4,7 +4,7 @@ Phase 1 动态版已经上线。系统从交易所官方来源采集 ETF、互�
 
 2026-07-16 已完成首轮云端端到端验证：快照日期为 `2026-07-14`，质量门禁为 `conditional_pass`，46 项通过、2 项警告、0 项失败。
 
-私有托管版：[flow-desk.xiaoaoker.chatgpt.site](https://flow-desk.xiaoaoker.chatgpt.site)
+Cloudflare 自有资源版：[flow.xiaoker.workers.dev](https://flow.xiaoker.workers.dev)
 
 ## 本地运行
 
@@ -28,7 +28,7 @@ npm install
 npm run dev
 ```
 
-本地访问 `http://localhost:3000/`。没有 D1 绑定时页面回退到仓库内的已验证快照；在 Sites 生产环境中会读取 D1 的最新成功快照。
+本地访问 `http://localhost:3000/`。没有 D1 数据时页面回退到仓库内的已验证快照；Cloudflare 生产环境会读取所有者账号中 D1 `flow` 的最新成功快照。
 
 只读接口包括 `/api/v1/overview`、`/api/v1/data-status`、`/api/v1/etf/flows`、`/api/v1/connect/flows` 和 `/api/v1/margin/flows`。`POST /api/v1/admin/import` 仅接受 Bearer 写入密钥认证、通过结构校验的快照，并同时写入 D1 和 R2。
 
@@ -39,7 +39,16 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 - 北京时间每周二至周六 00:10 运行，采集刚结束交易日及此前两个交易日；
 - 也可在 Actions 页面手动执行，并可选传入三个 ISO 日期；
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
-- 发布需要私有仓库 Actions Secrets：`FLOW_INGEST_API_KEY` 和 `FLOW_SITES_BYPASS_TOKEN`。
+- 发布需要私有仓库 Actions Secret：`FLOW_INGEST_API_KEY`。
+
+## Cloudflare 资源归属
+
+- Worker：`flow`
+- D1：`flow`（APAC）
+- R2：`flow`（Standard，`dashboard/` 对象保留 365 天）
+- 部署配置：`web/wrangler.jsonc`
+
+上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
 
 本地生成同结构快照：
 

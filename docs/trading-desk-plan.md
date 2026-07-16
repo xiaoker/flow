@@ -525,7 +525,7 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 | A 数据 | 适配器、标准化、质量规则、R2 快照 | 字段字典与 fixture |
 | B 平台 | D1 migration、发布状态机、Worker API | schema 与 API 契约 |
 | C 前端 | 页面骨架、图表、空/旧/错状态 | 固定 API fixture，可先于真实 API 开发 |
-| D 基础设施 | Actions、Pages、Worker、Access、Secrets | 资源命名和权限清单 |
+| D 基础设施 | Actions、Worker、D1、R2、Access、Secrets | 资源命名和权限清单 |
 
 合并顺序为：字段字典与 schema → API 契约与 fixture → 数据适配器/数据库/前端并行 → 发布状态机 → 云端集成 → 安全与生产冒烟。任何会改变字段含义或单位的修改必须先更新 schema 和 fixture，再进入其他工作流。
 
@@ -533,7 +533,6 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 
 按个人日频使用量，预计可长期处于免费层：
 
-- Cloudflare Pages 免费层每月 500 次构建；
 - Workers 免费层每日 100,000 次请求；
 - D1 免费层每日 500 万行读取、10 万行写入，总存储 5 GB；
 - R2 免费层每月 10 GB-month、100 万次 A 类和 1,000 万次 B 类操作，公网出口免费；
@@ -577,7 +576,7 @@ Phase 0 已于 2026-07-16 完成本地实数验证：46 项通过、0 项失败�
 
 Phase 1 本地骨架于 2026-07-16 完成：已实现一页式资金总览、ETF 份额增减切换、互联互通口径说明、两融三日变化、数据状态页面、5 个只读 API、7 张 D1 核心表及首个迁移。当前页面使用 Phase 0 真实快照，尚未对接云端活跃发布版本。创建 GitHub 仓库、D1、R2 和托管项目前，先与用户确认命名。
 
-2026-07-16 已按回退命名 `flow-desk` 完成首个私有生产版发布：[flow-desk.xiaoaoker.chatgpt.site](https://flow-desk.xiaoaoker.chatgpt.site)。该版本仅允许所有者访问，D1 和 R2 已绑定到托管项目。GitHub 独立仓库尚未创建，原因是本机尚未安装并登录 GitHub CLI；托管系统的私有源仓库已包含发布版源码。
+2026-07-16 曾以 `flow-desk` 发布临时 Sites 版本，用于验证动态页面和写入链路。随后按“资源完全归所有者管理”的要求迁移到所有者 Cloudflare 账号：Worker、D1 和 R2 均命名为 `flow`，D1 位于 APAC，R2 使用 Standard 存储并为 `dashboard/` 配置 365 天生命周期。生产入口切换为 [flow.xiaoker.workers.dev](https://flow.xiaoker.workers.dev)，GitHub 仓库为 `xiaoker/flow`。
 
 ## 20. 参考资料
 

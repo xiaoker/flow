@@ -1,6 +1,6 @@
 # 流向台 Web
 
-个人资金流向交易台的 Phase 1 前端和只读 API 骨架。当前页面使用 Phase 0 已验证的真实快照，等 D1/R2 资源配置后再切换为每日活跃发布版本。
+个人资金流向交易台的 Cloudflare Workers 全栈应用。Worker、D1 和 R2 均部署在项目所有者自己的 Cloudflare 账号中。
 
 ## Prerequisites
 
@@ -14,81 +14,34 @@ npm run dev
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+本地开发使用 Wrangler 的本地 D1/R2 存储，不会默认写入远程资源。
 
-## Included Shape
+## Cloudflare 资源
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+- Worker：`flow`
+- D1：`flow`，代码绑定名 `DB`
+- R2：`flow`，代码绑定名 `RAW_BUCKET`
+- 配置文件：`wrangler.jsonc`
+- D1 迁移目录：`drizzle/`
 
-## Workspace Auth Headers
+## 部署
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+npm run db:migrate:remote
+npx wrangler secret put INGEST_API_KEY
+npm run deploy
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+生产访问控制由所有者账号中的 Cloudflare Access 管理。写入接口仍要求独立的 `INGEST_API_KEY`，即使通过 Access 也不能绕过数据写入认证。
 
 ## Useful Commands
 
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
+- `npm test`: build and verify dashboard/API rendering
+- `npm run deploy`: deploy to the owner-managed Cloudflare Worker
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm run db:migrate:remote`: apply pending migrations to the owner-managed D1
 
 ## Learn More
 
