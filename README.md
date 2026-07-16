@@ -2,7 +2,7 @@
 
 Phase 1 动态版已经上线。系统从交易所官方来源采集 ETF、互联互通和融资融券数据，生成统一快照，经受保护的写入接口保存到 Cloudflare D1/R2，并由总览页和只读 API 展示最新成功快照。
 
-2026-07-16 已完成首轮云端端到端验证：快照日期为 `2026-07-14`，质量门禁为 `conditional_pass`，46 项通过、2 项警告、0 项失败。
+2026-07-16 已完成所有者 Cloudflare 资源的云端端到端验证：快照日期为 `2026-07-15`，质量门禁为 `conditional_pass`，46 项通过、2 项警告、0 项失败。流水线、写入接口和读取端均会拒绝质量失败的快照覆盖上一个有效版本。
 
 Cloudflare 自有资源版：[flow.xiaoker.workers.dev](https://flow.xiaoker.workers.dev)
 
@@ -49,6 +49,8 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 - 部署配置：`web/wrangler.jsonc`
 
 上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
+
+当前 `workers.dev` 读取入口仍可匿名访问，管理写入接口已由独立 Bearer 密钥保护。下一个托管收尾步骤是绑定 `flow.xiaoker.com`、启用 Cloudflare Access 白名单，并关闭公开的 `workers.dev` 入口。
 
 本地生成同结构快照：
 

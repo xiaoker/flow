@@ -1,8 +1,10 @@
 # 个人资金流向交易台测试与验收计划
 
-日期：2026-07-15  
-适用范围：Phase 0 数据可行性验证与 Phase 1 MVP  
-状态：已确认架构的配套测试计划
+日期：2026-07-16
+
+适用范围：Phase 0 数据可行性验证与 Phase 1 MVP
+
+状态：数据与发布链路已验证，Access 私有入口验收待完成
 
 ## 1. 测试目标
 
@@ -20,7 +22,7 @@
 
 - 本地：Python 流水线、临时 SQLite/D1、Worker 本地环境和前端 fixture；
 - CI：Pull Request 中运行 lint、类型检查、单元测试、契约测试和构建；
-- 预览：受 Cloudflare Access 保护的 Pages/Worker Preview；
+- 预览：待收尾的 Cloudflare Access 受保护 Worker Preview；
 - 生产：仅执行只读冒烟测试和一次最小数据发布验证。
 
 每个数据源至少保留以下 fixture：正常交易日、空响应、超时、字段新增、字段删除、字段改名、单位变化、重复记录、非交易日和一份真实异常样本。Fixture 必须记录抓取时间、源 URL、响应哈希和适配器版本。
@@ -104,8 +106,7 @@
 | SEC-001 | 未登录访问自定义域名 | 被 Cloudflare Access 拦截 |
 | SEC-002 | 非白名单邮箱登录 | 拒绝访问 |
 | SEC-003 | 直接访问 `workers.dev` | 域名关闭或不可达 |
-| SEC-004 | 直接访问生产 `pages.dev` | 重定向或由 Access 保护 |
-| SEC-005 | 访问 Pages/Worker Preview | 必须通过 Access，不允许匿名预览 |
+| SEC-004 | 访问 Worker Preview | 必须通过 Access，不允许匿名预览 |
 | SEC-006 | 伪造身份请求头但无 Access JWT | Worker 返回 `401` |
 | SEC-007 | R2 对象公共 URL | 不可匿名读取 |
 | SEC-008 | 前端构建产物扫描 | 不包含 D1、R2 或部署密钥 |
@@ -154,9 +155,8 @@ Pull Request 必须通过：
 - Python lint、类型检查、单元测试和适配器契约测试；
 - D1 migration 在临时数据库的升级与查询测试；
 - Worker 类型检查、API 契约测试；
-- Vue 类型检查、组件测试和生产构建；
+- React/vinext 生产构建、页面与 API 回归测试；
 - fixture 中不得出现账号、Token 或 Cookie；
 - 依赖漏洞检查不得存在已知高危项。
 
 生产发布后自动执行只读检查：Access 拦截、`/api/v1/data-status`、总览响应 schema、最新数据日期和关键页面元素。任何安全检查失败立即视为发布失败。
-
