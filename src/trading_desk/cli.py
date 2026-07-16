@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .phase0 import collect_phase0
+from .release_qa import failed_findings, run_release_qa
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -20,6 +21,13 @@ def _parser() -> argparse.ArgumentParser:
         "--szse-etf-inferred-date",
         help="Expected date for SZSE's undated current ETF snapshot",
     )
+    qa = subparsers.add_parser(
+        "qa-release", help="Reconcile source evidence, normalized data and dashboard snapshot"
+    )
+    qa.add_argument("--manifest", type=Path, default=Path("reports/phase0/latest-manifest.json"))
+    qa.add_argument("--quality", type=Path, default=Path("reports/phase0/latest-quality-summary.json"))
+    qa.add_argument("--snapshot", type=Path, default=Path("dashboard-snapshot.json"))
+    qa.add_argument("--output", type=Path, default=Path("reports/phase0/latest-release-qa.json"))
     return parser
 
 
@@ -43,6 +51,27 @@ def main() -> None:
             "errors": len(result["quality"]["errors"]),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+    elif args.command == "qa-release":
+        report = run_release_qa(
+            manifest_path=args.manifest,
+            quality_path=args.quality,
+            snapshot_path=args.snapshot,
+            output_path=args.output,
+            workspace_root=Path.cwd(),
+        )
+        summary = {
+            "run_id": report.get("run_id"),
+            "verdict": report["verdict"],
+            "counts": report["counts"],
+            "report": str(args.output),
+            "failed_checks": [
+                {"check_id": item["check_id"], "dataset": item["dataset"], "message": item["message"]}
+                for item in failed_findings(report)
+            ],
+        }
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        if report["counts"]["fail"]:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

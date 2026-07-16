@@ -395,14 +395,14 @@ class OfficialMarketAdapters:
         top = pd.DataFrame(top_rows)
         summary_path = write_normalized_csv(
             root=self.data_root,
-            dataset="stock_connect_summary",
+            dataset="hkex_stock_connect_summary",
             partition=trade_date,
             run_id=self.run_id,
             frame=summary,
         )
         top_path = write_normalized_csv(
             root=self.data_root,
-            dataset="stock_connect_top",
+            dataset="hkex_stock_connect_top",
             partition=trade_date,
             run_id=self.run_id,
             frame=top,
@@ -416,7 +416,11 @@ class OfficialMarketAdapters:
     ) -> tuple[pd.DataFrame, FetchArtifact]:
         output_path = write_normalized_csv(
             root=self.data_root,
-            dataset=artifact.source.dataset,
+            # Include the publisher in the storage key. SSE and SZSE both expose
+            # datasets named ``etf_scale``; without this namespace, same-run
+            # snapshots for the same date overwrite one another and destroy the
+            # raw -> normalized audit trail.
+            dataset=f"{artifact.source.source_id}_{artifact.source.dataset}",
             partition=partition,
             run_id=self.run_id,
             frame=frame,
@@ -424,4 +428,3 @@ class OfficialMarketAdapters:
         artifact.row_count = len(frame)
         artifact.normalized_path = str(output_path)
         return frame, artifact
-

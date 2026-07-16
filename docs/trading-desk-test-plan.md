@@ -14,6 +14,8 @@
 - GitHub Actions `Cloudflare Access smoke #2` 从海外 Runner 使用 Service Auth 身份读取 `/api/v1/data-status` 并通过响应契约校验；
 - 直接访问 `flow.xiaoker.workers.dev` 返回 `404`，Worker Preview URL 已关闭；
 - `Daily market data #3` 已完成官方数据采集、质量门禁、D1/R2 发布和证据保留；
+- 发布级 Data QA 已在重新采集批次 `20260716T170009+0800` 上完成 93 项检查，0 项失败；
+- 已验证 QA 能阻断跨交易所规范化路径覆盖，并将存储路径改为按 `sse` / `szse` / `hkex` 隔离；
 - 短时间内重复手动执行时，上交所接口可能对 GitHub 海外 Runner 返回 `403`。此时任务在采集阶段失败，不执行发布，生产继续读取上一个有效快照。日常定时任务保持每个工作日一次，不连续手动重跑。
 
 ## 1. 测试目标
@@ -131,6 +133,21 @@
 | OPS-003 | 连续三次源站失败 | 数据状态明确告警，旧版本继续服务 |
 | OPS-004 | 手动补录 CSV | 经过同一 schema 和质量规则，不直接改生产表 |
 | OPS-005 | Token 轮换 | 新 Token 生效、旧 Token 失效，前端不受影响 |
+
+### 3.8 发布级 Data QA
+
+| 编号 | 场景 | 预期结果 |
+|---|---|---|
+| QA-001 | 原始响应在采集后被改动 | SHA-256 复验失败，阻断发布 |
+| QA-002 | 两个交易所写入同一规范化路径 | 路径唯一性和单源行数同时失败 |
+| QA-003 | 代码、名称、日期或数值映射错位 | 从原始 JSON/XLSX/JS 逐行重算后不一致，阻断发布 |
+| QA-004 | 来源和市场交叉污染 | `source_id`、`market`、方向和币种检查失败 |
+| QA-005 | 合并明细漏行 | 单源行数之和与 combined 明细不相等，阻断发布 |
+| QA-006 | 页面快照被手工修改或使用旧明细 | 快照不可重建，阻断发布 |
+| QA-007 | 首页 ETF、南向、两融或北向汇总错误 | 从明细独立反算不一致，阻断发布 |
+| QA-008 | 上交所 ETF 日覆盖量断崖下降 | 三日最小/最大覆盖比低于 80%，阻断发布 |
+
+本地运行 `.venv/bin/trading-desk qa-release`；GitHub Actions 每次 Pull Request 运行字段契约测试，每日采集在写入 D1/R2 前运行完整发布级 QA。JSON 证据保存在 `reports/phase0/latest-release-qa.json` 和每次 Actions Artifact 中。
 
 ## 4. Phase 0 放行门槛
 

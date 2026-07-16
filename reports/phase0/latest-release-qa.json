@@ -1,0 +1,1326 @@
+{
+  "counts": {
+    "pass": 93,
+    "warn": 0,
+    "fail": 0
+  },
+  "release_eligible": true,
+  "findings": [
+    {
+      "check_id": "lineage.artifacts_present",
+      "dataset": "manifest",
+      "status": "pass",
+      "severity": "info",
+      "message": "采集证据清单非空",
+      "evidence": {
+        "artifact_count": 11
+      },
+      "remediation": "阻断发布并重新执行官方数据采集。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "sse",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/sse/etf_scale/2026-07-13/20260716T170009+0800.json",
+        "metadata_path": "data/raw/sse/etf_scale/2026-07-13/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "1a5c2c471252d6071630fc359a6e1f3a59bd81019541964c28ceed5bc592dcd1"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 0
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 878,
+        "observed_rows": 878,
+        "paths": [
+          "data/normalized/sse_etf_scale/2026-07-13/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "sse",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/sse/etf_scale/2026-07-14/20260716T170009+0800.json",
+        "metadata_path": "data/raw/sse/etf_scale/2026-07-14/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "daa1e645ca4220ff4287329e1482932752b4659cb064e86f87ee7e9771836003"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 1
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 878,
+        "observed_rows": 878,
+        "paths": [
+          "data/normalized/sse_etf_scale/2026-07-14/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "sse",
+        "url": "https://query.sse.com.cn/commonQuery.do",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/sse/etf_scale/2026-07-15/20260716T170009+0800.json",
+        "metadata_path": "data/raw/sse/etf_scale/2026-07-15/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "d716ce2ff33c0c7b37f57c63ed7342c6747f48c021d52cc462b32bf3c0b9eba5"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 2
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 877,
+        "observed_rows": 877,
+        "paths": [
+          "data/normalized/sse_etf_scale/2026-07-15/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "szse",
+        "url": "https://fund.szse.cn/api/report/ShowReport",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/szse/etf_scale/current/20260716T170009+0800.xlsx",
+        "metadata_path": "data/raw/szse/etf_scale/current/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "5f94ae317ced24ee82b9c98f8be5adfeb69f8b0a5e286f5a40b3671a3e1ade6c"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 3
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 1008,
+        "observed_rows": 1008,
+        "paths": [
+          "data/normalized/szse_etf_scale/2026-07-15/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "sse",
+        "url": "https://query.sse.com.cn/marketdata/tradedata/queryMargin.do",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/sse/margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.json",
+        "metadata_path": "data/raw/sse/margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "fff46c06852bbb4ff2c77e6fe6cc11ee6f3799013d06d7fff2c462a1b4653a42"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 4
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 3,
+        "observed_rows": 3,
+        "paths": [
+          "data/normalized/sse_margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "szse",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T170009+0800.json",
+        "metadata_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "b2c30900532ac0c5f35b3c394ce8bcccc274ec2271eb84bf655c78f4591b7d04"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 5
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 1,
+        "observed_rows": 1,
+        "paths": [
+          "data/normalized/szse_margin_market_daily/2026-07-13/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "szse",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T170009+0800.json",
+        "metadata_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "f029d1610da53a4d532f97229cbb6cd3cc73b621addece23235cc1dc3b3cdcc3"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 6
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 1,
+        "observed_rows": 1,
+        "paths": [
+          "data/normalized/szse_margin_market_daily/2026-07-14/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "szse",
+        "url": "https://www.szse.cn/api/report/ShowReport/data",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/szse/margin_market_daily/2026-07-15/20260716T170009+0800.json",
+        "metadata_path": "data/raw/szse/margin_market_daily/2026-07-15/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "29d68d99213350e952c7ed3c9ab06639553a60b26cacb9d79823bfccb8f2c843"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 7
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 1,
+        "observed_rows": 1,
+        "paths": [
+          "data/normalized/szse_margin_market_daily/2026-07-15/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "hkex",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T170009+0800.js",
+        "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "1a26e3df878bdaf263dc784e5877f7b96e1c171518aa025432b9e7cef1c80128"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 8
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 44,
+        "observed_rows": 44,
+        "paths": [
+          "data/normalized/hkex_stock_connect_summary/2026-07-13/20260716T170009+0800.csv",
+          "data/normalized/hkex_stock_connect_top/2026-07-13/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "hkex",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T170009+0800.js",
+        "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "da8c0843177875ee181a4cf4f40b22b7dafd7c83a338b674bd56b3b2346cc061"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 9
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 44,
+        "observed_rows": 44,
+        "paths": [
+          "data/normalized/hkex_stock_connect_summary/2026-07-14/20260716T170009+0800.csv",
+          "data/normalized/hkex_stock_connect_top/2026-07-14/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "provenance.approved_official_source",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源域名和来源等级可信",
+      "evidence": {
+        "source_id": "hkex",
+        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "source_grade": "A"
+      },
+      "remediation": "只允许 HTTPS 的上交所、深交所和港交所官方域名。"
+    },
+    {
+      "check_id": "lineage.raw_and_metadata_exist",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应和元数据均存在",
+      "evidence": {
+        "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-15/20260716T170009+0800.js",
+        "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-15/20260716T170009+0800.metadata.json"
+      },
+      "remediation": "保留上一有效快照，重新采集缺失来源。"
+    },
+    {
+      "check_id": "lineage.sha256_matches",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始响应哈希可复验",
+      "evidence": {
+        "expected_sha256": "26e58000fd0233fca1fd863620f9361f2f8158d88174469506c59caeb7316338"
+      },
+      "remediation": "将证据视为被修改或损坏，阻断发布并重新采集。"
+    },
+    {
+      "check_id": "lineage.metadata_matches_manifest",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "元数据与清单一致",
+      "evidence": {
+        "artifact_index": 10
+      },
+      "remediation": "检查请求日期、来源标识和清单写入流程。"
+    },
+    {
+      "check_id": "lineage.normalized_row_count",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "规范化行数与解析结果一致",
+      "evidence": {
+        "expected_rows": 44,
+        "observed_rows": 44,
+        "paths": [
+          "data/normalized/hkex_stock_connect_summary/2026-07-15/20260716T170009+0800.csv",
+          "data/normalized/hkex_stock_connect_top/2026-07-15/20260716T170009+0800.csv"
+        ]
+      },
+      "remediation": "为每个交易所使用独立存储命名空间，并重新采集本批数据。"
+    },
+    {
+      "check_id": "lineage.normalized_paths_unique",
+      "dataset": "manifest",
+      "status": "pass",
+      "severity": "info",
+      "message": "各来源规范化路径互不覆盖",
+      "evidence": {
+        "collisions": {}
+      },
+      "remediation": "将 source_id 纳入规范化文件目录，并重新采集。"
+    },
+    {
+      "check_id": "provenance.required_publishers",
+      "dataset": "manifest",
+      "status": "pass",
+      "severity": "info",
+      "message": "三家交易所来源齐全",
+      "evidence": {
+        "observed": [
+          "hkex",
+          "sse",
+          "szse"
+        ],
+        "missing": []
+      },
+      "remediation": "ETF、两融和互联互通任一官方来源缺失时不发布。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "sse.etf_scale:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 878,
+        "actual_rows": 878,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "sse.etf_scale:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 878,
+        "actual_rows": 878,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "sse.etf_scale:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 877,
+        "actual_rows": 877,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "szse.etf_scale:current",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 1008,
+        "actual_rows": 1008,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "sse.margin_market_daily:2026-07-13_2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 3,
+        "actual_rows": 3,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "szse.margin_market_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 1,
+        "actual_rows": 1,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "szse.margin_market_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 1,
+        "actual_rows": 1,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "szse.margin_market_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "expected_rows": 1,
+        "actual_rows": 1,
+        "missing_columns": [],
+        "missing_keys": 0,
+        "extra_keys": 0,
+        "value_mismatches": 0,
+        "sample_mismatches": []
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "hkex.stock_connect_daily:2026-07-13",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "summary": {
+          "matched": true,
+          "expected_rows": 4,
+          "actual_rows": 4,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        },
+        "top10": {
+          "matched": true,
+          "expected_rows": 40,
+          "actual_rows": 40,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        }
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "hkex.stock_connect_daily:2026-07-14",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "summary": {
+          "matched": true,
+          "expected_rows": 4,
+          "actual_rows": 4,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        },
+        "top10": {
+          "matched": true,
+          "expected_rows": 40,
+          "actual_rows": 40,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        }
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "mapping.raw_to_normalized_values",
+      "dataset": "hkex.stock_connect_daily:2026-07-15",
+      "status": "pass",
+      "severity": "info",
+      "message": "原始字段与规范化键值逐行一致",
+      "evidence": {
+        "matched": true,
+        "summary": {
+          "matched": true,
+          "expected_rows": 4,
+          "actual_rows": 4,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        },
+        "top10": {
+          "matched": true,
+          "expected_rows": 40,
+          "actual_rows": 40,
+          "missing_columns": [],
+          "missing_keys": 0,
+          "extra_keys": 0,
+          "value_mismatches": 0,
+          "sample_mismatches": []
+        }
+      },
+      "remediation": "阻断发布，核对字段名、单位倍率、日期和业务键；禁止按行号拼接。"
+    },
+    {
+      "check_id": "lineage.combined_files_exist",
+      "dataset": "manifest",
+      "status": "pass",
+      "severity": "info",
+      "message": "全部合并明细存在",
+      "evidence": {
+        "missing": []
+      },
+      "remediation": "不发布缺失任一数据域的快照。"
+    },
+    {
+      "check_id": "lineage.combined_row_count",
+      "dataset": "sse.etf_scale",
+      "status": "pass",
+      "severity": "info",
+      "message": "合并明细未丢行",
+      "evidence": {
+        "expected_rows": 2633,
+        "observed_rows": 2633,
+        "combined_datasets": [
+          "sse_etf"
+        ]
+      },
+      "remediation": "阻断发布，检查合并键、空表处理和跨来源覆盖。"
+    },
+    {
+      "check_id": "lineage.combined_row_count",
+      "dataset": "szse.etf_scale",
+      "status": "pass",
+      "severity": "info",
+      "message": "合并明细未丢行",
+      "evidence": {
+        "expected_rows": 1008,
+        "observed_rows": 1008,
+        "combined_datasets": [
+          "szse_etf"
+        ]
+      },
+      "remediation": "阻断发布，检查合并键、空表处理和跨来源覆盖。"
+    },
+    {
+      "check_id": "lineage.combined_row_count",
+      "dataset": "sse.margin_market_daily",
+      "status": "pass",
+      "severity": "info",
+      "message": "合并明细未丢行",
+      "evidence": {
+        "expected_rows": 3,
+        "observed_rows": 3,
+        "combined_datasets": [
+          "sse_margin"
+        ]
+      },
+      "remediation": "阻断发布，检查合并键、空表处理和跨来源覆盖。"
+    },
+    {
+      "check_id": "lineage.combined_row_count",
+      "dataset": "szse.margin_market_daily",
+      "status": "pass",
+      "severity": "info",
+      "message": "合并明细未丢行",
+      "evidence": {
+        "expected_rows": 3,
+        "observed_rows": 3,
+        "combined_datasets": [
+          "szse_margin"
+        ]
+      },
+      "remediation": "阻断发布，检查合并键、空表处理和跨来源覆盖。"
+    },
+    {
+      "check_id": "lineage.combined_row_count",
+      "dataset": "hkex.stock_connect_daily",
+      "status": "pass",
+      "severity": "info",
+      "message": "合并明细未丢行",
+      "evidence": {
+        "expected_rows": 132,
+        "observed_rows": 132,
+        "combined_datasets": [
+          "stock_connect_summary",
+          "stock_connect_top"
+        ]
+      },
+      "remediation": "阻断发布，检查合并键、空表处理和跨来源覆盖。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "sse",
+        "expected_markets": [
+          "SSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "szse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "szse",
+        "expected_markets": [
+          "SZSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "sse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "sse",
+        "expected_markets": [
+          "SSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "szse_margin",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "szse",
+        "expected_markets": [
+          "SZSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "hkex",
+        "expected_markets": [
+          "SSE",
+          "SZSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "mapping.required_values",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "匹配键和核心数值完整",
+      "evidence": {
+        "missing_columns": [],
+        "rows_with_nulls": 0
+      },
+      "remediation": "不要用行号拼接；以日期、市场、代码等业务键重新映射。"
+    },
+    {
+      "check_id": "mapping.source_market_consistency",
+      "dataset": "stock_connect_top",
+      "status": "pass",
+      "severity": "info",
+      "message": "来源与市场映射一致",
+      "evidence": {
+        "invalid_rows": 0,
+        "expected_source": "hkex",
+        "expected_markets": [
+          "SSE",
+          "SZSE"
+        ]
+      },
+      "remediation": "阻断发布并检查适配器常量和跨市场合并。"
+    },
+    {
+      "check_id": "volume.sse_etf_daily_stability",
+      "dataset": "sse_etf",
+      "status": "pass",
+      "severity": "info",
+      "message": "ETF 日覆盖量稳定",
+      "evidence": {
+        "daily_unique_codes": {
+          "2026-07-13": 878,
+          "2026-07-14": 878,
+          "2026-07-15": 877
+        },
+        "min_max_ratio": 0.9989
+      },
+      "remediation": "检查分页、交易日和源站空响应；不要发布断崖式缺行快照。"
+    },
+    {
+      "check_id": "mapping.connect_channels",
+      "dataset": "stock_connect_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "每日四通道和币种映射完整",
+      "evidence": {
+        "invalid_dates": {},
+        "expected_dates": [
+          "2026-07-13",
+          "2026-07-14",
+          "2026-07-15"
+        ]
+      },
+      "remediation": "按 market + direction 业务键核对四通道，不以页面顺序匹配。"
+    },
+    {
+      "check_id": "publication.snapshot_reproducible",
+      "dataset": "dashboard_snapshot",
+      "status": "pass",
+      "severity": "info",
+      "message": "发布快照可由已验证明细逐字节重建",
+      "evidence": {
+        "as_of": "2026-07-15",
+        "expected_as_of": "2026-07-15"
+      },
+      "remediation": "重新生成快照，禁止手工修改发布 JSON。"
+    },
+    {
+      "check_id": "publication.snapshot_finite",
+      "dataset": "dashboard_snapshot",
+      "status": "pass",
+      "severity": "info",
+      "message": "页面快照不含 NaN 或无穷值",
+      "evidence": {},
+      "remediation": "在计算层处理缺失值，不允许 NaN/Infinity 进入 JSON。"
+    },
+    {
+      "check_id": "reconciliation.dashboard_headlines",
+      "dataset": "dashboard_snapshot",
+      "status": "pass",
+      "severity": "info",
+      "message": "四个首页指标可由明细独立反算",
+      "evidence": {
+        "expected": {
+          "etf": 25.79,
+          "southbound": 133.64,
+          "margin": 2.8576,
+          "northbound": 3615.19
+        },
+        "actual": {
+          "etf": 25.79,
+          "southbound": 133.64,
+          "margin": 2.8576,
+          "northbound": 3615.19
+        },
+        "tolerances": {
+          "etf": 0.01,
+          "southbound": 0.01,
+          "margin": 0.0001,
+          "northbound": 0.01
+        }
+      },
+      "remediation": "阻断发布，核对日期、单位和汇总公式。"
+    },
+    {
+      "check_id": "publication.base_quality_gate",
+      "dataset": "quality_summary",
+      "status": "pass",
+      "severity": "info",
+      "message": "基础质量门禁允许发布",
+      "evidence": {
+        "counts": {
+          "pass": 46,
+          "warn": 2,
+          "fail": 0
+        },
+        "gate": "conditional_pass"
+      },
+      "remediation": "先修复基础质量失败项，再运行发布 QA。"
+    }
+  ],
+  "run_id": "20260716T170009+0800",
+  "generated_at": "2026-07-16T17:04:09+08:00",
+  "verdict": "pass",
+  "known_limitations": [
+    "深交所 ETF 文件不含统计日期，日期来自采集时点推断，只能从上线日起向前留存。",
+    "ETF 资金流向当前使用份额变化口径，不等同于精确申赎金额。",
+    "北向自披露调整后不提供买入额、卖出额或净流入，页面只展示官方成交总额。"
+  ]
+}

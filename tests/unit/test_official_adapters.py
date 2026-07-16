@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -27,6 +28,14 @@ class FakeResponse:
         if self._payload is None:
             return json.loads(self.text)
         return self._payload
+
+
+class BinaryResponse:
+    def __init__(self, content: bytes, content_type: str):
+        self.content = content
+        self.text = ""
+        self.status_code = 200
+        self.headers = {"Content-Type": content_type}
 
 
 @pytest.fixture
@@ -60,6 +69,69 @@ def test_szse_margin_converts_hundred_million_units(
     assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(1_417_264_000_000)
     assert frame.loc[0, "securities_lending_volume_shares"] == pytest.approx(880_000_000)
     assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(1_424_700_000_000)
+
+
+def test_sse_etf_matches_code_name_date_and_ten_thousand_share_unit(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "result": [
+            {
+                "STAT_DATE": "2026-07-15",
+                "SEC_CODE": "510300",
+                "SEC_NAME": "300ETF",
+                "ETF_TYPE": "股票ETF",
+                "TOT_VOL": "987,654.32",
+            }
+        ]
+    }
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_sse_etf("2026-07-15")
+
+    assert frame.loc[0, "trade_date"] == "2026-07-15"
+    assert frame.loc[0, "market"] == "SSE"
+    assert frame.loc[0, "instrument_code"] == "510300"
+    assert frame.loc[0, "instrument_name"] == "300ETF"
+    assert frame.loc[0, "shares"] == pytest.approx(9_876_543_200)
+    assert "sse_etf_scale" in str(artifact.normalized_path)
+
+
+def test_szse_etf_matches_named_excel_columns_without_row_order_join(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "基金代码": "159001",
+                "基金简称": "货币ETF易方达",
+                "基金类别": "ETF",
+                "投资类别": "货币市场基金",
+                "当前规模(份)": "19,042,471",
+                "净值": 100.0,
+            }
+        ]
+    )
+    content = io.BytesIO()
+    with pd.ExcelWriter(content, engine="openpyxl") as writer:
+        source.to_excel(writer, index=False)
+    monkeypatch.setattr(
+        official,
+        "get",
+        lambda *args, **kwargs: BinaryResponse(
+            content.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+
+    frame, artifact = adapters.fetch_szse_etf_current("2026-07-15")
+
+    assert frame.loc[0, "market"] == "SZSE"
+    assert frame.loc[0, "instrument_code"] == "159001"
+    assert frame.loc[0, "instrument_name"] == "货币ETF易方达"
+    assert frame.loc[0, "shares"] == 19_042_471
+    assert frame.loc[0, "date_basis"] == "collector_inferred_current_snapshot"
+    assert "szse_etf_scale" in str(artifact.normalized_path)
 
 
 def test_sse_margin_uses_named_source_fields(
