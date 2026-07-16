@@ -1,0 +1,47 @@
+name: Cloudflare Access smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-access-smoke
+  cancel-in-progress: true
+
+jobs:
+  verify-private-endpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STATUS_URL: https://flow.xiaoker.com/api/v1/data-status
+      CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Verify service identity secrets are configured
+        shell: bash
+        run: |
+          if [[ -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Both FLOW_CF_ACCESS_* secrets must be configured." >&2
+            exit 1
+          fi
+
+      - name: Request the private data status endpoint
+        shell: bash
+        run: |
+          curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+            --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            --output access-response.json \
+            "$STATUS_URL"
+
+      - name: Validate the response contract
+        shell: bash
+        run: |
+          jq -e '
+            (.asOf | type == "string") and
+            (.gate | type == "string") and
+            (.domains | type == "object")
+          ' access-response.json >/dev/null
+          echo "Cloudflare Access service identity and private read endpoint are healthy."
