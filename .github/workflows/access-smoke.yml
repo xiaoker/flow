@@ -42,6 +42,7 @@ jobs:
           jq -e '
             (.asOf | type == "string") and
             (.gate | type == "string") and
-            (.domains | type == "object")
+            (.quality | type == "object") and
+            (.domains | type == "array")
           ' access-response.json >/dev/null
           echo "Cloudflare Access service identity and private read endpoint are healthy."
