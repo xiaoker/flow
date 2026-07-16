@@ -32,7 +32,7 @@ npx wrangler secret put INGEST_API_KEY
 npm run deploy
 ```
 
-生产访问控制由所有者账号中的 Cloudflare Access 管理。写入接口仍要求独立的 `INGEST_API_KEY`，即使通过 Access 也不能绕过数据写入认证。
+当前 `workers.dev` 读取入口可匿名访问；写入接口已要求独立的 `INGEST_API_KEY`。私有化收尾后，生产页面和只读 API 将由所有者账号中的 Cloudflare Access 管理；写入接口仍保留独立密钥，不允许仅凭 Access 身份写入数据。
 
 ## Useful Commands
 

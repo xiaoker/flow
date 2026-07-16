@@ -1,7 +1,9 @@
 # 个人资金流向交易台规划
 
-日期：2026-07-15  
-状态：Phase 1 首个私有托管版已发布，GitHub 独立仓库待完成 CLI 授权  
+日期：2026-07-16
+
+状态：Phase 1 所有者托管版已发布，私有访问和代码自动部署待收尾
+
 定位：个人使用、联网访问、日频更新、开源与免费优先
 
 ## 1. 产品结论
@@ -141,7 +143,7 @@ ETF 估算净申购金额 = (当日基金份额 - 前一交易日基金份额) �
 
 | 层级 | 选择 | 原因 |
 |---|---|---|
-| Web 前端 | Vue 3 + TypeScript + Vite | 开源、静态构建、生态成熟、适合 Cloudflare Pages |
+| Web 前端 | React 19 + TypeScript + vinext | 开源，可与 Worker API 同源部署 |
 | 图表 | Apache ECharts | 免费开源，适合热力图、时间序列、Treemap 和排名图 |
 | API | Cloudflare Worker + TypeScript | 无服务器运维，直接访问 D1/R2，个人流量可使用免费额度 |
 | 结构化数据 | Cloudflare D1 | 保存标准化日频指标，支持日期和分类查询 |
@@ -149,8 +151,8 @@ ETF 估算净申购金额 = (当日基金份额 - 前一交易日基金份额) �
 | 数据采集 | Python 3.12 + AKShare + httpx | 国内公开财经数据接口覆盖较全，开发效率高 |
 | 计算与校验 | pandas + PyArrow + Pydantic + pytest | 适合日频小数据集，规则明确且容易测试 |
 | 调度 | GitHub Actions | 支持 Python、定时运行和手动补跑，代码与流水线统一管理 |
-| 部署 | Cloudflare Pages + Wrangler | GitHub 推送自动部署，预览环境完整 |
-| 访问保护 | Cloudflare Access | 仅允许指定邮箱访问页面和 API |
+| 部署 | Cloudflare Workers + Static Assets + Wrangler | 一个所有者管理的 Worker 同时承载页面和 API |
+| 访问保护 | Cloudflare Access（待启用） | 收尾后仅允许指定邮箱访问页面和只读 API |
 
 第一版不采用 Kubernetes、ClickHouse、Kafka、Redis、微服务或实时流处理。这些组件不能改善当前日频个人场景，只会增加维护成本。
 
@@ -174,8 +176,8 @@ ETF 估算净申购金额 = (当日基金份额 - 前一交易日基金份额) �
                               Cloudflare Worker API
                                        │
                                        ▼
-                              Vue + ECharts 交易台
-                              Cloudflare Pages
+                            React + vinext 交易台
+                      Cloudflare Worker Static Assets
                                        │
                                        ▼
                               Cloudflare Access
@@ -371,22 +373,20 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 
 ### 9.5 发布
 
-- `main` 分支连接 Cloudflare Pages 生产环境；
-- Pull Request 自动生成预览地址；
-- Worker 与 D1 migration 由 GitHub Actions 使用 Wrangler 部署；
+- 生产使用 Cloudflare Worker `flow`，静态资源和 API 同源部署；
+- 当前代码由所有者授权的 Wrangler 手动部署；
+- 待所有者完成 Cloudflare 与 GitHub 仓库的连接授权后，`main` 分支改为自动部署；
 - 数据更新不触发前端重新构建；
 - 数据和部署使用最小权限 Cloudflare API Token。
 
 ### 9.6 私有访问与入口收敛
 
-系统采用“默认拒绝、仅本人邮箱可访问”的安全边界：
+目标安全边界是“默认拒绝、仅本人邮箱可访问”。当前 `workers.dev` 入口仍可匿名读取，因此本节是尚未全部达成的上线收尾门槛：
 
 - 自定义域名整体接入 Cloudflare Access，只允许指定邮箱登录；
 - Worker 以同源 `/api/*` 路由提供接口，并验证 `Cf-Access-Jwt-Assertion`，不得仅信任可伪造的身份请求头；
 - 设置 `workers_dev = false`，关闭 Worker 的公共 `workers.dev` 入口；
 - Worker Preview URL 禁用，或纳入相同的 Access 策略；
-- Pages 的生产 `pages.dev` 域名重定向到自定义域名或单独保护；
-- Pages Preview Deployments 全部启用 Access，避免 Pull Request 预览公开；
 - R2 Bucket 不公开，只允许采集任务和 Worker 通过最小权限凭证访问；
 - GitHub Actions 分离“部署”和“数据写入”令牌，令牌只保存在 GitHub Secrets，不进入前端构建产物。
 
@@ -570,13 +570,11 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 
 ## 19. 下一步任务
 
-Phase 0 已于 2026-07-16 完成本地实数验证：46 项通过、0 项失败、2 项警告。上交所 ETF、沪深两融和港交所互联互通均完成三日覆盖；深交所 ETF 官方 XLSX 只有无统计日期的当前快照，无法官方历史回填。此外，GitHub Actions 到 R2/D1 的写入链路尚未配置云端资源和凭据，本轮不宣称已验证。
+Phase 0 和 Phase 1 首轮云端闭环已于 2026-07-16 完成。GitHub 私有仓库为 `xiaoker/flow`；所有者 Cloudflare 账号中的 Worker、D1 和 R2 均命名为 `flow`，D1 位于 APAC，R2 使用 Standard 存储并为 `dashboard/` 配置 365 天生命周期。GitHub Actions 已能定时采集、质量校验、发布到 D1/R2 并保留证据。
 
-下一步是在确认命名后创建 GitHub 仓库、D1、R2 和托管项目，打通数据发布状态机与 GitHub Actions，同时连续留存深交所 ETF 每日快照。Phase 0 完整结果见 [可交付报告](../reports/phase0/phase0-report.html)。
+2026-07-16 的生产验证使用 `2026-07-15` 快照：46 项通过、2 项警告、0 项失败。同日曾遇到深交所两融接口超时，暴露出“质量失败快照仍可覆盖最新数据”的发布缺口。现已在 GitHub Actions、Worker 导入接口和 D1 读取查询三层修复，并完成线上回归。
 
-Phase 1 本地骨架于 2026-07-16 完成：已实现一页式资金总览、ETF 份额增减切换、互联互通口径说明、两融三日变化、数据状态页面、5 个只读 API、7 张 D1 核心表及首个迁移。当前页面使用 Phase 0 真实快照，尚未对接云端活跃发布版本。创建 GitHub 仓库、D1、R2 和托管项目前，先与用户确认命名。
-
-2026-07-16 曾以 `flow-desk` 发布临时 Sites 版本，用于验证动态页面和写入链路。随后按“资源完全归所有者管理”的要求迁移到所有者 Cloudflare 账号：Worker、D1 和 R2 均命名为 `flow`，D1 位于 APAC，R2 使用 Standard 存储并为 `dashboard/` 配置 365 天生命周期。生产入口切换为 [flow.xiaoker.workers.dev](https://flow.xiaoker.workers.dev)，GitHub 仓库为 `xiaoker/flow`。
+剩余托管任务为：绑定 `flow.xiaoker.com`，对页面和只读 API 启用 Cloudflare Access 邮箱白名单，为 GitHub Actions 配置 Access 服务身份或受限路径策略，关闭公开 `workers.dev` 入口，再退役临时 Sites 版本。代码自动部署也待所有者完成 Cloudflare 与 GitHub 的连接授权。
 
 ## 20. 参考资料
 
