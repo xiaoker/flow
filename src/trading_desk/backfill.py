@@ -94,7 +94,11 @@ def _publish(
         "Content-Type": "application/json",
     }
     last_error: Exception | None = None
-    for attempt in range(4):
+    # Cloudflare can briefly return 503 while committing a multi-object R2 bundle.
+    # The import is idempotent, so a longer bounded retry window is safer than
+    # aborting a multi-hour backfill on a transient platform response.
+    max_attempts = 8
+    for attempt in range(max_attempts):
         try:
             response = requests.post(url, data=body, headers=headers, timeout=(10, 90))
             response.raise_for_status()
@@ -104,9 +108,9 @@ def _publish(
             return result
         except Exception as exc:
             last_error = exc
-            if attempt == 3:
+            if attempt == max_attempts - 1:
                 break
-            time.sleep(2**attempt)
+            time.sleep(min(30, 2**attempt))
     raise RuntimeError(f"history import failed after retries: {last_error}")
 
 
