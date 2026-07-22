@@ -151,7 +151,10 @@ def _snapshot_for_date(
     connect_closed: bool,
     work_root: Path,
 ) -> dict[str, Any]:
-    combined = work_root / "snapshot-input"
+    # The GitHub runner invokes the collector with a repository-relative data root.
+    # Persist absolute paths in the temporary manifest so dashboard generation and
+    # bundle serialization do not accidentally resolve them from filesystem root.
+    combined = (work_root / "snapshot-input").resolve()
     combined.mkdir(parents=True, exist_ok=True)
     paths: dict[str, str] = {}
     frames = {
@@ -203,6 +206,7 @@ def run_history_backfill(
 ) -> dict[str, Any]:
     if end_date < start_date:
         raise ValueError("end date must not be before start date")
+    data_root = data_root.resolve()
     run_id = f"history-{new_run_id()}"
     started_at = now_iso()
     adapters = OfficialMarketAdapters(
