@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pandas as pd
-import requests
 
 from trading_desk import backfill
 from trading_desk.backfill import EMPTY_CONNECT_COLUMNS, _publish, _snapshot_for_date
@@ -54,9 +53,11 @@ def test_snapshot_for_date_resolves_relative_work_root(
 
 def test_publish_recovers_from_extended_transient_503_window(monkeypatch) -> None:
     failed = Mock()
-    failed.raise_for_status.side_effect = requests.HTTPError("503")
+    failed.ok = False
+    failed.status_code = 503
+    failed.text = '{"error":"storage_unavailable"}'
     succeeded = Mock()
-    succeeded.raise_for_status.return_value = None
+    succeeded.ok = True
     succeeded.json.return_value = {"ok": True}
     post = Mock(side_effect=[failed] * 5 + [succeeded])
     sleep = Mock()

@@ -101,7 +101,12 @@ def _publish(
     for attempt in range(max_attempts):
         try:
             response = requests.post(url, data=body, headers=headers, timeout=(10, 90))
-            response.raise_for_status()
+            if not response.ok:
+                detail = response.text[:500].replace("\n", " ")
+                raise requests.HTTPError(
+                    f"{response.status_code} response from history import: {detail}",
+                    response=response,
+                )
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("history import did not return a JSON object")
