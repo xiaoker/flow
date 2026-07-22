@@ -8,6 +8,10 @@ type RuntimeEnv = {
 };
 
 export async function runtimeEnv(): Promise<RuntimeEnv> {
+  const injected = (
+    globalThis as typeof globalThis & { __FLOW_RUNTIME_ENV__?: RuntimeEnv }
+  ).__FLOW_RUNTIME_ENV__;
+  if (injected) return injected;
   try {
     const workers = await import("cloudflare:workers");
     return workers.env as unknown as RuntimeEnv;

@@ -179,7 +179,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
   ],
   dataStatus: [
     { name: "上交所 ETF", status: "ready", asOf: "07-14", detail: "官方日期 · 878 只·3 日", basis: "official" },
-    { name: "深交所 ETF", status: "warning", asOf: "07-15", detail: "官方当前快照 · 日期推断", basis: "inferred_date" },
+    { name: "深交所 ETF", status: "ready", asOf: "07-15", detail: "官方列表页规模日期", basis: "official" },
     { name: "融资融券", status: "ready", asOf: "07-14", detail: "官方沪深汇总", basis: "official" },
     { name: "互联互通", status: "ready", asOf: "07-14", detail: "南向复算 · 北向官方成交", basis: "mixed" },
   ],

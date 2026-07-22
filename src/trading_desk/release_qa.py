@@ -173,11 +173,11 @@ def _expected_sse_etf(content: bytes, requested_date: str) -> pd.DataFrame:
     )
 
 
-def _expected_szse_etf(content: bytes, inferred_date: str) -> pd.DataFrame:
+def _expected_szse_etf(content: bytes, trade_date: str) -> pd.DataFrame:
     frame = pd.read_excel(io.BytesIO(content), engine="openpyxl", dtype={"基金代码": str})
     return pd.DataFrame(
         {
-            "trade_date": inferred_date,
+            "trade_date": trade_date,
             "market": "SZSE",
             "instrument_code": frame["基金代码"].astype(str).str.zfill(6),
             "instrument_name": frame["基金简称"],
@@ -223,7 +223,7 @@ def _expected_szse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
 
 
 def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    text = content.decode("utf-8").strip()
+    text = content.decode("utf-8").lstrip("\ufeff").strip()
     match = re.fullmatch(r"tabData\s*=\s*(\[.*\])\s*;?", text, flags=re.DOTALL)
     if not match:
         raise ValueError("HKEX raw wrapper does not match tabData JSON")
@@ -269,8 +269,12 @@ def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, p
                             "market": market,
                             "direction": direction,
                             "rank": None if _number(raw.get("Rank")) is None else int(_number(raw.get("Rank"))),
-                            "instrument_code": str(raw.get("Stock Code", "")),
-                            "instrument_name": raw.get("Stock Name"),
+                                "instrument_code": (
+                                    str(raw.get("Stock Code", "")).zfill(6)
+                                    if direction == "northbound"
+                                    else str(raw.get("Stock Code", "")).zfill(5)
+                                ),
+                                "instrument_name": str(raw.get("Stock Name") or "").strip(),
                             "buy_turnover": _number(raw.get("Buy Turnover")),
                             "sell_turnover": _number(raw.get("Sell Turnover")),
                             "total_turnover": _number(raw.get("Total Turnover")),
@@ -285,12 +289,11 @@ def validate_raw_to_normalized_mapping(
     """Independently reconcile source fields against every normalized row."""
 
     findings: list[QualityFinding] = []
-    inferred_date = str(manifest.get("szse_etf_inferred_date", ""))
     for artifact in manifest.get("artifacts") or []:
         source = artifact.get("source") or {}
         source_id = str(source.get("source_id", ""))
         dataset = str(source.get("dataset", ""))
-        requested_date = str(artifact.get("requested_date") or inferred_date)
+        requested_date = str(artifact.get("requested_date") or "")
         label = f"{source_id}.{dataset}:{artifact.get('requested_date') or 'current'}"
         raw_path = workspace_root / str(artifact.get("raw_path", ""))
         normalized_paths = [workspace_root / path for path in _paths(artifact.get("normalized_path"))]
@@ -307,7 +310,7 @@ def validate_raw_to_normalized_mapping(
                 )
             elif (source_id, dataset) == ("szse", "etf_scale"):
                 result = _compare_frames(
-                    _expected_szse_etf(content, inferred_date),
+                    _expected_szse_etf(content, requested_date),
                     _read_csv(normalized_paths[0]),
                     keys=["trade_date", "market", "instrument_code"],
                     text_columns=["instrument_name"],
@@ -821,7 +824,7 @@ def run_release_qa(
             "generated_at": now_iso(),
             "verdict": "pass" if summary["counts"]["fail"] == 0 else "blocked",
             "known_limitations": [
-                "深交所 ETF 文件不含统计日期，日期来自采集时点推断，只能从上线日起向前留存。",
+                "深交所 ETF 份额日期取列表页规模日期，并校验为页面发布日期的前一已知交易日。",
                 "ETF 页面当前展示份额变化，不等同于精确申赎金额。",
                 "北向自披露调整后不提供买入额、卖出额或净流入，页面只展示官方成交总额。",
             ],

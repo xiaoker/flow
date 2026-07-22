@@ -1,6 +1,6 @@
 # FLOW 个人市场数据交易台
 
-Phase 1 动态版已经上线。系统从交易所官方来源采集 ETF、互联互通和融资融券数据，区分“官方事实”“公式计算”和“日期推断”后生成统一快照，经受保护的写入接口保存到 Cloudflare D1/R2，并由总览页和只读 API 展示最新成功快照。
+Phase 1 动态版已经上线。系统从交易所官方来源采集 ETF、互联互通和融资融券数据，区分“官方事实”与“公式计算”后生成统一快照，经受保护的写入接口把交易所原始文件存入 R2、规范化 ETF 日表存入 D1，并由总览页和只读 API 展示最新成功快照。
 
 2026-07-16 已完成所有者 Cloudflare 资源的云端端到端验证：快照日期为 `2026-07-15`，基础质量门禁为 `conditional_pass`，46 项通过、2 项已知口径警告、0 项失败；发布级 Data QA 93 项全部通过。流水线、写入接口和读取端均会拒绝质量失败的快照覆盖上一个有效版本。
 
@@ -12,11 +12,11 @@ Cloudflare 自有资源版：[flow.xiaoker.com](https://flow.xiaoker.com)（Clou
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/trading-desk collect-phase0 \
-  --dates 2026-07-10 2026-07-13 2026-07-14 \
-  --szse-etf-inferred-date 2026-07-15
+  --dates 2026-07-10 2026-07-13 2026-07-14
 .venv/bin/python -m pytest
 .venv/bin/python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
 .venv/bin/trading-desk qa-release
+.venv/bin/python scripts/build_ingest_bundle.py --output ingest-bundle.json
 .venv/bin/python scripts/build_phase0_notebook.py
 ```
 
@@ -34,23 +34,25 @@ npm run dev
 
 本地访问 `http://localhost:3000/`。没有 D1 数据时页面回退到仓库内的已验证快照；Cloudflare 生产环境会读取所有者账号中 D1 `flow` 的最新成功快照。
 
-只读接口包括 `/api/v1/overview`、`/api/v1/data-status`、`/api/v1/etf/flows`、`/api/v1/connect/flows` 和 `/api/v1/margin/flows`。`POST /api/v1/admin/import` 仅接受 Bearer 写入密钥认证、通过结构校验的快照，并同时写入 D1 和 R2。
+只读接口包括 `/api/v1/overview`、`/api/v1/data-status`、`/api/v1/etf/flows`、`/api/v1/connect/flows` 和 `/api/v1/margin/flows`。`POST /api/v1/admin/import` 仅接受 Bearer 写入密钥认证、通过结构校验及 SHA-256 复验的发布包；先归档 R2 原始证据和 D1 ETF 日表，再切换页面快照。
 
 ## 每日自动采集
 
 GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
-- 北京时间每周二至周六 00:10 运行，采集刚结束交易日及此前两个交易日；
+- 北京时间每周二至周六 09:15 运行，采集前一交易日已完成次日早间更新的官方数据；
 - 也可在 Actions 页面手动执行，并可选传入三个 ISO 日期；
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
 - 每次发布前自动运行单元/字段契约测试和发布级 Data QA；
+- 深交所 ETF 用列表页发布日和“当前规模”列标注日校验前一交易日；港交所使用简体中文历史每日页的中文数据文件；
 - 发布需要私有仓库 Actions Secrets：`FLOW_INGEST_API_KEY`、`FLOW_CF_ACCESS_CLIENT_ID` 和 `FLOW_CF_ACCESS_CLIENT_SECRET`。后两项只用于通过 Cloudflare Access 的 Service Auth 策略。
 
 ## Cloudflare 资源归属
 
 - Worker：`flow`
 - D1：`flow`（APAC）
-- R2：`flow`（Standard，`dashboard/` 对象保留 365 天）
+- R2：`flow`（Standard，`dashboard/` 与 `market-data/` 对象保留 365 天）
+- D1：ETF 规范化日表滚动保留 365 天，体积较大的页面派生快照保留 30 天；历史快照仍可从 R2 重放
 - 部署配置：`web/wrangler.jsonc`
 
 上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
@@ -74,4 +76,4 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
 ## 当前限制
 
-深交所 ETF 官方下载只提供无统计日期的当前快照，不能直接进行官方历史回填。系统从定时采集启用日起每天留存，并明确标记推断日期，因此该数据域当前保持黄色警告，不会伪装成完整官方历史。
+深交所 ETF 不提供可任意按历史日下载的份额序列；系统依据列表页规模日期从自动采集启用日起逐日积累，不伪造上线前的历史。ETF “份额变化”仍不等于精确资金净流入，页面会持续明示该口径。

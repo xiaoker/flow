@@ -67,7 +67,6 @@ def collect_phase0(
     data_root: Path,
     report_root: Path,
     workspace_root: Path,
-    szse_etf_inferred_date: str | None = None,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -103,9 +102,8 @@ def collect_phase0(
             frames["sse_etf"].append(frame)
             artifacts.append(artifact)
 
-    inferred_date = szse_etf_inferred_date or dates[-1]
     result = run_step(
-        "szse_etf:current", lambda: adapters.fetch_szse_etf_current(inferred_date)
+        "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
     )
     if result:
         frame, artifact = result
@@ -223,7 +221,16 @@ def collect_phase0(
         "started_at": started_at,
         "finished_at": now_iso(),
         "requested_dates": dates,
-        "szse_etf_inferred_date": inferred_date,
+        "szse_etf_page_date": (
+            None
+            if combined.get("szse_etf", pd.DataFrame()).empty
+            else str(combined["szse_etf"]["source_page_date"].max())
+        ),
+        "szse_etf_trade_date": (
+            None
+            if combined.get("szse_etf", pd.DataFrame()).empty
+            else str(combined["szse_etf"]["trade_date"].max())
+        ),
         "artifacts": [],
         "combined_paths": combined_paths,
         "quality_summary_path": f"reports/phase0/{run_id}/quality-summary.json",

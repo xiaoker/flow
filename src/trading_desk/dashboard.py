@@ -498,7 +498,7 @@ def build_dashboard_snapshot(
         "connectSeries": _build_connect_series(connect, dates),
         "dataStatus": [
             {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"官方日期 · {etf_summary['latest_count']} 只·3 日", "basis": "official"},
-            {"name": "深交所 ETF", "status": "warning", "asOf": szse_date[5:], "detail": "官方当前快照 · 日期推断", "basis": "inferred_date"},
+            {"name": "深交所 ETF", "status": "ready", "asOf": szse_date[5:], "detail": "官方列表页规模日期", "basis": "official"},
             {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深汇总", "basis": "official"},
             {"name": "互联互通", "status": "ready", "asOf": as_of[5:], "detail": "南向复算 · 北向官方成交", "basis": "mixed"},
         ],

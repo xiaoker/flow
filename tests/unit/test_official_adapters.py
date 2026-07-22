@@ -115,23 +115,58 @@ def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     content = io.BytesIO()
     with pd.ExcelWriter(content, engine="openpyxl") as writer:
         source.to_excel(writer, index=False)
-    monkeypatch.setattr(
-        official,
-        "get",
-        lambda *args, **kwargs: BinaryResponse(
-            content.getvalue(),
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ),
+    responses = iter(
+        [
+            FakeResponse(
+                [
+                    {
+                        "metadata": {
+                            "subname": "2026-07-16",
+                            "cols": {"dqgm": "当前规模（份）（2026-07-15）"},
+                        }
+                    }
+                ]
+            ),
+            BinaryResponse(
+                content.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        ]
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: next(responses))
+
+    frame, artifact = adapters.fetch_szse_etf_current(
+        ["2026-07-13", "2026-07-14", "2026-07-15"]
     )
 
-    frame, artifact = adapters.fetch_szse_etf_current("2026-07-15")
-
+    assert frame.loc[0, "trade_date"] == "2026-07-15"
     assert frame.loc[0, "market"] == "SZSE"
     assert frame.loc[0, "instrument_code"] == "159001"
     assert frame.loc[0, "instrument_name"] == "货币ETF易方达"
     assert frame.loc[0, "shares"] == 19_042_471
-    assert frame.loc[0, "date_basis"] == "collector_inferred_current_snapshot"
+    assert frame.loc[0, "date_basis"] == "source_page_previous_trading_day"
+    assert frame.loc[0, "source_page_date"] == "2026-07-16"
+    assert artifact.requested_date == "2026-07-15"
     assert "szse_etf_scale" in str(artifact.normalized_path)
+
+
+def test_szse_etf_rejects_page_date_mismatch(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = [
+        {
+            "metadata": {
+                "subname": "2026-07-16",
+                "cols": {"dqgm": "当前规模（份）（2026-07-14）"},
+            }
+        }
+    ]
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    with pytest.raises(ValueError, match="previous known trading day"):
+        adapters.fetch_szse_etf_current(
+            ["2026-07-13", "2026-07-14", "2026-07-15"]
+        )
 
 
 def test_sse_margin_uses_named_source_fields(
@@ -180,7 +215,16 @@ def test_hkex_summary_converts_millions_and_keeps_northbound_net_empty(
                             {"td": [["3,790.99"]]},
                         ],
                     },
-                }
+                },
+                {
+                    "style": 2,
+                    "table": {
+                        "schema": [["Rank", "Stock Code", "Stock Name", "Total Turnover"]],
+                        "tr": [
+                            {"td": [["1", "688256", "寒武紀\u3000\u3000", "1,234"]]}
+                        ],
+                    },
+                },
             ],
         },
         {
@@ -207,12 +251,15 @@ def test_hkex_summary_converts_millions_and_keeps_northbound_net_empty(
             ],
         },
     ]
-    wrapper = "tabData = " + json.dumps(payload) + ";"
-    monkeypatch.setattr(
-        official,
-        "get",
-        lambda *args, **kwargs: FakeResponse(wrapper, "application/javascript"),
-    )
+    wrapper = "\ufefftabData = " + json.dumps(payload) + ";"
+    request: dict[str, object] = {}
+
+    def fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        request["url"] = args[1]
+        request["headers"] = kwargs.get("headers")
+        return FakeResponse(wrapper, "application/javascript")
+
+    monkeypatch.setattr(official, "get", fake_get)
 
     summary, top, _ = adapters.fetch_hkex_connect("2026-07-15")
 
@@ -222,4 +269,9 @@ def test_hkex_summary_converts_millions_and_keeps_northbound_net_empty(
     assert pd.isna(north["net_buy"])
     assert pd.isna(north["daily_quota_balance"])
     assert south["net_buy"] == pytest.approx(4_497_430_000)
-    assert top.empty
+    assert len(top) == 1
+    assert top.loc[0, "instrument_code"] == "688256"
+    assert top.loc[0, "instrument_name"] == "寒武紀"
+    assert "/chi/csm/DailyStat/" in str(request["url"])
+    assert str(request["url"]).endswith("20260715c.js")
+    assert "sc_lang=zh-CN" in str(request["headers"])

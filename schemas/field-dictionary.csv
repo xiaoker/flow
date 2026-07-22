@@ -7,7 +7,7 @@ etf_scale,etf_type,string,enum,true,not_applicable,A,源站 ETF 或基金类别
 etf_scale,investment_type,string,enum,true,not_applicable,A,深交所投资类别
 etf_scale,shares,number,share,false,trade_date,A,基金份额；上交所源字段万份已乘 10000
 etf_scale,nav,number,currency_per_share,true,trade_date,A,深交所当前列表净值
-etf_scale,date_basis,string,enum,false,not_applicable,A,source_published 或 collector_inferred_current_snapshot
+etf_scale,date_basis,string,enum,false,not_applicable,A,source_published 或 source_page_previous_trading_day
 margin_market_daily,trade_date,date,day,false,source_published,A,交易所两融汇总交易日
 margin_market_daily,financing_balance_yuan,number,CNY,false,trade_date,A,融资余额；深交所亿元已乘 1e8
 margin_market_daily,financing_buy_yuan,number,CNY,false,trade_date,A,融资买入额；深交所亿元已乘 1e8
@@ -31,4 +31,3 @@ stock_connect_top,instrument_name,string,text,true,trade_date,A,港交所英文�
 stock_connect_top,buy_turnover,number,base_currency,true,trade_date,A,南向前十买入成交额；北向不披露
 stock_connect_top,sell_turnover,number,base_currency,true,trade_date,A,南向前十卖出成交额；北向不披露
 stock_connect_top,total_turnover,number,base_currency,false,trade_date,A,前十证券总成交额
-

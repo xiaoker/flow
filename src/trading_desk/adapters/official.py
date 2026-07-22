@@ -25,7 +25,7 @@ SZSE_ETF = SourceSpec(
     publisher="深圳证券交易所",
     dataset="etf_scale",
     url="https://fund.szse.cn/api/report/ShowReport",
-    date_semantics="collector_inferred_current_snapshot",
+    date_semantics="source_page_previous_trading_day",
 )
 SSE_MARGIN = SourceSpec(
     source_id="sse",
@@ -43,7 +43,14 @@ HKEX_CONNECT = SourceSpec(
     source_id="hkex",
     publisher="香港交易所",
     dataset="stock_connect_daily",
-    url="https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+    url="https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]c.js",
+)
+
+SZSE_ETF_PAGE_URL = "https://fund.szse.cn/marketdata/fundslist/index.html"
+SZSE_ETF_METADATA_URL = "https://fund.szse.cn/api/report/ShowReport/data"
+HKEX_CONNECT_PAGE_URL = (
+    "https://www.hkex.com.hk/Mutual-Market/Stock-Connect/Statistics/"
+    "Historical-Daily?sc_lang=zh-CN"
 )
 
 
@@ -59,6 +66,48 @@ def _number(value: Any, *, multiplier: float = 1.0) -> float | None:
 def _integer(value: Any) -> int | None:
     number = _number(value)
     return None if number is None else int(number)
+
+
+def _iso_date(value: Any, *, field: str) -> str:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"{field} did not contain a valid date: {value!r}")
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _szse_etf_dates(
+    payload: object, known_trading_dates: list[str]
+) -> tuple[str, str, str]:
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        raise ValueError("SZSE ETF metadata response did not contain the expected report")
+    metadata = payload[0].get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("SZSE ETF report did not contain metadata")
+
+    page_date = _iso_date(metadata.get("subname"), field="metadata.subname")
+    scale_header = str((metadata.get("cols") or {}).get("dqgm", ""))
+    displayed_match = re.search(r"(20\d{2}-\d{2}-\d{2})", scale_header)
+    displayed_data_date = (
+        _iso_date(displayed_match.group(1), field="metadata.cols.dqgm")
+        if displayed_match
+        else None
+    )
+    parsed_dates = [
+        _iso_date(value, field="known_trading_dates") for value in known_trading_dates
+    ]
+    prior_dates = sorted(value for value in parsed_dates if value < page_date)
+    expected_data_date = prior_dates[-1] if prior_dates else None
+    if displayed_data_date and expected_data_date and displayed_data_date != expected_data_date:
+        raise ValueError(
+            "SZSE ETF displayed scale date did not equal the previous known trading day: "
+            f"page={page_date}, displayed={displayed_data_date}, expected={expected_data_date}"
+        )
+    data_date = displayed_data_date or expected_data_date
+    if not data_date:
+        raise ValueError(
+            "SZSE ETF data date could not be established from the page or known trading dates"
+        )
+    return page_date, data_date, scale_header
 
 
 class OfficialMarketAdapters:
@@ -128,8 +177,24 @@ class OfficialMarketAdapters:
         return self._persist(normalized, artifact, trade_date)
 
     def fetch_szse_etf_current(
-        self, inferred_trade_date: str
+        self, known_trading_dates: list[str]
     ) -> tuple[pd.DataFrame, FetchArtifact]:
+        metadata_params = {
+            "SHOWTYPE": "JSON",
+            "CATALOGID": "1000_lf",
+            "TABKEY": "tab1",
+            "tab1PAGENO": "1",
+            "tab1PAGESIZE": "1",
+        }
+        metadata_response = get(
+            self.session,
+            SZSE_ETF_METADATA_URL,
+            params=metadata_params,
+            headers=self._headers(SZSE_ETF_PAGE_URL),
+        )
+        page_date, trade_date, scale_header = _szse_etf_dates(
+            metadata_response.json(), known_trading_dates
+        )
         params = {
             "SHOWTYPE": "xlsx",
             "CATALOGID": "1000_lf",
@@ -139,12 +204,12 @@ class OfficialMarketAdapters:
             self.session,
             SZSE_ETF.url,
             params=params,
-            headers=self._headers("https://fund.szse.cn/marketdata/fundslist/index.html"),
+            headers=self._headers(SZSE_ETF_PAGE_URL),
         )
         artifact = write_raw_response(
             root=self.data_root,
             source=SZSE_ETF,
-            requested_date=None,
+            requested_date=trade_date,
             run_id=self.run_id,
             content=response.content,
             extension="xlsx",
@@ -152,14 +217,21 @@ class OfficialMarketAdapters:
             content_type=response.headers.get(
                 "Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ),
-            request_params=params,
+            request_params={
+                **params,
+                "page_metadata_url": SZSE_ETF_METADATA_URL,
+                "page_date": page_date,
+                "displayed_scale_date": trade_date,
+                "displayed_scale_header": scale_header,
+                "date_rule": "page_date_previous_known_trading_day",
+            },
         )
         frame = pd.read_excel(
             io.BytesIO(response.content), engine="openpyxl", dtype={"基金代码": str}
         )
         normalized = pd.DataFrame(
             {
-                "trade_date": inferred_trade_date,
+                "trade_date": trade_date,
                 "market": "SZSE",
                 "instrument_code": frame["基金代码"].astype(str).str.zfill(6),
                 "instrument_name": frame["基金简称"],
@@ -170,16 +242,15 @@ class OfficialMarketAdapters:
                     errors="coerce",
                 ),
                 "nav": pd.to_numeric(frame.get("净值"), errors="coerce"),
-                "date_basis": "collector_inferred_current_snapshot",
+                "date_basis": "source_page_previous_trading_day",
+                "source_page_date": page_date,
+                "source_scale_date": trade_date,
                 "source_id": SZSE_ETF.source_id,
                 "source_grade": SZSE_ETF.source_grade,
                 "observed_at": artifact.observed_at,
             }
         )
-        artifact.warnings.append(
-            "深交所 ETF 官方下载只提供当前快照且未包含统计日期；trade_date 来自采集任务预期日期，不能用于历史回填。"
-        )
-        return self._persist(normalized, artifact, inferred_trade_date)
+        return self._persist(normalized, artifact, trade_date)
 
     def fetch_sse_margin(
         self, start_date: str, end_date: str
@@ -298,15 +369,13 @@ class OfficialMarketAdapters:
     ) -> tuple[pd.DataFrame, pd.DataFrame, FetchArtifact]:
         compact_date = trade_date.replace("-", "")
         url = (
-            "https://www.hkex.com.hk/eng/csm/DailyStat/"
-            f"data_tab_daily_{compact_date}e.js"
+            "https://www.hkex.com.hk/chi/csm/DailyStat/"
+            f"data_tab_daily_{compact_date}c.js"
         )
         response = get(
             self.session,
             url,
-            headers=self._headers(
-                "https://www.hkex.com.hk/Mutual-Market/Stock-Connect/Statistics/Historical-Daily?sc_lang=en"
-            ),
+            headers=self._headers(HKEX_CONNECT_PAGE_URL),
         )
         artifact = write_raw_response(
             root=self.data_root,
@@ -317,9 +386,13 @@ class OfficialMarketAdapters:
             extension="js",
             status_code=response.status_code,
             content_type=response.headers.get("Content-Type", "application/javascript"),
-            request_params={"date": trade_date},
+            request_params={
+                "date": trade_date,
+                "language": "zh-CN",
+                "page_url": HKEX_CONNECT_PAGE_URL,
+            },
         )
-        text = response.text.strip()
+        text = response.text.lstrip("\ufeff").strip()
         match = re.fullmatch(r"tabData\s*=\s*(\[.*\])\s*;?", text, flags=re.DOTALL)
         if not match:
             raise ValueError("HKEX response did not match the expected tabData JSON wrapper")
@@ -381,8 +454,12 @@ class OfficialMarketAdapters:
                                 "direction": direction,
                                 "currency": currency,
                                 "rank": _integer(raw.get("Rank")),
-                                "instrument_code": str(raw.get("Stock Code", "")),
-                                "instrument_name": raw.get("Stock Name"),
+                                "instrument_code": (
+                                    str(raw.get("Stock Code", "")).zfill(6)
+                                    if direction == "northbound"
+                                    else str(raw.get("Stock Code", "")).zfill(5)
+                                ),
+                                "instrument_name": str(raw.get("Stock Name") or "").strip(),
                                 "buy_turnover": _number(raw.get("Buy Turnover")),
                                 "sell_turnover": _number(raw.get("Sell Turnover")),
                                 "total_turnover": _number(raw.get("Total Turnover")),

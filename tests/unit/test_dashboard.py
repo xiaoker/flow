@@ -81,9 +81,9 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["marginSeries"][-1]["change"] == 0.0
     assert snapshot["marginSeries"][-1]["sseBalance"] == 0.0
     assert len(snapshot["connectSeries"]) == 3
-    assert snapshot["dataStatus"][1]["status"] == "warning"
-    assert snapshot["dataStatus"][1]["basis"] == "inferred_date"
-    assert "日期推断" in snapshot["dataStatus"][1]["detail"]
+    assert snapshot["dataStatus"][1]["status"] == "ready"
+    assert snapshot["dataStatus"][1]["basis"] == "official"
+    assert "列表页规模日期" in snapshot["dataStatus"][1]["detail"]
 
 
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:

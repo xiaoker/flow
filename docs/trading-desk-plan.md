@@ -222,8 +222,8 @@ flowchart LR
 
 | 数据域 | 主来源 | 采集方式 | 更新频率 |
 |---|---|---|---|
-| 上交所 ETF 份额 | 上交所基金市场 | 官方接口/AKShare 适配器 | 交易日夜间 |
-| 深交所 ETF 份额 | 深交所基金列表 | 官方接口/AKShare 适配器 | 交易日夜间 |
+| 上交所 ETF 份额 | 上交所基金市场 | 官方接口 | 次交易日 09:15 |
+| 深交所 ETF 份额 | 深交所基金列表 | 官方列表 JSON 日期 + XLSX | 次交易日 09:15 |
 | ETF 行情与净值 | 交易所/基金公开数据 | AKShare 适配器，必要时基金公司回补 | 日频 |
 | 行业分类 | 国证行业分类 | 定期下载并版本化 | 月度检查 |
 | 沪市两融 | 上交所融资融券 | 官方接口/AKShare | 次交易日开市前 |
@@ -236,10 +236,10 @@ flowchart LR
 每次采集都在 R2 保存不可变快照：
 
 ```text
-raw/{source}/{dataset}/year=YYYY/month=MM/date=YYYY-MM-DD/run_id.json.gz
+market-data/raw/{source}/{dataset}/{YYYY-MM-DD}/{sha256}.{extension}
 ```
 
-同时写入哈希、HTTP 状态、抓取时间、源 URL、适配器版本和解析结果。这样接口字段变化时可以重放，不必重新依赖历史网页。
+同时写入哈希、HTTP 状态、抓取时间、源 URL、请求参数和解析结果。R2 key 使用内容 SHA-256，同一原始文件重试不重复占用空间；接口字段变化时可以重放，不必重新依赖历史网页。
 
 ### 6.4 历史数据与回填范围
 
@@ -247,8 +247,8 @@ raw/{source}/{dataset}/year=YYYY/month=MM/date=YYYY-MM-DD/run_id.json.gz
 
 - 首次上线导入最近 25 个交易日，确保 1 日、5 日和 20 日指标立即可用；
 - 上线后按每日不超过约 50,000 行的节奏，把证券级明细补到 60 个交易日；
-- ETF、市场级和行业级汇总在 D1 保留最近 3 年；
-- 更早或更细的证券级原始数据和标准化 Parquet 保存在 R2，需要时离线重算，不进入日常 API 全量扫描；
+- 当前免费版在 D1 保留最近 365 天 ETF 规范化日表；体积较大的页面派生快照仅保留 30 天；
+- R2 中原始证据、元数据和发布 manifest 同样滚动保留 365 天；
 - “尚未回填”和“真实零值”必须使用不同状态表达，API 同时返回 `coverageStart` 与 `coverageEnd`。
 
 正常日更、发布切换和失败重试优先于历史回填；当日预计写入接近免费额度时自动暂停回填。
@@ -277,7 +277,7 @@ raw/{source}/{dataset}/year=YYYY/month=MM/date=YYYY-MM-DD/run_id.json.gz
 | `ingest_run` | 每次采集的状态、时长、版本 | `run_id` |
 | `quality_issue` | 数据缺失、异常和降级记录 | 日期+数据集+规则 |
 
-所有事实表保留 `release_id`、`source_id`、`source_grade`、`observed_at`、`published_at` 和 `ingest_run_id`。API 按 `domain` 只读取对应 `data_release.status = 'ACTIVE'` 指向的完整版本；同一数据域任一时刻只能有一个激活版本。
+所有事实表保留 `release_id`、`source_id`、`observed_at` 和日期口径。ETF 当前以 `market + trade_date` 作为发布域，同一市场同一日期只有一个 `ACTIVE` release，因此日线可累积、同日补跑又不会把新旧版本混在一起。
 
 聚合表由 GitHub Actions 在发布前计算，不由 Worker 在线扫描事实表生成。核心复合索引以实际查询为准，至少覆盖：
 
@@ -333,30 +333,28 @@ API 返回统一信封：
 
 ### 9.1 GitHub Actions
 
-设置三个入口：
+设置两个入口：
 
-- `schedule`：交易日 18:37 获取盘后互联互通及初步行情；
-- `schedule`：交易日 23:37 获取 ETF 份额、净值并重算指标；
-- `schedule`：交易日 08:17 回补上一交易日两融数据；
-- `workflow_dispatch`：按数据集和日期手动补跑。
+- `schedule`：北京时间每周二至周六 09:15 自动获取上一交易日 ETF、互联互通和两融数据；
+- `workflow_dispatch`：可传入三个最近交易日手动补跑。
 
 避开整点运行，降低 GitHub Actions 高峰期延迟概率。流水线按“采集 → 保存原始数据 → 解析 → 校验 → 暂存 D1 新版本 → 完整性检查 → 原子发布 → 刷新缓存”执行。
 
 ### 9.2 数据写入通道
 
-GitHub Actions 直接写入 Cloudflare 数据层，不开放独立的数据导入 API：
+GitHub Actions 通过 Cloudflare Access Service Auth 和独立 Bearer 密钥调用同源管理写入路由：
 
-1. Python 采集任务生成 `release_id`，并把原始响应、标准化快照和校验报告通过 S3 兼容接口上传到私有 R2；
-2. 使用参数化 D1 REST API 把标准化记录写入 `STAGED` 版本，每批控制在 100–250 行，禁止拼接来源数据生成 SQL；
+1. Python 采集任务生成发布包，包含页面快照、原始字节、元数据、SHA-256 和 ETF 规范化行；
+2. Worker 重新校验包结构和 SHA-256，原始字节写入私有 R2，规范化记录以 250 行为一批写入 D1 `STAGED` 版本，全部 SQL 参数化；
 3. 所有分批写入完成后执行当前数据域的完整性检查；
 4. 仅在校验通过时提交最终发布批次，把新版本切为 `ACTIVE`；
 5. 任何步骤失败均保留旧 `ACTIVE` 版本，并允许按同一 `release_id` 或新的补跑版本安全重试。
 
-凭证按用途隔离：R2 使用仅限指定 Bucket 的 Object Read & Write 凭证；D1 使用仅限目标账户的数据写入 Token；部署使用单独 Token。凭证只保存在 GitHub Secrets，Fork Pull Request 不得获得生产 Secrets。前端 Worker 不提供批量导入路由，也不承担数据解析任务。
+凭证按用途隔离：部署、Access Service Auth 和采集写入密钥分开管理。凭证只保存在 GitHub Secrets，Fork Pull Request 不得获得生产 Secrets。管理路由不向匿名用户开放，也不在 Worker 中解析交易所文件。
 
 ### 9.3 数据域级原子发布
 
-ETF、互联互通和两融分别维护独立的激活版本。每次数据域更新生成唯一 `release_id`，新记录先以 `STAGED` 状态写入。当前数据域的必需数据集全部通过质量检查后，使用 D1 `batch()` 在同一事务内把该数据域的新版本切换为 `ACTIVE`，并把该域旧版本切换为 `SUPERSEDED`。该数据域写入或校验失败时不更新其激活指针，其他数据域仍可正常发布。
+ETF 按市场和交易日维护独立的激活版本。每次更新生成唯一 `release_id`，新记录先以 `STAGED` 状态分批写入。完整写入后使用 D1 `batch()` 把同市场同日新版本切换为 `ACTIVE`，并把同日旧版本切换为 `SUPERSEDED`。写入或校验失败时不更新激活指针，页面快照也不发布。
 
 ```text
 COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
@@ -370,13 +368,12 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 
 ### 9.4 幂等写入
 
-同一交易日和数据集重复执行时，结果必须一致。D1 使用业务主键 upsert；R2 原始快照使用不同 `run_id` 保留每次响应。失败任务可安全重跑。
+同一交易日和数据集重复执行时，结果必须一致。D1 使用 `source + trade_date + sha256` 生成 release 主键；R2 原始快照使用 SHA-256 内容寻址。失败任务可安全重跑。
 
 ### 9.5 发布
 
 - 生产使用 Cloudflare Worker `flow`，静态资源和 API 同源部署；
-- 当前代码由所有者授权的 Wrangler 手动部署；
-- 待所有者完成 Cloudflare 与 GitHub 仓库的连接授权后，`main` 分支改为自动部署；
+- `main` 分支推送后由 Cloudflare 与 GitHub 的集成自动构建部署；
 - 数据更新不触发前端重新构建；
 - 数据和部署使用最小权限 Cloudflare API Token。
 

@@ -374,7 +374,7 @@ export function Dashboard({ snapshot }: DashboardProps) {
       <section className="evidence-legend" aria-label="数据证据等级">
         <span><EvidenceBadge kind="official" label="官方事实" detail="交易所直接披露或两市官方值相加" />交易所直接披露或官方汇总</span>
         <span><EvidenceBadge kind="calculated" label="公式计算" detail="只使用官方字段按公开公式复算" />可从官方字段独立复算</span>
-        <span><EvidenceBadge kind="inferred" label="日期推断" detail="数值来自官方文件，但文件未提供统计日期" />仅深交所 ETF 当前快照日期</span>
+        <span><EvidenceBadge kind="official" label="日期核验" detail="深交所规模日期已与列表页发布日及前一交易日交叉校验" />深市 ETF 按官方规模日归档</span>
         <strong>未披露的数据不展示、不补造</strong>
       </section>
 

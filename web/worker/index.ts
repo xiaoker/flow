@@ -29,6 +29,9 @@ interface ExecutionContext {
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // The app-router bundle runs in a separate Vite environment. Keep the
+    // request's Cloudflare bindings visible to route handlers and local QA.
+    (globalThis as typeof globalThis & { __FLOW_RUNTIME_ENV__?: Env }).__FLOW_RUNTIME_ENV__ = env;
     const url = new URL(request.url);
 
     if (url.pathname === "/_vinext/image") {

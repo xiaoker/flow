@@ -1,13 +1,14 @@
 {
-  "run_id": "20260716T170009+0800",
-  "started_at": "2026-07-16T17:00:09+08:00",
-  "finished_at": "2026-07-16T17:00:12+08:00",
+  "run_id": "20260722T160650+0800",
+  "started_at": "2026-07-22T16:06:50+08:00",
+  "finished_at": "2026-07-22T16:06:53+08:00",
   "requested_dates": [
-    "2026-07-13",
-    "2026-07-14",
-    "2026-07-15"
+    "2026-07-17",
+    "2026-07-20",
+    "2026-07-21"
   ],
-  "szse_etf_inferred_date": "2026-07-15",
+  "szse_etf_page_date": "2026-07-22",
+  "szse_etf_trade_date": "2026-07-21",
   "artifacts": [
     {
       "source": {
@@ -18,15 +19,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-13",
-      "observed_at": "2026-07-16T17:00:09+08:00",
+      "requested_date": "2026-07-17",
+      "observed_at": "2026-07-22T16:06:50+08:00",
       "status_code": 200,
       "content_type": "application/json;charset=UTF-8",
-      "raw_path": "data/raw/sse/etf_scale/2026-07-13/20260716T170009+0800.json",
-      "metadata_path": "data/raw/sse/etf_scale/2026-07-13/20260716T170009+0800.metadata.json",
-      "sha256": "1a5c2c471252d6071630fc359a6e1f3a59bd81019541964c28ceed5bc592dcd1",
-      "row_count": 878,
-      "normalized_path": "data/normalized/sse_etf_scale/2026-07-13/20260716T170009+0800.csv",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-17/20260722T160650+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-17/20260722T160650+0800.metadata.json",
+      "sha256": "cd00fc6b44a22e832aa2032fafd6749c07c610354c5408df7b47b8b0c4e121d1",
+      "row_count": 880,
+      "normalized_path": "data/normalized/sse_etf_scale/2026-07-17/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -38,15 +39,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-14",
-      "observed_at": "2026-07-16T17:00:09+08:00",
+      "requested_date": "2026-07-20",
+      "observed_at": "2026-07-22T16:06:50+08:00",
       "status_code": 200,
       "content_type": "application/json;charset=UTF-8",
-      "raw_path": "data/raw/sse/etf_scale/2026-07-14/20260716T170009+0800.json",
-      "metadata_path": "data/raw/sse/etf_scale/2026-07-14/20260716T170009+0800.metadata.json",
-      "sha256": "daa1e645ca4220ff4287329e1482932752b4659cb064e86f87ee7e9771836003",
-      "row_count": 878,
-      "normalized_path": "data/normalized/sse_etf_scale/2026-07-14/20260716T170009+0800.csv",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-20/20260722T160650+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-20/20260722T160650+0800.metadata.json",
+      "sha256": "d188e25b4ce4d95da95f1b85b45c5eb4a276fff46ea0c2305d44d15b49cdeaf3",
+      "row_count": 880,
+      "normalized_path": "data/normalized/sse_etf_scale/2026-07-20/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -58,15 +59,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-15",
-      "observed_at": "2026-07-16T17:00:09+08:00",
+      "requested_date": "2026-07-21",
+      "observed_at": "2026-07-22T16:06:50+08:00",
       "status_code": 200,
       "content_type": "application/json;charset=UTF-8",
-      "raw_path": "data/raw/sse/etf_scale/2026-07-15/20260716T170009+0800.json",
-      "metadata_path": "data/raw/sse/etf_scale/2026-07-15/20260716T170009+0800.metadata.json",
-      "sha256": "d716ce2ff33c0c7b37f57c63ed7342c6747f48c021d52cc462b32bf3c0b9eba5",
-      "row_count": 877,
-      "normalized_path": "data/normalized/sse_etf_scale/2026-07-15/20260716T170009+0800.csv",
+      "raw_path": "data/raw/sse/etf_scale/2026-07-21/20260722T160650+0800.json",
+      "metadata_path": "data/raw/sse/etf_scale/2026-07-21/20260722T160650+0800.metadata.json",
+      "sha256": "12bd18910ec4517a0ea22648ac26511adc15757ecae5366fe21692ce5c6b0640",
+      "row_count": 880,
+      "normalized_path": "data/normalized/sse_etf_scale/2026-07-21/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -76,20 +77,18 @@
         "dataset": "etf_scale",
         "url": "https://fund.szse.cn/api/report/ShowReport",
         "source_grade": "A",
-        "date_semantics": "collector_inferred_current_snapshot"
+        "date_semantics": "source_page_previous_trading_day"
       },
-      "requested_date": null,
-      "observed_at": "2026-07-16T17:00:10+08:00",
+      "requested_date": "2026-07-21",
+      "observed_at": "2026-07-22T16:06:51+08:00",
       "status_code": 200,
       "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=GBK",
-      "raw_path": "data/raw/szse/etf_scale/current/20260716T170009+0800.xlsx",
-      "metadata_path": "data/raw/szse/etf_scale/current/20260716T170009+0800.metadata.json",
-      "sha256": "5f94ae317ced24ee82b9c98f8be5adfeb69f8b0a5e286f5a40b3671a3e1ade6c",
-      "row_count": 1008,
-      "normalized_path": "data/normalized/szse_etf_scale/2026-07-15/20260716T170009+0800.csv",
-      "warnings": [
-        "深交所 ETF 官方下载只提供当前快照且未包含统计日期；trade_date 来自采集任务预期日期，不能用于历史回填。"
-      ]
+      "raw_path": "data/raw/szse/etf_scale/2026-07-21/20260722T160650+0800.xlsx",
+      "metadata_path": "data/raw/szse/etf_scale/2026-07-21/20260722T160650+0800.metadata.json",
+      "sha256": "ddb42d985761bfea0faf20c030013f31916c82455d7b60ffd5c90d03a03c9c26",
+      "row_count": 1013,
+      "normalized_path": "data/normalized/szse_etf_scale/2026-07-21/20260722T160650+0800.csv",
+      "warnings": []
     },
     {
       "source": {
@@ -100,15 +99,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-13_2026-07-15",
-      "observed_at": "2026-07-16T17:00:10+08:00",
+      "requested_date": "2026-07-17_2026-07-21",
+      "observed_at": "2026-07-22T16:06:51+08:00",
       "status_code": 200,
       "content_type": "application/json;charset=UTF-8",
-      "raw_path": "data/raw/sse/margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.json",
-      "metadata_path": "data/raw/sse/margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.metadata.json",
-      "sha256": "fff46c06852bbb4ff2c77e6fe6cc11ee6f3799013d06d7fff2c462a1b4653a42",
+      "raw_path": "data/raw/sse/margin_market_daily/2026-07-17_2026-07-21/20260722T160650+0800.json",
+      "metadata_path": "data/raw/sse/margin_market_daily/2026-07-17_2026-07-21/20260722T160650+0800.metadata.json",
+      "sha256": "48b13f3b3335e306057c51ab0a9fbe5fc9206b181fba257f98bbc4d11fc84bff",
       "row_count": 3,
-      "normalized_path": "data/normalized/sse_margin_market_daily/2026-07-13_2026-07-15/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/sse_margin_market_daily/2026-07-17_2026-07-21/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -120,15 +119,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-13",
-      "observed_at": "2026-07-16T17:00:10+08:00",
+      "requested_date": "2026-07-17",
+      "observed_at": "2026-07-22T16:06:51+08:00",
       "status_code": 200,
       "content_type": "application/json",
-      "raw_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T170009+0800.json",
-      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-13/20260716T170009+0800.metadata.json",
-      "sha256": "b2c30900532ac0c5f35b3c394ce8bcccc274ec2271eb84bf655c78f4591b7d04",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-17/20260722T160650+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-17/20260722T160650+0800.metadata.json",
+      "sha256": "19ab3579e072cde8d28b21e1ae385839cd5a5386edc48e984964d765ba9295ad",
       "row_count": 1,
-      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-13/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-17/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -140,15 +139,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-14",
-      "observed_at": "2026-07-16T17:00:10+08:00",
+      "requested_date": "2026-07-20",
+      "observed_at": "2026-07-22T16:06:51+08:00",
       "status_code": 200,
       "content_type": "application/json",
-      "raw_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T170009+0800.json",
-      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-14/20260716T170009+0800.metadata.json",
-      "sha256": "f029d1610da53a4d532f97229cbb6cd3cc73b621addece23235cc1dc3b3cdcc3",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-20/20260722T160650+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-20/20260722T160650+0800.metadata.json",
+      "sha256": "92ba57ab26a6fbf393f850c4ab5a07f4b91b2548498d4165b640ae7e7ca2f7cf",
       "row_count": 1,
-      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-14/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-20/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -160,15 +159,15 @@
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-15",
-      "observed_at": "2026-07-16T17:00:10+08:00",
+      "requested_date": "2026-07-21",
+      "observed_at": "2026-07-22T16:06:51+08:00",
       "status_code": 200,
       "content_type": "application/json",
-      "raw_path": "data/raw/szse/margin_market_daily/2026-07-15/20260716T170009+0800.json",
-      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-15/20260716T170009+0800.metadata.json",
-      "sha256": "29d68d99213350e952c7ed3c9ab06639553a60b26cacb9d79823bfccb8f2c843",
+      "raw_path": "data/raw/szse/margin_market_daily/2026-07-21/20260722T160650+0800.json",
+      "metadata_path": "data/raw/szse/margin_market_daily/2026-07-21/20260722T160650+0800.metadata.json",
+      "sha256": "bf6939459ee5f58ae404c53f17bf7cadb21e11f5b97b44cf9ddb1255fe57ef3d",
       "row_count": 1,
-      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-15/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/szse_margin_market_daily/2026-07-21/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -176,19 +175,19 @@
         "source_id": "hkex",
         "publisher": "香港交易所",
         "dataset": "stock_connect_daily",
-        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "url": "https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]c.js",
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-13",
-      "observed_at": "2026-07-16T17:00:11+08:00",
+      "requested_date": "2026-07-17",
+      "observed_at": "2026-07-22T16:06:53+08:00",
       "status_code": 200,
       "content_type": "application/javascript",
-      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T170009+0800.js",
-      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-13/20260716T170009+0800.metadata.json",
-      "sha256": "1a26e3df878bdaf263dc784e5877f7b96e1c171518aa025432b9e7cef1c80128",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-17/20260722T160650+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-17/20260722T160650+0800.metadata.json",
+      "sha256": "c605259138bd0b187ab62aad09ff146c1fd6b4b3d04e689fea7bab3c4f9fbd1e",
       "row_count": 44,
-      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-13/20260716T170009+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-13/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-17/20260722T160650+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-17/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -196,19 +195,19 @@
         "source_id": "hkex",
         "publisher": "香港交易所",
         "dataset": "stock_connect_daily",
-        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "url": "https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]c.js",
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-14",
-      "observed_at": "2026-07-16T17:00:12+08:00",
+      "requested_date": "2026-07-20",
+      "observed_at": "2026-07-22T16:06:53+08:00",
       "status_code": 200,
       "content_type": "application/javascript",
-      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T170009+0800.js",
-      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-14/20260716T170009+0800.metadata.json",
-      "sha256": "da8c0843177875ee181a4cf4f40b22b7dafd7c83a338b674bd56b3b2346cc061",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-20/20260722T160650+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-20/20260722T160650+0800.metadata.json",
+      "sha256": "ea2206e5b8f725bedec0dde0aa2ad9d7e96e9f890bbf4e97e1f85c9d2f5a2154",
       "row_count": 44,
-      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-14/20260716T170009+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-14/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-20/20260722T160650+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-20/20260722T160650+0800.csv",
       "warnings": []
     },
     {
@@ -216,29 +215,29 @@
         "source_id": "hkex",
         "publisher": "香港交易所",
         "dataset": "stock_connect_daily",
-        "url": "https://www.hkex.com.hk/eng/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]e.js",
+        "url": "https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_[YYYY][MM][DD]c.js",
         "source_grade": "A",
         "date_semantics": "source_published"
       },
-      "requested_date": "2026-07-15",
-      "observed_at": "2026-07-16T17:00:12+08:00",
+      "requested_date": "2026-07-21",
+      "observed_at": "2026-07-22T16:06:53+08:00",
       "status_code": 200,
       "content_type": "application/javascript",
-      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-15/20260716T170009+0800.js",
-      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-15/20260716T170009+0800.metadata.json",
-      "sha256": "26e58000fd0233fca1fd863620f9361f2f8158d88174469506c59caeb7316338",
+      "raw_path": "data/raw/hkex/stock_connect_daily/2026-07-21/20260722T160650+0800.js",
+      "metadata_path": "data/raw/hkex/stock_connect_daily/2026-07-21/20260722T160650+0800.metadata.json",
+      "sha256": "e009c5a11a32f7c4755a98fbeae89e0b07a790a6f24fcf7a169ba44bc04d6bce",
       "row_count": 44,
-      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-15/20260716T170009+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-15/20260716T170009+0800.csv",
+      "normalized_path": "data/normalized/hkex_stock_connect_summary/2026-07-21/20260722T160650+0800.csv;data/normalized/hkex_stock_connect_top/2026-07-21/20260722T160650+0800.csv",
       "warnings": []
     }
   ],
   "combined_paths": {
-    "sse_etf": "data/normalized/phase0_combined_sse_etf/20260716T170009+0800/20260716T170009+0800.csv",
-    "szse_etf": "data/normalized/phase0_combined_szse_etf/20260716T170009+0800/20260716T170009+0800.csv",
-    "sse_margin": "data/normalized/phase0_combined_sse_margin/20260716T170009+0800/20260716T170009+0800.csv",
-    "szse_margin": "data/normalized/phase0_combined_szse_margin/20260716T170009+0800/20260716T170009+0800.csv",
-    "stock_connect_summary": "data/normalized/phase0_combined_stock_connect_summary/20260716T170009+0800/20260716T170009+0800.csv",
-    "stock_connect_top": "data/normalized/phase0_combined_stock_connect_top/20260716T170009+0800/20260716T170009+0800.csv"
+    "sse_etf": "data/normalized/phase0_combined_sse_etf/20260722T160650+0800/20260722T160650+0800.csv",
+    "szse_etf": "data/normalized/phase0_combined_szse_etf/20260722T160650+0800/20260722T160650+0800.csv",
+    "sse_margin": "data/normalized/phase0_combined_sse_margin/20260722T160650+0800/20260722T160650+0800.csv",
+    "szse_margin": "data/normalized/phase0_combined_szse_margin/20260722T160650+0800/20260722T160650+0800.csv",
+    "stock_connect_summary": "data/normalized/phase0_combined_stock_connect_summary/20260722T160650+0800/20260722T160650+0800.csv",
+    "stock_connect_top": "data/normalized/phase0_combined_stock_connect_top/20260722T160650+0800/20260722T160650+0800.csv"
   },
-  "quality_summary_path": "reports/phase0/20260716T170009+0800/quality-summary.json"
+  "quality_summary_path": "reports/phase0/20260722T160650+0800/quality-summary.json"
 }

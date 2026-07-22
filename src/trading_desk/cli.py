@@ -17,10 +17,6 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--dates", nargs=3, required=True, metavar="YYYY-MM-DD")
     collect.add_argument("--data-root", default="data")
     collect.add_argument("--report-root", default="reports/phase0")
-    collect.add_argument(
-        "--szse-etf-inferred-date",
-        help="Expected date for SZSE's undated current ETF snapshot",
-    )
     qa = subparsers.add_parser(
         "qa-release", help="Reconcile source evidence, normalized data and dashboard snapshot"
     )
@@ -40,7 +36,6 @@ def main() -> None:
             data_root=Path(args.data_root),
             report_root=Path(args.report_root),
             workspace_root=workspace_root,
-            szse_etf_inferred_date=args.szse_etf_inferred_date,
         )
         summary = {
             "run_id": result["manifest"]["run_id"],
