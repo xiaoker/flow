@@ -373,7 +373,7 @@ COLLECTING → STAGED → VALIDATED → ACTIVE → SUPERSEDED
 ### 9.5 发布
 
 - 生产使用 Cloudflare Worker `flow`，静态资源和 API 同源部署；
-- `main` 分支推送后由 Cloudflare 与 GitHub 的集成自动构建部署；
+- 代码以 GitHub `main` 为唯一生产源；2026-07-22 实测推送后 Cloudflare 未自动产生新部署，当次使用所有者账号的 Wrangler 发布同一提交；Git 自动构建需在 Cloudflare 控制台另行完成并验证；
 - 数据更新不触发前端重新构建；
 - 数据和部署使用最小权限 Cloudflare API Token。
 
