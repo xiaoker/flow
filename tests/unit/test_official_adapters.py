@@ -38,6 +38,12 @@ class BinaryResponse:
         self.headers = {"Content-Type": content_type}
 
 
+class MissingResponse(FakeResponse):
+    def __init__(self) -> None:
+        super().__init__("official file not retained", "text/html")
+        self.status_code = 404
+
+
 @pytest.fixture
 def adapters(tmp_path: Path) -> OfficialMarketAdapters:
     return OfficialMarketAdapters(session=object(), data_root=tmp_path, run_id="test-run")  # type: ignore[arg-type]
@@ -275,3 +281,24 @@ def test_hkex_summary_converts_millions_and_keeps_northbound_net_empty(
     assert "/chi/csm/DailyStat/" in str(request["url"])
     assert str(request["url"]).endswith("20260715c.js")
     assert "sc_lang=zh-CN" in str(request["headers"])
+
+
+def test_hkex_archives_official_404_for_expired_history(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    missing = MissingResponse()
+    error = official.requests.HTTPError("404")
+    error.response = missing  # type: ignore[assignment]
+
+    def missing_get(*args: object, **kwargs: object) -> FakeResponse:
+        raise error
+
+    monkeypatch.setattr(official, "get", missing_get)
+
+    summary, top, artifact = adapters.fetch_hkex_connect("2024-08-01")
+
+    assert summary.empty
+    assert top.empty
+    assert artifact.status_code == 404
+    assert artifact.normalized_path is not None
+    assert "官方文件返回 404" in artifact.warnings[0]

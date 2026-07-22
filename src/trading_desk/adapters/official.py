@@ -372,11 +372,88 @@ class OfficialMarketAdapters:
             "https://www.hkex.com.hk/chi/csm/DailyStat/"
             f"data_tab_daily_{compact_date}c.js"
         )
-        response = get(
-            self.session,
-            url,
-            headers=self._headers(HKEX_CONNECT_PAGE_URL),
-        )
+        try:
+            response = get(
+                self.session,
+                url,
+                headers=self._headers(HKEX_CONNECT_PAGE_URL),
+            )
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is None or response.status_code != 404:
+                raise
+            artifact = write_raw_response(
+                root=self.data_root,
+                source=HKEX_CONNECT,
+                requested_date=trade_date,
+                run_id=self.run_id,
+                content=response.content,
+                extension="html",
+                status_code=response.status_code,
+                content_type=response.headers.get("Content-Type", "text/html"),
+                request_params={
+                    "date": trade_date,
+                    "language": "zh-CN",
+                    "page_url": HKEX_CONNECT_PAGE_URL,
+                    "availability": "official_daily_file_not_retained",
+                },
+            )
+            summary = pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "market",
+                    "direction",
+                    "currency",
+                    "total_turnover",
+                    "buy_turnover",
+                    "sell_turnover",
+                    "net_buy",
+                    "total_trade_count",
+                    "buy_trade_count",
+                    "sell_trade_count",
+                    "etf_turnover",
+                    "daily_quota_balance",
+                    "source_id",
+                    "source_grade",
+                    "observed_at",
+                ]
+            )
+            top = pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "market",
+                    "direction",
+                    "currency",
+                    "rank",
+                    "instrument_code",
+                    "instrument_name",
+                    "buy_turnover",
+                    "sell_turnover",
+                    "total_turnover",
+                    "source_id",
+                    "source_grade",
+                    "observed_at",
+                ]
+            )
+            summary_path = write_normalized_csv(
+                root=self.data_root,
+                dataset="hkex_stock_connect_summary",
+                partition=trade_date,
+                run_id=self.run_id,
+                frame=summary,
+            )
+            top_path = write_normalized_csv(
+                root=self.data_root,
+                dataset="hkex_stock_connect_top",
+                partition=trade_date,
+                run_id=self.run_id,
+                frame=top,
+            )
+            artifact.normalized_path = f"{summary_path};{top_path}"
+            artifact.warnings.append(
+                "港交所中文历史页仅保留近期每日文件；该日期官方文件返回 404。"
+            )
+            return summary, top, artifact
         artifact = write_raw_response(
             root=self.data_root,
             source=HKEX_CONNECT,

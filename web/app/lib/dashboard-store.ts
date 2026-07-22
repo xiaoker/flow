@@ -71,3 +71,102 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     return dashboardSnapshot;
   }
 }
+
+type HistoricalSnapshotRow = {
+  as_of: string;
+  r2_object_key: string;
+};
+
+export type DashboardViewData = {
+  snapshot: DashboardSnapshot;
+  availableDates: string[];
+  requestedDate: string | null;
+  exactDateMatch: boolean;
+};
+
+async function readHistoricalSnapshot(
+  requestedDate: string,
+): Promise<{ snapshot: DashboardSnapshot; exact: boolean } | null> {
+  const runtime = await runtimeEnv();
+  if (!runtime.DB || !runtime.RAW_BUCKET || !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
+    return null;
+  }
+  try {
+    let row = await runtime.DB
+      .prepare(
+        `SELECT as_of, r2_object_key
+         FROM historical_snapshot
+         WHERE as_of = ?
+         LIMIT 1`,
+      )
+      .bind(requestedDate)
+      .first<HistoricalSnapshotRow>();
+    let exact = true;
+    if (!row) {
+      exact = false;
+      row = await runtime.DB
+        .prepare(
+          `SELECT as_of, r2_object_key
+           FROM historical_snapshot
+           WHERE as_of < ?
+           ORDER BY as_of DESC
+           LIMIT 1`,
+        )
+        .bind(requestedDate)
+        .first<HistoricalSnapshotRow>();
+    }
+    if (!row) return null;
+    const object = await runtime.RAW_BUCKET.get(row.r2_object_key);
+    if (!object) return null;
+    const parsed: unknown = JSON.parse(await object.text());
+    if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) return null;
+    return { snapshot: parsed, exact };
+  } catch {
+    return null;
+  }
+}
+
+export async function getAvailableHistoryDates(): Promise<string[]> {
+  const db = (await runtimeEnv()).DB;
+  if (!db) return [];
+  try {
+    const result = await db
+      .prepare(
+        `SELECT as_of
+         FROM historical_snapshot
+         WHERE quality_fail = 0
+         ORDER BY as_of ASC`,
+      )
+      .all<{ as_of: string }>();
+    return (result.results ?? []).map((row) => row.as_of);
+  } catch {
+    return [];
+  }
+}
+
+export async function getDashboardViewData(
+  requestedDate?: string,
+): Promise<DashboardViewData> {
+  const latest = await getDashboardSnapshot();
+  const availableDates = await getAvailableHistoryDates();
+  if (!availableDates.includes(latest.asOf)) availableDates.push(latest.asOf);
+  availableDates.sort();
+  const requested = requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+    ? requestedDate
+    : null;
+  if (!requested || requested === latest.asOf) {
+    return {
+      snapshot: latest,
+      availableDates,
+      requestedDate: requested,
+      exactDateMatch: true,
+    };
+  }
+  const historical = await readHistoricalSnapshot(requested);
+  return {
+    snapshot: historical?.snapshot ?? latest,
+    availableDates,
+    requestedDate: requested,
+    exactDateMatch: historical?.exact ?? false,
+  };
+}

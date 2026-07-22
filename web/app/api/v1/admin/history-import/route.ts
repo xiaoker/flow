@@ -1,0 +1,333 @@
+import { NextResponse } from "next/server";
+import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
+import type { DashboardSnapshot } from "@/app/lib/dashboard-data";
+import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
+
+export const dynamic = "force-dynamic";
+
+const MAX_BODY_BYTES = 12_000_000;
+const MAX_ARTIFACTS = 16;
+const MAX_NORMALIZED_FILES = 2;
+const HISTORY_RETENTION_DAYS = 1825;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+type NormalizedFile = {
+  name: string;
+  format: "csv";
+  sha256: string;
+  rowCount: number;
+  tradeDates: string[];
+  contentBase64: string;
+};
+
+type HistoryArtifact = {
+  releaseId: string;
+  sourceId: "sse" | "szse" | "hkex";
+  dataset: "etf_scale" | "margin_market_daily" | "stock_connect_daily";
+  requestedDate: string;
+  tradeDates: string[];
+  observedAt: string;
+  sourceUrl: string;
+  dateBasis: string;
+  sha256: string;
+  contentType: string;
+  extension: string;
+  rawContentBase64: string;
+  metadata: Record<string, unknown>;
+  normalized: NormalizedFile[];
+};
+
+type HistoryBundle = {
+  version: 1;
+  history: {
+    runId: string;
+    startedAt: string;
+    finishedAt: string;
+    retentionDays: number;
+    asOf: string;
+    snapshot: DashboardSnapshot;
+    artifacts: HistoryArtifact[];
+  };
+};
+
+function secureEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isOfficialSource(
+  sourceId: HistoryArtifact["sourceId"],
+  dataset: HistoryArtifact["dataset"],
+  value: string,
+): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    if (sourceId === "hkex") {
+      return dataset === "stock_connect_daily" && hostname === "www.hkex.com.hk";
+    }
+    if (sourceId === "sse") return hostname === "query.sse.com.cn";
+    return hostname === "www.szse.cn" || hostname === "fund.szse.cn";
+  } catch {
+    return false;
+  }
+}
+
+function isNormalizedFile(value: unknown): value is NormalizedFile {
+  if (!isRecord(value)) return false;
+  return Boolean(
+    typeof value.name === "string" &&
+      /^[a-z0-9-]{1,24}$/.test(value.name) &&
+      value.format === "csv" &&
+      typeof value.sha256 === "string" &&
+      SHA256.test(value.sha256) &&
+      Number.isSafeInteger(value.rowCount) &&
+      Number(value.rowCount) >= 0 &&
+      Array.isArray(value.tradeDates) &&
+      value.tradeDates.length <= 750 &&
+      value.tradeDates.every((date) => typeof date === "string" && ISO_DATE.test(date)) &&
+      typeof value.contentBase64 === "string",
+  );
+}
+
+function isHistoryArtifact(value: unknown): value is HistoryArtifact {
+  if (!isRecord(value)) return false;
+  const sourceId = value.sourceId;
+  const dataset = value.dataset;
+  if (
+    (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "hkex") ||
+    (dataset !== "etf_scale" &&
+      dataset !== "margin_market_daily" &&
+      dataset !== "stock_connect_daily")
+  ) return false;
+  const expectedPair =
+    (dataset === "stock_connect_daily" && sourceId === "hkex") ||
+    (dataset === "etf_scale" && (sourceId === "sse" || sourceId === "szse")) ||
+    (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse"));
+  if (!expectedPair) return false;
+  return Boolean(
+    typeof value.requestedDate === "string" &&
+      /^[0-9_-]{8,25}$/.test(value.requestedDate) &&
+      typeof value.sha256 === "string" &&
+      SHA256.test(value.sha256) &&
+      value.releaseId === `${dataset}:${sourceId}:${value.requestedDate}:${value.sha256.slice(0, 16)}` &&
+      Array.isArray(value.tradeDates) &&
+      value.tradeDates.length <= 750 &&
+      value.tradeDates.every((date) => typeof date === "string" && ISO_DATE.test(date)) &&
+      typeof value.observedAt === "string" &&
+      value.observedAt.length > 0 &&
+      typeof value.sourceUrl === "string" &&
+      isOfficialSource(sourceId, dataset, value.sourceUrl) &&
+      typeof value.dateBasis === "string" &&
+      value.dateBasis.length > 0 &&
+      typeof value.contentType === "string" &&
+      value.contentType.length > 0 &&
+      typeof value.extension === "string" &&
+      /^[a-z0-9]{1,8}$/.test(value.extension) &&
+      typeof value.rawContentBase64 === "string" &&
+      value.rawContentBase64.length > 0 &&
+      isRecord(value.metadata) &&
+      value.metadata.sha256 === value.sha256 &&
+      Array.isArray(value.normalized) &&
+      value.normalized.length > 0 &&
+      value.normalized.length <= MAX_NORMALIZED_FILES &&
+      value.normalized.every(isNormalizedFile)
+  );
+}
+
+function isHistoryBundle(value: unknown): value is HistoryBundle {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.history)) return false;
+  const history = value.history;
+  return Boolean(
+    typeof history.runId === "string" &&
+      /^[A-Za-z0-9+:_-]{6,100}$/.test(history.runId) &&
+      typeof history.startedAt === "string" &&
+      history.startedAt.length > 0 &&
+      typeof history.finishedAt === "string" &&
+      history.finishedAt.length > 0 &&
+      history.retentionDays === HISTORY_RETENTION_DAYS &&
+      typeof history.asOf === "string" &&
+      ISO_DATE.test(history.asOf) &&
+      Array.isArray(history.artifacts) &&
+      history.artifacts.length > 0 &&
+      history.artifacts.length <= MAX_ARTIFACTS &&
+      history.artifacts.every(isHistoryArtifact) &&
+      isDashboardSnapshot(history.snapshot) &&
+      history.snapshot.asOf === history.asOf &&
+      isPublishableSnapshot(history.snapshot)
+  );
+}
+
+function decodeBase64(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new Error("invalid_base64");
+  }
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function sha256Hex(content: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", content);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function POST(request: Request) {
+  const runtime = await runtimeEnv();
+  const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  if (!runtime.INGEST_API_KEY || !suppliedKey || !secureEqual(suppliedKey, runtime.INGEST_API_KEY)) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (!runtime.DB || !runtime.RAW_BUCKET) {
+    return NextResponse.json({ error: "storage_unavailable" }, { status: 503 });
+  }
+  const declaredSize = Number(request.headers.get("content-length") ?? "0");
+  if (declaredSize > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
+  }
+  const body = await request.text();
+  if (new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return NextResponse.json({ error: "invalid_json" }, { status: 400 });
+  }
+  if (!isHistoryBundle(value)) {
+    return NextResponse.json({ error: "invalid_history_bundle" }, { status: 422 });
+  }
+
+  try {
+    const { history } = value;
+    const manifestArtifacts: Array<Record<string, unknown>> = [];
+    for (const artifact of history.artifacts) {
+      const raw = decodeBase64(artifact.rawContentBase64);
+      if ((await sha256Hex(raw)) !== artifact.sha256) {
+        throw new Error(`raw_sha256_mismatch:${artifact.releaseId}`);
+      }
+      const prefix = `market-data/raw/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}`;
+      const rawKey = `${prefix}.${artifact.extension}`;
+      const metadataKey = `${prefix}.metadata.json`;
+      await runtime.RAW_BUCKET.put(rawKey, raw, {
+        httpMetadata: { contentType: artifact.contentType },
+        customMetadata: {
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          requestedDate: artifact.requestedDate,
+          sha256: artifact.sha256,
+        },
+      });
+      await runtime.RAW_BUCKET.put(
+        metadataKey,
+        JSON.stringify({ ...artifact.metadata, release_id: artifact.releaseId, archived_raw_key: rawKey }),
+        { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+      );
+      const normalizedKeys: string[] = [];
+      for (const normalized of artifact.normalized) {
+        const content = decodeBase64(normalized.contentBase64);
+        if ((await sha256Hex(content)) !== normalized.sha256) {
+          throw new Error(`normalized_sha256_mismatch:${artifact.releaseId}:${normalized.name}`);
+        }
+        const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}.csv`;
+        await runtime.RAW_BUCKET.put(key, content, {
+          httpMetadata: { contentType: "text/csv; charset=utf-8" },
+          customMetadata: {
+            sourceId: artifact.sourceId,
+            dataset: artifact.dataset,
+            rowCount: String(normalized.rowCount),
+            sha256: normalized.sha256,
+          },
+        });
+        normalizedKeys.push(key);
+      }
+      manifestArtifacts.push({
+        releaseId: artifact.releaseId,
+        sourceId: artifact.sourceId,
+        dataset: artifact.dataset,
+        requestedDate: artifact.requestedDate,
+        tradeDates: artifact.tradeDates,
+        observedAt: artifact.observedAt,
+        rawKey,
+        metadataKey,
+        normalizedKeys,
+      });
+    }
+
+    const snapshotBody = JSON.stringify(history.snapshot);
+    const snapshotBytes = new TextEncoder().encode(snapshotBody);
+    const snapshotSha256 = await sha256Hex(snapshotBytes);
+    const snapshotKey = `market-data/history/${history.asOf}/${snapshotSha256}.json`;
+    const manifestKey = `market-data/history-manifests/${history.runId}/${history.asOf}.json`;
+    await runtime.RAW_BUCKET.put(snapshotKey, snapshotBytes, {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { asOf: history.asOf, sha256: snapshotSha256 },
+    });
+    await runtime.RAW_BUCKET.put(
+      manifestKey,
+      JSON.stringify({
+        version: value.version,
+        runId: history.runId,
+        startedAt: history.startedAt,
+        finishedAt: history.finishedAt,
+        retentionDays: history.retentionDays,
+        asOf: history.asOf,
+        snapshotKey,
+        snapshotSha256,
+        artifacts: manifestArtifacts,
+      }),
+      { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+    );
+    const createdAt = new Date().toISOString();
+    await runtime.DB
+      .prepare(
+        `INSERT INTO historical_snapshot (
+           as_of, observed_at, snapshot_sha256, r2_object_key, manifest_key,
+           source_count, quality_pass, quality_warn, quality_fail, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(as_of) DO UPDATE SET
+           observed_at = excluded.observed_at,
+           snapshot_sha256 = excluded.snapshot_sha256,
+           r2_object_key = excluded.r2_object_key,
+           manifest_key = excluded.manifest_key,
+           source_count = excluded.source_count,
+           quality_pass = excluded.quality_pass,
+           quality_warn = excluded.quality_warn,
+           quality_fail = excluded.quality_fail,
+           created_at = excluded.created_at`,
+      )
+      .bind(
+        history.asOf,
+        history.snapshot.observedAt,
+        snapshotSha256,
+        snapshotKey,
+        manifestKey,
+        history.artifacts.length,
+        history.snapshot.quality.pass,
+        history.snapshot.quality.warn,
+        history.snapshot.quality.fail,
+        createdAt,
+      )
+      .run();
+
+    return NextResponse.json({
+      status: "archived",
+      asOf: history.asOf,
+      artifacts: history.artifacts.length,
+      snapshotSha256,
+      snapshotKey,
+      manifestKey,
+    });
+  } catch (error) {
+    console.error("history import failed", error);
+    return NextResponse.json({ error: "history_import_failed" }, { status: 500 });
+  }
+}

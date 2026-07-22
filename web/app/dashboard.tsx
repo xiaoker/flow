@@ -3,6 +3,7 @@
 import {
   ArrowsClockwise,
   ArrowsLeftRight,
+  CalendarBlank,
   Camera,
   CaretDown,
   CaretLeft,
@@ -34,7 +35,12 @@ import type {
   FlowPeriod,
 } from "./lib/dashboard-data";
 
-type DashboardProps = { snapshot: DashboardSnapshot };
+type DashboardProps = {
+  snapshot: DashboardSnapshot;
+  availableDates?: string[];
+  requestedDate?: string | null;
+  exactDateMatch?: boolean;
+};
 type DeskView = "overview" | "radar" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
@@ -121,7 +127,12 @@ function EvidenceBadge({ kind, label, detail }: { kind: EvidenceKind; label: str
   return <span className={`evidence-badge evidence-${kind}`} title={detail}>{label}</span>;
 }
 
-export function Dashboard({ snapshot }: DashboardProps) {
+export function Dashboard({
+  snapshot,
+  availableDates = [],
+  requestedDate = null,
+  exactDateMatch = true,
+}: DashboardProps) {
   const [view, setView] = useState<DeskView>("overview");
   const [period, setPeriod] = useState<FlowPeriod>("1d");
   const [direction, setDirection] = useState<DirectionFilter>("all");
@@ -300,6 +311,15 @@ export function Dashboard({ snapshot }: DashboardProps) {
   const northboundMetric = metricValue(snapshot, "northbound");
   const evidenceFor = (id: string, basis?: { kind: EvidenceKind; label: string; detail: string }) => basis ?? defaultMetricBasis[id];
   const currentPeriod = periods.find((item) => item.id === period)?.label ?? "最近1日";
+  const dateIndex = availableDates.indexOf(snapshot.asOf);
+  const previousAvailableDate = dateIndex > 0 ? availableDates[dateIndex - 1] : null;
+  const nextAvailableDate = dateIndex >= 0 && dateIndex < availableDates.length - 1
+    ? availableDates[dateIndex + 1]
+    : null;
+  const openDate = (date: string) => {
+    const latest = availableDates.at(-1);
+    window.location.assign(date === latest ? "/" : `/?date=${encodeURIComponent(date)}`);
+  };
 
   const choosePeriod = (next: FlowPeriod) => {
     if (!availablePeriods.has(next)) {
@@ -362,6 +382,24 @@ export function Dashboard({ snapshot }: DashboardProps) {
           <span className="eyebrow">官方事实与复算指标</span>
           <strong>{view === "overview" ? "市场数据全景" : view === "radar" ? "ETF 份额雷达" : view === "connect" ? "互联互通" : "融资融券"}</strong>
           <span>截至 {snapshot.asOf} · {snapshot.mode}</span>
+          {requestedDate && !exactDateMatch && (
+            <span className="date-fallback">{requestedDate} 非可用交易日，已显示此前最近的完整归档日</span>
+          )}
+        </div>
+        <div className="history-date-control" aria-label="查看历史交易日">
+          <button aria-label="上一个归档交易日" disabled={!previousAvailableDate} onClick={() => previousAvailableDate && openDate(previousAvailableDate)} type="button"><CaretLeft size={16} /></button>
+          <label>
+            <span><CalendarBlank size={15} />查看某一天</span>
+            <input
+              aria-label="历史交易日期"
+              max={availableDates.at(-1)}
+              min={availableDates.at(0)}
+              onChange={(event) => event.target.value && openDate(event.target.value)}
+              type="date"
+              value={snapshot.asOf}
+            />
+          </label>
+          <button aria-label="下一个归档交易日" disabled={!nextAvailableDate} onClick={() => nextAvailableDate && openDate(nextAvailableDate)} type="button"><CaretRight size={16} /></button>
         </div>
         <div className="command-metrics">
           <span><small>ETF 份额变化<EvidenceBadge {...evidenceFor("etf", latestMetric?.basis)} /></small><strong className={latestMetric?.tone === "positive" ? "text-in" : "text-out"}>{latestMetric?.value}<em>{latestMetric?.unit}</em></strong></span>

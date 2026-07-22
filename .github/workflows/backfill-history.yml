@@ -1,0 +1,59 @@
+name: Backfill official market history
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First trading date to archive"
+        required: true
+        default: "2024-08-01"
+        type: string
+      end_date:
+        description: "Last trading date to archive"
+        required: true
+        default: "2026-07-21"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: history-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install collector
+        run: python -m pip install -e '.[dev]'
+
+      - name: Validate collector and history contracts
+        run: python -m pytest
+
+      - name: Backfill official raw data and daily snapshots
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python scripts/backfill_history.py \
+            --start "${{ inputs.start_date }}" \
+            --end "${{ inputs.end_date }}"
+
+      - name: Preserve backfill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-backfill-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: reports/backfill/latest-summary.json

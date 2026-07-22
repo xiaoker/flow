@@ -138,13 +138,31 @@ def _build_etf_terminal_data(
     pivot = selected.pivot_table(
         index="instrument_code", columns="trade_date", values="shares", aggfunc="last"
     )
-    latest_date, previous_date, first_date = (
-        available_dates[-1],
-        available_dates[-2],
-        available_dates[0],
-    )
-    latest_delta = pivot[latest_date] - pivot[previous_date]
-    window_delta = pivot[latest_date] - pivot[first_date]
+    latest_date = available_dates[-1]
+    lookbacks = {
+        "1d": 1,
+        "3d": 3,
+        "1w": 5,
+        "2w": 10,
+        "1m": 21,
+        "3m": 63,
+        "6m": 126,
+        "12m": 252,
+    }
+    anchors: dict[str, str] = {
+        period: available_dates[-offset - 1]
+        for period, offset in lookbacks.items()
+        if len(available_dates) > offset
+    }
+    current_year = latest_date[:4]
+    prior_year_dates = [date for date in available_dates if date[:4] < current_year]
+    if prior_year_dates:
+        anchors["ytd"] = prior_year_dates[-1]
+    available_periods = [
+        period
+        for period in ("1d", "3d", "1w", "2w", "1m", "3m", "6m", "ytd", "12m")
+        if period in anchors
+    ]
 
     instruments = []
     for code in pivot.index:
@@ -152,9 +170,17 @@ def _build_etf_terminal_data(
         name = str(row_metadata.get("instrument_name", code))
         investment_type = row_metadata.get("investment_type")
         category, asset_class, classification_source = _etf_dimensions(name, investment_type)
-        one_day = latest_delta.get(code)
-        window = window_delta.get(code)
         latest_shares = pivot.at[code, latest_date] if latest_date in pivot.columns else None
+        period_values: dict[str, float | None] = {}
+        for period in available_periods:
+            anchor = anchors[period]
+            current_value = pivot.at[code, latest_date]
+            anchor_value = pivot.at[code, anchor]
+            period_values[period] = (
+                None
+                if pd.isna(current_value) or pd.isna(anchor_value)
+                else round(float(current_value - anchor_value) / 100_000_000, 2)
+            )
         instruments.append(
             {
                 "code": str(code),
@@ -165,10 +191,7 @@ def _build_etf_terminal_data(
                 "classificationSource": classification_source,
                 "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
                 "nav": None if pd.isna(row_metadata.get("nav")) else round(float(row_metadata.get("nav")), 4),
-                "periods": {
-                    "1d": None if pd.isna(one_day) else round(float(one_day) / 100_000_000, 2),
-                    "3d": None if pd.isna(window) else round(float(window) / 100_000_000, 2),
-                },
+                "periods": period_values,
                 "coverage": int(pivot.loc[code, available_dates].notna().sum()),
             }
         )
@@ -207,16 +230,16 @@ def _build_etf_terminal_data(
                         "classificationSource": classification_source,
                         "shares": None if pd.isna(row.shares) else round(float(row.shares) / 100_000_000, 2),
                         "nav": None if pd.isna(row.nav) else round(float(row.nav), 4),
-                        "periods": {"1d": None, "3d": None},
+                        "periods": {period: None for period in available_periods},
                         "coverage": 1,
                     }
                 )
     instruments.sort(
-        key=lambda item: abs(item["periods"]["1d"] or 0), reverse=True
+        key=lambda item: abs(item["periods"].get("1d") or 0), reverse=True
     )
 
     daily_series = []
-    for previous, current in zip(available_dates, available_dates[1:]):
+    for previous, current in list(zip(available_dates, available_dates[1:]))[-60:]:
         comparable = pivot[[previous, current]].dropna()
         delta = comparable[current] - comparable[previous]
         daily_series.append(
@@ -229,12 +252,14 @@ def _build_etf_terminal_data(
 
     groups: dict[str, dict[str, float]] = {}
     for item in instruments:
-        if all(item["periods"].get(period) is None for period in ("1d", "3d")):
+        if all(item["periods"].get(period) is None for period in available_periods):
             continue
         category = item["category"]
-        aggregate = groups.setdefault(category, {"1d": 0.0, "3d": 0.0})
-        for period in ("1d", "3d"):
-            value = item["periods"][period]
+        aggregate = groups.setdefault(
+            category, {period: 0.0 for period in available_periods}
+        )
+        for period in available_periods:
+            value = item["periods"].get(period)
             if value is not None:
                 aggregate[period] += value
     group_periods = [
@@ -244,7 +269,9 @@ def _build_etf_terminal_data(
         }
         for name, periods in groups.items()
     ]
-    group_periods.sort(key=lambda item: abs(item["periods"]["1d"]), reverse=True)
+    group_periods.sort(
+        key=lambda item: abs(item["periods"].get("1d", 0)), reverse=True
+    )
 
     market_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
@@ -256,14 +283,16 @@ def _build_etf_terminal_data(
         "dailySeries": daily_series,
         "instruments": instruments,
         "groupPeriods": group_periods,
-        "availablePeriods": ["1d", "3d"],
+        "availablePeriods": available_periods,
         "classification": "官方投资类型优先，基金简称关键词补充",
         "classificationVersion": "2026-07-v2",
         "universe": {
             "total": len(instruments),
             "marketCounts": market_counts,
             "categoryCounts": category_counts,
-            "periodComparable": sum(1 for item in instruments if item["periods"].get("1d") is not None),
+            "periodComparable": sum(
+                1 for item in instruments if item["periods"].get("1d") is not None
+            ),
         },
     }
 
@@ -310,7 +339,11 @@ def build_dashboard_snapshot(
     as_of = dates[-1]
 
     sse_etf = _read_csv(workspace_root, paths["sse_etf"])
-    szse_etf = _read_csv(workspace_root, paths["szse_etf"])
+    szse_etf = (
+        _read_csv(workspace_root, paths["szse_etf"])
+        if paths.get("szse_etf")
+        else pd.DataFrame()
+    )
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
@@ -361,8 +394,16 @@ def build_dashboard_snapshot(
     connect_latest = connect[connect["trade_date"].astype(str).eq(as_of)].copy()
     southbound = connect_latest[connect_latest["direction"].eq("southbound")]
     northbound = connect_latest[connect_latest["direction"].eq("northbound")]
-    southbound_net = float(southbound["net_buy"].sum()) / 100_000_000
-    northbound_turnover = float(northbound["total_turnover"].sum()) / 100_000_000
+    southbound_net = (
+        None
+        if southbound.empty
+        else float(southbound["net_buy"].sum()) / 100_000_000
+    )
+    northbound_turnover = (
+        None
+        if northbound.empty
+        else float(northbound["total_turnover"].sum()) / 100_000_000
+    )
 
     market_labels = {
         ("SSE", "southbound"): "沪港通南向",
@@ -373,10 +414,22 @@ def build_dashboard_snapshot(
     connect_rows = []
     for direction in ("southbound", "northbound"):
         for market in ("SSE", "SZSE"):
-            row = connect_latest[
+            rows = connect_latest[
                 connect_latest["direction"].eq(direction)
                 & connect_latest["market"].eq(market)
-            ].iloc[0]
+            ]
+            if rows.empty:
+                connect_rows.append(
+                    {
+                        "name": market_labels[(market, direction)],
+                        "value": "—",
+                        "unit": "亿港元" if direction == "southbound" else "亿元",
+                        "description": "当日互联互通休市或无披露",
+                        "tone": "neutral",
+                    }
+                )
+                continue
+            row = rows.iloc[0]
             if direction == "southbound":
                 value = float(row["net_buy"]) / 100_000_000
                 connect_rows.append(
@@ -401,7 +454,7 @@ def build_dashboard_snapshot(
 
     margin_series = []
     previous_balance: float | None = None
-    for row in margin_daily.itertuples():
+    for row in margin_daily.tail(60).itertuples():
         trade_date = str(row.trade_date)
         balance = float(row.financing_balance_yuan) / 100_000_000
         split = market_balance.get(row.trade_date, market_balance.get(trade_date, {}))
@@ -421,7 +474,11 @@ def build_dashboard_snapshot(
         )
         previous_balance = balance
     counts = quality["counts"]
-    szse_date = str(szse_etf["trade_date"].max())
+    szse_date = (
+        None
+        if szse_etf.empty or "trade_date" not in szse_etf.columns
+        else str(szse_etf["trade_date"].max())
+    )
     south_market_values = {
         row["name"]: row["value"] for row in connect_rows if "南向" in row["name"]
     }
@@ -451,11 +508,19 @@ def build_dashboard_snapshot(
             {
                 "id": "southbound",
                 "eyebrow": "南向净买入",
-                "value": _signed(southbound_net),
+                "value": "—" if southbound_net is None else _signed(southbound_net),
                 "unit": "亿港元",
                 "delta": f"沪港通 {south_market_values['沪港通南向']} · 深港通 {south_market_values['深港通南向']}",
-                "tone": "positive" if southbound_net >= 0 else "negative",
-                "note": "官方买入额 − 卖出额",
+                "tone": (
+                    "neutral"
+                    if southbound_net is None
+                    else ("positive" if southbound_net >= 0 else "negative")
+                ),
+                "note": (
+                    "当日互联互通休市或无披露"
+                    if southbound_net is None
+                    else "官方买入额 − 卖出额"
+                ),
                 "basis": {
                     "kind": "calculated",
                     "label": "公式计算",
@@ -479,7 +544,7 @@ def build_dashboard_snapshot(
             {
                 "id": "northbound",
                 "eyebrow": "北向成交总额",
-                "value": f"{northbound_turnover:,.2f}",
+                "value": "—" if northbound_turnover is None else f"{northbound_turnover:,.2f}",
                 "unit": "亿元",
                 "delta": f"沪股通 {north_rows[0]['value']} · 深股通 {north_rows[1]['value']}",
                 "tone": "neutral",
@@ -495,11 +560,31 @@ def build_dashboard_snapshot(
         "etfTerminal": etf_terminal,
         "marginSeries": margin_series,
         "connect": connect_rows,
-        "connectSeries": _build_connect_series(connect, dates),
+        "connectSeries": _build_connect_series(connect, dates[-60:]),
         "dataStatus": [
-            {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"官方日期 · {etf_summary['latest_count']} 只·3 日", "basis": "official"},
-            {"name": "深交所 ETF", "status": "ready", "asOf": szse_date[5:], "detail": "官方列表页规模日期", "basis": "official"},
+            {"name": "上交所 ETF", "status": "ready", "asOf": as_of[5:], "detail": f"官方日期 · {etf_summary['latest_count']} 只 · {len(dates)} 日窗口", "basis": "official"},
+            {
+                "name": "深交所 ETF",
+                "status": "warning" if szse_date is None else "ready",
+                "asOf": "—" if szse_date is None else szse_date[5:],
+                "detail": (
+                    "官方日列表不支持历史回填"
+                    if szse_date is None
+                    else "官方列表页规模日期"
+                ),
+                "basis": "official",
+            },
             {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深汇总", "basis": "official"},
-            {"name": "互联互通", "status": "ready", "asOf": as_of[5:], "detail": "南向复算 · 北向官方成交", "basis": "mixed"},
+            {
+                "name": "互联互通",
+                "status": "warning" if connect_latest.empty else "ready",
+                "asOf": as_of[5:],
+                "detail": (
+                    "当日互联互通休市或无披露"
+                    if connect_latest.empty
+                    else "南向复算 · 北向官方成交"
+                ),
+                "basis": "mixed",
+            },
         ],
     }

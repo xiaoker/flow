@@ -138,6 +138,149 @@ test("rejects unauthenticated snapshot imports", async () => {
   assert.equal(response.status, 401);
 });
 
+test("serves an archived dashboard for an explicitly selected date", async () => {
+  const worker = await loadWorker();
+  const overview = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const archived = await overview.json();
+  archived.asOf = "2025-01-02";
+  archived.mode = "官方历史归档";
+  const db = {
+    prepare(sql) {
+      return {
+        sql,
+        values: [],
+        bind(...values) {
+          this.values = values;
+          return this;
+        },
+        async first() {
+          if (this.sql.includes("FROM dashboard_snapshot")) return null;
+          if (this.sql.includes("FROM historical_snapshot")) {
+            return { as_of: "2025-01-02", r2_object_key: "market-data/history/2025-01-02/test.json" };
+          }
+          return null;
+        },
+        async all() {
+          return { results: [{ as_of: "2025-01-02" }, { as_of: "2026-07-14" }] };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.equal(key, "market-data/history/2025-01-02/test.json");
+      return { text: async () => JSON.stringify(archived) };
+    },
+  };
+
+  const response = await worker.fetch(
+    new Request("http://localhost/?date=2025-01-02", { headers: { accept: "text/html" } }),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /2025-01-02/);
+  assert.match(html, /官方历史归档/);
+  assert.match(html, /查看某一天/);
+});
+
+test("archives full-source history with server-side hash verification", async () => {
+  const worker = await loadWorker();
+  const overview = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const snapshot = await overview.json();
+  const raw = Buffer.from('{"result":[]}');
+  const normalized = Buffer.from("trade_date,market\n2026-07-14,SSE\n");
+  const sha256 = createHash("sha256").update(raw).digest("hex");
+  const normalizedSha256 = createHash("sha256").update(normalized).digest("hex");
+  const statements = [];
+  const objects = new Map();
+  const db = {
+    prepare(sql) {
+      return {
+        sql,
+        values: [],
+        bind(...values) {
+          this.values = values;
+          return this;
+        },
+        async run() {
+          statements.push({ sql: this.sql, values: this.values });
+          return { success: true };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async put(key, value) {
+      objects.set(key, value);
+      return {};
+    },
+  };
+  const bundle = {
+    version: 1,
+    history: {
+      runId: "history-20260722T091500+0800",
+      startedAt: "2026-07-22T09:15:00+08:00",
+      finishedAt: "2026-07-22T09:16:00+08:00",
+      retentionDays: 1825,
+      asOf: snapshot.asOf,
+      snapshot,
+      artifacts: [
+        {
+          releaseId: `margin_market_daily:sse:2026-07-14:${sha256.slice(0, 16)}`,
+          sourceId: "sse",
+          dataset: "margin_market_daily",
+          requestedDate: "2026-07-14",
+          tradeDates: ["2026-07-14"],
+          observedAt: "2026-07-22T09:15:20+08:00",
+          sourceUrl: "https://query.sse.com.cn/marketdata/tradedata/queryMargin.do",
+          dateBasis: "source_published",
+          sha256,
+          contentType: "application/json",
+          extension: "json",
+          rawContentBase64: raw.toString("base64"),
+          metadata: { sha256 },
+          normalized: [
+            {
+              name: "data",
+              format: "csv",
+              sha256: normalizedSha256,
+              rowCount: 1,
+              tradeDates: ["2026-07-14"],
+              contentBase64: normalized.toString("base64"),
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/history-import", {
+      method: "POST",
+      headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      body: JSON.stringify(bundle),
+    }),
+    { ...env, DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key" },
+    context,
+  );
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.status, "archived");
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/sse/margin_market_daily")));
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/margin_market_daily")));
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/history/")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")));
+});
+
 test("archives verified ETF evidence before publishing a snapshot", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(

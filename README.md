@@ -17,6 +17,7 @@ python3.12 -m venv .venv
 .venv/bin/python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
 .venv/bin/trading-desk qa-release
 .venv/bin/python scripts/build_ingest_bundle.py --output ingest-bundle.json
+.venv/bin/python scripts/build_history_bundle.py --output history-bundle.json
 .venv/bin/python scripts/build_phase0_notebook.py
 ```
 
@@ -34,7 +35,7 @@ npm run dev
 
 本地访问 `http://localhost:3000/`。没有 D1 数据时页面回退到仓库内的已验证快照；Cloudflare 生产环境会读取所有者账号中 D1 `flow` 的最新成功快照。
 
-只读接口包括 `/api/v1/overview`、`/api/v1/data-status`、`/api/v1/etf/flows`、`/api/v1/connect/flows` 和 `/api/v1/margin/flows`。`POST /api/v1/admin/import` 仅接受 Bearer 写入密钥认证、通过结构校验及 SHA-256 复验的发布包；先归档 R2 原始证据和 D1 ETF 日表，再切换页面快照。
+只读接口包括 `/api/v1/overview`、`/api/v1/data-status`、`/api/v1/etf/flows`、`/api/v1/connect/flows`、`/api/v1/margin/flows` 和 `/api/v1/history/dates`。页面支持使用 `/?date=YYYY-MM-DD` 查看归档交易日。`POST /api/v1/admin/import` 和 `POST /api/v1/admin/history-import` 仅接受 Bearer 写入密钥认证、通过结构校验及 SHA-256 复验的发布包。
 
 ## 每日自动采集
 
@@ -44,6 +45,7 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 - 也可在 Actions 页面手动执行，并可选传入三个 ISO 日期；
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
 - 每次发布前自动运行单元/字段契约测试和发布级 Data QA；
+- 每次任务把 ETF、两融、互联互通的原始响应和规范化 CSV 全部归档到 R2，并为最新交易日建立历史快照；
 - 深交所 ETF 用列表页发布日和“当前规模”列标注日校验前一交易日；港交所使用简体中文历史每日页的中文数据文件；
 - 发布需要私有仓库 Actions Secrets：`FLOW_INGEST_API_KEY`、`FLOW_CF_ACCESS_CLIENT_ID` 和 `FLOW_CF_ACCESS_CLIENT_SECRET`。后两项只用于通过 Cloudflare Access 的 Service Auth 策略。
 
@@ -51,8 +53,8 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
 - Worker：`flow`
 - D1：`flow`（APAC）
-- R2：`flow`（Standard，`dashboard/` 与 `market-data/` 对象保留 365 天）
-- D1：ETF 规范化日表滚动保留 365 天，体积较大的页面派生快照保留 30 天；历史快照仍可从 R2 重放
+- R2：`flow`（Standard，`dashboard/` 保留 365 天，`market-data/` 原始证据与历史快照保留 1,825 天）
+- D1：ETF 规范化日表滚动保留 365 天，体积较大的最新页面派生快照保留 30 天；完整历史快照正文放在 R2，D1 只保存日期索引
 - 部署配置：`web/wrangler.jsonc`
 
 上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
@@ -70,10 +72,11 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
 - [产品与技术架构](docs/trading-desk-plan.md)
 - [测试与验收计划](docs/trading-desk-test-plan.md)
+- [历史回补、覆盖边界与按日查看](docs/history-backfill.md)
 - [字段字典](schemas/field-dictionary.csv)
 - [Phase 0 可交付报告](reports/phase0/phase0-report.html)
 - [Phase 0 可复现 Notebook](notebooks/phase0_data_quality.ipynb)
 
 ## 当前限制
 
-深交所 ETF 不提供可任意按历史日下载的份额序列；系统依据列表页规模日期从自动采集启用日起逐日积累，不伪造上线前的历史。ETF “份额变化”仍不等于精确资金净流入，页面会持续明示该口径。
+深交所 ETF 不提供可任意按历史日下载的份额序列；系统依据列表页规模日期从自动采集启用日起逐日积累，不伪造上线前的历史。港交所中文“历史每日数据”页面当前只暴露最近 7 个月文件，早期日期的官方 404 会作为缺失证据归档，不用第三方数字代填。ETF “份额变化”仍不等于精确资金净流入，页面会持续明示该口径。

@@ -1,8 +1,14 @@
 import { Dashboard } from "./dashboard";
-import { getDashboardSnapshot } from "./lib/dashboard-store";
+import { getDashboardViewData } from "./lib/dashboard-store";
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
-  return <Dashboard snapshot={await getDashboardSnapshot()} />;
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ date?: string }>;
+}) {
+  const { date } = await searchParams;
+  const data = await getDashboardViewData(date);
+  return <Dashboard {...data} />;
 }

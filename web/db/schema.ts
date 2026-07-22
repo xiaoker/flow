@@ -48,6 +48,21 @@ export const dashboardSnapshots = sqliteTable("dashboard_snapshot", {
   index("dashboard_snapshot_as_of_idx").on(table.asOf, table.publishedAt),
 ]);
 
+export const historicalSnapshots = sqliteTable("historical_snapshot", {
+  asOf: text("as_of").primaryKey(),
+  observedAt: text("observed_at").notNull(),
+  snapshotSha256: text("snapshot_sha256").notNull(),
+  r2ObjectKey: text("r2_object_key").notNull(),
+  manifestKey: text("manifest_key").notNull(),
+  sourceCount: integer("source_count").notNull(),
+  qualityPass: integer("quality_pass").notNull(),
+  qualityWarn: integer("quality_warn").notNull(),
+  qualityFail: integer("quality_fail").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("historical_snapshot_created_idx").on(table.createdAt),
+]);
+
 export const etfDaily = sqliteTable("etf_daily", {
   releaseId: text("release_id").notNull(),
   tradeDate: text("trade_date").notNull(),

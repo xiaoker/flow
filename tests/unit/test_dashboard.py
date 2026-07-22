@@ -71,12 +71,12 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["metrics"][0]["basis"]["kind"] == "calculated"
     assert snapshot["metrics"][2]["basis"]["kind"] == "official"
     assert snapshot["etfFlows"]["inflow"][0]["code"] == "000001"
-    assert snapshot["etfTerminal"]["availablePeriods"] == ["1d", "3d"]
+    assert snapshot["etfTerminal"]["availablePeriods"] == ["1d"]
     assert snapshot["etfTerminal"]["dailySeries"][-1]["coverage"] == 2
-    assert snapshot["etfTerminal"]["instruments"][0]["periods"]["3d"] is not None
+    assert "3d" not in snapshot["etfTerminal"]["instruments"][0]["periods"]
     szse_item = next(item for item in snapshot["etfTerminal"]["instruments"] if item["market"] == "SZSE")
     assert szse_item["category"] == "债券货币"
-    assert szse_item["periods"] == {"1d": None, "3d": None}
+    assert szse_item["periods"] == {"1d": None}
     assert snapshot["etfTerminal"]["universe"]["marketCounts"] == {"SSE": 2, "SZSE": 1}
     assert snapshot["marginSeries"][-1]["change"] == 0.0
     assert snapshot["marginSeries"][-1]["sseBalance"] == 0.0
