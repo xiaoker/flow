@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
+from .adapters.official import parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
 from .models import QualityFinding
 from .quality import summarize_findings
@@ -224,12 +225,9 @@ def _expected_szse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
 
 def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     text = content.decode("utf-8").lstrip("\ufeff").strip()
-    match = re.fullmatch(r"tabData\s*=\s*(\[.*\])\s*;?", text, flags=re.DOTALL)
-    if not match:
-        raise ValueError("HKEX raw wrapper does not match tabData JSON")
     summary_rows: list[dict[str, Any]] = []
     top_rows: list[dict[str, Any]] = []
-    for payload in json.loads(match.group(1)):
+    for payload in parse_hkex_tab_data(text):
         if not payload.get("tradingDay"):
             continue
         label = str(payload.get("market", ""))

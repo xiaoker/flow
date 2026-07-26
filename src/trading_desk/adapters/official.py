@@ -54,6 +54,37 @@ HKEX_CONNECT_PAGE_URL = (
 )
 
 
+def parse_hkex_tab_data(text: str) -> list[dict[str, Any]]:
+    r"""Parse HKEX's JavaScript assignment while retaining the original raw bytes.
+
+    Most daily files contain strict JSON, but some historical files use
+    JavaScript-only escapes such as ``\'`` or ``\xNN`` inside stock names.
+    """
+    normalized = text.lstrip("\ufeff").strip()
+    match = re.fullmatch(
+        r"tabData\s*=\s*(\[.*\])\s*;?", normalized, flags=re.DOTALL
+    )
+    if not match:
+        raise ValueError("HKEX response did not match the expected tabData JSON wrapper")
+    payload = match.group(1)
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        payload = payload.replace("\\'", "'")
+        payload = re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda item: chr(int(item.group(1), 16)),
+            payload,
+        )
+        payload = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", payload)
+        parsed = json.loads(payload)
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, dict) for item in parsed
+    ):
+        raise ValueError("HKEX tabData payload was not an array of objects")
+    return parsed
+
+
 def _number(value: Any, *, multiplier: float = 1.0) -> float | None:
     if value is None or value == "":
         return None
@@ -469,11 +500,7 @@ class OfficialMarketAdapters:
                 "page_url": HKEX_CONNECT_PAGE_URL,
             },
         )
-        text = response.text.lstrip("\ufeff").strip()
-        match = re.fullmatch(r"tabData\s*=\s*(\[.*\])\s*;?", text, flags=re.DOTALL)
-        if not match:
-            raise ValueError("HKEX response did not match the expected tabData JSON wrapper")
-        markets = json.loads(match.group(1))
+        markets = parse_hkex_tab_data(response.text)
         summary_rows: list[dict[str, Any]] = []
         top_rows: list[dict[str, Any]] = []
         for market_payload in markets:

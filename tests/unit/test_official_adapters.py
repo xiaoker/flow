@@ -302,3 +302,32 @@ def test_hkex_archives_official_404_for_expired_history(
     assert artifact.status_code == 404
     assert artifact.normalized_path is not None
     assert "官方文件返回 404" in artifact.warnings[0]
+
+
+def test_hkex_accepts_javascript_only_string_escapes(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    wrapper = r'''tabData = [{
+      "date":"2026-02-10",
+      "market":"SSE Southbound",
+      "tradingDay":1,
+      "content":[{
+        "style":2,
+        "table":{
+          "schema":[["Rank","Stock Code","Stock Name","Total Turnover"]],
+          "tr":[{"td":[["1","00001","L\'Occitane\x20Intl","1,234"]]}]
+        }
+      }]
+    }];'''
+
+    monkeypatch.setattr(
+        official,
+        "get",
+        lambda *args, **kwargs: FakeResponse(wrapper, "application/javascript"),
+    )
+
+    summary, top, artifact = adapters.fetch_hkex_connect("2026-02-10")
+
+    assert summary.empty
+    assert top.loc[0, "instrument_name"] == "L'Occitane Intl"
+    assert artifact.status_code == 200
