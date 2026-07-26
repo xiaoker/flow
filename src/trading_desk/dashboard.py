@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .adapters import OfficialMarketAdapters
+from .etf_classification import CLASSIFICATION_VERSION, classify_etf
 from .http import build_session
 from .storage import new_run_id
 
@@ -71,35 +72,8 @@ def _latest_etf_flows(frame: pd.DataFrame, dates: list[str]) -> tuple[dict[str, 
     return {"inflow": rows(False), "outflow": rows(True)}, summary
 
 
-def _etf_dimensions(name: str, investment_type: str | None = None) -> tuple[str, str, str]:
-    normalized = name.upper()
-    official_type = "" if pd.isna(investment_type) else str(investment_type)
-    if "货币" in official_type or any(keyword in normalized for keyword in ("货币", "现金", "快线")):
-        return "债券货币", "货币", "official_investment_type" if official_type else "name_keyword"
-    if "债券" in official_type or any(keyword in normalized for keyword in ("国债", "政金债", "信用债", "可转债", "短融", "同业存单")):
-        return "债券货币", "债券", "official_investment_type" if official_type else "name_keyword"
-    if any(keyword in normalized for keyword in ("沪深300", "中证500", "中证1000", "中证2000", "中证A500", "上证50", "科创50", "创业板", "深证100", "A50", "上证180")):
-        return "宽基", "股票", "name_keyword"
-    rules = (
-        ("科技", ("半导", "芯片", "通信", "5G", "软件", "计算机", "人工智能", "AI", "机器人", "科创")),
-        ("医药", ("医药", "医疗", "创新药", "生物", "疫苗")),
-        ("港股海外", ("恒生", "港股", "中概", "纳指", "标普", "日经", "德国", "法国", "海外")),
-        ("商品", ("黄金", "有色", "煤炭", "钢铁", "化工", "豆粕", "能源", "商品")),
-        ("红利价值", ("红利", "价值", "低波", "央企")),
-        ("金融地产", ("银行", "证券", "券商", "金融", "地产")),
-        ("新能源制造", ("新能源", "光伏", "电池", "汽车", "军工", "机械", "制造")),
-        ("宽基", ("300", "500", "1000", "2000", "A50", "上证", "创业板", "中证", "沪深")),
-    )
-    for category, keywords in rules:
-        if any(keyword in normalized for keyword in keywords):
-            asset_class = "跨境" if category == "港股海外" else "商品" if category == "商品" else "股票"
-            return category, asset_class, "name_keyword"
-    asset_class = "股票" if "股票" in official_type else "其他"
-    return "其他", asset_class, "official_investment_type" if official_type else "name_keyword"
-
-
 def _classify_etf(name: str, investment_type: str | None = None) -> str:
-    return _etf_dimensions(name, investment_type)[0]
+    return classify_etf(name=name, investment_type=investment_type).category
 
 
 def _build_etf_terminal_data(
@@ -165,13 +139,29 @@ def _build_etf_terminal_data(
     ]
 
     instruments = []
+    exclusion_counts: dict[str, int] = {}
     for code in pivot.index:
         row_metadata = metadata.loc[code]
         name = str(row_metadata.get("instrument_name", code))
         investment_type = row_metadata.get("investment_type")
-        category, asset_class, classification_source = _etf_dimensions(name, investment_type)
+        etf_type = row_metadata.get("etf_type")
+        classification = classify_etf(
+            name=name,
+            code=str(code),
+            market="SSE",
+            etf_type=None if pd.isna(etf_type) else str(etf_type),
+            investment_type=(
+                None if pd.isna(investment_type) else str(investment_type)
+            ),
+        )
+        if not classification.eligible:
+            reason = classification.exclusion_reason or "未通过ETF范围规则"
+            exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+            continue
         latest_shares = pivot.at[code, latest_date] if latest_date in pivot.columns else None
+        latest_nav = row_metadata.get("nav")
         period_values: dict[str, float | None] = {}
+        estimated_cash_values: dict[str, float | None] = {}
         for period in available_periods:
             anchor = anchors[period]
             current_value = pivot.at[code, latest_date]
@@ -181,17 +171,27 @@ def _build_etf_terminal_data(
                 if pd.isna(current_value) or pd.isna(anchor_value)
                 else round(float(current_value - anchor_value) / 100_000_000, 2)
             )
+            estimated_cash_values[period] = (
+                None
+                if period_values[period] is None or pd.isna(latest_nav)
+                else round(float(period_values[period]) * float(latest_nav), 2)
+            )
         instruments.append(
             {
                 "code": str(code),
                 "name": name,
                 "market": "SSE",
-                "category": category,
-                "assetClass": asset_class,
-                "classificationSource": classification_source,
+                "category": classification.category,
+                "groupType": classification.group_type,
+                "assetClass": classification.asset_class,
+                "classificationSource": classification.source,
+                "classificationConfidence": classification.confidence,
+                "classificationRule": classification.rule_id,
+                "includeInGroup": classification.include_in_group,
                 "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
-                "nav": None if pd.isna(row_metadata.get("nav")) else round(float(row_metadata.get("nav")), 4),
+                "nav": None if pd.isna(latest_nav) else round(float(latest_nav), 4),
                 "periods": period_values,
+                "estimatedCashPeriods": estimated_cash_values,
                 "coverage": int(pivot.loc[code, available_dates].notna().sum()),
             }
         )
@@ -217,20 +217,41 @@ def _build_etf_terminal_data(
             )
             for row in szse_latest.itertuples():
                 name = str(row.instrument_name)
-                category, asset_class, classification_source = _etf_dimensions(
-                    name, row.investment_type
+                classification = classify_etf(
+                    name=name,
+                    code=str(row.instrument_code),
+                    market="SZSE",
+                    etf_type=(
+                        None if pd.isna(row.etf_type) else str(row.etf_type)
+                    ),
+                    investment_type=(
+                        None
+                        if pd.isna(row.investment_type)
+                        else str(row.investment_type)
+                    ),
                 )
+                if not classification.eligible:
+                    reason = classification.exclusion_reason or "未通过ETF范围规则"
+                    exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+                    continue
                 instruments.append(
                     {
                         "code": str(row.instrument_code),
                         "name": name,
                         "market": "SZSE",
-                        "category": category,
-                        "assetClass": asset_class,
-                        "classificationSource": classification_source,
+                        "category": classification.category,
+                        "groupType": classification.group_type,
+                        "assetClass": classification.asset_class,
+                        "classificationSource": classification.source,
+                        "classificationConfidence": classification.confidence,
+                        "classificationRule": classification.rule_id,
+                        "includeInGroup": classification.include_in_group,
                         "shares": None if pd.isna(row.shares) else round(float(row.shares) / 100_000_000, 2),
                         "nav": None if pd.isna(row.nav) else round(float(row.nav), 4),
                         "periods": {period: None for period in available_periods},
+                        "estimatedCashPeriods": {
+                            period: None for period in available_periods
+                        },
                         "coverage": 1,
                     }
                 )
@@ -250,24 +271,61 @@ def _build_etf_terminal_data(
             }
         )
 
-    groups: dict[str, dict[str, float]] = {}
+    groups: dict[str, dict[str, Any]] = {}
     for item in instruments:
-        if all(item["periods"].get(period) is None for period in available_periods):
+        if not item["includeInGroup"]:
             continue
         category = item["category"]
         aggregate = groups.setdefault(
-            category, {period: 0.0 for period in available_periods}
+            category,
+            {
+                "groupType": item["groupType"],
+                "periods": {period: 0.0 for period in available_periods},
+                "estimatedCashPeriods": {
+                    period: 0.0 for period in available_periods
+                },
+                "estimatedCashCoverage": {
+                    period: 0 for period in available_periods
+                },
+                "componentCount": 0,
+                "comparableCount": {
+                    period: 0 for period in available_periods
+                },
+            },
         )
+        aggregate["componentCount"] += 1
         for period in available_periods:
             value = item["periods"].get(period)
             if value is not None:
-                aggregate[period] += value
+                aggregate["periods"][period] += value
+                aggregate["comparableCount"][period] += 1
+            cash_value = item["estimatedCashPeriods"].get(period)
+            if cash_value is not None:
+                aggregate["estimatedCashPeriods"][period] += cash_value
+                aggregate["estimatedCashCoverage"][period] += 1
     group_periods = [
         {
             "name": name,
-            "periods": {key: round(value, 2) for key, value in periods.items()},
+            "groupType": aggregate["groupType"],
+            "periods": {
+                key: round(value, 2)
+                for key, value in aggregate["periods"].items()
+            },
+            "estimatedCashPeriods": {
+                key: (
+                    round(value, 2)
+                    if aggregate["estimatedCashCoverage"][key] > 0
+                    else None
+                )
+                for key, value in aggregate["estimatedCashPeriods"].items()
+            },
+            "componentCount": aggregate["componentCount"],
+            "comparableCount": aggregate["comparableCount"],
         }
-        for name, periods in groups.items()
+        for name, aggregate in groups.items()
+        if any(
+            count > 0 for count in aggregate["comparableCount"].values()
+        )
     ]
     group_periods.sort(
         key=lambda item: abs(item["periods"].get("1d", 0)), reverse=True
@@ -284,10 +342,12 @@ def _build_etf_terminal_data(
         "instruments": instruments,
         "groupPeriods": group_periods,
         "availablePeriods": available_periods,
-        "classification": "官方投资类型优先，基金简称关键词补充",
-        "classificationVersion": "2026-07-v2",
+        "classification": "官方产品/投资类型优先，版本化名称规则补充；低置信度不进入板块汇总",
+        "classificationVersion": CLASSIFICATION_VERSION,
         "universe": {
             "total": len(instruments),
+            "excluded": sum(exclusion_counts.values()),
+            "exclusionCounts": exclusion_counts,
             "marketCounts": market_counts,
             "categoryCounts": category_counts,
             "periodComparable": sum(

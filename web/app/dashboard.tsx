@@ -71,38 +71,69 @@ const marginMetricDefinitions: Record<MarginDisplayMetric, { label: string; unit
   lendingBalance: { label: "融券余额", unit: "亿元", note: "沪深融券余额合计" },
 };
 
+const groupTypeLabels: Record<string, string> = {
+  broad: "宽基",
+  industry: "行业",
+  strategy: "策略",
+  theme: "主题",
+  cross_border: "跨境",
+  bond: "债券",
+  commodity: "商品",
+  money: "货币",
+  other: "其他",
+};
+
+const classificationRuleLabels: Record<string, string> = {
+  money: "货币产品规则",
+  bond: "债券产品规则",
+  cross_border: "跨境产品规则",
+  commodity: "商品产品规则",
+  strategy: "策略名称规则",
+  healthcare: "医药行业规则",
+  financial_real_estate: "金融地产规则",
+  consumer: "消费行业规则",
+  cyclical_resources: "周期资源规则",
+  new_energy_manufacturing: "新能源制造规则",
+  ai_robotics: "人工智能机器人规则",
+  technology: "科技行业规则",
+  broad_market: "宽基指数规则",
+  unmatched: "未匹配",
+};
+
+const confidenceLabels: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
 function formatFlow(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
 
 function fallbackTerminal(snapshot: DashboardSnapshot): EtfTerminalData {
-  const category = (name: string) => {
-    if (/半导|通信|5G|科创|芯片/.test(name)) return "科技";
-    if (/医药|医疗/.test(name)) return "医药";
-    if (/恒生|港股/.test(name)) return "港股海外";
-    if (/有色|商品/.test(name)) return "商品";
-    if (/1000|300|500/.test(name)) return "宽基";
-    return "其他";
-  };
   const instruments = [...snapshot.etfFlows.inflow, ...snapshot.etfFlows.outflow].map((item) => ({
     ...item,
     market: "SSE" as const,
-    category: category(item.name),
-    assetClass: "股票",
+    category: "待分类",
+    groupType: "unknown",
+    assetClass: "其他",
+    classificationSource: "missing_versioned_terminal",
+    classificationConfidence: "low",
+    classificationRule: "not_classified",
+    includeInGroup: false,
     shares: null,
     periods: { "1d": item.value },
+    estimatedCashPeriods: { "1d": null },
     coverage: 2,
   }));
-  const grouped = new Map<string, number>();
-  instruments.forEach((item) => grouped.set(item.category, (grouped.get(item.category) ?? 0) + item.value));
   return {
     dailySeries: [],
     instruments,
-    groupPeriods: Array.from(grouped, ([name, value]) => ({ name, periods: { "1d": value } })),
+    groupPeriods: [],
     availablePeriods: ["1d"],
-    classification: "基金简称关键词映射",
-    universe: { total: instruments.length, marketCounts: { SSE: instruments.length, SZSE: 0 }, categoryCounts: Object.fromEntries(Array.from(grouped, ([name]) => [name, instruments.filter((item) => item.category === name).length])), periodComparable: instruments.length },
+    classification: "缺少版本化分类数据，未生成板块汇总",
+    universe: { total: instruments.length, marketCounts: { SSE: instruments.length, SZSE: 0 }, categoryCounts: { "待分类": instruments.length }, periodComparable: instruments.length },
   };
 }
 
@@ -224,7 +255,13 @@ export function Dashboard({
   });
 
   const groupRows = useMemo(() => terminal.groupPeriods
-    .map((item) => ({ name: item.name, value: item.periods[period] ?? 0 }))
+    .map((item) => ({
+      name: item.name,
+      groupType: item.groupType ?? "other",
+      value: item.periods[period] ?? 0,
+      componentCount: item.componentCount ?? 0,
+      comparableCount: item.comparableCount?.[period] ?? 0,
+    }))
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)), [period, terminal.groupPeriods]);
   const totalGroupFlow = groupRows.reduce((sum, item) => sum + item.value, 0);
   const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (item.periods[period] ?? 0), 0);
@@ -236,7 +273,7 @@ export function Dashboard({
   const rotationOption = useMemo(() => ({
     animationDuration: 450,
     grid: { left: 112, right: 92, top: 18, bottom: 28 },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 }, formatter: (items: Array<{ name: string; value: number }>) => `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} 亿份` },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 }, formatter: (items: Array<{ dataIndex: number; name: string; value: number }>) => { const row = groupRows[items[0]?.dataIndex]; return `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} 亿份<br/>${groupTypeLabels[row?.groupType] ?? row?.groupType} · ${row?.comparableCount ?? 0} 只可比`; } },
     xAxis: { type: "value", axisLine: { lineStyle: { color: "#394759" } }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
     yAxis: { type: "category", data: groupRows.map((item) => item.name), axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: "#dce4ee", fontSize: 14, fontWeight: 600 } },
     series: [{
@@ -434,14 +471,14 @@ export function Dashboard({
             <section className="overview-grid">
               <article className="terminal-panel rotation-panel">
                 <div className="panel-heading">
-                  <div><span className="eyebrow">ETF 分类样本 · 公式计算</span><h2>板块份额变化</h2><p>按基金简称归类 · 当前展示 {currentPeriod} 官方份额差</p></div>
+                  <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>板块份额变化</h2><p>{terminal.classificationVersion ?? "未标版本"} · 当前展示 {currentPeriod} 官方份额差</p></div>
                   <div className="panel-kpis"><span><small>样本净变化</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
                 </div>
                 <ReactECharts className="rotation-chart" option={rotationOption} notMerge lazyUpdate />
                 <div className="insight-row">
                   <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中份额变化最显著。</p></span>
                   <span><i>02</i><p><strong>集中度 {crowding}%</strong>前三流入方向占可见流入样本。</p></span>
-                  <span><i>03</i><p><strong>口径有限</strong>分类来自简称映射，点击雷达核对 ETF。</p></span>
+                  <span><i>03</i><p><strong>口径可审计</strong>官方类型优先，低置信度产品不进入汇总。</p></span>
                 </div>
               </article>
 
@@ -533,10 +570,10 @@ export function Dashboard({
       {selected && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
-            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
+            <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {groupTypeLabels[selected.groupType ?? "other"] ?? selected.groupType} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
             <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.coverage} 个官方快照</small></div>
             <div className="drawer-periods">{periods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
-            <div className="drawer-note"><Info size={18} /><p><strong>如何阅读</strong>当前指标是 ETF 份额变化，不包含净值，因此不等同于资金金额。{selected.market === "SZSE" ? "深市当前只有官方单日快照，变化值保持为空。" : "历史周期会随每日快照自然积累。"}</p></div>
+            <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；估算资金仅在净值与区间份额同时完整时提供。{selected.market === "SZSE" ? "深市当前只有官方单日快照，变化值保持为空。" : "历史周期会随每日快照自然积累。"}</p></div>
           </aside>
         </div>
       )}

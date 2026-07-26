@@ -11,11 +11,16 @@ export interface EtfTerminalInstrument {
   name: string;
   market?: "SSE" | "SZSE";
   category: string;
+  groupType?: string;
   assetClass?: string;
   classificationSource?: string;
+  classificationConfidence?: string;
+  classificationRule?: string;
+  includeInGroup?: boolean;
   shares: number | null;
   nav?: number | null;
   periods: Partial<Record<FlowPeriod, number | null>>;
+  estimatedCashPeriods?: Partial<Record<FlowPeriod, number | null>>;
   coverage: number;
 }
 
@@ -24,13 +29,19 @@ export interface EtfTerminalData {
   instruments: EtfTerminalInstrument[];
   groupPeriods: Array<{
     name: string;
+    groupType?: string;
     periods: Partial<Record<FlowPeriod, number | null>>;
+    estimatedCashPeriods?: Partial<Record<FlowPeriod, number | null>>;
+    componentCount?: number;
+    comparableCount?: Partial<Record<FlowPeriod, number>>;
   }>;
   availablePeriods?: FlowPeriod[];
   classification?: string;
   classificationVersion?: string;
   universe?: {
     total: number;
+    excluded?: number;
+    exclusionCounts?: Record<string, number>;
     marketCounts: Record<string, number>;
     categoryCounts: Record<string, number>;
     periodComparable: number;
@@ -186,27 +197,27 @@ export const dashboardSnapshot: DashboardSnapshot = {
   etfTerminal: {
     dailySeries: [{ date: "07-14", value: 79.89, coverage: 878 }],
     availablePeriods: ["1d"],
-    classification: "官方投资类型优先，基金简称关键词补充",
-    classificationVersion: "2026-07-v2",
-    universe: { total: 10, marketCounts: { SSE: 10, SZSE: 0 }, categoryCounts: { "科技": 4, "宽基": 1, "医药": 2, "商品": 1, "港股海外": 2 }, periodComparable: 10 },
+    classification: "官方产品/投资类型优先，版本化名称规则补充；低置信度不进入板块汇总",
+    classificationVersion: "2026-07-v3",
+    universe: { total: 10, excluded: 0, exclusionCounts: {}, marketCounts: { SSE: 10, SZSE: 0 }, categoryCounts: { "科技": 4, "宽基": 1, "医药": 2, "周期资源": 1, "港股海外": 2 }, periodComparable: 10 },
     groupPeriods: [
-      { name: "科技", periods: { "1d": 38.51 } },
-      { name: "宽基", periods: { "1d": 5.08 } },
-      { name: "医药", periods: { "1d": -8.39 } },
-      { name: "商品", periods: { "1d": -4.36 } },
-      { name: "港股海外", periods: { "1d": -7.02 } },
+      { name: "科技", groupType: "industry", periods: { "1d": 38.51 }, componentCount: 4, comparableCount: { "1d": 4 } },
+      { name: "宽基", groupType: "broad", periods: { "1d": 5.08 }, componentCount: 1, comparableCount: { "1d": 1 } },
+      { name: "医药", groupType: "industry", periods: { "1d": -8.39 }, componentCount: 2, comparableCount: { "1d": 2 } },
+      { name: "周期资源", groupType: "industry", periods: { "1d": -4.36 }, componentCount: 1, comparableCount: { "1d": 1 } },
+      { name: "港股海外", groupType: "cross_border", periods: { "1d": -7.02 }, componentCount: 2, comparableCount: { "1d": 2 } },
     ],
     instruments: [
-      { code: "588170", name: "科创半导", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 13.98 }, coverage: 2 },
-      { code: "515880", name: "通信ETF", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 11.2 }, coverage: 2 },
-      { code: "515050", name: "5GETF", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 7.06 }, coverage: 2 },
-      { code: "560780", name: "半导设备", market: "SSE", category: "科技", assetClass: "股票", shares: null, periods: { "1d": 6.27 }, coverage: 2 },
-      { code: "512100", name: "1000ETF", market: "SSE", category: "宽基", assetClass: "股票", shares: null, periods: { "1d": 5.08 }, coverage: 2 },
-      { code: "512170", name: "医疗ETF", market: "SSE", category: "医药", assetClass: "股票", shares: null, periods: { "1d": -5.36 }, coverage: 2 },
-      { code: "513130", name: "恒生科技", market: "SSE", category: "港股海外", assetClass: "跨境", shares: null, periods: { "1d": -5 }, coverage: 2 },
-      { code: "560860", name: "工业有色", market: "SSE", category: "商品", assetClass: "商品", shares: null, periods: { "1d": -4.36 }, coverage: 2 },
-      { code: "512010", name: "医药ETF", market: "SSE", category: "医药", assetClass: "股票", shares: null, periods: { "1d": -3.03 }, coverage: 2 },
-      { code: "513770", name: "港股互联", market: "SSE", category: "港股海外", assetClass: "跨境", shares: null, periods: { "1d": -2.02 }, coverage: 2 },
+      { code: "588170", name: "科创半导", market: "SSE", category: "科技", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "technology", includeInGroup: true, shares: null, periods: { "1d": 13.98 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "515880", name: "通信ETF", market: "SSE", category: "科技", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "technology", includeInGroup: true, shares: null, periods: { "1d": 11.2 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "515050", name: "5GETF", market: "SSE", category: "科技", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "technology", includeInGroup: true, shares: null, periods: { "1d": 7.06 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "560780", name: "半导设备", market: "SSE", category: "科技", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "technology", includeInGroup: true, shares: null, periods: { "1d": 6.27 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "512100", name: "1000ETF", market: "SSE", category: "宽基", groupType: "broad", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "broad_market", includeInGroup: true, shares: null, periods: { "1d": 5.08 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "512170", name: "医疗ETF", market: "SSE", category: "医药", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "healthcare", includeInGroup: true, shares: null, periods: { "1d": -5.36 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "513130", name: "恒生科技", market: "SSE", category: "港股海外", groupType: "cross_border", assetClass: "跨境", classificationSource: "official_etf_type", classificationConfidence: "high", classificationRule: "cross_border", includeInGroup: true, shares: null, periods: { "1d": -5 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "560860", name: "工业有色", market: "SSE", category: "周期资源", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "cyclical_resources", includeInGroup: true, shares: null, periods: { "1d": -4.36 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "512010", name: "医药ETF", market: "SSE", category: "医药", groupType: "industry", assetClass: "股票", classificationSource: "name_rule", classificationConfidence: "medium", classificationRule: "healthcare", includeInGroup: true, shares: null, periods: { "1d": -3.03 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
+      { code: "513770", name: "港股互联", market: "SSE", category: "港股海外", groupType: "cross_border", assetClass: "跨境", classificationSource: "official_etf_type", classificationConfidence: "high", classificationRule: "cross_border", includeInGroup: true, shares: null, periods: { "1d": -2.02 }, estimatedCashPeriods: { "1d": null }, coverage: 2 },
     ],
   },
 };

@@ -8,15 +8,19 @@ export async function GET() {
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     unit: "100m shares",
-    scope: "SSE headline; SSE and SZSE terminal universe",
-    methodology: "adjacent trading-day share difference",
+    scope: "SSE share-change headline; eligible SSE and SZSE ETF terminal universe",
+    methodology: "versioned primary classification; adjacent trading-day share difference",
     evidence: {
       kind: "calculated",
       source: "official exchange share snapshots",
       formula: "current shares - previous trading-day shares",
       isCashFlow: false,
     },
-    limitations: ["SZSE current file has no source-published statistical date"],
+    limitations: [
+      "SZSE currently has one scale snapshot, so its period changes remain unavailable",
+      "Equity group assignment remains a conservative name inference until tracked-index metadata is collected",
+      "Share change is not cash flow; estimated cash requires both NAV and comparable shares",
+    ],
     flows: dashboardSnapshot.etfFlows,
     terminal: dashboardSnapshot.etfTerminal ?? null,
   });

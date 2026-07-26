@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading_desk.dashboard import _classify_etf, build_dashboard_snapshot
+from trading_desk.dashboard import (
+    _build_etf_terminal_data,
+    _classify_etf,
+    build_dashboard_snapshot,
+)
+from trading_desk.etf_classification import (
+    CLASSIFICATION_VERSION,
+    classify_etf,
+)
 
 
 def _write(frame: pd.DataFrame, path: Path) -> str:
@@ -75,9 +83,12 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert snapshot["etfTerminal"]["dailySeries"][-1]["coverage"] == 2
     assert "3d" not in snapshot["etfTerminal"]["instruments"][0]["periods"]
     szse_item = next(item for item in snapshot["etfTerminal"]["instruments"] if item["market"] == "SZSE")
-    assert szse_item["category"] == "债券货币"
+    assert szse_item["category"] == "货币"
+    assert szse_item["groupType"] == "money"
+    assert szse_item["classificationConfidence"] == "high"
     assert szse_item["periods"] == {"1d": None}
     assert snapshot["etfTerminal"]["universe"]["marketCounts"] == {"SSE": 2, "SZSE": 1}
+    assert snapshot["etfTerminal"]["classificationVersion"] == CLASSIFICATION_VERSION
     assert snapshot["marginSeries"][-1]["change"] == 0.0
     assert snapshot["marginSeries"][-1]["sseBalance"] == 0.0
     assert len(snapshot["connectSeries"]) == 3
@@ -89,4 +100,111 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
     assert _classify_etf("科创50ETF") == "宽基"
     assert _classify_etf("科创半导体ETF") == "科技"
-    assert _classify_etf("深市现金ETF", "货币市场基金") == "债券货币"
+    assert _classify_etf("深市现金ETF", "货币市场基金") == "货币"
+
+
+def test_etf_classification_blocks_known_cross_category_pollution() -> None:
+    cases = {
+        "科创债券": "债券",
+        "科创医药": "医药",
+        "科创生物": "医药",
+        "科创板50": "宽基",
+        "科创100": "宽基",
+        "科创200": "宽基",
+        "港股通信息技术ETF": "港股海外",
+        "中韩芯片ETF": "港股海外",
+        "科创AI": "人工智能机器人",
+        "科创机械": "新能源制造",
+    }
+    for name, expected in cases.items():
+        assert classify_etf(name=name).category == expected
+
+
+def test_etf_classification_excludes_non_etf_products_and_unmatched_groups() -> None:
+    lof = classify_etf(
+        name="人工智能LOF",
+        code="161631",
+        market="SZSE",
+        etf_type="LOF",
+        investment_type="股票基金",
+    )
+    assert lof.eligible is False
+    assert lof.exclusion_reason == "非ETF产品"
+
+    unmatched = classify_etf(
+        name="治理ETF",
+        code="510010",
+        market="SSE",
+        etf_type="单市",
+    )
+    assert unmatched.category == "其他"
+    assert unmatched.include_in_group is False
+    assert unmatched.confidence == "low"
+
+
+def test_etf_group_aggregation_keeps_share_and_cash_estimates_separate() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-20",
+                "instrument_code": "512480",
+                "instrument_name": "半导体ETF",
+                "shares": 100_000_000,
+                "nav": 2.0,
+                "etf_type": "跨市",
+                "investment_type": None,
+            },
+            {
+                "trade_date": "2026-07-21",
+                "instrument_code": "512480",
+                "instrument_name": "半导体ETF",
+                "shares": 120_000_000,
+                "nav": 2.0,
+                "etf_type": "跨市",
+                "investment_type": None,
+            },
+            {
+                "trade_date": "2026-07-20",
+                "instrument_code": "588080",
+                "instrument_name": "科创板50",
+                "shares": 200_000_000,
+                "nav": None,
+                "etf_type": "单市",
+                "investment_type": None,
+            },
+            {
+                "trade_date": "2026-07-21",
+                "instrument_code": "588080",
+                "instrument_name": "科创板50",
+                "shares": 190_000_000,
+                "nav": None,
+                "etf_type": "单市",
+                "investment_type": None,
+            },
+        ]
+    )
+    terminal = _build_etf_terminal_data(
+        frame,
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-21",
+                    "instrument_code": "159995",
+                    "instrument_name": "芯片ETF",
+                    "shares": 80_000_000,
+                    "nav": 1.2,
+                    "etf_type": "ETF",
+                    "investment_type": "股票基金",
+                }
+            ]
+        ),
+        ["2026-07-20", "2026-07-21"],
+    )
+    groups = {item["name"]: item for item in terminal["groupPeriods"]}
+
+    assert groups["科技"]["periods"]["1d"] == 0.2
+    assert groups["科技"]["estimatedCashPeriods"]["1d"] == 0.4
+    assert groups["科技"]["componentCount"] == 2
+    assert groups["科技"]["comparableCount"]["1d"] == 1
+    assert groups["宽基"]["periods"]["1d"] == -0.1
+    assert groups["宽基"]["estimatedCashPeriods"]["1d"] is None

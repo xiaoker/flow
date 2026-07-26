@@ -113,10 +113,13 @@ test("exposes ETF terminal coverage without inventing unavailable periods", asyn
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.deepEqual(payload.terminal.availablePeriods, ["1d"]);
+  assert.equal(payload.terminal.classificationVersion, "2026-07-v3");
+  assert.equal(payload.terminal.groupPeriods[0].groupType, "industry");
   assert.equal(payload.terminal.instruments[0].periods["1d"], 13.98);
   assert.equal(payload.terminal.instruments[0].periods["1w"], undefined);
   assert.equal(payload.evidence.kind, "calculated");
   assert.equal(payload.evidence.isCashFlow, false);
+  assert.match(payload.limitations.join(" "), /tracked-index metadata/);
 });
 
 test("labels margin fields as official balances rather than net capital flow", async () => {
