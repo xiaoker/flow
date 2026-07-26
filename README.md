@@ -53,8 +53,9 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 
 - Worker：`flow`
 - D1：`flow`（APAC）
-- R2：`flow`（Standard，`dashboard/` 保留 365 天，`market-data/` 原始证据与历史快照保留 1,825 天）
+- R2：`flow`（Standard，`dashboard/` 保留 365 天；`market-data/` 不自动过期；`market-data/raw/` 使用无限期 Bucket Lock）
 - D1：ETF 规范化日表滚动保留 365 天，体积较大的最新页面派生快照保留 30 天；完整历史快照正文放在 R2，D1 只保存日期索引
+- ETF 长周期：R2 保存最近 260 个交易日的紧凑日变化状态，按内容哈希发布；页面周期值为每日官方份额变化累计，不把派生数据冒充原始数据
 - 部署配置：`web/wrangler.jsonc`
 
 上述资源均位于项目所有者自己的 Cloudflare 账号，不依赖 Sites 控制面。
@@ -67,6 +68,15 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 .venv/bin/python scripts/select_recent_trading_dates.py --count 3
 .venv/bin/python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
 ```
+
+从远端历史快照重新生成 ETF 长周期状态（只读取历史对象，不修改原始文件）：
+
+```bash
+.venv/bin/python scripts/rebuild_remote_etf_flow_state.py \
+  --output /tmp/flow-etf-flow-state-v3.json
+```
+
+人工复核摘要后增加 `--publish`，会写入新的内容哈希对象和 `latest.json` 指针。
 
 ## 文档
 

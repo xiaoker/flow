@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
 import type { DashboardSnapshot } from "@/app/lib/dashboard-data";
+import {
+  loadEtfFlowState,
+  mergeSnapshotIntoEtfFlowState,
+  persistEtfFlowState,
+} from "@/app/lib/etf-flow-state";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +13,7 @@ export const dynamic = "force-dynamic";
 const MAX_BODY_BYTES = 12_000_000;
 const MAX_ARTIFACTS = 16;
 const MAX_NORMALIZED_FILES = 2;
-const HISTORY_RETENTION_DAYS = 1825;
+const HISTORY_RETENTION_DAYS = 0;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -179,6 +184,33 @@ async function sha256Hex(content: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function putImmutableRaw(
+  bucket: R2Bucket,
+  key: string,
+  content: Uint8Array | string,
+  sha256: string,
+  options: R2PutOptions,
+): Promise<"created" | "existing"> {
+  const canHead = typeof bucket.head === "function";
+  const existing = canHead ? await bucket.head(key) : null;
+  if (existing) {
+    if (!key.includes(sha256) && existing.customMetadata?.sha256 !== sha256) {
+      throw new Error(`immutable_raw_conflict:${key}`);
+    }
+    return "existing";
+  }
+  try {
+    await bucket.put(key, content, options);
+    return "created";
+  } catch (error) {
+    const raced = canHead ? await bucket.head(key) : null;
+    if (raced && (key.includes(sha256) || raced.customMetadata?.sha256 === sha256)) {
+      return "existing";
+    }
+    throw error;
+  }
+}
+
 export async function POST(request: Request) {
   const runtime = await runtimeEnv();
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
@@ -217,7 +249,7 @@ export async function POST(request: Request) {
       const prefix = `market-data/raw/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}`;
       const rawKey = `${prefix}.${artifact.extension}`;
       const metadataKey = `${prefix}.metadata.json`;
-      await runtime.RAW_BUCKET.put(rawKey, raw, {
+      await putImmutableRaw(runtime.RAW_BUCKET, rawKey, raw, artifact.sha256, {
         httpMetadata: { contentType: artifact.contentType },
         customMetadata: {
           sourceId: artifact.sourceId,
@@ -226,10 +258,15 @@ export async function POST(request: Request) {
           sha256: artifact.sha256,
         },
       });
-      await runtime.RAW_BUCKET.put(
+      await putImmutableRaw(
+        runtime.RAW_BUCKET,
         metadataKey,
         JSON.stringify({ ...artifact.metadata, release_id: artifact.releaseId, archived_raw_key: rawKey }),
-        { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+        artifact.sha256,
+        {
+          httpMetadata: { contentType: "application/json; charset=utf-8" },
+          customMetadata: { sha256: artifact.sha256 },
+        },
       );
       const normalizedKeys: string[] = [];
       for (const normalized of artifact.normalized) {
@@ -318,6 +355,17 @@ export async function POST(request: Request) {
       )
       .run();
 
+    const previousState = await loadEtfFlowState(runtime.RAW_BUCKET);
+    const mergedState = mergeSnapshotIntoEtfFlowState(
+      previousState,
+      history.snapshot,
+      snapshotSha256,
+    );
+    const statePointer =
+      mergedState && mergedState !== previousState
+        ? await persistEtfFlowState(runtime.RAW_BUCKET, mergedState)
+        : null;
+
     return NextResponse.json({
       status: "archived",
       asOf: history.asOf,
@@ -325,6 +373,13 @@ export async function POST(request: Request) {
       snapshotSha256,
       snapshotKey,
       manifestKey,
+      etfFlowState: statePointer
+        ? {
+            asOf: statePointer.asOf,
+            dateCount: statePointer.dateCount,
+            sha256: statePointer.sha256,
+          }
+        : { status: "unchanged" },
     });
   } catch (error) {
     console.error("history import failed", error);

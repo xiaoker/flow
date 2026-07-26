@@ -27,14 +27,19 @@ R2 flow
     ├── raw/{source}/{dataset}/{requestedDate}/{sha256}.{ext}
     ├── normalized/{source}/{dataset}/{requestedDate}/{rawSha}/{part}.csv
     ├── history/{tradeDate}/{snapshotSha}.json
-    └── history-manifests/{runId}/{tradeDate}.json
+    ├── history-manifests/{runId}/{tradeDate}.json
+    └── derived/etf-flow-state/{classificationVersion}/...
 
 D1 flow
 └── historical_snapshot
     └── 每个交易日一行：日期、快照哈希、R2 key、质量计数、来源数
 ```
 
-数十万 ETF 明细不重复塞入 D1。原始文件、规范化 CSV 和页面历史快照放在 R2；D1 只保存按日期定位所需的小索引。`market-data/` 生命周期为 1,825 天。按当前文件大小估算，约 500 个交易日的本次回补远低于 R2 免费层 10 GB 存储量，写入次数也远低于每月免费操作额度。
+数十万 ETF 明细不重复塞入 D1。原始文件、规范化 CSV 和页面历史快照放在 R2；D1 只保存按日期定位所需的小索引。`market-data/` 不设置自动过期，其中 `market-data/raw/` 还启用无限期 Bucket Lock，防止官方原件被覆盖或误删。
+
+ETF 长周期使用单独的紧凑派生状态：从通过质量门禁且哈希一致的历史快照提取单只 ETF 每日份额变化，保留最近 260 个交易日。1 日、3 日、1 周、2 周、1 月、3 月、6 月和 12 月均为每日变化逐日累计；今年以来为当年每日变化累计。派生状态使用内容哈希路径保存，并由带 SHA-256 的指针定位，加载时再次复验。原始文件始终是事实来源，派生状态可以随时重建。
+
+按当前文件大小估算，约 500 个交易日的回补和约 1.3 MB 的滚动 ETF 状态远低于 R2 免费层 10 GB 存储量。
 
 ## 按日查看
 
@@ -54,3 +59,5 @@ D1 flow
 4. 每个原始响应和规范化 CSV 均保存 SHA-256，Worker 收到后重新计算；
 5. 历史快照日期必须与包内 `asOf` 一致，质量失败的快照拒绝入库；
 6. 同一日期重复回补使用内容哈希键，D1 日期索引原子更新，可安全续跑。
+7. ETF 派生状态拒绝重复日期、重复代码、非有限数值和分类版本不一致；
+8. 官方原始对象按内容哈希命名，写入前先检查对象；Bucket Lock 启用后重试不会覆盖已有原件。

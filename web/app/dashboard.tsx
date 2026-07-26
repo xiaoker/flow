@@ -234,7 +234,7 @@ export function Dashboard({
         return (
           <span className={`heat-cell ${heatClass(value, periodMaxima.get(id) ?? 1)}`}>
             <strong>{formatFlow(value, 2)}</strong>
-            <small>{value === null || value === undefined ? "覆盖不足" : `${row.original.coverage} 日覆盖`}</small>
+            <small>{value === null || value === undefined ? "覆盖不足" : `${row.original.periodCoverage?.[id] ?? row.original.coverage} 日覆盖`}</small>
           </span>
         );
       },
@@ -360,7 +360,7 @@ export function Dashboard({
 
   const choosePeriod = (next: FlowPeriod) => {
     if (!availablePeriods.has(next)) {
-      setNotice(`${periods.find((item) => item.id === next)?.label}需要继续积累官方日快照`);
+      setNotice(`${periods.find((item) => item.id === next)?.label}尚未达到所需的官方交易日覆盖`);
       window.setTimeout(() => setNotice(""), 2400);
       return;
     }
@@ -471,7 +471,7 @@ export function Dashboard({
             <section className="overview-grid">
               <article className="terminal-panel rotation-panel">
                 <div className="panel-heading">
-                  <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>板块份额变化</h2><p>{terminal.classificationVersion ?? "未标版本"} · 当前展示 {currentPeriod} 官方份额差</p></div>
+                  <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>板块份额变化</h2><p>{terminal.classificationVersion ?? "未标版本"} · {terminal.calculation ?? `当前展示 ${currentPeriod} 官方份额差`}</p></div>
                   <div className="panel-kpis"><span><small>样本净变化</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
                 </div>
                 <ReactECharts className="rotation-chart" option={rotationOption} notMerge lazyUpdate />
@@ -571,9 +571,9 @@ export function Dashboard({
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {groupTypeLabels[selected.groupType ?? "other"] ?? selected.groupType} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
-            <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.coverage} 个官方快照</small></div>
+                <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值</small></div>
             <div className="drawer-periods">{periods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
-            <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；估算资金仅在净值与区间份额同时完整时提供。{selected.market === "SZSE" ? "深市当前只有官方单日快照，变化值保持为空。" : "历史周期会随每日快照自然积累。"}</p></div>
+            <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。估算资金仅在净值与区间份额同时完整时提供。</p></div>
           </aside>
         </div>
       )}

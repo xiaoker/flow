@@ -22,6 +22,7 @@ export interface EtfTerminalInstrument {
   periods: Partial<Record<FlowPeriod, number | null>>;
   estimatedCashPeriods?: Partial<Record<FlowPeriod, number | null>>;
   coverage: number;
+  periodCoverage?: Partial<Record<FlowPeriod, number>>;
 }
 
 export interface EtfTerminalData {
@@ -38,6 +39,13 @@ export interface EtfTerminalData {
   availablePeriods?: FlowPeriod[];
   classification?: string;
   classificationVersion?: string;
+  calculation?: string;
+  historyCoverage?: {
+    from: string;
+    to: string;
+    tradingDays: number;
+    stateVersion: number;
+  };
   universe?: {
     total: number;
     excluded?: number;

@@ -1,4 +1,8 @@
 import { dashboardSnapshot, type DashboardSnapshot } from "./dashboard-data";
+import {
+  enrichSnapshotWithEtfFlowState,
+  loadEtfFlowState,
+} from "./etf-flow-state";
 import { isPublishableSnapshot } from "./snapshot-policy.mjs";
 
 type RuntimeEnv = {
@@ -49,7 +53,8 @@ export function isDashboardSnapshot(value: unknown): value is DashboardSnapshot 
 }
 
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const db = (await runtimeEnv()).DB;
+  const runtime = await runtimeEnv();
+  const db = runtime.DB;
   if (!db) return dashboardSnapshot;
 
   try {
@@ -64,9 +69,11 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
       .first<{ payload_json: string }>();
     if (!row) return dashboardSnapshot;
     const parsed: unknown = JSON.parse(row.payload_json);
-    return isDashboardSnapshot(parsed) && isPublishableSnapshot(parsed)
-      ? parsed
-      : dashboardSnapshot;
+    if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) {
+      return dashboardSnapshot;
+    }
+    const state = await loadEtfFlowState(runtime.RAW_BUCKET);
+    return enrichSnapshotWithEtfFlowState(parsed, state);
   } catch {
     return dashboardSnapshot;
   }
@@ -120,7 +127,11 @@ async function readHistoricalSnapshot(
     if (!object) return null;
     const parsed: unknown = JSON.parse(await object.text());
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) return null;
-    return { snapshot: parsed, exact };
+    const state = await loadEtfFlowState(runtime.RAW_BUCKET);
+    return {
+      snapshot: enrichSnapshotWithEtfFlowState(parsed, state),
+      exact,
+    };
   } catch {
     return null;
   }

@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.wrangler/
 .ipynb_checkpoints/
 *.egg-info/
 

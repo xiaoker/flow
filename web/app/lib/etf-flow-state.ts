@@ -1,0 +1,442 @@
+import type {
+  DashboardSnapshot,
+  EtfTerminalData,
+  EtfTerminalInstrument,
+  FlowPeriod,
+} from "@/app/lib/dashboard-data";
+
+export const ETF_FLOW_STATE_VERSION = 1;
+export const ETF_CLASSIFICATION_VERSION = "2026-07-v3";
+export const ETF_FLOW_STATE_MAX_DATES = 260;
+export const ETF_FLOW_STATE_POINTER_KEY =
+  `market-data/derived/etf-flow-state/${ETF_CLASSIFICATION_VERSION}/latest.json`;
+
+const PERIOD_WINDOWS: Partial<Record<FlowPeriod, number>> = {
+  "1d": 1,
+  "3d": 3,
+  "1w": 5,
+  "2w": 10,
+  "1m": 21,
+  "3m": 63,
+  "6m": 126,
+  "12m": 252,
+};
+const PERIOD_ORDER: FlowPeriod[] = [
+  "1d",
+  "3d",
+  "1w",
+  "2w",
+  "1m",
+  "3m",
+  "6m",
+  "ytd",
+  "12m",
+];
+
+type StateInstrument = {
+  code: string;
+  name: string;
+  market: "SSE" | "SZSE";
+  category: string;
+  groupType?: string;
+  assetClass?: string;
+  classificationSource?: string;
+  classificationConfidence?: string;
+  classificationRule?: string;
+  includeInGroup?: boolean;
+  values: Array<number | null>;
+};
+
+export type EtfFlowState = {
+  version: 1;
+  classificationVersion: string;
+  calculationMethod: "sum_of_daily_official_share_changes";
+  generatedAt: string;
+  dates: string[];
+  instruments: StateInstrument[];
+  sourceSnapshots: Array<{ date: string; sha256: string; file?: string }>;
+  quality: {
+    snapshotCount: number;
+    instrumentCount: number;
+    populatedValues: number;
+    rejectedRows: number;
+    duplicateRows: number;
+    status: "pass" | "conditional_pass";
+  };
+};
+
+type StatePointer = {
+  version: 1;
+  classificationVersion: string;
+  objectKey: string;
+  sha256: string;
+  asOf: string;
+  dateCount: number;
+  updatedAt: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isEtfFlowState(value: unknown): value is EtfFlowState {
+  if (!isRecord(value)) return false;
+  if (
+    value.version !== ETF_FLOW_STATE_VERSION ||
+    value.classificationVersion !== ETF_CLASSIFICATION_VERSION ||
+    value.calculationMethod !== "sum_of_daily_official_share_changes" ||
+    !Array.isArray(value.dates) ||
+    value.dates.length === 0 ||
+    value.dates.length > ETF_FLOW_STATE_MAX_DATES ||
+    !value.dates.every((date) => typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) ||
+    !Array.isArray(value.instruments)
+  ) {
+    return false;
+  }
+  return value.instruments.every((item) => {
+    if (!isRecord(item)) return false;
+    return Boolean(
+      typeof item.code === "string" &&
+        /^\d{6}$/.test(item.code) &&
+        (item.market === "SSE" || item.market === "SZSE") &&
+        typeof item.name === "string" &&
+        typeof item.category === "string" &&
+        Array.isArray(item.values) &&
+        item.values.length === value.dates.length &&
+        item.values.every(
+          (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
+        ),
+    );
+  });
+}
+
+async function sha256Hex(content: string): Promise<string> {
+  const bytes = new TextEncoder().encode(content);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export async function loadEtfFlowState(
+  bucket?: R2Bucket,
+): Promise<EtfFlowState | null> {
+  if (!bucket || typeof bucket.get !== "function") return null;
+  try {
+    const pointerObject = await bucket.get(ETF_FLOW_STATE_POINTER_KEY);
+    if (!pointerObject) return null;
+    const pointer: unknown = JSON.parse(await pointerObject.text());
+    if (
+      !isRecord(pointer) ||
+      pointer.version !== ETF_FLOW_STATE_VERSION ||
+      pointer.classificationVersion !== ETF_CLASSIFICATION_VERSION ||
+      typeof pointer.objectKey !== "string" ||
+      typeof pointer.sha256 !== "string"
+    ) {
+      return null;
+    }
+    const stateObject = await bucket.get(pointer.objectKey);
+    if (!stateObject) return null;
+    const body = await stateObject.text();
+    if ((await sha256Hex(body)) !== pointer.sha256) return null;
+    const state: unknown = JSON.parse(body);
+    return isEtfFlowState(state) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function persistEtfFlowState(
+  bucket: R2Bucket,
+  state: EtfFlowState,
+): Promise<StatePointer> {
+  if (!isEtfFlowState(state)) throw new Error("invalid_etf_flow_state");
+  const body = JSON.stringify(state);
+  const sha256 = await sha256Hex(body);
+  const asOf = state.dates.at(-1) ?? "";
+  const objectKey =
+    `market-data/derived/etf-flow-state/${ETF_CLASSIFICATION_VERSION}/${asOf}/${sha256}.json`;
+  await bucket.put(objectKey, body, {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: {
+      classificationVersion: ETF_CLASSIFICATION_VERSION,
+      calculationMethod: state.calculationMethod,
+      sha256,
+      asOf,
+    },
+  });
+  const pointer: StatePointer = {
+    version: ETF_FLOW_STATE_VERSION,
+    classificationVersion: ETF_CLASSIFICATION_VERSION,
+    objectKey,
+    sha256,
+    asOf,
+    dateCount: state.dates.length,
+    updatedAt: new Date().toISOString(),
+  };
+  await bucket.put(ETF_FLOW_STATE_POINTER_KEY, JSON.stringify(pointer), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { sha256, asOf },
+  });
+  return pointer;
+}
+
+function instrumentKey(item: { market?: string; code: string }): string {
+  return `${item.market ?? "SSE"}:${item.code}`;
+}
+
+export function mergeSnapshotIntoEtfFlowState(
+  previous: EtfFlowState | null,
+  snapshot: DashboardSnapshot,
+  sourceSnapshotSha256: string,
+): EtfFlowState | null {
+  const terminal = snapshot.etfTerminal;
+  if (
+    !terminal ||
+    terminal.classificationVersion !== ETF_CLASSIFICATION_VERSION ||
+    !terminal.instruments.length
+  ) {
+    return previous;
+  }
+  const dates = [...new Set([...(previous?.dates ?? []), snapshot.asOf])]
+    .sort()
+    .slice(-ETF_FLOW_STATE_MAX_DATES);
+  const dateIndex = new Map(dates.map((date, index) => [date, index]));
+  const rows = new Map<string, StateInstrument>();
+
+  for (const item of previous?.instruments ?? []) {
+    const values = Array<number | null>(dates.length).fill(null);
+    previous?.dates.forEach((date, index) => {
+      const nextIndex = dateIndex.get(date);
+      if (nextIndex !== undefined) values[nextIndex] = item.values[index] ?? null;
+    });
+    rows.set(instrumentKey(item), { ...item, values });
+  }
+
+  const currentIndex = dateIndex.get(snapshot.asOf);
+  if (currentIndex === undefined) return previous;
+  for (const item of terminal.instruments) {
+    const value = item.periods["1d"];
+    if (value === null || value === undefined || !Number.isFinite(value)) continue;
+    const key = instrumentKey(item);
+    const existing = rows.get(key);
+    const row: StateInstrument = {
+      code: item.code,
+      name: item.name,
+      market: item.market ?? "SSE",
+      category: item.category,
+      groupType: item.groupType,
+      assetClass: item.assetClass,
+      classificationSource: item.classificationSource,
+      classificationConfidence: item.classificationConfidence,
+      classificationRule: item.classificationRule,
+      includeInGroup: item.includeInGroup,
+      values: existing?.values ?? Array<number | null>(dates.length).fill(null),
+    };
+    row.values[currentIndex] = Number(value.toFixed(6));
+    rows.set(key, row);
+  }
+
+  const instruments = [...rows.values()]
+    .filter((item) => item.values.some((value) => value !== null))
+    .sort((left, right) =>
+      `${left.market}:${left.code}`.localeCompare(`${right.market}:${right.code}`),
+    );
+  const sourceSnapshots = [
+    ...(previous?.sourceSnapshots ?? []).filter((item) => dates.includes(item.date)),
+  ].filter((item) => item.date !== snapshot.asOf);
+  sourceSnapshots.push({ date: snapshot.asOf, sha256: sourceSnapshotSha256 });
+  sourceSnapshots.sort((left, right) => left.date.localeCompare(right.date));
+  const populatedValues = instruments.reduce(
+    (total, item) => total + item.values.filter((value) => value !== null).length,
+    0,
+  );
+  return {
+    version: ETF_FLOW_STATE_VERSION,
+    classificationVersion: ETF_CLASSIFICATION_VERSION,
+    calculationMethod: "sum_of_daily_official_share_changes",
+    generatedAt: new Date().toISOString(),
+    dates,
+    instruments,
+    sourceSnapshots,
+    quality: {
+      snapshotCount: dates.length,
+      instrumentCount: instruments.length,
+      populatedValues,
+      rejectedRows: previous?.quality.rejectedRows ?? 0,
+      duplicateRows: previous?.quality.duplicateRows ?? 0,
+      status:
+        (previous?.quality.rejectedRows ?? 0) === 0 &&
+        (previous?.quality.duplicateRows ?? 0) === 0
+          ? "pass"
+          : "conditional_pass",
+    },
+  };
+}
+
+function periodIndexes(
+  dates: string[],
+  asOf: string,
+): Partial<Record<FlowPeriod, number[]>> {
+  const eligible = dates
+    .map((date, index) => ({ date, index }))
+    .filter((item) => item.date <= asOf);
+  const output: Partial<Record<FlowPeriod, number[]>> = {};
+  for (const [period, count] of Object.entries(PERIOD_WINDOWS) as Array<
+    [FlowPeriod, number]
+  >) {
+    if (eligible.length >= count) {
+      output[period] = eligible.slice(-count).map((item) => item.index);
+    }
+  }
+  const year = asOf.slice(0, 4);
+  const yearRows = eligible.filter((item) => item.date.startsWith(year));
+  const hasPriorYear = eligible.some((item) => item.date.slice(0, 4) < year);
+  if (hasPriorYear && yearRows.length) {
+    output.ytd = yearRows.map((item) => item.index);
+  }
+  return output;
+}
+
+function sumValues(
+  values: Array<number | null>,
+  indexes: number[],
+): { value: number | null; coverage: number } {
+  const observed = indexes
+    .map((index) => values[index])
+    .filter((value): value is number => value !== null && value !== undefined);
+  return {
+    value: observed.length
+      ? Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2))
+      : null,
+    coverage: observed.length,
+  };
+}
+
+export function enrichSnapshotWithEtfFlowState(
+  snapshot: DashboardSnapshot,
+  state: EtfFlowState | null,
+): DashboardSnapshot {
+  const terminal = snapshot.etfTerminal;
+  if (!terminal || !state || !state.dates.some((date) => date <= snapshot.asOf)) {
+    return snapshot;
+  }
+  const indexes = periodIndexes(state.dates, snapshot.asOf);
+  const availablePeriods = PERIOD_ORDER.filter((period) => indexes[period]?.length);
+  if (!availablePeriods.length) return snapshot;
+  const stateRows = new Map(
+    state.instruments.map((item) => [instrumentKey(item), item]),
+  );
+  const instruments: EtfTerminalInstrument[] = terminal.instruments.map((item) => {
+    const stateItem = stateRows.get(instrumentKey(item));
+    if (!stateItem) return item;
+    const periods: EtfTerminalInstrument["periods"] = {};
+    const estimatedCashPeriods: NonNullable<
+      EtfTerminalInstrument["estimatedCashPeriods"]
+    > = {};
+    const periodCoverage: Partial<Record<FlowPeriod, number>> = {};
+    for (const period of availablePeriods) {
+      const result = sumValues(stateItem.values, indexes[period] ?? []);
+      periods[period] = result.value;
+      periodCoverage[period] = result.coverage;
+      estimatedCashPeriods[period] =
+        result.value === null || item.nav === null || item.nav === undefined
+          ? null
+          : Number((result.value * item.nav).toFixed(2));
+    }
+    return {
+      ...item,
+      category: stateItem.category,
+      groupType: stateItem.groupType,
+      assetClass: stateItem.assetClass,
+      classificationSource: stateItem.classificationSource,
+      classificationConfidence: stateItem.classificationConfidence,
+      classificationRule: stateItem.classificationRule,
+      includeInGroup: stateItem.includeInGroup,
+      periods,
+      estimatedCashPeriods,
+      coverage: Math.max(0, ...Object.values(periodCoverage)),
+      periodCoverage,
+    };
+  });
+
+  const groups = new Map<string, EtfTerminalData["groupPeriods"][number]>();
+  for (const item of instruments) {
+    if (!item.includeInGroup) continue;
+    const group = groups.get(item.category) ?? {
+      name: item.category,
+      groupType: item.groupType,
+      periods: {},
+      estimatedCashPeriods: {},
+      componentCount: 0,
+      comparableCount: {},
+    };
+    group.componentCount = (group.componentCount ?? 0) + 1;
+    for (const period of availablePeriods) {
+      const value = item.periods[period];
+      if (value !== null && value !== undefined) {
+        group.periods[period] = Number(
+          ((group.periods[period] ?? 0) + value).toFixed(2),
+        );
+        group.comparableCount![period] =
+          (group.comparableCount?.[period] ?? 0) + 1;
+      }
+      const cash = item.estimatedCashPeriods?.[period];
+      if (cash !== null && cash !== undefined) {
+        group.estimatedCashPeriods![period] = Number(
+          ((group.estimatedCashPeriods?.[period] ?? 0) + cash).toFixed(2),
+        );
+      }
+    }
+    groups.set(item.category, group);
+  }
+  const groupPeriods = [...groups.values()].sort(
+    (left, right) =>
+      Math.abs(right.periods["1d"] ?? 0) - Math.abs(left.periods["1d"] ?? 0),
+  );
+
+  const eligibleDates = state.dates
+    .map((date, index) => ({ date, index }))
+    .filter((item) => item.date <= snapshot.asOf)
+    .slice(-60);
+  const dailySeries = eligibleDates.map(({ date, index }) => {
+    const observed = state.instruments
+      .map((item) => item.values[index])
+      .filter((value): value is number => value !== null && value !== undefined);
+    return {
+      date: date.slice(5),
+      value: Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2)),
+      coverage: observed.length,
+    };
+  });
+  const categoryCounts: Record<string, number> = {};
+  for (const item of instruments) {
+    categoryCounts[item.category] = (categoryCounts[item.category] ?? 0) + 1;
+  }
+  const periodComparable = instruments.filter(
+    (item) => item.periods["1d"] !== null && item.periods["1d"] !== undefined,
+  ).length;
+
+  return {
+    ...snapshot,
+    etfTerminal: {
+      ...terminal,
+      instruments,
+      groupPeriods,
+      dailySeries,
+      availablePeriods,
+      classificationVersion: ETF_CLASSIFICATION_VERSION,
+      calculation:
+        "各交易日官方份额变化逐日累计；单日变化=当日份额−前一交易日份额",
+      historyCoverage: {
+        from: state.dates[0],
+        to: state.dates.at(-1) ?? snapshot.asOf,
+        tradingDays: state.dates.length,
+        stateVersion: state.version,
+      },
+      universe: terminal.universe
+        ? { ...terminal.universe, categoryCounts, periodComparable }
+        : terminal.universe,
+    },
+  };
+}

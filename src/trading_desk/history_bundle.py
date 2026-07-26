@@ -12,7 +12,9 @@ import pandas as pd
 from .models import FetchArtifact
 
 
-HISTORY_RETENTION_DAYS = 1825
+# Zero is the wire-contract sentinel for indefinite R2 retention. Raw objects
+# are additionally protected by an R2 bucket lock on market-data/raw/.
+HISTORY_RETENTION_DAYS = 0
 
 
 def _read_json(path: Path) -> dict[str, Any]:

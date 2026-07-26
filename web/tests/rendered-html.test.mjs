@@ -122,6 +122,100 @@ test("exposes ETF terminal coverage without inventing unavailable periods", asyn
   assert.match(payload.limitations.join(" "), /tracked-index metadata/);
 });
 
+test("restores long ETF periods from the hash-verified R2 flow state", async () => {
+  const worker = await loadWorker();
+  const fallbackResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const snapshot = await fallbackResponse.json();
+  const dates = [
+    "2026-07-16",
+    "2026-07-17",
+    "2026-07-20",
+    "2026-07-21",
+    "2026-07-22",
+  ];
+  const state = {
+    version: 1,
+    classificationVersion: "2026-07-v3",
+    calculationMethod: "sum_of_daily_official_share_changes",
+    generatedAt: "2026-07-23T09:00:00+08:00",
+    dates,
+    instruments: [
+      {
+        code: "588170",
+        name: "科创半导",
+        market: "SSE",
+        category: "科技",
+        groupType: "industry",
+        assetClass: "股票",
+        classificationSource: "name_rule",
+        classificationConfidence: "medium",
+        classificationRule: "technology",
+        includeInGroup: true,
+        values: [1, 2, 3, 4, 5],
+      },
+    ],
+    sourceSnapshots: dates.map((date) => ({ date, sha256: "a".repeat(64) })),
+    quality: {
+      snapshotCount: 5,
+      instrumentCount: 1,
+      populatedValues: 5,
+      rejectedRows: 0,
+      duplicateRows: 0,
+      status: "pass",
+    },
+  };
+  const body = JSON.stringify(state);
+  const digest = createHash("sha256").update(body).digest("hex");
+  const stateKey = `market-data/derived/etf-flow-state/2026-07-v3/2026-07-22/${digest}.json`;
+  const pointer = {
+    version: 1,
+    classificationVersion: "2026-07-v3",
+    objectKey: stateKey,
+    sha256: digest,
+    asOf: "2026-07-22",
+    dateCount: 5,
+    updatedAt: "2026-07-23T09:00:00+08:00",
+  };
+  snapshot.asOf = "2026-07-22";
+  const db = {
+    prepare() {
+      return {
+        async first() {
+          return { payload_json: JSON.stringify(snapshot) };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      if (key.endsWith("/latest.json")) {
+        return { text: async () => JSON.stringify(pointer) };
+      }
+      if (key === stateKey) return { text: async () => body };
+      return null;
+    },
+  };
+
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/etf/flows"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.terminal.availablePeriods, ["1d", "3d", "1w"]);
+  const item = payload.terminal.instruments.find((row) => row.code === "588170");
+  assert.equal(item.periods["1d"], 5);
+  assert.equal(item.periods["3d"], 12);
+  assert.equal(item.periods["1w"], 15);
+  assert.equal(item.periodCoverage["1w"], 5);
+  assert.equal(payload.terminal.historyCoverage.tradingDays, 5);
+});
+
 test("labels margin fields as official balances rather than net capital flow", async () => {
   const worker = await loadWorker();
   const response = await worker.fetch(
@@ -242,7 +336,7 @@ test("archives full-source history with server-side hash verification", async ()
       runId: "history-20260722T091500+0800",
       startedAt: "2026-07-22T09:15:00+08:00",
       finishedAt: "2026-07-22T09:16:00+08:00",
-      retentionDays: 1825,
+      retentionDays: 0,
       asOf: snapshot.asOf,
       snapshot,
       artifacts: [

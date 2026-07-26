@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
+import {
+  enrichSnapshotWithEtfFlowState,
+  loadEtfFlowState,
+} from "@/app/lib/etf-flow-state";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
@@ -170,6 +174,33 @@ async function sha256Hex(content: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function putImmutableRaw(
+  bucket: R2Bucket,
+  key: string,
+  content: Uint8Array | string,
+  sha256: string,
+  options: R2PutOptions,
+): Promise<"created" | "existing"> {
+  const canHead = typeof bucket.head === "function";
+  const existing = canHead ? await bucket.head(key) : null;
+  if (existing) {
+    if (!key.includes(sha256) && existing.customMetadata?.sha256 !== sha256) {
+      throw new Error(`immutable_raw_conflict:${key}`);
+    }
+    return "existing";
+  }
+  try {
+    await bucket.put(key, content, options);
+    return "created";
+  } catch (error) {
+    const raced = canHead ? await bucket.head(key) : null;
+    if (raced && (key.includes(sha256) || raced.customMetadata?.sha256 === sha256)) {
+      return "existing";
+    }
+    throw error;
+  }
+}
+
 function cutoffDate(tradeDates: string[], days: number): string {
   const latest = [...tradeDates].sort().at(-1);
   if (!latest) throw new Error("missing_trade_date");
@@ -215,7 +246,7 @@ async function archiveEtfData(
       const prefix = `market-data/raw/${artifact.sourceId}/etf_scale/${artifact.tradeDate}/${artifact.sha256}`;
       const rawKey = `${prefix}.${artifact.extension}`;
       const metadataKey = `${prefix}.metadata.json`;
-      await runtime.RAW_BUCKET.put(rawKey, content, {
+      await putImmutableRaw(runtime.RAW_BUCKET, rawKey, content, artifact.sha256, {
         httpMetadata: { contentType: artifact.contentType },
         customMetadata: {
           sourceId: artifact.sourceId,
@@ -223,14 +254,19 @@ async function archiveEtfData(
           sha256: artifact.sha256,
         },
       });
-      await runtime.RAW_BUCKET.put(
+      await putImmutableRaw(
+        runtime.RAW_BUCKET,
         metadataKey,
         JSON.stringify({
           ...artifact.metadata,
           release_id: artifact.releaseId,
           archived_raw_key: rawKey,
         }),
-        { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+        artifact.sha256,
+        {
+          httpMetadata: { contentType: "application/json; charset=utf-8" },
+          customMetadata: { sha256: artifact.sha256 },
+        },
       );
 
       const existing = await runtime.DB
@@ -409,13 +445,19 @@ export async function POST(request: Request) {
       { DB: runtime.DB, RAW_BUCKET: runtime.RAW_BUCKET },
       payload,
     );
+    const flowState = await loadEtfFlowState(runtime.RAW_BUCKET);
+    const publishedSnapshot = enrichSnapshotWithEtfFlowState(snapshot, flowState);
     const publishedAt = new Date().toISOString();
-    const snapshotId = `${snapshot.asOf}:${crypto.randomUUID()}`;
-    const objectKey = `dashboard/${snapshot.asOf}/${publishedAt.replaceAll(":", "-")}.json`;
-    const snapshotBody = JSON.stringify(snapshot);
+    const snapshotId = `${publishedSnapshot.asOf}:${crypto.randomUUID()}`;
+    const objectKey = `dashboard/${publishedSnapshot.asOf}/${publishedAt.replaceAll(":", "-")}.json`;
+    const snapshotBody = JSON.stringify(publishedSnapshot);
     await runtime.RAW_BUCKET.put(objectKey, snapshotBody, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
-      customMetadata: { asOf: snapshot.asOf, gate: snapshot.gate },
+      customMetadata: {
+        asOf: publishedSnapshot.asOf,
+        gate: publishedSnapshot.gate,
+        etfFlowStateVersion: String(flowState?.version ?? 0),
+      },
     });
     await runtime.DB
       .prepare(
@@ -426,13 +468,13 @@ export async function POST(request: Request) {
       )
       .bind(
         snapshotId,
-        snapshot.asOf,
-        snapshot.observedAt,
+        publishedSnapshot.asOf,
+        publishedSnapshot.observedAt,
         snapshotBody,
         publishedAt,
-        snapshot.quality.pass,
-        snapshot.quality.warn,
-        snapshot.quality.fail,
+        publishedSnapshot.quality.pass,
+        publishedSnapshot.quality.warn,
+        publishedSnapshot.quality.fail,
         objectKey,
       )
       .run();
@@ -445,9 +487,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       status: "published",
-      asOf: snapshot.asOf,
+      asOf: publishedSnapshot.asOf,
       publishedAt,
       snapshotId,
+      etfFlowStateDates: flowState?.dates.length ?? 0,
       ...archiveResult,
     });
   } catch (error) {
