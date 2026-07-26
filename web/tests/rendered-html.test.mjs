@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { isPublishableSnapshot } from "../app/lib/snapshot-policy.mjs";
 
@@ -41,6 +42,13 @@ test("server-renders the trading flow dashboard", async () => {
   assert.doesNotMatch(html, /板块资金轮动|资金流全景/);
   assert.doesNotMatch(html, /β\s*压强/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("keeps the margin history preview inside its dashboard card", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.compact-panel\s*\{[^}]*overflow:\s*hidden/);
+  assert.match(css, /\.margin-spark\s*\{[^}]*grid-template-columns:\s*repeat\(12,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /\.margin-spark\s*>\s*div:nth-last-child\(n\s*\+\s*13\)\s*\{\s*display:\s*none/);
 });
 
 test("exposes connect trend series without inventing northbound direction", async () => {
