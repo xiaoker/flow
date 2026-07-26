@@ -149,6 +149,42 @@ def _concat(frames: deque[pd.DataFrame], columns: list[str] | None = None) -> pd
     return pd.DataFrame(columns=columns or [])
 
 
+def _discover_sse_trading_dates(
+    adapters: OfficialMarketAdapters, start_date: date, end_date: date
+) -> list[str]:
+    """Discover the official calendar in bounded yearly requests.
+
+    SSE intermittently rejects multi-year margin queries with HTTP 403. Annual
+    chunks keep each official request small and make transient rejection
+    recoverable without changing the source of truth.
+    """
+    frames: list[pd.DataFrame] = []
+    cursor = start_date
+    while cursor <= end_date:
+        chunk_end = min(end_date, date(cursor.year, 12, 31))
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                frame, _ = adapters.fetch_sse_margin(
+                    cursor.isoformat(), chunk_end.isoformat()
+                )
+                frames.append(frame)
+                last_error = None
+                break
+            except requests.HTTPError as exc:
+                last_error = exc
+                if attempt == 2:
+                    break
+                time.sleep(2**attempt)
+        if last_error is not None:
+            raise last_error
+        cursor = chunk_end + timedelta(days=1)
+    if not frames:
+        return []
+    calendar = pd.concat(frames, ignore_index=True)
+    return sorted(calendar["trade_date"].dropna().astype(str).unique().tolist())
+
+
 def _snapshot_for_date(
     *,
     trade_dates: list[str],
@@ -222,11 +258,8 @@ def run_history_backfill(
         session=build_session(), data_root=data_root, run_id=run_id
     )
     discovery_start = start_date - timedelta(days=400)
-    calendar_frame, _ = adapters.fetch_sse_margin(
-        discovery_start.isoformat(), end_date.isoformat()
-    )
-    all_dates = sorted(
-        calendar_frame["trade_date"].dropna().astype(str).unique().tolist()
+    all_dates = _discover_sse_trading_dates(
+        adapters, discovery_start, end_date
     )
     targets = [value for value in all_dates if start_date.isoformat() <= value <= end_date.isoformat()]
     if not targets:

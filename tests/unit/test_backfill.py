@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pandas as pd
 
 from trading_desk import backfill
-from trading_desk.backfill import EMPTY_CONNECT_COLUMNS, _publish, _snapshot_for_date
+from datetime import date
+
+import requests
+
+from trading_desk.backfill import (
+    EMPTY_CONNECT_COLUMNS,
+    _discover_sse_trading_dates,
+    _publish,
+    _snapshot_for_date,
+)
 
 
 def test_snapshot_for_date_resolves_relative_work_root(
@@ -75,3 +84,38 @@ def test_publish_recovers_from_extended_transient_503_window(monkeypatch) -> Non
     assert result == {"ok": True}
     assert post.call_count == 6
     assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8, 16]
+
+
+def test_calendar_discovery_uses_yearly_chunks_and_retries_403(monkeypatch) -> None:
+    adapters = Mock()
+    forbidden = requests.HTTPError("403")
+    adapters.fetch_sse_margin.side_effect = [
+        forbidden,
+        (
+            pd.DataFrame({"trade_date": ["2023-12-29"]}),
+            Mock(),
+        ),
+        (
+            pd.DataFrame({"trade_date": ["2024-01-02", "2024-12-31"]}),
+            Mock(),
+        ),
+        (
+            pd.DataFrame({"trade_date": ["2025-01-02"]}),
+            Mock(),
+        ),
+    ]
+    sleep = Mock()
+    monkeypatch.setattr(backfill.time, "sleep", sleep)
+
+    dates = _discover_sse_trading_dates(
+        adapters, date(2023, 11, 28), date(2025, 4, 30)
+    )
+
+    assert dates == ["2023-12-29", "2024-01-02", "2024-12-31", "2025-01-02"]
+    assert adapters.fetch_sse_margin.call_args_list == [
+        call("2023-11-28", "2023-12-31"),
+        call("2023-11-28", "2023-12-31"),
+        call("2024-01-01", "2024-12-31"),
+        call("2025-01-01", "2025-04-30"),
+    ]
+    sleep.assert_called_once_with(1)
