@@ -30,6 +30,38 @@ final result: passed
 
 ---
 
+# 日期选择与 ETF 折线图 Design QA（2026-07-28）
+
+Reference input:
+
+- `/var/folders/zx/r3tlq5gj4c3bxzy8hjnf9m8h0000gn/T/codex-clipboard-17b91121-c0b3-41c1-8e3a-4ee36069d0e8.png`（2594 × 1848）
+
+Implementation capture:
+
+- `docs/audits/2026-07-28-history-line/implementation.png`（1920 × 1881）
+
+Verified state:
+
+- Production `/?view=national`, latest official snapshot `2026-07-27`
+- Selected ETF `510300`
+- Official coverage `12 / 12`
+
+## Findings
+
+- P0: none.
+- P1 date interaction: selecting a calendar date no longer navigates immediately. The control keeps a draft date and requires an explicit “查看”; previous day, next day, and “最新” remain available for fast archive navigation.
+- P1 chart semantics: the selected ETF now renders an official total-share line/area chart. Historical anchors are reconstructed from the current official share count and each disclosed period change. It is explicitly labeled as ETF total shares, not national-team holdings or cash flow.
+- P1 missing-data behavior: fewer than two comparable official anchors produce an explanatory empty state instead of a fabricated line. This primarily protects SZSE rows whose archived period fields are not yet available.
+- P1 production stability: the first production pass exposed Cloudflare Worker error 1102 while switching dates. ETF Radar table processing is now deferred unless the radar view is active; the national-team page subsequently loaded and switched between archived/latest dates without console errors.
+- P2 visual fidelity: same-input comparison with the supplied reference confirms the intended terminal palette, cyan hierarchy, red/green market semantics, line-plus-area treatment, compact top controls, and wide chart/table composition. The reference’s long-term holder-disclosure/estimate curve was intentionally not copied because that source is not connected.
+- P2 readability: the date picker, confirmation action, chart title, legend, axis labels, point labels, and data-boundary note are legible at the 1920px production viewport.
+- Interaction coverage: browser-tested previous archive, latest return, preserved `view=national` query state, selected-row chart updates, and production reload.
+- Browser console: no errors after the Worker CPU fix.
+
+final result: passed
+
+---
+
 # 国家队持仓页面 Design QA（2026-07-28）
 
 Reference input:
