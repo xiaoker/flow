@@ -27,6 +27,10 @@ jobs:
     env:
       INPUT_DATES: ${{ inputs.dates }}
       PUBLISH_URL: https://flow.xiaoker.com/api/v1/admin/import
+      FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
 

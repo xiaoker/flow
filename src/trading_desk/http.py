@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from urllib.parse import parse_qsl, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -46,7 +48,66 @@ def build_session(settings: HttpSettings | None = None) -> requests.Session:
 
 def get(session: requests.Session, url: str, **kwargs: object) -> requests.Response:
     timeout = getattr(session, "request_timeout", (8.0, 25.0))
-    response = session.get(url, timeout=timeout, **kwargs)
+    parsed = urlparse(url)
+    is_sse_source = parsed.scheme == "https" and parsed.hostname == "query.sse.com.cn"
+    try:
+        response = session.get(url, timeout=timeout, **kwargs)
+        response.raise_for_status()
+        if is_sse_source:
+            _record_transport(kwargs, "direct")
+        return response
+    except requests.RequestException:
+        proxy = _source_proxy_config()
+        if not is_sse_source or proxy is None:
+            raise
+
+    proxy_url, proxy_headers = proxy
+    proxy_params: dict[str, object] = {
+        "path": parsed.path,
+        **dict(parse_qsl(parsed.query, keep_blank_values=True)),
+    }
+    request_params = kwargs.get("params")
+    if isinstance(request_params, dict):
+        proxy_params.update(
+            {
+                str(key): value
+                for key, value in request_params.items()
+                if not str(key).startswith("_flow_")
+            }
+        )
+    response = session.get(
+        proxy_url,
+        params=proxy_params,
+        headers=proxy_headers,
+        timeout=timeout,
+    )
     response.raise_for_status()
+    _record_transport(kwargs, "cloudflare_sse_relay")
     return response
 
+
+def _source_proxy_config() -> tuple[str, dict[str, str]] | None:
+    proxy_url = os.getenv("FLOW_SOURCE_PROXY_URL", "")
+    ingest_key = os.getenv("FLOW_INGEST_API_KEY", "")
+    access_id = os.getenv("FLOW_CF_ACCESS_CLIENT_ID", "")
+    access_secret = os.getenv("FLOW_CF_ACCESS_CLIENT_SECRET", "")
+    parsed = urlparse(proxy_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "flow.xiaoker.com"
+        or not ingest_key
+        or not access_id
+        or not access_secret
+    ):
+        return None
+    return proxy_url, {
+        "Authorization": f"Bearer {ingest_key}",
+        "CF-Access-Client-Id": access_id,
+        "CF-Access-Client-Secret": access_secret,
+    }
+
+
+def _record_transport(kwargs: dict[str, object], transport: str) -> None:
+    request_params = kwargs.get("params")
+    if isinstance(request_params, dict):
+        request_params["_flow_transport"] = transport

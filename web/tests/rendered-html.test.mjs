@@ -243,6 +243,32 @@ test("rejects unauthenticated snapshot imports", async () => {
   assert.equal(response.status, 401);
 });
 
+test("keeps the official-source relay private and allowlisted", async () => {
+  const worker = await loadWorker();
+  const unauthenticated = await worker.fetch(
+    new Request(
+      "http://localhost/api/v1/admin/source-proxy?path=/commonQuery.do",
+    ),
+    env,
+    context,
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const disallowed = await worker.fetch(
+    new Request(
+      "http://localhost/api/v1/admin/source-proxy?path=/anything&url=https://example.com",
+      { headers: { authorization: "Bearer test-key" } },
+    ),
+    { ...env, INGEST_API_KEY: "test-key" },
+    context,
+  );
+  assert.equal(disallowed.status, 400);
+  assert.deepEqual(await disallowed.json(), {
+    error: "invalid_source_request",
+    detail: "path is not allowlisted",
+  });
+});
+
 test("serves an archived dashboard for an explicitly selected date", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(
