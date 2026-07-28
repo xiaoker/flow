@@ -15,19 +15,21 @@ import type {
   FlowPeriod,
 } from "./lib/dashboard-data";
 
-const nationalTeamEtfs = [
-  { code: "510300", referenceName: "沪深300ETF 华泰柏瑞" },
-  { code: "510310", referenceName: "沪深300ETF 易方达" },
-  { code: "510330", referenceName: "沪深300ETF 华夏" },
-  { code: "510500", referenceName: "中证500ETF 南方" },
-  { code: "159915", referenceName: "创业板ETF 易方达" },
-  { code: "159919", referenceName: "沪深300ETF 嘉实" },
-  { code: "512100", referenceName: "中证1000ETF 南方" },
-  { code: "510050", referenceName: "上证50ETF 华夏" },
-  { code: "588080", referenceName: "科创50ETF 易方达" },
-  { code: "510180", referenceName: "上证180ETF 华安" },
-  { code: "159845", referenceName: "中证1000ETF 华夏" },
-  { code: "512500", referenceName: "中证500ETF 华夏" },
+// This derived observation pool stores codes only. Every displayed name and
+// value must come from the matching official ETF Radar row.
+const nationalTeamEtfCodes = [
+  "510300",
+  "510310",
+  "510330",
+  "510500",
+  "159915",
+  "159919",
+  "512100",
+  "510050",
+  "588080",
+  "510180",
+  "159845",
+  "512500",
 ] as const;
 
 const periodLabels: Record<FlowPeriod, string> = {
@@ -56,7 +58,6 @@ const historyPeriods: Array<{ id: FlowPeriod; label: string }> = [
 
 type NationalTeamRow = {
   code: string;
-  referenceName: string;
   instrument: EtfTerminalInstrument | null;
 };
 
@@ -83,19 +84,18 @@ export function NationalTeamView({
 }) {
   const rows = useMemo<NationalTeamRow[]>(() => {
     const byCode = new Map(terminal.instruments.map((item) => [item.code, item]));
-    return nationalTeamEtfs.map((item) => ({
-      ...item,
-      instrument: byCode.get(item.code) ?? null,
+    return nationalTeamEtfCodes.map((code) => ({
+      code,
+      instrument: byCode.get(code) ?? null,
     }));
   }, [terminal.instruments]);
-  const [selectedCode, setSelectedCode] = useState(nationalTeamEtfs[0].code);
+  const [selectedCode, setSelectedCode] = useState(nationalTeamEtfCodes[0]);
   const selected = rows.find((item) => item.code === selectedCode) ?? rows[0];
   const normalizedQuery = query.trim().toLowerCase();
   const filteredRows = rows.filter(
     (item) =>
       !normalizedQuery ||
       item.code.includes(normalizedQuery) ||
-      item.referenceName.toLowerCase().includes(normalizedQuery) ||
       item.instrument?.name.toLowerCase().includes(normalizedQuery),
   );
   const matchedRows = rows.filter((item) => item.instrument);
@@ -220,7 +220,7 @@ export function NationalTeamView({
         </div>
         <div className="national-chart-title">
           <div>
-            <strong>{selectedInstrument?.name ?? selected.referenceName} · 官方总份额</strong>
+            <strong>{selectedInstrument?.name ?? "原始 ETF 数据未匹配"} · 官方总份额</strong>
             <span>{selected.code} · 周期锚点复算 · 截至 {asOf}</span>
           </div>
           <span className="disclosure-pending">
@@ -281,7 +281,7 @@ export function NationalTeamView({
                       <td>{String(index + 1).padStart(2, "0")}</td>
                       <td>
                         <button type="button" onClick={() => setSelectedCode(row.code)}>
-                          <strong>{instrument?.name ?? row.referenceName}</strong>
+                          <strong>{instrument?.name ?? "原始数据未匹配"}</strong>
                           <small>{instrument?.category ?? "待匹配分类"}</small>
                           <CaretRight size={14} />
                         </button>
@@ -305,7 +305,7 @@ export function NationalTeamView({
         <aside className="terminal-panel national-detail">
           <div className="national-detail-header">
             <span className="eyebrow">选中 ETF</span>
-            <h2>{selected.instrument?.name ?? selected.referenceName}</h2>
+            <h2>{selected.instrument?.name ?? "原始 ETF 数据未匹配"}</h2>
             <p>{selected.code} · {selected.instrument?.market === "SZSE" ? "深交所" : "上交所"}</p>
           </div>
           <div className="national-detail-metrics">

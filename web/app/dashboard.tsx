@@ -61,6 +61,18 @@ const periods: Array<{ id: FlowPeriod; label: string }> = [
   { id: "12m", label: "12月" },
 ];
 
+const shareHistoryPeriods: Array<{ id: FlowPeriod; label: string }> = [
+  { id: "12m", label: "12月前" },
+  { id: "ytd", label: "年初" },
+  { id: "6m", label: "6月前" },
+  { id: "3m", label: "3月前" },
+  { id: "1m", label: "1月前" },
+  { id: "2w", label: "2周前" },
+  { id: "1w", label: "1周前" },
+  { id: "3d", label: "3日前" },
+  { id: "1d", label: "前一日" },
+];
+
 const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> = [
   { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
@@ -113,6 +125,10 @@ const confidenceLabels: Record<string, string> = {
 function formatFlow(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function compactDate(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.slice(5) : value;
 }
 
 function fallbackTerminal(snapshot: DashboardSnapshot): EtfTerminalData {
@@ -302,12 +318,17 @@ export function Dashboard({
   }), [terminal.dailySeries]);
 
   const connectSeries = useMemo(() => snapshot.connectSeries ?? [], [snapshot.connectSeries]);
+  const marketHistoryCoverage = snapshot.marketHistoryCoverage;
   const connectTrendOption = useMemo(() => ({
     animationDuration: 450,
     legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
-    grid: { left: 16, right: 20, top: 44, bottom: 26, containLabel: true },
+    grid: { left: 16, right: 20, top: 44, bottom: 54, containLabel: true },
+    dataZoom: [
+      { type: "inside", filterMode: "none" },
+      { type: "slider", height: 16, bottom: 7, borderColor: "#263648", backgroundColor: "#0b1420", fillerColor: "rgba(80,183,217,.14)", textStyle: { color: "#8795a8" } },
+    ],
     tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 } },
-    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13, formatter: compactDate } },
     yAxis: [
       { type: "value", name: "南向净买入", nameTextStyle: { color: "#8795a8", fontSize: 13 }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
       { type: "value", name: "北向成交", nameTextStyle: { color: "#8795a8", fontSize: 13 }, splitLine: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
@@ -321,9 +342,13 @@ export function Dashboard({
   const channelOption = useMemo(() => ({
     animationDuration: 450,
     legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
-    grid: { left: 12, right: 14, top: 42, bottom: 26, containLabel: true },
+    grid: { left: 12, right: 14, top: 42, bottom: 54, containLabel: true },
+    dataZoom: [
+      { type: "inside", filterMode: "none" },
+      { type: "slider", height: 16, bottom: 7, borderColor: "#263648", backgroundColor: "#0b1420", fillerColor: "rgba(80,183,217,.14)", textStyle: { color: "#8795a8" } },
+    ],
     tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 } },
-    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
+    xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13, formatter: compactDate } },
     yAxis: { type: "value", splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
     series: [
       { name: "沪港通南向", type: "bar", data: connectSeries.map((item) => item.southboundSseNet), itemStyle: { color: "#d95e61" } },
@@ -338,9 +363,13 @@ export function Dashboard({
     return {
       animationDuration: 450,
       legend: isBalance ? { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 } : { show: false },
-      grid: { left: 14, right: 18, top: 42, bottom: 28, containLabel: true },
+      grid: { left: 14, right: 18, top: 42, bottom: 54, containLabel: true },
+      dataZoom: [
+        { type: "inside", filterMode: "none" },
+        { type: "slider", height: 16, bottom: 7, borderColor: "#263648", backgroundColor: "#0b1420", fillerColor: "rgba(80,183,217,.14)", textStyle: { color: "#8795a8" } },
+      ],
       tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 }, valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${definition.unit}` },
-      xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
+      xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13, formatter: compactDate } },
       yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
       series: isBalance ? [
         { name: "沪深合计", type: "line", smooth: true, symbolSize: 7, data, lineStyle: { width: 3, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" } },
@@ -349,6 +378,55 @@ export function Dashboard({
       ] : [{ name: definition.label, type: "bar", barMaxWidth: 36, data, itemStyle: { color: marginDisplayMetric === "financingBuy" ? "#e36464" : "#f1ae42", borderRadius: [4, 4, 0, 0] } }],
     };
   }, [marginDisplayMetric, snapshot.marginSeries]);
+
+  const selectedShareHistory = useMemo(() => {
+    if (typeof selected?.shares !== "number") return [];
+    return [
+      ...shareHistoryPeriods.flatMap(({ id, label }) => {
+        const change = selected.periods[id];
+        return typeof change === "number"
+          ? [{ label, value: selected.shares! - change }]
+          : [];
+      }),
+      { label: "当前", value: selected.shares },
+    ];
+  }, [selected]);
+  const selectedShareChartOption = useMemo(() => ({
+    animationDuration: 350,
+    grid: { left: 62, right: 18, top: 18, bottom: 42 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "#111923",
+      borderColor: "#334155",
+      textStyle: { color: "#e7edf5", fontSize: 13 },
+      valueFormatter: (value: number) => `${Number(value).toFixed(2)} 亿份`,
+    },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: selectedShareHistory.map((item) => item.label),
+      axisLine: { lineStyle: { color: "#394759" } },
+      axisTick: { show: false },
+      axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 },
+    },
+    yAxis: {
+      type: "value",
+      scale: true,
+      splitLine: { lineStyle: { color: "rgba(68,82,102,.32)", type: "dashed" } },
+      axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 },
+    },
+    series: [{
+      name: "官方总份额",
+      type: "line",
+      smooth: 0.16,
+      showSymbol: true,
+      symbolSize: 6,
+      data: selectedShareHistory.map((item) => item.value),
+      lineStyle: { width: 2.5, color: "#e36464" },
+      itemStyle: { color: "#f1ae42", borderColor: "#132234", borderWidth: 2 },
+      areaStyle: { color: "rgba(227,100,100,.12)" },
+    }],
+  }), [selectedShareHistory]);
 
   const latestMetric = metricValue(snapshot, "etf");
   const marginMetric = metricValue(snapshot, "margin");
@@ -373,8 +451,8 @@ export function Dashboard({
     const url = new URL(window.location.href);
     if (date === latest) url.searchParams.delete("date");
     else url.searchParams.set("date", date);
-    if (view === "national") url.searchParams.set("view", "national");
-    else url.searchParams.delete("view");
+    if (view === "overview") url.searchParams.delete("view");
+    else url.searchParams.set("view", view);
     window.location.assign(`${url.pathname}${url.search}`);
   };
 
@@ -539,7 +617,7 @@ export function Dashboard({
               </article>
               <article className="terminal-panel compact-panel">
                 <div className="panel-heading"><div><span className="eyebrow">融资融券 · 官方汇总</span><h2>杠杆余额连续变化</h2></div><button className="link-button" onClick={() => setView("margin")} type="button">展开<CaretRight size={15} /></button></div>
-                <div className="margin-spark">{snapshot.marginSeries.map((item, index) => <div key={item.date}><span className={index === snapshot.marginSeries.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...snapshot.marginSeries.map((point) => point.balance))) / Math.max(1, Math.max(...snapshot.marginSeries.map((point) => point.balance)) - Math.min(...snapshot.marginSeries.map((point) => point.balance)))) * 42}%` }} /><strong>{item.date}</strong><small>{item.label}</small></div>)}</div>
+                <div className="margin-spark">{snapshot.marginSeries.slice(-12).map((item, index, rows) => <div key={item.date}><span className={index === rows.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...rows.map((point) => point.balance))) / Math.max(1, Math.max(...rows.map((point) => point.balance)) - Math.min(...rows.map((point) => point.balance)))) * 42}%` }} /><strong>{compactDate(item.date)}</strong><small>{item.label}</small></div>)}</div>
                 <p className="method-note"><Info size={15} />余额变化代表杠杆规模扩张或收缩，不直接等同多空方向。</p>
               </article>
             </section>
@@ -587,7 +665,7 @@ export function Dashboard({
         {view === "connect" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main connect-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度</p></div><div className="panel-kpis"><span><small>南向最新 · 公式计算</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交 · 官方</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
+              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度 · {marketHistoryCoverage?.connect.points ?? connectSeries.length} 个官方历史点{marketHistoryCoverage?.connect.from ? `（${marketHistoryCoverage.connect.from} 至 ${marketHistoryCoverage.connect.to}）` : ""}</p></div><div className="panel-kpis"><span><small>南向最新 · 公式计算</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交 · 官方</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
               {connectSeries.length ? <div className="detail-chart-grid"><div><h3>互联互通走势</h3><ReactECharts className="detail-chart" option={connectTrendOption} notMerge lazyUpdate /></div><div><h3>南向通道拆分</h3><ReactECharts className="detail-chart" option={channelOption} notMerge lazyUpdate /></div></div> : <div className="empty-chart"><Database size={30} /><strong>等待连续交易日</strong></div>}
               <div className="connect-kpi-strip">{snapshot.connect.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
             </article>
@@ -598,11 +676,11 @@ export function Dashboard({
         {view === "margin" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main margin-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；不直接解释为资金流入或看多看空</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
+              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；{marketHistoryCoverage?.margin.points ?? snapshot.marginSeries.length} 个官方历史点{marketHistoryCoverage?.margin.from ? `（${marketHistoryCoverage.margin.from} 至 ${marketHistoryCoverage.margin.to}）` : ""}</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
               <div className="margin-metric-tabs">{(Object.keys(marginMetricDefinitions) as MarginDisplayMetric[]).map((item) => <button className={marginDisplayMetric === item ? "active" : ""} key={item} onClick={() => setMarginDisplayMetric(item)} type="button">{marginMetricDefinitions[item].label}</button>)}</div>
               <ReactECharts className="margin-detail-chart" option={marginTrendOption} notMerge lazyUpdate />
               <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div></div>
-              <div className="margin-history compact-history">{snapshot.marginSeries.map((item) => <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={item.change === null || item.change === undefined ? "" : item.change >= 0 ? "text-in" : "text-out"}>{item.change === null || item.change === undefined ? "基准" : `${formatFlow(item.change, 2)} 亿元`}</span></div>)}</div>
+              <div className="margin-history compact-history">{snapshot.marginSeries.slice(-60).reverse().map((item) => <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={item.change === null || item.change === undefined ? "" : item.change >= 0 ? "text-in" : "text-out"}>{item.change === null || item.change === undefined ? "基准" : `${formatFlow(item.change, 2)} 亿元`}</span></div>)}</div>
             </article>
             <aside className="terminal-panel methodology"><Pulse size={24} /><h3>如何阅读</h3><p>{marginMetric?.delta}。余额变化只说明杠杆存量扩张或收缩，需要与指数趋势和成交额一起观察。</p><span>官方汇总 · 最新 {snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模，不叫净流入</p><p><b>融资买入</b>当日融资买入成交额</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>
           </section>
@@ -615,7 +693,16 @@ export function Dashboard({
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {groupTypeLabels[selected.groupType ?? "other"] ?? selected.groupType} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
-                <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值</small></div>
+            <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值</small></div>
+            <div className="drawer-share-chart">
+              <div><strong>官方总份额走势</strong><span>周期锚点复算 · 当前 {selected.shares?.toFixed(2) ?? "—"} 亿份</span></div>
+              {selectedShareHistory.length ? (
+                <ReactECharts className="drawer-share-echart" option={selectedShareChartOption} notMerge lazyUpdate />
+              ) : (
+                <div className="drawer-chart-empty"><Database size={22} />等待官方份额快照</div>
+              )}
+              <p>历史节点＝当前官方总份额－对应周期份额变化；不是现金净流入。</p>
+            </div>
             <div className="drawer-periods">{periods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
             <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。估算资金仅在净值与区间份额同时完整时提供。</p></div>
           </aside>

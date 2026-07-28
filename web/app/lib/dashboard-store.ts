@@ -3,6 +3,11 @@ import {
   enrichSnapshotWithEtfFlowState,
   loadEtfFlowState,
 } from "./etf-flow-state";
+import {
+  enrichSnapshotWithMarketHistory,
+  MARKET_HISTORY_MAX_DATES,
+  type MarketHistoryRow,
+} from "./market-history";
 import { isPublishableSnapshot } from "./snapshot-policy.mjs";
 
 type RuntimeEnv = {
@@ -52,6 +57,34 @@ export function isDashboardSnapshot(value: unknown): value is DashboardSnapshot 
   );
 }
 
+async function loadMarketHistoryRows(
+  db: D1Database | undefined,
+  asOf: string,
+): Promise<MarketHistoryRow[]> {
+  if (!db || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return [];
+  try {
+    const result = await db
+      .prepare(
+        `SELECT
+           trade_date, margin_balance, margin_change, financing_buy,
+           lending_balance, lending_sell_volume, total_balance, sse_balance,
+           szse_balance, southbound_net, southbound_turnover,
+           southbound_sse_net, southbound_szse_net, northbound_turnover,
+           northbound_etf_turnover, northbound_trade_count, margin_available,
+           connect_available, source_snapshot_sha256, observed_at
+         FROM market_history_daily
+         WHERE trade_date <= ?
+         ORDER BY trade_date DESC
+         LIMIT ?`,
+      )
+      .bind(asOf, MARKET_HISTORY_MAX_DATES)
+      .all<MarketHistoryRow>();
+    return [...(result.results ?? [])].reverse();
+  } catch {
+    return [];
+  }
+}
+
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   const runtime = await runtimeEnv();
   const db = runtime.DB;
@@ -72,8 +105,14 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) {
       return dashboardSnapshot;
     }
-    const state = await loadEtfFlowState(runtime.RAW_BUCKET);
-    return enrichSnapshotWithEtfFlowState(parsed, state);
+    const [state, marketHistory] = await Promise.all([
+      loadEtfFlowState(runtime.RAW_BUCKET),
+      loadMarketHistoryRows(db, parsed.asOf),
+    ]);
+    return enrichSnapshotWithMarketHistory(
+      enrichSnapshotWithEtfFlowState(parsed, state),
+      marketHistory,
+    );
   } catch {
     return dashboardSnapshot;
   }
@@ -127,9 +166,15 @@ async function readHistoricalSnapshot(
     if (!object) return null;
     const parsed: unknown = JSON.parse(await object.text());
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) return null;
-    const state = await loadEtfFlowState(runtime.RAW_BUCKET);
+    const [state, marketHistory] = await Promise.all([
+      loadEtfFlowState(runtime.RAW_BUCKET),
+      loadMarketHistoryRows(runtime.DB, parsed.asOf),
+    ]);
     return {
-      snapshot: enrichSnapshotWithEtfFlowState(parsed, state),
+      snapshot: enrichSnapshotWithMarketHistory(
+        enrichSnapshotWithEtfFlowState(parsed, state),
+        marketHistory,
+      ),
       exact,
     };
   } catch {

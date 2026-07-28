@@ -12,5 +12,6 @@ export async function GET() {
     mode: dashboardSnapshot.mode,
     quality: dashboardSnapshot.quality,
     domains: dashboardSnapshot.dataStatus,
+    marketHistoryCoverage: dashboardSnapshot.marketHistoryCoverage ?? null,
   });
 }

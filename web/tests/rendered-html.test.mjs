@@ -71,11 +71,26 @@ test("defines the national-team ETF watchlist without fabricating holder disclos
     "512500",
   ];
   for (const code of codes) assert.match(source, new RegExp(`"${code}"`));
+  assert.match(source, /nationalTeamEtfCodes/);
+  assert.doesNotMatch(source, /referenceName/);
+  assert.match(source, /instrument\?\.name/);
   assert.match(source, /正式持有人披露尚未接入/);
   assert.match(source, /不使用截图数字或第三方估算/);
   assert.match(source, /它不等同于国家队增减持/);
   assert.match(source, /type:\s*"line"/);
   assert.match(source, /历史节点＝当前官方总份额－对应周期份额变化/);
+});
+
+test("gives every ETF Radar detail view an official-share line chart", async () => {
+  const source = await readFile(
+    new URL("../app/dashboard.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /drawer-share-chart/);
+  assert.match(source, /selectedShareHistory/);
+  assert.match(source, /name:\s*"官方总份额"/);
+  assert.match(source, /type:\s*"line"/);
+  assert.match(source, /不是现金净流入/);
 });
 
 test("requires explicit confirmation before opening a historical date", async () => {
@@ -98,6 +113,7 @@ test("exposes connect trend series without inventing northbound direction", asyn
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.northboundDisclosure, "turnover_only");
+  assert.equal(payload.coverage.points, 3);
   assert.equal(payload.series.length, 3);
   assert.equal(payload.series[2].southboundNet, 109.97);
   assert.equal("northboundNet" in payload.series[2], false);
@@ -263,7 +279,101 @@ test("labels margin fields as official balances rather than net capital flow", a
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.evidence.kind, "official");
+  assert.equal(payload.coverage.points, 3);
   assert.match(payload.evidence.interpretation, /not net capital flow/);
+});
+
+test("hydrates long margin and connect series from the daily history index", async () => {
+  const worker = await loadWorker();
+  const fallbackResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const snapshot = await fallbackResponse.json();
+  snapshot.asOf = "2026-07-14";
+  const rows = [
+    {
+      trade_date: "2024-08-01",
+      margin_balance: 14000,
+      margin_change: null,
+      financing_buy: 700,
+      lending_balance: 120,
+      lending_sell_volume: 1.2,
+      total_balance: 14120,
+      sse_balance: 7200,
+      szse_balance: 6800,
+      southbound_net: null,
+      southbound_turnover: null,
+      southbound_sse_net: null,
+      southbound_szse_net: null,
+      northbound_turnover: null,
+      northbound_etf_turnover: null,
+      northbound_trade_count: null,
+      margin_available: 1,
+      connect_available: 0,
+      source_snapshot_sha256: "a".repeat(64),
+      observed_at: "2024-08-02T01:15:00Z",
+    },
+    {
+      trade_date: "2026-07-14",
+      margin_balance: 28692.78,
+      margin_change: -109.58,
+      financing_buy: 2408.55,
+      lending_balance: 213.21,
+      lending_sell_volume: 0.88,
+      total_balance: 28905.99,
+      sse_balance: 14520.14,
+      szse_balance: 14172.64,
+      southbound_net: 109.97,
+      southbound_turnover: 1289.72,
+      southbound_sse_net: 82.05,
+      southbound_szse_net: 27.92,
+      northbound_turnover: 4159.04,
+      northbound_etf_turnover: 65.6,
+      northbound_trade_count: 17561612,
+      margin_available: 1,
+      connect_available: 1,
+      source_snapshot_sha256: "b".repeat(64),
+      observed_at: "2026-07-15T01:15:00Z",
+    },
+  ];
+  const db = {
+    prepare(sql) {
+      return {
+        bind() { return this; },
+        async first() {
+          return sql.includes("FROM dashboard_snapshot")
+            ? { payload_json: JSON.stringify(snapshot) }
+            : null;
+        },
+        async all() {
+          return { results: rows };
+        },
+      };
+    },
+  };
+  const bucket = { async get() { return null; } };
+
+  const marginResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/margin/flows"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  const marginPayload = await marginResponse.json();
+  assert.equal(marginPayload.series.length, 2);
+  assert.equal(marginPayload.series[0].date, "2024-08-01");
+  assert.equal(marginPayload.coverage.points, 2);
+
+  const connectResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/connect/flows"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  const connectPayload = await connectResponse.json();
+  assert.equal(connectPayload.series.length, 1);
+  assert.equal(connectPayload.series[0].date, "2026-07-14");
+  assert.equal(connectPayload.coverage.points, 1);
 });
 
 test("rejects unauthenticated snapshot imports", async () => {
@@ -447,6 +557,7 @@ test("archives full-source history with server-side hash verification", async ()
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/history/")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO market_history_daily")));
 });
 
 test("archives verified ETF evidence before publishing a snapshot", async () => {

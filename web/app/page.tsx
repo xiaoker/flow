@@ -10,5 +10,9 @@ export default async function Home({
 }) {
   const { date, view } = await searchParams;
   const data = await getDashboardViewData(date);
-  return <Dashboard {...data} initialView={view === "national" ? "national" : undefined} />;
+  const initialView =
+    view === "radar" || view === "national" || view === "connect" || view === "margin"
+      ? view
+      : undefined;
+  return <Dashboard {...data} initialView={initialView} />;
 }

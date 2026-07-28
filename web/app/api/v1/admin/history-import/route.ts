@@ -6,6 +6,7 @@ import {
   mergeSnapshotIntoEtfFlowState,
   persistEtfFlowState,
 } from "@/app/lib/etf-flow-state";
+import { extractMarketHistoryPoint } from "@/app/lib/market-history";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
@@ -355,6 +356,64 @@ export async function POST(request: Request) {
       )
       .run();
 
+    const marketPoint = extractMarketHistoryPoint(history.snapshot);
+    await runtime.DB
+      .prepare(
+        `INSERT INTO market_history_daily (
+           trade_date, margin_balance, margin_change, financing_buy,
+           lending_balance, lending_sell_volume, total_balance, sse_balance,
+           szse_balance, southbound_net, southbound_turnover,
+           southbound_sse_net, southbound_szse_net, northbound_turnover,
+           northbound_etf_turnover, northbound_trade_count, margin_available,
+           connect_available, source_snapshot_sha256, observed_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(trade_date) DO UPDATE SET
+           margin_balance = excluded.margin_balance,
+           margin_change = excluded.margin_change,
+           financing_buy = excluded.financing_buy,
+           lending_balance = excluded.lending_balance,
+           lending_sell_volume = excluded.lending_sell_volume,
+           total_balance = excluded.total_balance,
+           sse_balance = excluded.sse_balance,
+           szse_balance = excluded.szse_balance,
+           southbound_net = excluded.southbound_net,
+           southbound_turnover = excluded.southbound_turnover,
+           southbound_sse_net = excluded.southbound_sse_net,
+           southbound_szse_net = excluded.southbound_szse_net,
+           northbound_turnover = excluded.northbound_turnover,
+           northbound_etf_turnover = excluded.northbound_etf_turnover,
+           northbound_trade_count = excluded.northbound_trade_count,
+           margin_available = excluded.margin_available,
+           connect_available = excluded.connect_available,
+           source_snapshot_sha256 = excluded.source_snapshot_sha256,
+           observed_at = excluded.observed_at,
+           created_at = excluded.created_at`,
+      )
+      .bind(
+        marketPoint.trade_date,
+        marketPoint.margin_balance,
+        marketPoint.margin_change,
+        marketPoint.financing_buy,
+        marketPoint.lending_balance,
+        marketPoint.lending_sell_volume,
+        marketPoint.total_balance,
+        marketPoint.sse_balance,
+        marketPoint.szse_balance,
+        marketPoint.southbound_net,
+        marketPoint.southbound_turnover,
+        marketPoint.southbound_sse_net,
+        marketPoint.southbound_szse_net,
+        marketPoint.northbound_turnover,
+        marketPoint.northbound_etf_turnover,
+        marketPoint.northbound_trade_count,
+        marketPoint.margin_available,
+        marketPoint.connect_available,
+        snapshotSha256,
+        history.snapshot.observedAt,
+        createdAt,
+      )
+      .run();
+
     const previousState = await loadEtfFlowState(runtime.RAW_BUCKET);
     const mergedState = mergeSnapshotIntoEtfFlowState(
       previousState,
@@ -373,6 +432,10 @@ export async function POST(request: Request) {
       snapshotSha256,
       snapshotKey,
       manifestKey,
+      marketHistory: {
+        marginAvailable: Boolean(marketPoint.margin_available),
+        connectAvailable: Boolean(marketPoint.connect_available),
+      },
       etfFlowState: statePointer
         ? {
             asOf: statePointer.asOf,

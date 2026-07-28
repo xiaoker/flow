@@ -12,6 +12,11 @@ export async function GET() {
       southbound: { kind: "calculated", formula: "official buy turnover - official sell turnover" },
       northbound: { kind: "official", field: "total turnover", directionAvailable: false },
     },
+    coverage: dashboardSnapshot.marketHistoryCoverage?.connect ?? {
+      from: dashboardSnapshot.connectSeries?.at(0)?.date ?? null,
+      to: dashboardSnapshot.connectSeries?.at(-1)?.date ?? null,
+      points: dashboardSnapshot.connectSeries?.length ?? 0,
+    },
     channels: dashboardSnapshot.connect,
     series: dashboardSnapshot.connectSeries ?? [],
   });

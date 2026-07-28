@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const dataSources = sqliteTable("data_source", {
   id: text("id").primaryKey(),
@@ -61,6 +61,32 @@ export const historicalSnapshots = sqliteTable("historical_snapshot", {
   createdAt: text("created_at").notNull(),
 }, (table) => [
   index("historical_snapshot_created_idx").on(table.createdAt),
+]);
+
+export const marketHistoryDaily = sqliteTable("market_history_daily", {
+  tradeDate: text("trade_date").primaryKey(),
+  marginBalance: real("margin_balance"),
+  marginChange: real("margin_change"),
+  financingBuy: real("financing_buy"),
+  lendingBalance: real("lending_balance"),
+  lendingSellVolume: real("lending_sell_volume"),
+  totalBalance: real("total_balance"),
+  sseBalance: real("sse_balance"),
+  szseBalance: real("szse_balance"),
+  southboundNet: real("southbound_net"),
+  southboundTurnover: real("southbound_turnover"),
+  southboundSseNet: real("southbound_sse_net"),
+  southboundSzseNet: real("southbound_szse_net"),
+  northboundTurnover: real("northbound_turnover"),
+  northboundEtfTurnover: real("northbound_etf_turnover"),
+  northboundTradeCount: integer("northbound_trade_count"),
+  marginAvailable: integer("margin_available", { mode: "boolean" }).notNull().default(false),
+  connectAvailable: integer("connect_available", { mode: "boolean" }).notNull().default(false),
+  sourceSnapshotSha256: text("source_snapshot_sha256").notNull(),
+  observedAt: text("observed_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("market_history_daily_date_idx").on(table.tradeDate),
 ]);
 
 export const etfDaily = sqliteTable("etf_daily", {

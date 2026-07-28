@@ -106,6 +106,13 @@ export interface DashboardSnapshot {
     northboundEtfTurnover: number;
     northboundTradeCount: number;
   }>;
+  marketHistoryCoverage?: {
+    archiveFrom: string;
+    archiveTo: string;
+    archiveDates: number;
+    margin: { from: string | null; to: string | null; points: number };
+    connect: { from: string | null; to: string | null; points: number };
+  };
   dataStatus: Array<{
     name: string;
     status: "ready" | "warning";

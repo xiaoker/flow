@@ -481,6 +481,13 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .drawer-hero { display: flex; flex-direction: column; gap: 7px; margin: 18px 20px; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: #0e1926; }
 .drawer-hero span, .drawer-hero small { color: var(--muted); font-size: var(--text-sm); }
 .drawer-hero strong { font-family: var(--font-geist-mono), monospace; font-size: 36px; }
+.drawer-share-chart { margin: 0 20px 18px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #0d1723; }
+.drawer-share-chart > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.drawer-share-chart > div:first-child strong { color: var(--text); font-size: 15px; }
+.drawer-share-chart > div:first-child span, .drawer-share-chart > p { color: var(--muted); font-size: 12px; }
+.drawer-share-echart { height: 230px !important; }
+.drawer-share-chart > p { margin: 7px 0 0; line-height: 1.6; }
+.drawer-chart-empty { display: flex; min-height: 170px; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .drawer-periods { display: block; margin: 0 20px; border-top: 1px solid var(--line-soft); }
 .drawer-periods > div { display: grid; min-height: 58px; grid-template-columns: 86px minmax(0, 1fr) 96px; align-items: center; gap: 12px; padding: 0 8px; border-bottom: 1px solid var(--line-soft); }
 .drawer-periods > div.active { background: linear-gradient(90deg, var(--cyan-soft), transparent 70%); box-shadow: inset 2px 0 0 var(--cyan); }
@@ -591,6 +598,7 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .detail-drawer { width: 100%; border-left: 0; }
   .drawer-header { padding: 18px; }
   .drawer-periods { margin: 0 16px; }
+  .drawer-share-chart { margin-inline: 16px; }
   .drawer-periods > div { grid-template-columns: 72px minmax(0, 1fr) 88px; }
 }
 
