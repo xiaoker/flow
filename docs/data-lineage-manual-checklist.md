@@ -21,7 +21,7 @@
 | 深交所两融汇总 | [融资融券交易](https://www.szse.cn/disclosure/margin/margin/index.html) | [`ShowReport/data`](https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1837_xxpl&txtDate=2026-07-15&tab1PAGENO=1) | HTTP GET；`CATALOGID=1837_xxpl`；`txtDate=YYYY-MM-DD` | JSON | 请求日期 + 响应 `metadata.subname` | 金额=亿元；数量=亿股/亿份 |
 | 港交所互联互通 | [历史每日数据（简体中文）](https://www.hkex.com.hk/Mutual-Market/Stock-Connect/Statistics/Historical-Daily?sc_lang=zh-CN) | [`data_tab_daily_20260715c.js`](https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_20260715c.js) | HTTP GET；把交易日填入 `data_tab_daily_YYYYMMDDc.js`；带中文 HKEX Referer；解析前移除 UTF-8 BOM | JavaScript 包裹的 JSON | 每个通道对象的 `date` | 汇总表金额=百万本币；前十证券金额=本币元；北向=RMB，南向=HKD |
 
-采集调度：GitHub Actions `daily-data.yml` 在每周二至周六 `01:15 UTC`（北京时间 `09:15`）自动运行，先通过上交所两融数据发现最近 3 个交易日，再下载上述原始文件。该时点使用深交所 T+1 早间的前一日权威数据。每次请求保存 HTTP 状态、Content-Type、参数、观测时间、SHA-256、原始文件和规范化 CSV。发布时再复算 SHA-256；`market-data/` 原始证据和历史快照进入 R2 并保留 1,825 天，D1 ETF 明细滚动保留 365 天、最新页面派生快照保留 30 天，历史快照正文只在 R2 保存。
+采集调度：GitHub Actions `daily-data.yml` 在每周一至周五 `01:15 UTC`（北京时间 `09:15`）自动运行，先通过上交所两融数据发现最近 3 个交易日，再下载上述原始文件。周五数据在下周一采集，不在周六采集深交所周五晚间的临时规模。该时点使用深交所 T+1 早间的前一交易日权威数据。每次请求保存 HTTP 状态、Content-Type、参数、观测时间、SHA-256、原始文件和规范化 CSV。发布时再复算 SHA-256；`market-data/` 原始证据和历史快照进入 R2 并长期保留，D1 ETF 明细滚动保留 365 天、最新页面派生快照保留 30 天，历史快照正文只在 R2 保存。
 
 ## 2. 页面字段→原始字段对照
 

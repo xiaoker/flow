@@ -8,9 +8,10 @@ on:
         required: false
         type: string
   schedule:
-    # 09:15 Asia/Shanghai, Tuesday-Saturday: collect the prior trading day's
-    # morning-final exchange files without requiring a manual trigger.
-    - cron: "15 1 * * 2-6"
+    # 09:15 Asia/Shanghai, Monday-Friday: collect the prior trading day's
+    # T+1 morning-final exchange files. Saturday still exposes Friday's
+    # provisional same-day SZSE scale, so weekends must not be scheduled.
+    - cron: "15 1 * * 1-5"
 
 permissions:
   contents: read
