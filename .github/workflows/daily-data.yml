@@ -61,11 +61,22 @@ jobs:
         shell: bash
         run: |
           read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
-          trading-desk collect-phase0 \
-            --dates "${DATES[@]}"
-
-      - name: Build dashboard snapshot
-        run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
+          MAX_ATTEMPTS=3
+          for (( attempt=1; attempt<=MAX_ATTEMPTS; attempt++ )); do
+            trading-desk collect-phase0 \
+              --dates "${DATES[@]}"
+            if jq -e '.counts.fail == 0 and .phase0_gate_status != "blocked"' \
+              reports/phase0/latest-quality-summary.json >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" -eq "$MAX_ATTEMPTS" ]] || \
+              ! jq -e '.errors | length > 0 and all(.[]; .error_type == "ConnectionError" or .error_type == "HTTPError")' \
+                reports/phase0/latest-quality-summary.json >/dev/null; then
+              break
+            fi
+            echo "Transient official-source failure; retrying collection attempt $((attempt + 1))/$MAX_ATTEMPTS." >&2
+            sleep $((attempt * 30))
+          done
 
       - name: Enforce publication quality gate
         shell: bash
@@ -76,6 +87,9 @@ jobs:
             jq '{counts, phase0_gate_status, errors}' reports/phase0/latest-quality-summary.json >&2
             exit 1
           fi
+
+      - name: Build dashboard snapshot
+        run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
 
       - name: Reconcile evidence, mappings and dashboard values
         run: trading-desk qa-release --snapshot dashboard-snapshot.json
