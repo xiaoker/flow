@@ -3,6 +3,7 @@
 import {
   ArrowsClockwise,
   ArrowsLeftRight,
+  Buildings,
   CalendarBlank,
   Camera,
   CaretDown,
@@ -34,14 +35,16 @@ import type {
   EtfTerminalInstrument,
   FlowPeriod,
 } from "./lib/dashboard-data";
+import { NationalTeamView } from "./national-team-view";
 
 type DashboardProps = {
   snapshot: DashboardSnapshot;
   availableDates?: string[];
   requestedDate?: string | null;
   exactDateMatch?: boolean;
+  initialView?: DeskView;
 };
-type DeskView = "overview" | "radar" | "connect" | "margin";
+type DeskView = "overview" | "radar" | "national" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
 type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
@@ -61,6 +64,7 @@ const periods: Array<{ id: FlowPeriod; label: string }> = [
 const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> = [
   { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
+  { id: "national", label: "国家队持仓", icon: Buildings },
   { id: "connect", label: "互联互通", icon: ArrowsLeftRight },
   { id: "margin", label: "融资融券", icon: Pulse },
 ];
@@ -163,8 +167,9 @@ export function Dashboard({
   availableDates = [],
   requestedDate = null,
   exactDateMatch = true,
+  initialView = "overview",
 }: DashboardProps) {
-  const [view, setView] = useState<DeskView>("overview");
+  const [view, setView] = useState<DeskView>(initialView);
   const [period, setPeriod] = useState<FlowPeriod>("1d");
   const [direction, setDirection] = useState<DirectionFilter>("all");
   const [marketFilter, setMarketFilter] = useState<MarketFilter>("all");
@@ -348,6 +353,13 @@ export function Dashboard({
   const northboundMetric = metricValue(snapshot, "northbound");
   const evidenceFor = (id: string, basis?: { kind: EvidenceKind; label: string; detail: string }) => basis ?? defaultMetricBasis[id];
   const currentPeriod = periods.find((item) => item.id === period)?.label ?? "最近1日";
+  const currentViewTitle: Record<DeskView, string> = {
+    overview: "市场数据全景",
+    radar: "ETF 份额雷达",
+    national: "国家队持仓",
+    connect: "互联互通",
+    margin: "融资融券",
+  };
   const dateIndex = availableDates.indexOf(snapshot.asOf);
   const previousAvailableDate = dateIndex > 0 ? availableDates[dateIndex - 1] : null;
   const nextAvailableDate = dateIndex >= 0 && dateIndex < availableDates.length - 1
@@ -403,11 +415,11 @@ export function Dashboard({
         <nav className="desk-nav" aria-label="交易台导航">
           {navigation.map((item) => {
             const Icon = item.icon;
-            return <button aria-current={view === item.id ? "page" : undefined} className={view === item.id ? "active" : ""} key={item.id} onClick={() => setView(item.id)} type="button"><Icon size={17} /><span>{item.label}</span></button>;
+            return <button aria-current={view === item.id ? "page" : undefined} aria-label={item.label} className={view === item.id ? "active" : ""} key={item.id} onClick={() => { setView(item.id); const url = new URL(window.location.href); if (item.id === "national") url.searchParams.set("view", "national"); else url.searchParams.delete("view"); window.history.replaceState({}, "", url); }} title={item.label} type="button"><Icon size={17} /><span>{item.label}</span></button>;
           })}
         </nav>
         <div className="top-actions">
-          <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim()) setView("radar"); }} placeholder="搜索基金或代码，回车查看" value={query} /></label>
+          <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim() && view !== "national") setView("radar"); }} placeholder={view === "national" ? "搜索观察池 ETF 或代码" : "搜索基金或代码，回车查看"} value={query} /></label>
           <button className="icon-button" title="打印或保存当前页面" onClick={() => window.print()} type="button"><Camera size={19} /></button>
           <button className={`refresh-toggle ${autoRefresh ? "enabled" : ""}`} aria-pressed={autoRefresh} onClick={() => setAutoRefresh((value) => !value)} type="button"><span /><em>自动更新</em></button>
           <button className="icon-button" title="刷新数据" onClick={() => window.location.reload()} type="button"><ArrowsClockwise size={19} /></button>
@@ -417,7 +429,7 @@ export function Dashboard({
       <section className="command-strip" aria-label="数据摘要">
         <div className="command-title">
           <span className="eyebrow">官方事实与复算指标</span>
-          <strong>{view === "overview" ? "市场数据全景" : view === "radar" ? "ETF 份额雷达" : view === "connect" ? "互联互通" : "融资融券"}</strong>
+          <strong>{currentViewTitle[view]}</strong>
           <span>截至 {snapshot.asOf} · {snapshot.mode}</span>
           {requestedDate && !exactDateMatch && (
             <span className="date-fallback">{requestedDate} 非可用交易日，已显示此前最近的完整归档日</span>
@@ -453,7 +465,7 @@ export function Dashboard({
         <strong>未披露的数据不展示、不补造</strong>
       </section>
 
-      {(view === "overview" || view === "radar") && (
+      {(view === "overview" || view === "radar" || view === "national") && (
         <section className="period-strip" aria-label="ETF 观察口径">
           <div className="metric-switch" aria-label="指标口径"><button className="active" type="button">份额（亿份）</button><button disabled title="等待 ETF 净值字段" type="button">金额估算</button></div>
           <div className="period-tabs" aria-label="观察周期">
@@ -538,6 +550,15 @@ export function Dashboard({
             </div>
             <div className="table-footer"><span>第 {table.getState().pagination.pageIndex + 1} / {Math.max(1, table.getPageCount())} 页 · {filteredInstruments.length} 条结果</span><div><button disabled={!table.getCanPreviousPage()} onClick={() => table.previousPage()} type="button"><CaretLeft size={15} />上一页</button><button disabled={!table.getCanNextPage()} onClick={() => table.nextPage()} type="button">下一页<CaretRight size={15} /></button></div></div>
           </section>
+        )}
+
+        {view === "national" && (
+          <NationalTeamView
+            asOf={snapshot.asOf}
+            period={period}
+            query={query}
+            terminal={terminal}
+          />
         )}
 
         {view === "connect" && (

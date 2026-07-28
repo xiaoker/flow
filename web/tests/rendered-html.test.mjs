@@ -51,6 +51,31 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark\s*>\s*div:nth-last-child\(n\s*\+\s*13\)\s*\{\s*display:\s*none/);
 });
 
+test("defines the national-team ETF watchlist without fabricating holder disclosures", async () => {
+  const source = await readFile(
+    new URL("../app/national-team-view.tsx", import.meta.url),
+    "utf8",
+  );
+  const codes = [
+    "510300",
+    "510310",
+    "510330",
+    "510500",
+    "159915",
+    "159919",
+    "512100",
+    "510050",
+    "588080",
+    "510180",
+    "159845",
+    "512500",
+  ];
+  for (const code of codes) assert.match(source, new RegExp(`"${code}"`));
+  assert.match(source, /正式持有人披露尚未接入/);
+  assert.match(source, /不使用截图数字或第三方估算/);
+  assert.match(source, /它不等同于国家队增减持/);
+});
+
 test("exposes connect trend series without inventing northbound direction", async () => {
   const worker = await loadWorker();
   const response = await worker.fetch(

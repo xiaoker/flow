@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "flow",
   "account_id": "21004860faeebc5fa4f297679796ee00",
-  "compatibility_date": "2026-07-16",
+  "compatibility_date": "2026-05-22",
   "compatibility_flags": ["nodejs_compat"],
   "main": "./worker/index.ts",
   "workers_dev": false,

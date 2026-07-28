@@ -6,9 +6,9 @@ export const dynamic = "force-dynamic";
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ date?: string }>;
+  searchParams: Promise<{ date?: string; view?: string }>;
 }) {
-  const { date } = await searchParams;
+  const { date, view } = await searchParams;
   const data = await getDashboardViewData(date);
-  return <Dashboard {...data} />;
+  return <Dashboard {...data} initialView={view === "national" ? "national" : undefined} />;
 }

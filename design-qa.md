@@ -27,3 +27,30 @@ Implementation captures:
 - Browser console: no errors during overview, radar, connect, margin, filter, and responsive states.
 
 final result: passed
+
+---
+
+# 国家队持仓页面 Design QA（2026-07-28）
+
+Reference input:
+
+- `/var/folders/zx/r3tlq5gj4c3bxzy8hjnf9m8h0000gn/T/codex-clipboard-17b91121-c0b3-41c1-8e3a-4ee36069d0e8.png`
+
+Implementation capture:
+
+- `docs/audits/2026-07-28-national-team/implementation.png`
+
+## Findings
+
+- P0: none.
+- P1 data boundary: the 12 reference ETF codes are a fixed observation list, while values come only from the existing official SSE/SZSE snapshot. Missing codes and unavailable periods render as `—`; the page does not copy the screenshot's holding ratios, market values, report dates, or estimated changes.
+- P1 disclosure boundary: formal holder disclosure is explicitly marked “待接入”. The two Central Huijin entity names are presented only as candidates to verify against fund periodic reports.
+- P1 semantic accuracy: the page states that ETF share change is neither national-team trading nor cash net flow.
+- P1 navigation: the new view is available from the primary navigation and directly at `/?view=national`; collapsed icon navigation now retains an accessible label and tooltip.
+- P1 interactions: browser-tested direct entry, search (`510300` reduces the list to one row), table-row selection (detail changes to `沪深300ETF 易方达`), and unavailable-period protection.
+- P2 visual fidelity: browser-rendered comparison confirms the reference's near-black terminal canvas, cyan navigation/section accents, red-green directional encoding, wide visual summary, dense table, and right-side detail hierarchy while preserving the existing FLOW shell.
+- Responsive safeguards: the page switches the table/detail workspace to a single column below 1000px and keeps the dense table horizontally scrollable below 680px.
+- Browser console: no errors on direct entry, filtering, selection, and reload.
+- Local fixture note: the checked-in Phase 0 snapshot currently matches one of the 12 codes. The UI exposes that coverage rather than substituting values; the hosted D1 snapshot determines production coverage.
+
+final result: passed
