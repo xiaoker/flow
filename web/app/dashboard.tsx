@@ -189,6 +189,7 @@ export function Dashboard({
   const activeValue = (item: EtfTerminalInstrument) => item.periods[period] ?? null;
 
   const filteredInstruments = useMemo(() => {
+    if (view !== "radar") return [];
     const normalized = query.trim().toLowerCase();
     return terminal.instruments.filter((item) => {
       const value = item.periods[period];
@@ -198,15 +199,16 @@ export function Dashboard({
       const matchesCategory = categoryFilter === "all" || item.category === categoryFilter;
       return matchesDirection && matchesQuery && matchesMarket && matchesCategory;
     });
-  }, [categoryFilter, direction, marketFilter, period, query, terminal.instruments]);
+  }, [categoryFilter, direction, marketFilter, period, query, terminal.instruments, view]);
 
   const periodMaxima = useMemo(() => {
     const maxima = new Map<FlowPeriod, number>();
+    if (view !== "radar") return maxima;
     periods.forEach(({ id }) => {
       maxima.set(id, Math.max(...terminal.instruments.map((item) => Math.abs(item.periods[id] ?? 0)), 0.01));
     });
     return maxima;
-  }, [terminal.instruments]);
+  }, [terminal.instruments, view]);
 
   const columns = useMemo<ColumnDef<EtfTerminalInstrument>[]>(() => [
     {
