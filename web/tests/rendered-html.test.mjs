@@ -74,6 +74,18 @@ test("defines the national-team ETF watchlist without fabricating holder disclos
   assert.match(source, /正式持有人披露尚未接入/);
   assert.match(source, /不使用截图数字或第三方估算/);
   assert.match(source, /它不等同于国家队增减持/);
+  assert.match(source, /type:\s*"line"/);
+  assert.match(source, /历史节点＝当前官方总份额－对应周期份额变化/);
+});
+
+test("requires explicit confirmation before opening a historical date", async () => {
+  const source = await readFile(
+    new URL("../app/dashboard.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /setDraftDate\(event\.target\.value\)/);
+  assert.match(source, />\s*查看\s*<\/button>/);
+  assert.doesNotMatch(source, /onChange=\{\(event\) => event\.target\.value && openDate/);
 });
 
 test("exposes connect trend series without inventing northbound direction", async () => {
@@ -342,7 +354,7 @@ test("serves an archived dashboard for an explicitly selected date", async () =>
   const html = await response.text();
   assert.match(html, /2025-01-02/);
   assert.match(html, /官方历史归档/);
-  assert.match(html, /查看某一天/);
+  assert.match(html, /选择归档日期/);
 });
 
 test("archives full-source history with server-side hash verification", async () => {

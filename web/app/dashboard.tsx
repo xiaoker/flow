@@ -180,6 +180,7 @@ export function Dashboard({
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [notice, setNotice] = useState("");
+  const [draftDate, setDraftDate] = useState(snapshot.asOf);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const lastFocusedElement = useRef<HTMLElement | null>(null);
   const terminal = useMemo(() => snapshot.etfTerminal ?? fallbackTerminal(snapshot), [snapshot]);
@@ -367,8 +368,17 @@ export function Dashboard({
     : null;
   const openDate = (date: string) => {
     const latest = availableDates.at(-1);
-    window.location.assign(date === latest ? "/" : `/?date=${encodeURIComponent(date)}`);
+    const url = new URL(window.location.href);
+    if (date === latest) url.searchParams.delete("date");
+    else url.searchParams.set("date", date);
+    if (view === "national") url.searchParams.set("view", "national");
+    else url.searchParams.delete("view");
+    window.location.assign(`${url.pathname}${url.search}`);
   };
+
+  useEffect(() => {
+    setDraftDate(snapshot.asOf);
+  }, [snapshot.asOf]);
 
   const choosePeriod = (next: FlowPeriod) => {
     if (!availablePeriods.has(next)) {
@@ -438,17 +448,28 @@ export function Dashboard({
         <div className="history-date-control" aria-label="查看历史交易日">
           <button aria-label="上一个归档交易日" disabled={!previousAvailableDate} onClick={() => previousAvailableDate && openDate(previousAvailableDate)} type="button"><CaretLeft size={16} /></button>
           <label>
-            <span><CalendarBlank size={15} />查看某一天</span>
+            <span><CalendarBlank size={15} />选择归档日期</span>
             <input
               aria-label="历史交易日期"
               max={availableDates.at(-1)}
               min={availableDates.at(0)}
-              onChange={(event) => event.target.value && openDate(event.target.value)}
+              onChange={(event) => setDraftDate(event.target.value)}
               type="date"
-              value={snapshot.asOf}
+              value={draftDate}
             />
           </label>
+          <button
+            className="date-apply"
+            disabled={!draftDate || draftDate === snapshot.asOf}
+            onClick={() => draftDate && openDate(draftDate)}
+            type="button"
+          >
+            查看
+          </button>
           <button aria-label="下一个归档交易日" disabled={!nextAvailableDate} onClick={() => nextAvailableDate && openDate(nextAvailableDate)} type="button"><CaretRight size={16} /></button>
+          {snapshot.asOf !== availableDates.at(-1) && (
+            <button className="date-latest" onClick={() => availableDates.at(-1) && openDate(availableDates.at(-1)!)} type="button">最新</button>
+          )}
         </div>
         <div className="command-metrics">
           <span><small>ETF 份额变化<EvidenceBadge {...evidenceFor("etf", latestMetric?.basis)} /></small><strong className={latestMetric?.tone === "positive" ? "text-in" : "text-out"}>{latestMetric?.value}<em>{latestMetric?.unit}</em></strong></span>

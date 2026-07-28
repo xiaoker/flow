@@ -97,6 +97,9 @@ h1, h2, h3 { text-wrap: balance; }
 .history-date-control label { display: flex; min-width: 168px; flex-direction: column; gap: 2px; padding: 5px 10px; border: 1px solid rgba(80,183,217,.36); border-radius: 8px; background: var(--cyan-soft); }
 .history-date-control label span { display: flex; align-items: center; gap: 5px; color: var(--cyan); font-size: var(--text-xs); font-weight: 700; }
 .history-date-control input { border: 0; outline: 0; background: transparent; color: var(--ink); font-family: var(--font-geist-mono), monospace; font-size: var(--text-sm); font-weight: 650; color-scheme: dark; }
+.history-date-control > .date-apply, .history-date-control > .date-latest { width: auto; padding: 0 12px; font-size: 13px; font-weight: 750; white-space: nowrap; }
+.history-date-control > .date-apply:not(:disabled) { border-color: rgba(80,183,217,.7); background: #245f78; color: #f2fbff; }
+.history-date-control > .date-latest { border-color: rgba(241,174,66,.35); background: var(--amber-soft); color: var(--amber); }
 .eyebrow { color: var(--cyan); font-size: 13px; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
 .command-metrics { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); }
 .command-metrics > span { display: flex; min-width: 120px; flex-direction: column; justify-content: center; gap: 4px; padding: 0 21px; border-left: 1px solid var(--line-soft); }
@@ -333,6 +336,11 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   font-weight: 700;
 }
 .national-chart { height: 355px !important; }
+.national-chart-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: var(--muted); }
+.national-chart-empty svg { color: #526276; }
+.national-chart-empty strong { color: var(--muted-strong); font-size: 16px; }
+.national-chart-empty span { font-size: 13px; }
+.national-chart-footnote { margin: 0; padding: 10px 22px 14px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 13px; line-height: 1.6; }
 .national-workspace { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(350px, .7fr); gap: 12px; }
 .national-table-panel { overflow: hidden; }
 .national-table-heading {

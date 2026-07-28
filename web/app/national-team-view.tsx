@@ -42,6 +42,18 @@ const periodLabels: Record<FlowPeriod, string> = {
   "12m": "12月",
 };
 
+const historyPeriods: Array<{ id: FlowPeriod; label: string }> = [
+  { id: "12m", label: "12月前" },
+  { id: "ytd", label: "年初" },
+  { id: "6m", label: "6月前" },
+  { id: "3m", label: "3月前" },
+  { id: "1m", label: "1月前" },
+  { id: "2w", label: "2周前" },
+  { id: "1w", label: "1周前" },
+  { id: "3d", label: "3日前" },
+  { id: "1d", label: "前一日" },
+];
+
 type NationalTeamRow = {
   code: string;
   referenceName: string;
@@ -99,28 +111,36 @@ export function NationalTeamView({
     0,
   );
 
-  const chartRows = [...matchedRows].sort(
-    (left, right) =>
-      Math.abs(right.instrument?.periods[period] ?? 0) -
-      Math.abs(left.instrument?.periods[period] ?? 0),
-  );
+  const selectedInstrument = selected.instrument;
+  const shareHistory =
+    typeof selectedInstrument?.shares === "number"
+      ? [
+          ...historyPeriods.flatMap(({ id, label }) => {
+            const change = selectedInstrument.periods[id];
+            return typeof change === "number"
+              ? [{ label, value: selectedInstrument.shares! - change }]
+              : [];
+          }),
+          { label: "当前", value: selectedInstrument.shares },
+        ]
+      : [];
   const chartOption = {
     animationDuration: 420,
-    grid: { left: 150, right: 80, top: 18, bottom: 26 },
+    grid: { left: 72, right: 34, top: 28, bottom: 46 },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "shadow" },
+      axisPointer: { type: "line", lineStyle: { color: "#728197", type: "dashed" } },
       backgroundColor: "#111923",
       borderColor: "#334155",
       textStyle: { color: "#e7edf5", fontSize: 14 },
-      valueFormatter: (value: number) => `${signed(Number(value))} 亿份`,
+      valueFormatter: (value: number) => `${Number(value).toFixed(2)} 亿份`,
     },
     xAxis: {
-      type: "value",
+      type: "category",
+      boundaryGap: false,
+      data: shareHistory.map((item) => item.label),
       axisLine: { lineStyle: { color: "#394759" } },
-      splitLine: {
-        lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" },
-      },
+      axisTick: { show: false },
       axisLabel: {
         color: "#8795a8",
         fontFamily: "monospace",
@@ -128,40 +148,39 @@ export function NationalTeamView({
       },
     },
     yAxis: {
-      type: "category",
-      inverse: true,
-      data: chartRows.map((item) => item.instrument?.name ?? item.referenceName),
-      axisTick: { show: false },
-      axisLine: { show: false },
+      type: "value",
+      scale: true,
+      name: "亿份",
+      nameTextStyle: { color: "#7f8da0", padding: [0, 0, 8, 0] },
+      splitLine: { lineStyle: { color: "rgba(68,82,102,.32)", type: "dashed" } },
       axisLabel: {
-        width: 126,
-        overflow: "truncate",
-        color: "#dce4ee",
+        color: "#8795a8",
+        fontFamily: "monospace",
         fontSize: 13,
-        fontWeight: 600,
       },
     },
     series: [
       {
-        type: "bar",
-        barMaxWidth: 17,
-        data: chartRows.map((item) => {
-          const value = item.instrument?.periods[period] ?? 0;
-          return {
-            value,
-            itemStyle: {
-              color: value >= 0 ? "#e36464" : "#55b887",
-              borderRadius: value >= 0 ? [0, 5, 5, 0] : [5, 0, 0, 5],
-            },
-          };
-        }),
-        label: {
-          show: true,
-          position: "right",
-          color: "#bec8d5",
-          fontFamily: "monospace",
-          fontSize: 12,
-          formatter: ({ value }: { value: number }) => signed(value),
+        name: "官方总份额",
+        type: "line",
+        smooth: 0.16,
+        showSymbol: true,
+        symbolSize: 8,
+        data: shareHistory.map((item) => item.value),
+        lineStyle: { width: 3, color: "#e14f45" },
+        itemStyle: { color: "#f2b24a", borderColor: "#132234", borderWidth: 2 },
+        areaStyle: {
+          color: {
+            type: "linear",
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: "rgba(225,79,69,.28)" },
+              { offset: 1, color: "rgba(225,79,69,.015)" },
+            ],
+          },
         },
       },
     ],
@@ -201,19 +220,30 @@ export function NationalTeamView({
         </div>
         <div className="national-chart-title">
           <div>
-            <strong>观察池 ETF 份额变化</strong>
-            <span>{periodLabels[period]} · 截至 {asOf}</span>
+            <strong>{selectedInstrument?.name ?? selected.referenceName} · 官方总份额</strong>
+            <span>{selected.code} · 周期锚点复算 · 截至 {asOf}</span>
           </div>
           <span className="disclosure-pending">
             <Info size={15} />持有人披露待接入
           </span>
         </div>
-        <ReactECharts
-          className="national-chart"
-          lazyUpdate
-          notMerge
-          option={chartOption}
-        />
+        {shareHistory.length >= 2 ? (
+          <ReactECharts
+            className="national-chart"
+            lazyUpdate
+            notMerge
+            option={chartOption}
+          />
+        ) : (
+          <div className="national-chart national-chart-empty">
+            <Database size={28} />
+            <strong>等待该 ETF 的连续官方份额快照</strong>
+            <span>形成至少两个可比周期节点后自动生成折线</span>
+          </div>
+        )}
+        <p className="national-chart-footnote">
+          历史节点＝当前官方总份额－对应周期份额变化；这是 ETF 总份额曲线，不代表国家队持仓变化。
+        </p>
       </article>
 
       <section className="national-workspace">
