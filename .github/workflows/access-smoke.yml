@@ -2,6 +2,10 @@ name: Cloudflare Access smoke
 
 on:
   workflow_dispatch:
+  schedule:
+    # Weekly independent check that Cloudflare Access and the SSE fallback
+    # transport are healthy before a business-morning collection.
+    - cron: "30 0 * * 1"
 
 permissions:
   contents: read
@@ -16,14 +20,16 @@ jobs:
     timeout-minutes: 5
     env:
       STATUS_URL: https://flow.xiaoker.com/api/v1/data-status
+      SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
+      INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - name: Verify service identity secrets are configured
         shell: bash
         run: |
-          if [[ -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
-            echo "Both FLOW_CF_ACCESS_* secrets must be configured." >&2
+          if [[ -z "$INGEST_API_KEY" || -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets must be configured." >&2
             exit 1
           fi
 
@@ -46,3 +52,26 @@ jobs:
             (.domains | type == "array")
           ' access-response.json >/dev/null
           echo "Cloudflare Access service identity and private read endpoint are healthy."
+
+      - name: Request an allowlisted SSE source through Cloudflare
+        shell: bash
+        run: |
+          curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+            --get \
+            --header "Authorization: Bearer $INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            --data-urlencode "path=/commonQuery.do" \
+            --data-urlencode "isPagination=true" \
+            --data-urlencode "pageHelp.pageSize=1" \
+            --data-urlencode "pageHelp.pageNo=1" \
+            --data-urlencode "pageHelp.beginPage=1" \
+            --data-urlencode "pageHelp.cacheSize=1" \
+            --data-urlencode "pageHelp.endPage=1" \
+            --data-urlencode "sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L" \
+            --data-urlencode "STAT_DATE=2026-07-27" \
+            --output source-proxy-response.json \
+            "$SOURCE_PROXY_URL"
+          jq -e '.result | type == "array" and length > 0' \
+            source-proxy-response.json >/dev/null
+          echo "Authenticated, allowlisted SSE fallback transport is healthy."
