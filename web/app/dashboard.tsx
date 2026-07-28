@@ -65,7 +65,7 @@ const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> 
   { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
   { id: "national", label: "国家队持仓", icon: Buildings },
-  { id: "connect", label: "互联互通", icon: ArrowsLeftRight },
+  { id: "connect", label: "南北互通", icon: ArrowsLeftRight },
   { id: "margin", label: "融资融券", icon: Pulse },
 ];
 
@@ -410,7 +410,7 @@ export function Dashboard({
       <header className="terminal-topbar">
         <div className="brand-block">
           <span className="brand-mark" aria-hidden="true"><Pulse size={20} weight="bold" /></span>
-          <div><strong>FLOW</strong><span>个人市场数据交易台</span></div>
+          <div><strong>FLOW</strong><span>啸傲的市场资金流向交易台</span></div>
         </div>
         <nav className="desk-nav" aria-label="交易台导航">
           {navigation.map((item) => {

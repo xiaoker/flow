@@ -28,7 +28,7 @@ test("server-renders the trading flow dashboard", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>[^<]*市场数据台[^<]*<\/title>/i);
-  assert.match(html, /个人市场数据交易台/);
+  assert.match(html, /啸傲的市场资金流向交易台/);
   assert.match(html, /板块份额变化/);
   assert.match(html, /ETF 雷达/);
   assert.match(html, /南向净买入/);
