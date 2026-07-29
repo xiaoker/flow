@@ -274,6 +274,8 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .detail-chart-grid > div { min-width: 0; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(7,13,22,.38); }
 .detail-chart-grid h3 { margin: 14px 16px 0; color: var(--muted-strong); font-size: 15px; }
 .detail-chart { height: 300px !important; }
+.connect-chart-stack { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.connect-chart-stack .detail-chart { height: 320px !important; }
 .connect-kpi-strip, .margin-kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 10px; }
 .connect-kpi-strip > div, .margin-kpi-strip > div { display: flex; min-width: 0; flex-direction: column; gap: 5px; padding: 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(7,13,22,.38); }
 .connect-kpi-strip span, .margin-kpi-strip span { color: var(--muted); font-size: 13px; }
