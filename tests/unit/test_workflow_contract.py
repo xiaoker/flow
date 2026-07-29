@@ -4,14 +4,19 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_daily_collection_runs_on_business_mornings_not_saturday() -> None:
+def test_daily_collection_is_dispatched_by_cloudflare_not_github_cron() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/daily-data.yml"
     ).read_text(encoding="utf-8")
+    wrangler = (REPOSITORY_ROOT / "web/wrangler.jsonc").read_text(encoding="utf-8")
+    worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
 
-    assert '- cron: "15 1 * * 1-5"' in workflow
-    assert '- cron: "15 1 * * 2-6"' not in workflow
-    assert "weekends must not be scheduled" in workflow
+    assert "schedule:" not in workflow
+    assert "workflow_dispatch:" in workflow
+    assert '"crons": ["15 1 * * 1-5"]' in wrangler
+    assert "GITHUB_ACTIONS_TOKEN" in worker
+    assert "daily-data.yml/dispatches" in worker
+    assert 'JSON.stringify({ ref: "main" })' in worker
 
 
 def test_daily_collection_retries_network_failures_before_building_snapshot() -> None:

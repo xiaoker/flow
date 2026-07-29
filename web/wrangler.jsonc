@@ -13,6 +13,9 @@
       "custom_domain": true
     }
   ],
+  "triggers": {
+    "crons": ["15 1 * * 1-5"]
+  },
   "assets": {
     "directory": "dist/client",
     "not_found_handling": "none",

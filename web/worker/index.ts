@@ -5,6 +5,7 @@ import handler from "vinext/server/app-router-entry";
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  GITHUB_ACTIONS_TOKEN: string;
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
   IMAGES: {
@@ -19,6 +20,38 @@ interface Env {
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
+}
+
+interface ScheduledController {
+  cron: string;
+  scheduledTime: number;
+}
+
+const DAILY_DATA_DISPATCH_URL =
+  "https://api.github.com/repos/xiaoker/flow/actions/workflows/daily-data.yml/dispatches";
+
+async function dispatchDailyCollection(env: Env): Promise<void> {
+  if (!env.GITHUB_ACTIONS_TOKEN) {
+    throw new Error("GITHUB_ACTIONS_TOKEN is not configured");
+  }
+  const response = await fetch(DAILY_DATA_DISPATCH_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "flow-cloudflare-scheduler",
+      "X-GitHub-Api-Version": "2026-03-10",
+    },
+    body: JSON.stringify({ ref: "main" }),
+  });
+  if (response.status !== 204) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new Error(
+      `GitHub workflow dispatch failed with ${response.status}: ${detail}`,
+    );
+  }
+  console.info("Dispatched Daily market data workflow from Cloudflare Cron");
 }
 
 // Image security config. SVG sources with .svg extension auto-skip the
@@ -46,6 +79,13 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(dispatchDailyCollection(env));
   },
 };
 
