@@ -51,6 +51,20 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark\s*>\s*div:nth-last-child\(n\s*\+\s*13\)\s*\{\s*display:\s*none/);
 });
 
+test("groups connect channels by disclosure meaning instead of equal-weight cards", async () => {
+  const [source, css] = await Promise.all([
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /connect-channel-south/);
+  assert.match(source, /connect-channel-north/);
+  assert.match(source, /南向资金/);
+  assert.match(source, /北向活跃度/);
+  assert.match(source, /仅成交额，不代表流入方向/);
+  assert.match(css, /\.connect-channel-groups\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /@media \(max-width: 680px\)[\s\S]*\.connect-channel-groups\s*\{\s*grid-template-columns:\s*1fr/);
+});
+
 test("defines the national-team ETF watchlist without fabricating holder disclosures", async () => {
   const source = await readFile(
     new URL("../app/national-team-view.tsx", import.meta.url),
