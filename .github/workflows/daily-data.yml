@@ -147,3 +147,4 @@ jobs:
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json
             reports/backfill/latest-summary.json
+            history-bundle.json

@@ -432,7 +432,14 @@ export async function POST(request: Request) {
         normalizedKeys.push(key);
         normalizedFiles.push({ file: normalized, content });
       }
-      standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
+      try {
+        standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "unknown_standardization_error";
+        throw new Error(
+          `standardize_failed:${artifact.dataset}:${artifact.sourceId}:${artifact.requestedDate}:${detail}`,
+        );
+      }
       manifestArtifacts.push({
         releaseId: artifact.releaseId,
         sourceId: artifact.sourceId,
@@ -593,6 +600,12 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("history import failed", error);
-    return NextResponse.json({ error: "history_import_failed" }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: "history_import_failed",
+        detail: error instanceof Error ? error.message : "unknown_history_import_error",
+      },
+      { status: 500 },
+    );
   }
 }
