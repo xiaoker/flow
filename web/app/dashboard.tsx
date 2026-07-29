@@ -230,7 +230,7 @@ export function Dashboard({
     {
       id: "name",
       accessorFn: (row) => row.name,
-      header: "基金名称",
+      header: "官方简称",
       cell: ({ row }) => (
         <button className="fund-cell" type="button" onClick={() => setSelected(row.original)}>
           <span className="fund-rank">{String(row.index + 1).padStart(2, "0")}</span>

@@ -1,7 +1,39 @@
 import json
+import subprocess
 from pathlib import Path
 
-from scripts.rebuild_remote_market_history import _record, _write_sql
+from scripts import rebuild_remote_market_history
+from scripts.rebuild_remote_market_history import _download, _record, _write_sql
+
+
+def test_download_retries_a_transient_r2_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    attempts = 0
+
+    def fake_run(*_args: str, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        destination = Path(_args[-1])
+        if attempts == 1:
+            destination.write_text("partial", encoding="utf-8")
+            raise subprocess.CalledProcessError(1, _args)
+        destination.write_text('{"asOf":"2026-01-09"}', encoding="utf-8")
+
+    monkeypatch.setattr(rebuild_remote_market_history, "_run", fake_run)
+    monkeypatch.setattr(rebuild_remote_market_history.time, "sleep", lambda _seconds: None)
+
+    path = _download(
+        {
+            "as_of": "2026-01-09",
+            "r2_object_key": "market-data/history/example.json",
+        },
+        tmp_path,
+    )
+
+    assert attempts == 2
+    assert path.read_text(encoding="utf-8") == '{"asOf":"2026-01-09"}'
 
 
 def test_rebuild_extracts_only_the_snapshot_date(tmp_path: Path) -> None:
@@ -66,7 +98,7 @@ def test_rebuild_keeps_expired_hkex_day_missing(tmp_path: Path) -> None:
     assert values[17] == 0
 
     sql_path = tmp_path / "history.sql"
-    _write_sql([values], sql_path)
+    _write_sql([values, values], sql_path, batch_size=1)
     sql = sql_path.read_text(encoding="utf-8")
-    assert "INSERT INTO market_history_daily" in sql
+    assert sql.count("INSERT INTO market_history_daily") == 2
     assert "ON CONFLICT(trade_date) DO UPDATE" in sql

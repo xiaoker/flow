@@ -5,7 +5,9 @@ import json
 import math
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -51,22 +53,37 @@ def _history_rows() -> list[dict[str, str]]:
     ]
 
 
-def _download(row: dict[str, str], destination: Path) -> Path:
+def _download(
+    row: dict[str, str],
+    destination: Path,
+    *,
+    attempts: int = 4,
+) -> Path:
     path = destination / f"{row['as_of']}.json"
     if path.is_file() and path.stat().st_size > 0:
         return path
-    _run(
-        "npx",
-        "wrangler",
-        "r2",
-        "object",
-        "get",
-        f"flow/{row['r2_object_key']}",
-        "--remote",
-        "--file",
-        str(path),
-    )
-    return path
+    for attempt in range(1, attempts + 1):
+        try:
+            _run(
+                "npx",
+                "wrangler",
+                "r2",
+                "object",
+                "get",
+                f"flow/{row['r2_object_key']}",
+                "--remote",
+                "--file",
+                str(path),
+            )
+            if path.is_file() and path.stat().st_size > 0:
+                return path
+            raise RuntimeError(f"R2 returned an empty object for {row['r2_object_key']}")
+        except (RuntimeError, subprocess.CalledProcessError):
+            path.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            time.sleep(attempt * 2)
+    raise AssertionError("unreachable")
 
 
 def _finite(value: Any) -> float | int | None:
@@ -122,7 +139,14 @@ def _record(path: Path, metadata: dict[str, str]) -> tuple[list[Any], bool, bool
     return values, bool(margin), bool(connect)
 
 
-def _write_sql(records: list[list[Any]], path: Path) -> None:
+def _write_sql(
+    records: list[list[Any]],
+    path: Path,
+    *,
+    batch_size: int = 40,
+) -> None:
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     columns = """
       trade_date, margin_balance, margin_change, financing_buy,
       lending_balance, lending_sell_volume, total_balance, sse_balance,
@@ -131,13 +155,7 @@ def _write_sql(records: list[list[Any]], path: Path) -> None:
       northbound_etf_turnover, northbound_trade_count, margin_available,
       connect_available, source_snapshot_sha256, observed_at, created_at
     """.strip()
-    clauses = [
-        "INSERT INTO market_history_daily (" + columns + ") VALUES",
-        ",\n".join(
-            "(" + ", ".join(_sql_value(value) for value in record) + ")"
-            for record in records
-        ),
-        """ON CONFLICT(trade_date) DO UPDATE SET
+    upsert = """ON CONFLICT(trade_date) DO UPDATE SET
           margin_balance=excluded.margin_balance,
           margin_change=excluded.margin_change,
           financing_buy=excluded.financing_buy,
@@ -157,9 +175,23 @@ def _write_sql(records: list[list[Any]], path: Path) -> None:
           connect_available=excluded.connect_available,
           source_snapshot_sha256=excluded.source_snapshot_sha256,
           observed_at=excluded.observed_at,
-          created_at=excluded.created_at;""",
-    ]
-    path.write_text("\n".join(clauses), encoding="utf-8")
+          created_at=excluded.created_at;"""
+    statements = []
+    for offset in range(0, len(records), batch_size):
+        batch = records[offset : offset + batch_size]
+        statements.append(
+            "\n".join(
+                [
+                    "INSERT INTO market_history_daily (" + columns + ") VALUES",
+                    ",\n".join(
+                        "(" + ", ".join(_sql_value(value) for value in record) + ")"
+                        for record in batch
+                    ),
+                    upsert,
+                ]
+            )
+        )
+    path.write_text("\n".join(statements), encoding="utf-8")
 
 
 def main() -> None:
@@ -168,13 +200,24 @@ def main() -> None:
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="Optional persistent download cache for safe migration retries.",
+    )
     args = parser.parse_args()
 
     rows = _history_rows()
     if not rows:
         raise RuntimeError("No quality-passed historical snapshots were found")
-    with tempfile.TemporaryDirectory(prefix="flow-market-history-") as directory:
+    directory_context = (
+        nullcontext(str(args.cache_dir))
+        if args.cache_dir
+        else tempfile.TemporaryDirectory(prefix="flow-market-history-")
+    )
+    with directory_context as directory:
         root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
         with ThreadPoolExecutor(max_workers=max(1, min(args.workers, 16))) as pool:
             futures = {pool.submit(_download, row, root): row for row in rows}
             for index, future in enumerate(as_completed(futures), start=1):

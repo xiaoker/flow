@@ -260,7 +260,7 @@ export function NationalTeamView({
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>ETF 名称</th>
+                  <th>官方简称</th>
                   <th>代码</th>
                   <th>当前份额</th>
                   <th>最近1日</th>
