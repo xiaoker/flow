@@ -17,6 +17,7 @@ def test_daily_collection_is_dispatched_by_cloudflare_not_github_cron() -> None:
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'JSON.stringify({ ref: "main" })' in worker
+    assert "response.status !== 200 && response.status !== 204" in worker
 
 
 def test_daily_collection_retries_network_failures_before_building_snapshot() -> None:

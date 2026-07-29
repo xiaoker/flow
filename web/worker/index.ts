@@ -45,7 +45,7 @@ async function dispatchDailyCollection(env: Env): Promise<void> {
     },
     body: JSON.stringify({ ref: "main" }),
   });
-  if (response.status !== 204) {
+  if (response.status !== 200 && response.status !== 204) {
     const detail = (await response.text()).slice(0, 500);
     throw new Error(
       `GitHub workflow dispatch failed with ${response.status}: ${detail}`,
