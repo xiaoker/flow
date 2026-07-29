@@ -71,9 +71,25 @@ test("defines the national-team ETF watchlist without fabricating holder disclos
     "512500",
   ];
   for (const code of codes) assert.match(source, new RegExp(`"${code}"`));
-  assert.match(source, /nationalTeamEtfCodes/);
+  const fundShortNames = [
+    "沪深300ETF华泰柏瑞",
+    "沪深300ETF易方达",
+    "沪深300ETF华夏",
+    "中证500ETF南方",
+    "创业板ETF易方达",
+    "沪深300ETF嘉实",
+    "中证1000ETF南方",
+    "上证50ETF华夏",
+    "科创50ETF易方达",
+    "上证180ETF华安",
+    "中证1000ETF华夏",
+    "中证500ETF华夏",
+  ];
+  for (const name of fundShortNames) assert.match(source, new RegExp(name));
+  assert.match(source, /nationalTeamEtfs/);
+  assert.match(source, /<th>基金简称<\/th>/);
   assert.doesNotMatch(source, /referenceName/);
-  assert.match(source, /instrument\?\.name/);
+  assert.match(source, /fundShortName/);
   assert.match(source, /正式持有人披露尚未接入/);
   assert.match(source, /不使用截图数字或第三方估算/);
   assert.match(source, /它不等同于国家队增减持/);
