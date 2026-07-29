@@ -226,8 +226,18 @@ function parseCsv(content: Uint8Array): Array<Record<string, string>> {
 function requiredInteger(row: Record<string, string>, field: string): number {
   if (!row[field]) throw new Error(`missing_integer:${field}`);
   const value = Number(row[field]);
-  if (!Number.isSafeInteger(value)) throw new Error(`invalid_integer:${field}`);
-  return value;
+  const rounded = Math.round(value);
+  // Official values are integer yuan, but pandas may serialize a multiplied
+  // decimal such as 78.99 * 1e8 as 7898999999.999999. Only absorb sub-cent
+  // IEEE-754 noise; never coerce a materially fractional or missing value.
+  if (
+    !Number.isFinite(value) ||
+    !Number.isSafeInteger(rounded) ||
+    Math.abs(value - rounded) > 0.01
+  ) {
+    throw new Error(`invalid_integer:${field}`);
+  }
+  return rounded;
 }
 
 function optionalInteger(row: Record<string, string>, field: string): number | null {

@@ -530,7 +530,7 @@ test("archives full-source history with server-side hash verification", async ()
   const raw = Buffer.from('{"result":[]}');
   const normalized = Buffer.from(
     "trade_date,market,financing_balance_yuan,financing_buy_yuan,securities_lending_balance_yuan,margin_total_balance_yuan,source_id,observed_at\n" +
-    "2026-07-14,SSE,1452014000000,120000000000,10000000000,1462014000000,sse,2026-07-22T09:15:20+08:00\n",
+    "2026-07-14,SSE,1452014000000,120000000000,7898999999.999999,1462014000000,sse,2026-07-22T09:15:20+08:00\n",
   );
   const connectRaw = Buffer.from("var daily = {};");
   const connectSummary = Buffer.from(
@@ -660,6 +660,11 @@ test("archives full-source history with server-side hash verification", async ()
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO market_history_daily")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO margin_daily")));
+  assert.ok(statements.some(
+    ({ sql, values }) =>
+      sql.includes("INSERT INTO margin_daily") &&
+      values.includes(7_899_000_000),
+  ));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
 });
 
