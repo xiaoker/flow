@@ -14,7 +14,7 @@
     }
   ],
   "triggers": {
-    "crons": ["15 1 * * 1-5"]
+    "crons": ["30 10 * * 1-5", "15 1 * * 1-5"]
   },
   "assets": {
     "directory": "dist/client",

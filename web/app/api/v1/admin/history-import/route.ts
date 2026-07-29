@@ -180,6 +180,148 @@ function decodeBase64(value: string): Uint8Array {
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
+function parseCsv(content: Uint8Array): Array<Record<string, string>> {
+  const text = new TextDecoder().decode(content).replace(/^\uFEFF/, "");
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+      } else {
+        field += character;
+      }
+    } else if (character === '"') {
+      quoted = true;
+    } else if (character === ",") {
+      row.push(field);
+      field = "";
+    } else if (character === "\n") {
+      row.push(field.replace(/\r$/, ""));
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += character;
+    }
+  }
+  if (quoted) throw new Error("unterminated_csv_quote");
+  if (field.length || row.length) {
+    row.push(field.replace(/\r$/, ""));
+    rows.push(row);
+  }
+  const headers = rows.shift()?.map((item) => item.trim()) ?? [];
+  if (!headers.length) return [];
+  return rows
+    .filter((values) => values.some((item) => item.length > 0))
+    .map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
+}
+
+function requiredInteger(row: Record<string, string>, field: string): number {
+  if (!row[field]) throw new Error(`missing_integer:${field}`);
+  const value = Number(row[field]);
+  if (!Number.isSafeInteger(value)) throw new Error(`invalid_integer:${field}`);
+  return value;
+}
+
+function optionalInteger(row: Record<string, string>, field: string): number | null {
+  if (!row[field]) return null;
+  return requiredInteger(row, field);
+}
+
+function validateStandardRow(
+  artifact: HistoryArtifact,
+  row: Record<string, string>,
+): void {
+  if (!ISO_DATE.test(row.trade_date ?? "")) throw new Error("invalid_standard_trade_date");
+  if (row.source_id !== artifact.sourceId) throw new Error("standard_source_mismatch");
+  if (!row.observed_at) throw new Error("missing_standard_observed_at");
+}
+
+async function persistStandardRows(
+  db: D1Database,
+  artifact: HistoryArtifact,
+  normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }>,
+): Promise<number> {
+  if (artifact.dataset === "stock_connect_daily") {
+    const normalized = normalizedFiles.find(({ file }) => file.name === "summary");
+    if (!normalized) throw new Error("missing_connect_summary");
+    const rows = parseCsv(normalized.content);
+    if (rows.length !== normalized.file.rowCount) throw new Error("connect_row_count_mismatch");
+    await db.prepare("DELETE FROM connect_daily WHERE release_id = ?").bind(artifact.releaseId).run();
+    for (const row of rows) {
+      validateStandardRow(artifact, row);
+      if (!["SSE", "SZSE"].includes(row.market) || !["northbound", "southbound"].includes(row.direction)) {
+        throw new Error("invalid_connect_channel");
+      }
+      await db
+        .prepare(
+          `INSERT INTO connect_daily (
+             release_id, trade_date, market, direction, currency, total_turnover,
+             buy_turnover, sell_turnover, net_buy, etf_turnover, source_id, observed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          artifact.releaseId,
+          row.trade_date,
+          row.market,
+          row.direction,
+          row.currency,
+          requiredInteger(row, "total_turnover"),
+          optionalInteger(row, "buy_turnover"),
+          optionalInteger(row, "sell_turnover"),
+          optionalInteger(row, "net_buy"),
+          requiredInteger(row, "etf_turnover"),
+          artifact.sourceId,
+          row.observed_at,
+        )
+        .run();
+    }
+    return rows.length;
+  }
+
+  if (artifact.dataset === "margin_market_daily") {
+    const normalized = normalizedFiles.find(({ file }) => file.name === "data");
+    if (!normalized) throw new Error("missing_margin_data");
+    const rows = parseCsv(normalized.content);
+    if (rows.length !== normalized.file.rowCount) throw new Error("margin_row_count_mismatch");
+    await db.prepare("DELETE FROM margin_daily WHERE release_id = ?").bind(artifact.releaseId).run();
+    for (const row of rows) {
+      validateStandardRow(artifact, row);
+      if (!["SSE", "SZSE"].includes(row.market)) throw new Error("invalid_margin_market");
+      await db
+        .prepare(
+          `INSERT INTO margin_daily (
+             release_id, trade_date, market, financing_balance_yuan,
+             financing_buy_yuan, securities_lending_balance_yuan,
+             margin_total_balance_yuan, source_id, observed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          artifact.releaseId,
+          row.trade_date,
+          row.market,
+          requiredInteger(row, "financing_balance_yuan"),
+          requiredInteger(row, "financing_buy_yuan"),
+          requiredInteger(row, "securities_lending_balance_yuan"),
+          requiredInteger(row, "margin_total_balance_yuan"),
+          artifact.sourceId,
+          row.observed_at,
+        )
+        .run();
+    }
+    return rows.length;
+  }
+
+  return 0;
+}
+
 async function sha256Hex(content: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", content);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -242,6 +384,7 @@ export async function POST(request: Request) {
   try {
     const { history } = value;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
+    let standardizedRows = 0;
     for (const artifact of history.artifacts) {
       const raw = decodeBase64(artifact.rawContentBase64);
       if ((await sha256Hex(raw)) !== artifact.sha256) {
@@ -270,6 +413,7 @@ export async function POST(request: Request) {
         },
       );
       const normalizedKeys: string[] = [];
+      const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }> = [];
       for (const normalized of artifact.normalized) {
         const content = decodeBase64(normalized.contentBase64);
         if ((await sha256Hex(content)) !== normalized.sha256) {
@@ -286,7 +430,9 @@ export async function POST(request: Request) {
           },
         });
         normalizedKeys.push(key);
+        normalizedFiles.push({ file: normalized, content });
       }
+      standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
       manifestArtifacts.push({
         releaseId: artifact.releaseId,
         sourceId: artifact.sourceId,
@@ -429,6 +575,7 @@ export async function POST(request: Request) {
       status: "archived",
       asOf: history.asOf,
       artifacts: history.artifacts.length,
+      standardizedRows,
       snapshotSha256,
       snapshotKey,
       manifestKey,

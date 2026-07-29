@@ -122,9 +122,20 @@ const confidenceLabels: Record<string, string> = {
   low: "低",
 };
 
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
 function formatFlow(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function compactDate(value: string) {
@@ -383,6 +394,72 @@ export function Dashboard({
     };
   }, [marginDisplayMetric, snapshot.marginSeries]);
 
+  const marginInsights = useMemo(() => {
+    const series = snapshot.marginSeries;
+    const latest = series.at(-1);
+    const previous = series.at(-2);
+    const fiveDaysAgo = series.at(-6);
+    const twentyDaysAgo = series.at(-21);
+    const dailyChange = latest && previous ? latest.balance - previous.balance : null;
+    const fiveDayChange = latest && fiveDaysAgo ? latest.balance - fiveDaysAgo.balance : null;
+    const twentyDayChange = latest && twentyDaysAgo ? latest.balance - twentyDaysAgo.balance : null;
+    const priorBuyValues = series
+      .slice(-21, -1)
+      .flatMap((item) => item.financingBuy === undefined ? [] : [item.financingBuy]);
+    const buyMedian = median(priorBuyValues);
+    const buyRatio = latest?.financingBuy !== undefined && buyMedian
+      ? latest.financingBuy / buyMedian
+      : null;
+    const sseChange = latest?.sseBalance !== undefined && previous?.sseBalance !== undefined
+      ? latest.sseBalance - previous.sseBalance
+      : null;
+    const szseChange = latest?.szseBalance !== undefined && previous?.szseBalance !== undefined
+      ? latest.szseBalance - previous.szseBalance
+      : null;
+    const marketDriver = sseChange !== null && szseChange !== null
+      ? (Math.abs(sseChange) >= Math.abs(szseChange)
+        ? { label: "沪市主导", value: sseChange }
+        : { label: "深市主导", value: szseChange })
+      : null;
+    const lendingChange = latest?.lendingBalance !== undefined && fiveDaysAgo?.lendingBalance !== undefined
+      ? latest.lendingBalance - fiveDaysAgo.lendingBalance
+      : null;
+    return [
+      {
+        label: "短期杠杆趋势",
+        value: formatFlow(fiveDayChange),
+        unit: "亿元 / 5日",
+        tone: fiveDayChange === null ? "" : fiveDayChange >= 0 ? "text-in" : "text-out",
+        status: fiveDayChange === null ? "覆盖不足" : fiveDayChange >= 0 ? "余额扩张" : "余额收缩",
+        note: `当日 ${formatFlow(dailyChange)} 亿元 · 20日 ${formatFlow(twentyDayChange)} 亿元`,
+      },
+      {
+        label: "融资买入活跃度",
+        value: buyRatio === null ? "—" : `${buyRatio.toFixed(2)}×`,
+        unit: "20日中位数",
+        tone: buyRatio === null ? "" : buyRatio >= 1.2 ? "text-amber" : "text-cyan",
+        status: buyRatio === null ? "覆盖不足" : buyRatio >= 1.2 ? "偏热" : buyRatio <= 0.8 ? "偏冷" : "常态",
+        note: `最新 ${formatFlow(latest?.financingBuy)} 亿元 · 基准 ${formatFlow(buyMedian)} 亿元`,
+      },
+      {
+        label: "沪深余额增量",
+        value: formatFlow(marketDriver?.value),
+        unit: "亿元 / 当日",
+        tone: marketDriver === null ? "" : marketDriver.value >= 0 ? "text-in" : "text-out",
+        status: marketDriver?.label ?? "覆盖不足",
+        note: `沪市 ${formatFlow(sseChange)} 亿元 · 深市 ${formatFlow(szseChange)} 亿元`,
+      },
+      {
+        label: "融券余额变化",
+        value: formatFlow(lendingChange),
+        unit: "亿元 / 5日",
+        tone: lendingChange === null ? "" : lendingChange > 0 ? "text-amber" : "text-cyan",
+        status: lendingChange === null ? "覆盖不足" : lendingChange > 0 ? "融券余额抬升" : "融券余额回落",
+        note: `当前融券余额 ${formatFlow(latest?.lendingBalance)} 亿元`,
+      },
+    ];
+  }, [snapshot.marginSeries]);
+
   const selectedShareHistory = useMemo(() => {
     if (typeof selected?.shares !== "number") return [];
     return [
@@ -464,6 +541,29 @@ export function Dashboard({
     setDraftDate(snapshot.asOf);
   }, [snapshot.asOf]);
 
+  useEffect(() => {
+    if (!autoRefresh || requestedDate) return;
+    let lastCheck = Date.now();
+    const refresh = () => {
+      if (document.visibilityState === "visible") window.location.reload();
+    };
+    const interval = window.setInterval(refresh, AUTO_REFRESH_MS);
+    const refreshAfterBackground = () => {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastCheck >= AUTO_REFRESH_MS
+      ) {
+        refresh();
+      }
+      if (document.visibilityState === "visible") lastCheck = Date.now();
+    };
+    document.addEventListener("visibilitychange", refreshAfterBackground);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshAfterBackground);
+    };
+  }, [autoRefresh, requestedDate]);
+
   const choosePeriod = (next: FlowPeriod) => {
     if (!availablePeriods.has(next)) {
       setNotice(`${periods.find((item) => item.id === next)?.label}尚未达到所需的官方交易日覆盖`);
@@ -515,7 +615,7 @@ export function Dashboard({
         <div className="top-actions">
           <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim() && view !== "national") setView("radar"); }} placeholder={view === "national" ? "搜索观察池 ETF 或代码" : "搜索基金或代码，回车查看"} value={query} /></label>
           <button className="icon-button" title="打印或保存当前页面" onClick={() => window.print()} type="button"><Camera size={19} /></button>
-          <button className={`refresh-toggle ${autoRefresh ? "enabled" : ""}`} aria-pressed={autoRefresh} onClick={() => setAutoRefresh((value) => !value)} type="button"><span /><em>自动更新</em></button>
+          <button className={`refresh-toggle ${autoRefresh && !requestedDate ? "enabled" : ""}`} aria-pressed={autoRefresh && !requestedDate} disabled={Boolean(requestedDate)} onClick={() => setAutoRefresh((value) => !value)} title={requestedDate ? "历史归档不会自动切换日期" : "每 5 分钟检查最新发布数据"} type="button"><span /><em>自动更新</em></button>
           <button className="icon-button" title="刷新数据" onClick={() => window.location.reload()} type="button"><ArrowsClockwise size={19} /></button>
         </div>
       </header>
@@ -689,11 +789,11 @@ export function Dashboard({
         {view === "margin" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main margin-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；{marketHistoryCoverage?.margin.points ?? snapshot.marginSeries.length} 个官方历史点{marketHistoryCoverage?.margin.from ? `（${marketHistoryCoverage.margin.from} 至 ${marketHistoryCoverage.margin.to}）` : ""}</p></div><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div>
+              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；{marketHistoryCoverage?.margin.points ?? snapshot.marginSeries.length} 个官方历史点{marketHistoryCoverage?.margin.from ? `（${marketHistoryCoverage.margin.from} 至 ${marketHistoryCoverage.margin.to}）` : ""}</p></div><div className="margin-hero-value"><small>最新完整数据日 · {snapshot.asOf}</small><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div></div>
               <div className="margin-metric-tabs">{(Object.keys(marginMetricDefinitions) as MarginDisplayMetric[]).map((item) => <button className={marginDisplayMetric === item ? "active" : ""} key={item} onClick={() => setMarginDisplayMetric(item)} type="button">{marginMetricDefinitions[item].label}</button>)}</div>
               <ReactECharts className="margin-detail-chart" option={marginTrendOption} notMerge lazyUpdate />
               <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div></div>
-              <div className="margin-history compact-history">{snapshot.marginSeries.slice(-60).reverse().map((item) => <div key={item.date}><time>{item.date}</time><strong>{item.label}</strong><span className={item.change === null || item.change === undefined ? "" : item.change >= 0 ? "text-in" : "text-out"}>{item.change === null || item.change === undefined ? "基准" : `${formatFlow(item.change, 2)} 亿元`}</span></div>)}</div>
+              <section className="margin-insights" aria-labelledby="margin-insights-title"><div className="margin-insights-heading"><div><span className="eyebrow">从原始序列复算</span><h3 id="margin-insights-title">两融状态解读</h3></div><p>余额看存量趋势，买入额看交易活跃度；两者不能互相替代。</p></div><div className="margin-insight-grid">{marginInsights.map((item) => <article key={item.label}><header><span>{item.label}</span><small>{item.status}</small></header><strong className={item.tone}>{item.value}<em>{item.unit}</em></strong><p>{item.note}</p></article>)}</div></section>
             </article>
             <aside className="terminal-panel methodology"><Pulse size={24} /><h3>如何阅读</h3><p>{marginMetric?.delta}。余额变化只说明杠杆存量扩张或收缩，需要与指数趋势和成交额一起观察。</p><span>官方汇总 · 最新 {snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模，不叫净流入</p><p><b>融资买入</b>当日融资买入成交额</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>
           </section>

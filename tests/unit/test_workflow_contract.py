@@ -13,7 +13,7 @@ def test_daily_collection_is_dispatched_by_cloudflare_not_github_cron() -> None:
 
     assert "schedule:" not in workflow
     assert "workflow_dispatch:" in workflow
-    assert '"crons": ["15 1 * * 1-5"]' in wrangler
+    assert '"crons": ["30 10 * * 1-5", "15 1 * * 1-5"]' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'JSON.stringify({ ref: "main" })' in worker

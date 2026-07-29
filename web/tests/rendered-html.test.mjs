@@ -51,6 +51,28 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark\s*>\s*div:nth-last-child\(n\s*\+\s*13\)\s*\{\s*display:\s*none/);
 });
 
+test("refreshes the latest dashboard and schedules both close and morning collection", async () => {
+  const [source, configText] = await Promise.all([
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
+  ]);
+  const config = JSON.parse(configText);
+  assert.match(source, /AUTO_REFRESH_MS = 5 \* 60 \* 1000/);
+  assert.match(source, /window\.setInterval\(refresh, AUTO_REFRESH_MS\)/);
+  assert.match(source, /if \(!autoRefresh \|\| requestedDate\) return/);
+  assert.deepEqual(config.triggers.crons, ["30 10 * * 1-5", "15 1 * * 1-5"]);
+});
+
+test("replaces repetitive margin day cards with derived diagnostics", async () => {
+  const source = await readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8");
+  assert.match(source, /最新完整数据日/);
+  assert.match(source, /短期杠杆趋势/);
+  assert.match(source, /融资买入活跃度/);
+  assert.match(source, /沪深余额增量/);
+  assert.match(source, /融券余额变化/);
+  assert.doesNotMatch(source, /margin-history compact-history/);
+});
+
 test("groups connect channels by disclosure meaning instead of equal-weight cards", async () => {
   const [source, css] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
@@ -506,9 +528,24 @@ test("archives full-source history with server-side hash verification", async ()
   );
   const snapshot = await overview.json();
   const raw = Buffer.from('{"result":[]}');
-  const normalized = Buffer.from("trade_date,market\n2026-07-14,SSE\n");
+  const normalized = Buffer.from(
+    "trade_date,market,financing_balance_yuan,financing_buy_yuan,securities_lending_balance_yuan,margin_total_balance_yuan,source_id,observed_at\n" +
+    "2026-07-14,SSE,1452014000000,120000000000,10000000000,1462014000000,sse,2026-07-22T09:15:20+08:00\n",
+  );
+  const connectRaw = Buffer.from("var daily = {};");
+  const connectSummary = Buffer.from(
+    "trade_date,market,direction,currency,total_turnover,buy_turnover,sell_turnover,net_buy,etf_turnover,source_id,observed_at\n" +
+    "2026-07-14,SSE,southbound,HKD,50000000000,26000000000,24000000000,2000000000,1000000000,hkex,2026-07-22T09:15:30+08:00\n" +
+    "2026-07-14,SZSE,southbound,HKD,40000000000,19000000000,21000000000,-2000000000,800000000,hkex,2026-07-22T09:15:30+08:00\n" +
+    "2026-07-14,SSE,northbound,RMB,90000000000,,,,3000000000,hkex,2026-07-22T09:15:30+08:00\n" +
+    "2026-07-14,SZSE,northbound,RMB,100000000000,,,,3500000000,hkex,2026-07-22T09:15:30+08:00\n",
+  );
+  const connectTop = Buffer.from("trade_date,market,direction,rank,instrument_code,instrument_name,total_turnover,source_id,observed_at\n");
   const sha256 = createHash("sha256").update(raw).digest("hex");
   const normalizedSha256 = createHash("sha256").update(normalized).digest("hex");
+  const connectSha256 = createHash("sha256").update(connectRaw).digest("hex");
+  const connectSummarySha256 = createHash("sha256").update(connectSummary).digest("hex");
+  const connectTopSha256 = createHash("sha256").update(connectTop).digest("hex");
   const statements = [];
   const objects = new Map();
   const db = {
@@ -568,6 +605,39 @@ test("archives full-source history with server-side hash verification", async ()
             },
           ],
         },
+        {
+          releaseId: `stock_connect_daily:hkex:2026-07-14:${connectSha256.slice(0, 16)}`,
+          sourceId: "hkex",
+          dataset: "stock_connect_daily",
+          requestedDate: "2026-07-14",
+          tradeDates: ["2026-07-14"],
+          observedAt: "2026-07-22T09:15:30+08:00",
+          sourceUrl: "https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_20260714c.js",
+          dateBasis: "source_published",
+          sha256: connectSha256,
+          contentType: "application/javascript",
+          extension: "js",
+          rawContentBase64: connectRaw.toString("base64"),
+          metadata: { sha256: connectSha256 },
+          normalized: [
+            {
+              name: "summary",
+              format: "csv",
+              sha256: connectSummarySha256,
+              rowCount: 4,
+              tradeDates: ["2026-07-14"],
+              contentBase64: connectSummary.toString("base64"),
+            },
+            {
+              name: "top",
+              format: "csv",
+              sha256: connectTopSha256,
+              rowCount: 0,
+              tradeDates: [],
+              contentBase64: connectTop.toString("base64"),
+            },
+          ],
+        },
       ],
     },
   };
@@ -583,11 +653,14 @@ test("archives full-source history with server-side hash verification", async ()
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.status, "archived");
+  assert.equal(result.standardizedRows, 5);
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/history/")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO market_history_daily")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO margin_daily")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
 });
 
 test("archives verified ETF evidence before publishing a snapshot", async () => {
