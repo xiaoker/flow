@@ -73,18 +73,24 @@ test("replaces repetitive margin day cards with derived diagnostics", async () =
   assert.doesNotMatch(source, /margin-history compact-history/);
 });
 
-test("groups connect channels by disclosure meaning instead of equal-weight cards", async () => {
-  const [source, css] = await Promise.all([
+test("places disclosure-separated connect channels beside the detail heading", async () => {
+  const [source, css, snapshotBuilder] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../../src/trading_desk/dashboard.py", import.meta.url), "utf8"),
   ]);
+  assert.match(source, /className="connect-top-summary"/);
+  assert.match(source, /aria-label="南北互通当日摘要"/);
   assert.match(source, /connect-channel-south/);
   assert.match(source, /connect-channel-north/);
   assert.match(source, /南向资金/);
   assert.match(source, /北向活跃度/);
   assert.match(source, /仅成交额，不代表流入方向/);
-  assert.match(css, /\.connect-channel-groups\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
-  assert.match(css, /@media \(max-width: 680px\)[\s\S]*\.connect-channel-groups\s*\{\s*grid-template-columns:\s*1fr/);
+  assert.match(css, /\.connect-top-summary\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /@media \(max-width: 680px\)[\s\S]*\.connect-top-summary\s*\{\s*grid-template-columns:\s*1fr/);
+  assert.match(source, /const displayMode = snapshot\.mode\.replace/);
+  assert.match(snapshotBuilder, /"mode": "官方数据快照"/);
+  assert.doesNotMatch(snapshotBuilder, /GitHub Actions/);
 });
 
 test("defines the national-team ETF watchlist without fabricating holder disclosures", async () => {

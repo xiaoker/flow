@@ -547,7 +547,7 @@ def build_dashboard_snapshot(
     return {
         "asOf": as_of,
         "observedAt": manifest["finished_at"],
-        "mode": "GitHub Actions 官方数据快照",
+        "mode": "官方数据快照",
         "gate": quality["phase0_gate_status"],
         "quality": {"pass": counts["pass"], "warn": counts["warn"], "fail": counts["fail"]},
         "metrics": [

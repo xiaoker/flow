@@ -522,6 +522,7 @@ export function Dashboard({
     connect: "互联互通",
     margin: "融资融券",
   };
+  const displayMode = snapshot.mode.replace(/GitHub\s*Actions\s*/gi, "").trim() || "官方数据快照";
   const dateIndex = availableDates.indexOf(snapshot.asOf);
   const previousAvailableDate = dateIndex > 0 ? availableDates[dateIndex - 1] : null;
   const nextAvailableDate = dateIndex >= 0 && dateIndex < availableDates.length - 1
@@ -624,7 +625,7 @@ export function Dashboard({
         <div className="command-title">
           <span className="eyebrow">官方事实与复算指标</span>
           <strong>{currentViewTitle[view]}</strong>
-          <span>截至 {snapshot.asOf} · {snapshot.mode}</span>
+          <span>截至 {snapshot.asOf} · {displayMode}</span>
           {requestedDate && !exactDateMatch && (
             <span className="date-fallback">{requestedDate} 非可用交易日，已显示此前最近的完整归档日</span>
           )}
@@ -769,18 +770,17 @@ export function Dashboard({
         {view === "connect" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main connect-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度 · {marketHistoryCoverage?.connect.points ?? connectSeries.length} 个官方历史点{marketHistoryCoverage?.connect.from ? `（${marketHistoryCoverage.connect.from} 至 ${marketHistoryCoverage.connect.to}）` : ""}</p></div><div className="panel-kpis"><span><small>南向最新 · 公式计算</small><strong className="text-in">{formatFlow(connectSeries.at(-1)?.southboundNet)}<em>亿港元</em></strong></span><span><small>北向 ETF 成交 · 官方</small><strong className="text-cyan">{connectSeries.at(-1)?.northboundEtfTurnover.toFixed(1) ?? "—"}<em>亿元</em></strong></span></div></div>
+              <div className="panel-heading connect-heading"><div className="connect-heading-copy"><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度 · {marketHistoryCoverage?.connect.points ?? connectSeries.length} 个官方历史点{marketHistoryCoverage?.connect.from ? `（${marketHistoryCoverage.connect.from} 至 ${marketHistoryCoverage.connect.to}）` : ""}</p></div><div className="connect-top-summary" aria-label="南北互通当日摘要">
+                <section className="connect-top-group connect-channel-south" aria-labelledby="southbound-channel-title">
+                  <header><span className="evidence-badge evidence-calculated">公式计算</span><div><h3 id="southbound-channel-title">南向资金</h3><p>净买入方向与通道成交</p></div></header>
+                  <div className="connect-top-list">{connectChannels.southbound.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
+                </section>
+                <section className="connect-top-group connect-channel-north" aria-labelledby="northbound-channel-title">
+                  <header><span className="evidence-badge evidence-official">官方披露</span><div><h3 id="northbound-channel-title">北向活跃度</h3><p>仅成交额，不代表流入方向</p></div></header>
+                  <div className="connect-top-list">{connectChannels.northbound.map((item) => <div key={item.name}><span>{item.name}</span><strong className="text-cyan">{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
+                </section>
+              </div></div>
               {connectSeries.length ? <div className="detail-chart-grid connect-chart-stack"><div><h3>互通走势</h3><ReactECharts className="detail-chart" option={connectTrendOption} notMerge lazyUpdate /></div><div><h3>互通拆分</h3><ReactECharts className="detail-chart" option={channelOption} notMerge lazyUpdate /></div></div> : <div className="empty-chart"><Database size={30} /><strong>等待连续交易日</strong></div>}
-              <div className="connect-channel-groups">
-                <section className="connect-channel-group connect-channel-south" aria-labelledby="southbound-channel-title">
-                  <header><div><span className="evidence-badge evidence-calculated">公式计算</span><h3 id="southbound-channel-title">南向资金</h3></div><p>净买入方向与通道成交</p></header>
-                  <div className="connect-channel-list">{connectChannels.southbound.map((item) => <div key={item.name}><span>{item.name}</span><strong className={`text-${item.tone === "positive" ? "in" : item.tone === "negative" ? "out" : "cyan"}`}>{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
-                </section>
-                <section className="connect-channel-group connect-channel-north" aria-labelledby="northbound-channel-title">
-                  <header><div><span className="evidence-badge evidence-official">官方披露</span><h3 id="northbound-channel-title">北向活跃度</h3></div><p>仅成交额，不代表流入方向</p></header>
-                  <div className="connect-channel-list">{connectChannels.northbound.map((item) => <div key={item.name}><span>{item.name}</span><strong className="text-cyan">{item.value}<em>{item.unit}</em></strong><small>{item.description}</small></div>)}</div>
-                </section>
-              </div>
             </article>
             <aside className="terminal-panel methodology"><Info size={24} /><h3>披露边界</h3><p>北向当前不公开买入额、卖出额和净流入，因此系统不会用成交额替代净流入，也不会做方向推断。</p><span>北向：官方事实 · 南向：公式计算</span><div className="method-list"><p><b>南向 · 公式计算</b>买入额 − 卖出额，单位亿港元</p><p><b>北向 · 官方事实</b>仅展示总成交额与 ETF 成交额</p><p><b>未披露</b>北向方向和净流入保持缺失</p></div></aside>
           </section>
