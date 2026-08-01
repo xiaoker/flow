@@ -156,23 +156,24 @@ def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     assert "szse_etf_scale" in str(artifact.normalized_path)
 
 
-def test_szse_etf_rejects_page_date_mismatch(
-    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
-) -> None:
+def test_szse_etf_uses_previous_trading_day_when_header_shows_disclosure_date() -> None:
     payload = [
         {
             "metadata": {
-                "subname": "2026-07-16",
-                "cols": {"dqgm": "当前规模（份）（2026-07-14）"},
+                "subname": "2026-07-31",
+                "cols": {"dqgm": "当前规模（份）（2026-07-31）"},
             }
         }
     ]
-    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
 
-    with pytest.raises(ValueError, match="previous known trading day"):
-        adapters.fetch_szse_etf_current(
-            ["2026-07-13", "2026-07-14", "2026-07-15"]
-        )
+    page_date, trade_date, header, displayed_date = official._szse_etf_dates(
+        payload, ["2026-07-29", "2026-07-30", "2026-07-31"]
+    )
+
+    assert page_date == "2026-07-31"
+    assert trade_date == "2026-07-30"
+    assert header == "当前规模（份）（2026-07-31）"
+    assert displayed_date == "2026-07-31"
 
 
 def test_sse_margin_uses_named_source_fields(

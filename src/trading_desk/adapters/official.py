@@ -108,7 +108,7 @@ def _iso_date(value: Any, *, field: str) -> str:
 
 def _szse_etf_dates(
     payload: object, known_trading_dates: list[str]
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str | None]:
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         raise ValueError("SZSE ETF metadata response did not contain the expected report")
     metadata = payload[0].get("metadata")
@@ -128,17 +128,15 @@ def _szse_etf_dates(
     ]
     prior_dates = sorted(value for value in parsed_dates if value < page_date)
     expected_data_date = prior_dates[-1] if prior_dates else None
-    if displayed_data_date and expected_data_date and displayed_data_date != expected_data_date:
+    if not expected_data_date:
         raise ValueError(
-            "SZSE ETF displayed scale date did not equal the previous known trading day: "
-            f"page={page_date}, displayed={displayed_data_date}, expected={expected_data_date}"
+            "SZSE ETF data date could not be established from the page and known trading dates"
         )
-    data_date = displayed_data_date or expected_data_date
-    if not data_date:
-        raise ValueError(
-            "SZSE ETF data date could not be established from the page or known trading dates"
-        )
-    return page_date, data_date, scale_header
+    # The exchange's list page is the disclosure date.  Per the source's
+    # publication rule, the downloaded workbook belongs to its preceding
+    # trading day.  The date embedded in the column label is display metadata:
+    # it can equal the disclosure date, so it must not override that rule.
+    return page_date, expected_data_date, scale_header, displayed_data_date
 
 
 class OfficialMarketAdapters:
@@ -223,7 +221,7 @@ class OfficialMarketAdapters:
             params=metadata_params,
             headers=self._headers(SZSE_ETF_PAGE_URL),
         )
-        page_date, trade_date, scale_header = _szse_etf_dates(
+        page_date, trade_date, scale_header, displayed_scale_date = _szse_etf_dates(
             metadata_response.json(), known_trading_dates
         )
         params = {
@@ -252,7 +250,7 @@ class OfficialMarketAdapters:
                 **params,
                 "page_metadata_url": SZSE_ETF_METADATA_URL,
                 "page_date": page_date,
-                "displayed_scale_date": trade_date,
+                "displayed_scale_date": displayed_scale_date,
                 "displayed_scale_header": scale_header,
                 "date_rule": "page_date_previous_known_trading_day",
             },
