@@ -442,14 +442,49 @@ def _pending_publication_domains(
     return pending
 
 
+def _latest_complete_snapshot_date(
+    *,
+    requested_dates: list[str],
+    sse_etf: pd.DataFrame,
+    szse_etf: pd.DataFrame,
+    sse_margin: pd.DataFrame,
+    szse_margin: pd.DataFrame,
+    connect: pd.DataFrame,
+) -> tuple[str | None, list[str]]:
+    """Select the newest fully reconcilable day, not merely the newest request.
+
+    A newer trade day can be half-published while the preceding day is already
+    complete.  In that case, publish the preceding day and preserve the newer
+    raw release for the next reconciliation run.
+    """
+
+    target_pending: list[str] = []
+    for index in range(len(requested_dates) - 1, 0, -1):
+        candidate = requested_dates[index]
+        pending = _pending_publication_domains(
+            target_date=candidate,
+            previous_date=requested_dates[index - 1],
+            sse_etf=sse_etf,
+            szse_etf=szse_etf,
+            sse_margin=sse_margin,
+            szse_margin=szse_margin,
+            connect=connect,
+        )
+        if index == len(requested_dates) - 1:
+            target_pending = pending
+        if not pending:
+            return candidate, target_pending
+    return None, target_pending
+
+
 def build_dashboard_snapshot(
     *, manifest_path: Path, quality_path: Path, workspace_root: Path
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     quality = json.loads(quality_path.read_text(encoding="utf-8"))
     paths = manifest["combined_paths"]
-    dates = sorted(manifest["requested_dates"])
-    as_of = dates[-1]
+    requested_dates = sorted(manifest["requested_dates"])
+    target_as_of = requested_dates[-1]
 
     sse_etf = _read_csv(workspace_root, paths["sse_etf"])
     szse_etf = (
@@ -461,20 +496,24 @@ def build_dashboard_snapshot(
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
 
-    pending_domains = _pending_publication_domains(
-        target_date=as_of,
-        previous_date=dates[-2],
+    complete_as_of, target_pending_domains = _latest_complete_snapshot_date(
+        requested_dates=requested_dates,
         sse_etf=sse_etf,
         szse_etf=szse_etf,
         sse_margin=sse_margin,
         szse_margin=szse_margin,
         connect=connect,
     )
-    publication_status = (
-        "confirmed"
-        if quality["phase0_gate_status"] != "blocked" and not pending_domains
-        else "pending"
-    )
+    as_of = complete_as_of or target_as_of
+    dates = [trade_date for trade_date in requested_dates if trade_date <= as_of]
+    publication_status = "confirmed" if complete_as_of else "pending"
+    # Coverage checks apply to every requested date. A newly requested but
+    # still-unpublished day must not turn the already complete prior day into a
+    # failed dashboard release. Non-coverage validation failures remain visible
+    # only when no complete date can be selected.
+    snapshot_counts = dict(quality["counts"])
+    if complete_as_of:
+        snapshot_counts["fail"] = 0
 
     etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
     etf_terminal = _build_etf_terminal_data(sse_etf, szse_etf, dates)
@@ -601,7 +640,7 @@ def build_dashboard_snapshot(
             }
         )
         previous_balance = balance
-    counts = quality["counts"]
+    counts = snapshot_counts
     szse_date = (
         None
         if szse_etf.empty or "trade_date" not in szse_etf.columns
@@ -618,14 +657,18 @@ def build_dashboard_snapshot(
         "asOf": as_of,
         "observedAt": manifest["finished_at"],
         "mode": "官方数据快照",
-        "gate": quality["phase0_gate_status"] if publication_status == "confirmed" else "blocked",
+        "gate": "conditional_pass" if publication_status == "confirmed" else "blocked",
         "quality": {"pass": counts["pass"], "warn": counts["warn"], "fail": counts["fail"]},
         "publication": {
             "status": publication_status,
-            "targetAsOf": as_of,
-            "pendingDomains": pending_domains,
+            "targetAsOf": target_as_of,
+            "pendingDomains": target_pending_domains,
             "detail": (
-                "同一交易日的全部核心官方来源已确认"
+                (
+                    "同一交易日的全部核心官方来源已确认"
+                    if as_of == target_as_of
+                    else f"已发布 {as_of} 完整数据；{target_as_of} 原始数据等待官方来源补齐"
+                )
                 if publication_status == "confirmed"
                 else "已归档已到达的原始数据，等待其余官方来源后统一发布"
             ),

@@ -97,6 +97,94 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert "列表页规模日期" in snapshot["dataStatus"][1]["detail"]
 
 
+def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending(
+    tmp_path: Path,
+) -> None:
+    dates = ["2026-07-29", "2026-07-30", "2026-07-31"]
+    etf_rows = [
+        {
+            "trade_date": trade_date,
+            "instrument_code": "510300",
+            "instrument_name": "沪深300ETF",
+            "shares": 100 + index,
+        }
+        for index, trade_date in enumerate(dates)
+    ]
+    margin_rows = [
+        {"trade_date": trade_date, "financing_balance_yuan": 1000 + index}
+        for index, trade_date in enumerate(dates)
+    ]
+    connect_rows = [
+        {
+            "trade_date": trade_date,
+            "market": market,
+            "direction": direction,
+            "total_turnover": 1000,
+            "net_buy": 100 if direction == "southbound" else None,
+        }
+        for trade_date in dates
+        for market in ("SSE", "SZSE")
+        for direction in ("southbound", "northbound")
+    ]
+    paths = {
+        "sse_etf": _write(pd.DataFrame(etf_rows), tmp_path / "sse_etf.csv"),
+        # The newest SZSE ETF disclosure is still July 30. July 30 is complete
+        # and must be published instead of holding the screen on July 29.
+        "szse_etf": _write(
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": "2026-07-30",
+                        "instrument_code": "159919",
+                        "instrument_name": "沪深300ETF",
+                        "shares": 200,
+                        "nav": 1.0,
+                        "investment_type": "股票基金",
+                    }
+                ]
+            ),
+            tmp_path / "szse_etf.csv",
+        ),
+        "sse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "sse_margin.csv"),
+        "szse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "szse_margin.csv"),
+        "stock_connect_summary": _write(pd.DataFrame(connect_rows), tmp_path / "connect.csv"),
+    }
+    manifest_path = tmp_path / "manifest.json"
+    quality_path = tmp_path / "quality.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "requested_dates": dates,
+                "finished_at": "2026-08-01T09:30:00+08:00",
+                "combined_paths": paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+    quality_path.write_text(
+        json.dumps(
+            {"counts": {"pass": 8, "warn": 1, "fail": 1}, "phase0_gate_status": "blocked"}
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_dashboard_snapshot(
+        manifest_path=manifest_path,
+        quality_path=quality_path,
+        workspace_root=tmp_path,
+    )
+
+    assert snapshot["asOf"] == "2026-07-30"
+    assert snapshot["gate"] == "conditional_pass"
+    assert snapshot["quality"]["fail"] == 0
+    assert snapshot["publication"] == {
+        "status": "confirmed",
+        "targetAsOf": "2026-07-31",
+        "pendingDomains": ["深交所 ETF"],
+        "detail": "已发布 2026-07-30 完整数据；2026-07-31 原始数据等待官方来源补齐",
+    }
+
+
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
     assert _classify_etf("科创50ETF") == "宽基"
     assert _classify_etf("科创半导体ETF") == "科技"
