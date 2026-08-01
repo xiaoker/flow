@@ -8,8 +8,10 @@ on:
         required: false
         type: string
 
-# Cloudflare Cron dispatches this workflow at 09:15 Asia/Shanghai on weekdays.
-# Keeping GitHub's own schedule disabled avoids delayed duplicate collections.
+# Cloudflare Cron dispatches this workflow at 18:15, 23:15, 09:30 and 10:30
+# Asia/Shanghai on trading weekdays. Early runs preserve whichever official
+# sources are already available; only a complete same-trading-day snapshot is
+# allowed to replace the active dashboard.
 
 permissions:
   contents: read
@@ -80,21 +82,18 @@ jobs:
             sleep $((attempt * 30))
           done
 
-      - name: Enforce publication quality gate
-        shell: bash
-        run: |
-          if ! jq -e '.counts.fail == 0 and .phase0_gate_status != "blocked"' \
-            reports/phase0/latest-quality-summary.json >/dev/null; then
-            echo "Quality gate blocked publication; keeping the previous active snapshot." >&2
-            jq '{counts, phase0_gate_status, errors}' reports/phase0/latest-quality-summary.json >&2
-            exit 1
-          fi
-
       - name: Build dashboard snapshot
         run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
 
       - name: Reconcile evidence, mappings and dashboard values
-        run: trading-desk qa-release --snapshot dashboard-snapshot.json
+        shell: bash
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            trading-desk qa-release --snapshot dashboard-snapshot.json
+          else
+            echo "Snapshot is pending source confirmation; raw data will be archived and the active dashboard remains unchanged."
+            jq '.publication' dashboard-snapshot.json
+          fi
 
       - name: Build verified archive and publish bundle
         run: python scripts/build_ingest_bundle.py --output ingest-bundle.json

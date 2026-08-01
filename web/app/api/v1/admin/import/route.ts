@@ -429,22 +429,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid_ingest_bundle" }, { status: 422 });
   }
   const snapshot = payload.snapshot;
-  if (!isPublishableSnapshot(snapshot)) {
-    return NextResponse.json(
-      {
-        error: "snapshot_not_publishable",
-        gate: snapshot.gate,
-        qualityFail: snapshot.quality.fail,
-      },
-      { status: 422 },
-    );
-  }
 
   try {
     const archiveResult = await archiveEtfData(
       { DB: runtime.DB, RAW_BUCKET: runtime.RAW_BUCKET },
       payload,
     );
+    if (!isPublishableSnapshot(snapshot)) {
+      const finishedAt = new Date().toISOString();
+      await runtime.DB
+        .prepare(
+          "UPDATE ingest_run SET finished_at = ?, status = 'PENDING', error_count = ?, manifest_key = ? WHERE id = ?",
+        )
+        .bind(
+          finishedAt,
+          Math.max(0, Number(snapshot.quality.fail) || 0),
+          archiveResult.manifestKey,
+          payload.archive.runId,
+        )
+        .run();
+      return NextResponse.json({
+        status: "archived_pending",
+        asOf: snapshot.asOf,
+        gate: snapshot.gate,
+        qualityFail: snapshot.quality.fail,
+        publication: snapshot.publication ?? null,
+        ...archiveResult,
+      });
+    }
     const flowState = await loadEtfFlowState(runtime.RAW_BUCKET);
     const publishedSnapshot = enrichSnapshotWithEtfFlowState(snapshot, flowState);
     const publishedAt = new Date().toISOString();

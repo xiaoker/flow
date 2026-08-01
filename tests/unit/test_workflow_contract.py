@@ -13,14 +13,14 @@ def test_daily_collection_is_dispatched_by_cloudflare_not_github_cron() -> None:
 
     assert "schedule:" not in workflow
     assert "workflow_dispatch:" in workflow
-    assert '"crons": ["30 10 * * 1-5", "15 1 * * 1-5"]' in wrangler
+    assert '"crons": ["15 10 * * mon-fri", "15 15 * * mon-fri", "30 1,2 * * mon-fri"]' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'JSON.stringify({ ref: "main" })' in worker
     assert "response.status !== 200 && response.status !== 204" in worker
 
 
-def test_daily_collection_retries_network_failures_before_building_snapshot() -> None:
+def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/daily-data.yml"
     ).read_text(encoding="utf-8")
@@ -28,9 +28,10 @@ def test_daily_collection_retries_network_failures_before_building_snapshot() ->
     assert "MAX_ATTEMPTS=3" in workflow
     assert '.error_type == "ConnectionError"' in workflow
     assert '.error_type == "HTTPError"' in workflow
-    assert workflow.index("Enforce publication quality gate") < workflow.index(
-        "Build dashboard snapshot"
+    assert workflow.index("Build dashboard snapshot") < workflow.index(
+        "Build verified archive and publish bundle"
     )
+    assert '"Snapshot is pending source confirmation' in workflow
 
 
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:

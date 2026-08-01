@@ -62,6 +62,12 @@ export interface DashboardSnapshot {
   mode: string;
   gate: string;
   quality: { pass: number; warn: number; fail: number };
+  publication?: {
+    status: "confirmed" | "pending";
+    targetAsOf: string;
+    pendingDomains: string[];
+    detail: string;
+  };
   metrics: Array<{
     id: string;
     eyebrow: string;

@@ -51,7 +51,7 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark\s*>\s*div:nth-last-child\(n\s*\+\s*13\)\s*\{\s*display:\s*none/);
 });
 
-test("refreshes the latest dashboard and schedules both close and morning collection", async () => {
+test("refreshes the latest dashboard and schedules collection through source release windows", async () => {
   const [source, configText] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
@@ -60,7 +60,11 @@ test("refreshes the latest dashboard and schedules both close and morning collec
   assert.match(source, /AUTO_REFRESH_MS = 5 \* 60 \* 1000/);
   assert.match(source, /window\.setInterval\(refresh, AUTO_REFRESH_MS\)/);
   assert.match(source, /if \(!autoRefresh \|\| requestedDate\) return/);
-  assert.deepEqual(config.triggers.crons, ["30 10 * * 1-5", "15 1 * * 1-5"]);
+  assert.deepEqual(config.triggers.crons, [
+    "15 10 * * mon-fri",
+    "15 15 * * mon-fri",
+    "30 1,2 * * mon-fri",
+  ]);
 });
 
 test("replaces repetitive margin day cards with derived diagnostics", async () => {

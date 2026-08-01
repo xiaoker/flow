@@ -625,7 +625,7 @@ export function Dashboard({
         <div className="command-title">
           <span className="eyebrow">官方事实与复算指标</span>
           <strong>{currentViewTitle[view]}</strong>
-          <span>截至 {snapshot.asOf} · {displayMode}</span>
+          <span>{snapshot.publication?.status === "confirmed" ? "完整数据截至" : "截至"} {snapshot.asOf} · {displayMode}</span>
           {requestedDate && !exactDateMatch && (
             <span className="date-fallback">{requestedDate} 非可用交易日，已显示此前最近的完整归档日</span>
           )}
@@ -800,7 +800,7 @@ export function Dashboard({
         )}
       </div>
 
-      <footer className="terminal-footer"><span><i className="status-light" />{snapshot.gate === "conditional_pass" ? "条件通过" : snapshot.gate} · 观测于 {snapshot.observedAt}</span><span>份额变化不等同资金金额 · 仅供数据观察，不构成投资建议</span><a href="/api/v1/data-status">机器可读状态</a></footer>
+      <footer className="terminal-footer"><span><i className="status-light" />{snapshot.publication?.status === "confirmed" ? "完整交易日已确认" : snapshot.gate === "conditional_pass" ? "条件通过" : snapshot.gate} · 观测于 {snapshot.observedAt}</span><span>份额变化不等同资金金额 · 仅供数据观察，不构成投资建议</span><a href="/api/v1/data-status">机器可读状态</a></footer>
 
       {selected && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>

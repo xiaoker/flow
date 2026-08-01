@@ -389,6 +389,59 @@ def _build_connect_series(frame: pd.DataFrame, dates: list[str]) -> list[dict[st
     return series
 
 
+def _pending_publication_domains(
+    *,
+    target_date: str,
+    previous_date: str,
+    sse_etf: pd.DataFrame,
+    szse_etf: pd.DataFrame,
+    sse_margin: pd.DataFrame,
+    szse_margin: pd.DataFrame,
+    connect: pd.DataFrame,
+) -> list[str]:
+    """Return domains that have not supplied the target trading day yet.
+
+    Collection can legitimately see official sources at different times.  This
+    check is intentionally separate from acquisition quality: raw files may be
+    retained immediately, but the dashboard must never combine dates.
+    """
+
+    def has_date(frame: pd.DataFrame, trade_date: str) -> bool:
+        return bool(
+            not frame.empty
+            and "trade_date" in frame.columns
+            and frame["trade_date"].astype(str).eq(trade_date).any()
+        )
+
+    pending: list[str] = []
+    if not has_date(sse_etf, target_date) or not has_date(sse_etf, previous_date):
+        pending.append("上交所 ETF")
+    if not has_date(szse_etf, target_date):
+        pending.append("深交所 ETF")
+    if not has_date(sse_margin, target_date):
+        pending.append("上交所融资融券")
+    if not has_date(szse_margin, target_date):
+        pending.append("深交所融资融券")
+    required_channels = {
+        ("SSE", "southbound"),
+        ("SZSE", "southbound"),
+        ("SSE", "northbound"),
+        ("SZSE", "northbound"),
+    }
+    if connect.empty or not {"trade_date", "market", "direction"}.issubset(connect.columns):
+        pending.append("港交所互联互通")
+    else:
+        available_channels = {
+            (str(row.market), str(row.direction))
+            for row in connect.loc[
+                connect["trade_date"].astype(str).eq(target_date)
+            ].itertuples()
+        }
+        if not required_channels.issubset(available_channels):
+            pending.append("港交所互联互通")
+    return pending
+
+
 def build_dashboard_snapshot(
     *, manifest_path: Path, quality_path: Path, workspace_root: Path
 ) -> dict[str, Any]:
@@ -407,6 +460,21 @@ def build_dashboard_snapshot(
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
+
+    pending_domains = _pending_publication_domains(
+        target_date=as_of,
+        previous_date=dates[-2],
+        sse_etf=sse_etf,
+        szse_etf=szse_etf,
+        sse_margin=sse_margin,
+        szse_margin=szse_margin,
+        connect=connect,
+    )
+    publication_status = (
+        "confirmed"
+        if quality["phase0_gate_status"] != "blocked" and not pending_domains
+        else "pending"
+    )
 
     etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
     etf_terminal = _build_etf_terminal_data(sse_etf, szse_etf, dates)
@@ -542,14 +610,26 @@ def build_dashboard_snapshot(
     south_market_values = {
         row["name"]: row["value"] for row in connect_rows if "南向" in row["name"]
     }
-    north_rows = [row for row in connect_rows if "北向" in row["name"]]
+    north_market_values = {
+        row["name"]: row["value"] for row in connect_rows if "北向" in row["name"]
+    }
 
     return {
         "asOf": as_of,
         "observedAt": manifest["finished_at"],
         "mode": "官方数据快照",
-        "gate": quality["phase0_gate_status"],
+        "gate": quality["phase0_gate_status"] if publication_status == "confirmed" else "blocked",
         "quality": {"pass": counts["pass"], "warn": counts["warn"], "fail": counts["fail"]},
+        "publication": {
+            "status": publication_status,
+            "targetAsOf": as_of,
+            "pendingDomains": pending_domains,
+            "detail": (
+                "同一交易日的全部核心官方来源已确认"
+                if publication_status == "confirmed"
+                else "已归档已到达的原始数据，等待其余官方来源后统一发布"
+            ),
+        },
         "metrics": [
             {
                 "id": "etf",
@@ -570,7 +650,7 @@ def build_dashboard_snapshot(
                 "eyebrow": "南向净买入",
                 "value": "—" if southbound_net is None else _signed(southbound_net),
                 "unit": "亿港元",
-                "delta": f"沪港通 {south_market_values['沪港通南向']} · 深港通 {south_market_values['深港通南向']}",
+                "delta": f"沪港通 {south_market_values.get('沪港通南向', '—')} · 深港通 {south_market_values.get('深港通南向', '—')}",
                 "tone": (
                     "neutral"
                     if southbound_net is None
@@ -606,7 +686,7 @@ def build_dashboard_snapshot(
                 "eyebrow": "北向成交总额",
                 "value": "—" if northbound_turnover is None else f"{northbound_turnover:,.2f}",
                 "unit": "亿元",
-                "delta": f"沪股通 {north_rows[0]['value']} · 深股通 {north_rows[1]['value']}",
+                "delta": f"沪股通 {north_market_values.get('沪股通北向', '—')} · 深股通 {north_market_values.get('深股通北向', '—')}",
                 "tone": "neutral",
                 "note": "当前官方不披露北向净流入",
                 "basis": {

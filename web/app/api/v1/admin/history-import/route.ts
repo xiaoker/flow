@@ -167,8 +167,7 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
       history.artifacts.length <= MAX_ARTIFACTS &&
       history.artifacts.every(isHistoryArtifact) &&
       isDashboardSnapshot(history.snapshot) &&
-      history.snapshot.asOf === history.asOf &&
-      isPublishableSnapshot(history.snapshot)
+      history.snapshot.asOf === history.asOf
   );
 }
 
@@ -393,6 +392,7 @@ export async function POST(request: Request) {
 
   try {
     const { history } = value;
+    const publishHistory = isPublishableSnapshot(history.snapshot);
     const manifestArtifacts: Array<Record<string, unknown>> = [];
     let standardizedRows = 0;
     for (const artifact of history.artifacts) {
@@ -466,8 +466,12 @@ export async function POST(request: Request) {
     const snapshotBody = JSON.stringify(history.snapshot);
     const snapshotBytes = new TextEncoder().encode(snapshotBody);
     const snapshotSha256 = await sha256Hex(snapshotBytes);
-    const snapshotKey = `market-data/history/${history.asOf}/${snapshotSha256}.json`;
-    const manifestKey = `market-data/history-manifests/${history.runId}/${history.asOf}.json`;
+    const historyPrefix = publishHistory ? "market-data/history" : "market-data/history-pending";
+    const manifestPrefix = publishHistory
+      ? "market-data/history-manifests"
+      : "market-data/history-pending-manifests";
+    const snapshotKey = `${historyPrefix}/${history.asOf}/${snapshotSha256}.json`;
+    const manifestKey = `${manifestPrefix}/${history.runId}/${history.asOf}.json`;
     await runtime.RAW_BUCKET.put(snapshotKey, snapshotBytes, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: { asOf: history.asOf, sha256: snapshotSha256 },
@@ -487,6 +491,18 @@ export async function POST(request: Request) {
       }),
       { httpMetadata: { contentType: "application/json; charset=utf-8" } },
     );
+    if (!publishHistory) {
+      return NextResponse.json({
+        status: "archived_pending",
+        asOf: history.asOf,
+        artifacts: history.artifacts.length,
+        standardizedRows,
+        snapshotSha256,
+        snapshotKey,
+        manifestKey,
+        publication: history.snapshot.publication ?? null,
+      });
+    }
     const createdAt = new Date().toISOString();
     await runtime.DB
       .prepare(
