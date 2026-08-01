@@ -522,6 +522,10 @@ def build_dashboard_snapshot(
     if "market" not in szse_margin.columns:
         szse_margin = szse_margin.assign(market="SZSE")
     margin = pd.concat([sse_margin, szse_margin], ignore_index=True)
+    # A newer SSE release may arrive before its SZSE counterpart.  Once the
+    # snapshot selector falls back to the latest complete date, no later,
+    # partial margin row may leak into the headline or chart.
+    margin = margin[margin["trade_date"].astype(str).le(as_of)].copy()
     margin_columns = [
         "financing_balance_yuan",
         "financing_buy_yuan",
@@ -753,7 +757,7 @@ def build_dashboard_snapshot(
                 "detail": (
                     "官方日列表不支持历史回填"
                     if szse_date is None
-                    else "官方列表页规模日期"
+                    else "官方披露日归属前一交易日"
                 ),
                 "basis": "official",
             },

@@ -94,7 +94,7 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert len(snapshot["connectSeries"]) == 3
     assert snapshot["dataStatus"][1]["status"] == "ready"
     assert snapshot["dataStatus"][1]["basis"] == "official"
-    assert "列表页规模日期" in snapshot["dataStatus"][1]["detail"]
+    assert "披露日归属前一交易日" in snapshot["dataStatus"][1]["detail"]
 
 
 def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending(
@@ -146,7 +146,7 @@ def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending
             tmp_path / "szse_etf.csv",
         ),
         "sse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "sse_margin.csv"),
-        "szse_margin": _write(pd.DataFrame(margin_rows), tmp_path / "szse_margin.csv"),
+        "szse_margin": _write(pd.DataFrame(margin_rows[:-1]), tmp_path / "szse_margin.csv"),
         "stock_connect_summary": _write(pd.DataFrame(connect_rows), tmp_path / "connect.csv"),
     }
     manifest_path = tmp_path / "manifest.json"
@@ -180,9 +180,10 @@ def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending
     assert snapshot["publication"] == {
         "status": "confirmed",
         "targetAsOf": "2026-07-31",
-        "pendingDomains": ["深交所 ETF"],
+        "pendingDomains": ["深交所 ETF", "深交所融资融券"],
         "detail": "已发布 2026-07-30 完整数据；2026-07-31 原始数据等待官方来源补齐",
     }
+    assert snapshot["marginSeries"][-1]["date"] == "07-30"
 
 
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
