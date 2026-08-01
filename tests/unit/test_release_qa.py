@@ -8,7 +8,8 @@ import pandas as pd
 
 from trading_desk.adapters.official import OfficialMarketAdapters, SSE_ETF, SZSE_ETF
 from trading_desk.models import FetchArtifact
-from trading_desk.release_qa import validate_artifact_lineage
+from trading_desk.models import QualityFinding
+from trading_desk.release_qa import _future_only_failure, _pending_future_warning, validate_artifact_lineage
 
 
 def _artifact(
@@ -103,6 +104,23 @@ def test_release_qa_detects_tampered_raw_response(tmp_path: Path) -> None:
     digest = next(finding for finding in findings if finding.check_id == "lineage.sha256_matches")
 
     assert digest.status == "fail"
+
+
+def test_release_qa_keeps_future_source_gap_as_pending_warning() -> None:
+    finding = QualityFinding(
+        check_id="timeliness.requested_date_coverage",
+        dataset="szse_margin",
+        status="fail",
+        severity="high",
+        message="未覆盖全部请求日期",
+        evidence={"missing_dates": ["2026-07-31"]},
+    )
+
+    assert _future_only_failure(finding, "2026-07-30") is True
+    pending = _pending_future_warning(finding)
+    assert pending.status == "warn"
+    assert "待补" in pending.message
+    assert _future_only_failure(finding, "2026-07-31") is False
 
 
 def test_normalized_storage_is_namespaced_by_source(tmp_path: Path) -> None:

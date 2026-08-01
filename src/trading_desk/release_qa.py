@@ -677,6 +677,48 @@ def _metric_value(snapshot: dict[str, Any], metric_id: str) -> float:
     return float(str(metric["value"]).replace(",", ""))
 
 
+def _future_only_failure(finding: QualityFinding | dict[str, Any], published_as_of: str) -> bool:
+    """Whether a failure is exclusively about a date later than the snapshot.
+
+    Official sources publish at different times.  A later requested date stays
+    visible as pending, but must not prevent QA from approving an earlier,
+    independently complete snapshot.
+    """
+
+    dataset = str(
+        finding.dataset if isinstance(finding, QualityFinding) else finding.get("dataset", "")
+    )
+    evidence = finding.evidence if isinstance(finding, QualityFinding) else finding.get("evidence") or {}
+    label_date = re.search(r":(20\d{2}-\d{2}-\d{2})$", dataset)
+    if label_date and label_date.group(1) > published_as_of:
+        return True
+    missing_dates = evidence.get("missing_dates") if isinstance(evidence, dict) else None
+    return bool(missing_dates) and all(str(date) > published_as_of for date in missing_dates)
+
+
+def _pending_future_warning(finding: QualityFinding) -> QualityFinding:
+    return QualityFinding(
+        check_id=finding.check_id,
+        dataset=finding.dataset,
+        status="warn",
+        severity="high",
+        message=f"{finding.message}（晚于已发布快照，保留为待补）",
+        evidence=finding.evidence,
+        remediation=finding.remediation,
+    )
+
+
+def _quality_allows_published_snapshot(quality: dict[str, Any], published_as_of: str) -> bool:
+    failures = [
+        finding
+        for finding in quality.get("findings", [])
+        if finding.get("status") == "fail"
+    ]
+    return bool(failures) and all(
+        _future_only_failure(finding, published_as_of) for finding in failures
+    )
+
+
 def validate_snapshot_values(
     manifest: dict[str, Any],
     quality: dict[str, Any],
@@ -689,7 +731,8 @@ def validate_snapshot_values(
 ) -> list[QualityFinding]:
     findings: list[QualityFinding] = []
     dates = sorted(str(value) for value in manifest.get("requested_dates", []))
-    as_of = dates[-1] if dates else None
+    as_of = str(snapshot.get("asOf") or (dates[-1] if dates else ""))
+    published_dates = [trade_date for trade_date in dates if trade_date <= as_of]
     expected_snapshot = build_dashboard_snapshot(
         manifest_path=manifest_path,
         quality_path=quality_path,
@@ -702,7 +745,7 @@ def validate_snapshot_values(
             "dashboard_snapshot",
             exact_match,
             message="发布快照可由已验证明细逐字节重建" if exact_match else "发布快照与明细重建结果不一致",
-            evidence={"as_of": snapshot.get("asOf"), "expected_as_of": as_of},
+        evidence={"as_of": snapshot.get("asOf"), "expected_as_of": as_of},
             remediation="重新生成快照，禁止手工修改发布 JSON。",
         )
     )
@@ -721,8 +764,8 @@ def validate_snapshot_values(
     evidence: dict[str, Any] = {}
     try:
         sse_etf = frames["sse_etf"]
-        latest = sse_etf[sse_etf["trade_date"].astype(str).eq(dates[-1])][["instrument_code", "shares"]]
-        previous = sse_etf[sse_etf["trade_date"].astype(str).eq(dates[-2])][["instrument_code", "shares"]]
+        latest = sse_etf[sse_etf["trade_date"].astype(str).eq(published_dates[-1])][["instrument_code", "shares"]]
+        previous = sse_etf[sse_etf["trade_date"].astype(str).eq(published_dates[-2])][["instrument_code", "shares"]]
         comparable = latest.merge(previous, on="instrument_code", suffixes=("_latest", "_previous"))
         etf_expected = round(float((comparable["shares_latest"] - comparable["shares_previous"]).sum()) / 100_000_000, 2)
 
@@ -761,7 +804,13 @@ def validate_snapshot_values(
         )
     )
 
-    base_gate_ok = int((quality.get("counts") or {}).get("fail", 0)) == 0 and quality.get("phase0_gate_status") != "blocked"
+    base_gate_ok = (
+        snapshot.get("publication", {}).get("status") == "confirmed"
+        and _quality_allows_published_snapshot(quality, as_of)
+    ) or (
+        int((quality.get("counts") or {}).get("fail", 0)) == 0
+        and quality.get("phase0_gate_status") != "blocked"
+    )
     findings.append(
         _finding(
             "publication.base_quality_gate",
@@ -815,6 +864,15 @@ def run_release_qa(
             )
         )
 
+    published_as_of = str(snapshot.get("asOf") or "")
+    if snapshot.get("publication", {}).get("status") == "confirmed" and published_as_of:
+        findings = [
+            _pending_future_warning(finding)
+            if finding.status == "fail" and _future_only_failure(finding, published_as_of)
+            else finding
+            for finding in findings
+        ]
+
     summary = summarize_findings(findings)
     summary.update(
         {
@@ -822,7 +880,7 @@ def run_release_qa(
             "generated_at": now_iso(),
             "verdict": "pass" if summary["counts"]["fail"] == 0 else "blocked",
             "known_limitations": [
-                "深交所 ETF 份额日期取列表页规模日期，并校验为页面发布日期的前一已知交易日。",
+                "深交所 ETF 文件按列表页披露日归属到前一已知交易日。",
                 "ETF 页面当前展示份额变化，不等同于精确申赎金额。",
                 "北向自披露调整后不提供买入额、卖出额或净流入，页面只展示官方成交总额。",
             ],
