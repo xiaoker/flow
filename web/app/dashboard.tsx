@@ -722,7 +722,7 @@ export function Dashboard({
               </article>
               <article className="terminal-panel compact-panel">
                 <div className="panel-heading"><div><span className="eyebrow">融资融券 · 官方汇总</span><h2>杠杆余额连续变化</h2></div><button className="link-button" onClick={() => setView("margin")} type="button">展开<CaretRight size={15} /></button></div>
-                <div className="margin-spark">{snapshot.marginSeries.slice(-12).map((item, index, rows) => <div key={item.date}><span className={index === rows.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...rows.map((point) => point.balance))) / Math.max(1, Math.max(...rows.map((point) => point.balance)) - Math.min(...rows.map((point) => point.balance)))) * 42}%` }} /><strong>{compactDate(item.date)}</strong><small>{item.label}</small></div>)}</div>
+                <div className="margin-spark">{snapshot.marginSeries.slice(-12).map((item, index, rows) => <div aria-label={`${item.date}，${item.label}`} className={`margin-spark-point ${index === rows.length - 1 ? "is-latest" : ""}`} key={item.date}><span className={index === rows.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...rows.map((point) => point.balance))) / Math.max(1, Math.max(...rows.map((point) => point.balance)) - Math.min(...rows.map((point) => point.balance)))) * 42}%` }} /><strong>{compactDate(item.date)}</strong><small>{item.label}</small></div>)}</div>
                 <p className="method-note"><Info size={15} />余额变化代表杠杆规模扩张或收缩，不直接等同多空方向。</p>
               </article>
             </section>
