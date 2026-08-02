@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,22 +24,30 @@ POINTER_KEY = (
 )
 
 
-def _run(command: list[str], *, cwd: Path) -> str:
+def _run(command: list[str], *, cwd: Path, attempts: int = 5) -> str:
     environment = os.environ.copy()
     environment["WRANGLER_LOG_PATH"] = "/private/tmp/flow-wrangler-replay.log"
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        env=environment,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        raise RuntimeError(
-            f"Command failed ({result.returncode}): {' '.join(command)}\n"
-            f"{result.stderr.strip() or result.stdout.strip()}"
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
         )
-    return result.stdout
+        if result.returncode == 0:
+            return result.stdout
+        detail = result.stderr.strip() or result.stdout.strip()
+        last_error = detail
+        transient = "fetch failed" in detail.lower() or "unable to resolve cloudflare" in detail.lower()
+        if not transient or attempt == attempts:
+            break
+        time.sleep(attempt * 3)
+    raise RuntimeError(
+        f"Command failed after {attempt} attempt(s) ({result.returncode}): {' '.join(command)}\n"
+        f"{last_error}"
+    )
 
 
 def _sha256(path: Path) -> str:

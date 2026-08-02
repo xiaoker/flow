@@ -311,6 +311,47 @@ async function persistStandardRows(
   artifact: HistoryArtifact,
   normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }>,
 ): Promise<number> {
+  if (artifact.dataset === "etf_scale") {
+    const market = artifact.sourceId === "sse" ? "SSE" : artifact.sourceId === "szse" ? "SZSE" : null;
+    if (!market) throw new Error("invalid_etf_market_source");
+    const rows = normalizedFiles.flatMap(({ file, content }) => {
+      const parsed = parseCsv(content);
+      if (parsed.length !== file.rowCount) throw new Error("etf_row_count_mismatch");
+      return parsed;
+    });
+    if (!rows.length) throw new Error("missing_etf_data");
+    await db.prepare("DELETE FROM etf_daily WHERE release_id = ?").bind(artifact.releaseId).run();
+    for (const row of rows) {
+      validateStandardRow(artifact, row);
+      const code = String(row.instrument_code ?? "").trim().padStart(6, "0");
+      if (!/^\d{6}$/.test(code) || !row.instrument_name) throw new Error("invalid_etf_identity");
+      const nav = row.nav === undefined || row.nav === "" ? null : Number(row.nav);
+      if (nav !== null && !Number.isFinite(nav)) throw new Error("invalid_etf_nav");
+      await db
+        .prepare(
+          `INSERT INTO etf_daily (
+             release_id, trade_date, market, instrument_code, instrument_name,
+             category, shares, nav_micros, date_basis, source_id, observed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          artifact.releaseId,
+          row.trade_date,
+          market,
+          code,
+          row.instrument_name,
+          row.investment_type || row.etf_type || null,
+          requiredInteger(row, "shares"),
+          nav === null ? null : Math.round(nav * 1_000_000),
+          row.date_basis,
+          artifact.sourceId,
+          row.observed_at,
+        )
+        .run();
+    }
+    return rows.length;
+  }
+
   if (artifact.dataset === "stock_connect_daily") {
     const normalized = normalizedFiles.find(({ file }) => file.name === "summary");
     if (!normalized) throw new Error("missing_connect_summary");
