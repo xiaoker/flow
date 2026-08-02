@@ -197,7 +197,9 @@ def _build_etf_terminal_data(
         )
 
     if not szse_frame.empty and "instrument_code" in szse_frame.columns:
-        szse_selected = szse_frame.reindex(
+        szse_selected = szse_frame.loc[
+            szse_frame["trade_date"].astype(str).isin(available_dates),
+        ].reindex(
             columns=[
                 "trade_date",
                 "instrument_code",
@@ -207,12 +209,21 @@ def _build_etf_terminal_data(
                 "etf_type",
                 "investment_type",
             ]
-        ).dropna(subset=["instrument_code"])
-        if not szse_selected.empty:
+        ).dropna(subset=["instrument_code"]).copy()
+        if not szse_selected.empty and szse_selected["trade_date"].astype(str).eq(latest_date).any():
+            szse_selected["trade_date"] = szse_selected["trade_date"].astype(str)
             szse_selected["instrument_code"] = szse_selected["instrument_code"].astype(str).str.zfill(6)
-            szse_latest_date = szse_selected["trade_date"].astype(str).max()
+            szse_selected["shares"] = pd.to_numeric(szse_selected["shares"], errors="coerce")
+            szse_metadata = (
+                szse_selected.sort_values("trade_date")
+                .drop_duplicates("instrument_code", keep="last")
+                .set_index("instrument_code")
+            )
+            szse_pivot = szse_selected.pivot_table(
+                index="instrument_code", columns="trade_date", values="shares", aggfunc="last"
+            )
             szse_latest = (
-                szse_selected.loc[szse_selected["trade_date"].astype(str).eq(szse_latest_date)]
+                szse_selected.loc[szse_selected["trade_date"].eq(latest_date)]
                 .drop_duplicates("instrument_code", keep="last")
             )
             for row in szse_latest.itertuples():
@@ -234,6 +245,32 @@ def _build_etf_terminal_data(
                     reason = classification.exclusion_reason or "未通过ETF范围规则"
                     exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
                     continue
+                latest_shares = (
+                    szse_pivot.at[row.instrument_code, latest_date]
+                    if latest_date in szse_pivot.columns
+                    else None
+                )
+                latest_nav = szse_metadata.loc[row.instrument_code].get("nav")
+                period_values: dict[str, float | None] = {}
+                estimated_cash_values: dict[str, float | None] = {}
+                for period in available_periods:
+                    anchor = anchors[period]
+                    current_value = latest_shares
+                    anchor_value = (
+                        szse_pivot.at[row.instrument_code, anchor]
+                        if anchor in szse_pivot.columns
+                        else None
+                    )
+                    period_values[period] = (
+                        None
+                        if pd.isna(current_value) or pd.isna(anchor_value)
+                        else round(float(current_value - anchor_value) / 100_000_000, 2)
+                    )
+                    estimated_cash_values[period] = (
+                        None
+                        if period_values[period] is None or pd.isna(latest_nav)
+                        else round(float(period_values[period]) * float(latest_nav), 2)
+                    )
                 instruments.append(
                     {
                         "code": str(row.instrument_code),
@@ -246,13 +283,16 @@ def _build_etf_terminal_data(
                         "classificationConfidence": classification.confidence,
                         "classificationRule": classification.rule_id,
                         "includeInGroup": classification.include_in_group,
-                        "shares": None if pd.isna(row.shares) else round(float(row.shares) / 100_000_000, 2),
-                        "nav": None if pd.isna(row.nav) else round(float(row.nav), 4),
-                        "periods": {period: None for period in available_periods},
-                        "estimatedCashPeriods": {
-                            period: None for period in available_periods
-                        },
-                        "coverage": 1,
+                        "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
+                        "nav": None if pd.isna(latest_nav) else round(float(latest_nav), 4),
+                        "periods": period_values,
+                        "estimatedCashPeriods": estimated_cash_values,
+                        "coverage": int(
+                            szse_pivot.reindex(columns=available_dates)
+                            .loc[row.instrument_code]
+                            .notna()
+                            .sum()
+                        ),
                     }
                 )
     instruments.sort(

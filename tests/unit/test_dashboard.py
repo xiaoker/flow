@@ -192,6 +192,50 @@ def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
     assert _classify_etf("深市现金ETF", "货币市场基金") == "货币"
 
 
+def test_etf_terminal_calculates_szse_period_changes_from_official_history() -> None:
+    dates = ["2026-07-28", "2026-07-29", "2026-07-30"]
+    sse = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "instrument_code": "510300",
+                "instrument_name": "沪深300ETF",
+                "shares": 100_000_000,
+                "nav": 1.0,
+                "investment_type": "股票基金",
+            }
+            for trade_date in dates
+        ]
+    )
+    szse = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "instrument_code": "159919",
+                "instrument_name": "沪深300ETF",
+                "shares": shares,
+                "nav": 2.0,
+                "investment_type": "股票基金",
+            }
+            for trade_date, shares in zip(
+                dates, [6_400_000_000, 6_500_000_000, 6_700_000_000]
+            )
+        ]
+    )
+
+    terminal = _build_etf_terminal_data(sse, szse, dates)
+    szse_item = next(
+        item
+        for item in terminal["instruments"]
+        if item["market"] == "SZSE" and item["code"] == "159919"
+    )
+
+    assert szse_item["shares"] == 67.0
+    assert szse_item["periods"]["1d"] == 2.0
+    assert szse_item["coverage"] == 3
+    assert szse_item["estimatedCashPeriods"]["1d"] == 4.0
+
+
 def test_etf_classification_blocks_known_cross_category_pollution() -> None:
     cases = {
         "科创债券": "债券",
