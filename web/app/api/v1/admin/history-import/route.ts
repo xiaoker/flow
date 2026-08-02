@@ -5,6 +5,7 @@ import {
   loadEtfFlowState,
   mergeSnapshotIntoEtfFlowState,
   persistEtfFlowState,
+  type OfficialEtfDailyChange,
 } from "@/app/lib/etf-flow-state";
 import { extractMarketHistoryPoint } from "@/app/lib/market-history";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
@@ -251,6 +252,58 @@ function validateStandardRow(
   if (!ISO_DATE.test(row.trade_date ?? "")) throw new Error("invalid_standard_trade_date");
   if (row.source_id !== artifact.sourceId) throw new Error("standard_source_mismatch");
   if (!row.observed_at) throw new Error("missing_standard_observed_at");
+}
+
+async function loadOfficialEtfDailyChanges(
+  db: D1Database,
+  asOf: string,
+): Promise<OfficialEtfDailyChange[]> {
+  const result = await db
+    .prepare(
+      `WITH current_rows AS (
+         SELECT instrument_code, market, shares,
+                ROW_NUMBER() OVER (
+                  PARTITION BY instrument_code, market
+                  ORDER BY observed_at DESC, release_id DESC
+                ) AS row_number
+         FROM etf_daily
+         WHERE trade_date = ?
+       ), previous_rows AS (
+         SELECT instrument_code, market, shares,
+                ROW_NUMBER() OVER (
+                  PARTITION BY instrument_code, market
+                  ORDER BY trade_date DESC, observed_at DESC, release_id DESC
+                ) AS row_number
+         FROM etf_daily
+         WHERE trade_date < ?
+       )
+       SELECT current_rows.instrument_code, current_rows.market,
+              current_rows.shares AS current_shares,
+              previous_rows.shares AS previous_shares
+       FROM current_rows
+       LEFT JOIN previous_rows
+         ON previous_rows.instrument_code = current_rows.instrument_code
+        AND previous_rows.market = current_rows.market
+        AND previous_rows.row_number = 1
+       WHERE current_rows.row_number = 1`,
+    )
+    .bind(asOf, asOf)
+    .all<{
+      instrument_code: string;
+      market: "SSE" | "SZSE";
+      current_shares: number;
+      previous_shares: number | null;
+    }>();
+  return (result.results ?? []).flatMap((row) => {
+    if ((row.market !== "SSE" && row.market !== "SZSE") || !/^\d{6}$/.test(row.instrument_code)) return [];
+    return [{
+      code: row.instrument_code,
+      market: row.market,
+      value: row.previous_shares === null
+        ? null
+        : Number(((row.current_shares - row.previous_shares) / 100_000_000).toFixed(6)),
+    }];
+  });
 }
 
 async function persistStandardRows(
@@ -593,11 +646,15 @@ export async function POST(request: Request) {
       )
       .run();
 
-    const previousState = await loadEtfFlowState(runtime.RAW_BUCKET);
+    const [previousState, officialDailyChanges] = await Promise.all([
+      loadEtfFlowState(runtime.RAW_BUCKET),
+      loadOfficialEtfDailyChanges(runtime.DB, history.asOf),
+    ]);
     const mergedState = mergeSnapshotIntoEtfFlowState(
       previousState,
       history.snapshot,
       snapshotSha256,
+      officialDailyChanges,
     );
     const statePointer =
       mergedState && mergedState !== previousState

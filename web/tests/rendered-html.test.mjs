@@ -573,6 +573,10 @@ test("archives full-source history with server-side hash verification", async ()
           statements.push({ sql: this.sql, values: this.values });
           return { success: true };
         },
+        async all() {
+          statements.push({ sql: this.sql, values: this.values });
+          return { results: [] };
+        },
       };
     },
   };
@@ -678,6 +682,7 @@ test("archives full-source history with server-side hash verification", async ()
       values.includes(7_899_000_000),
   ));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
+  assert.ok(statements.some(({ sql }) => sql.includes("WITH current_rows AS")));
 });
 
 test("archives verified ETF evidence before publishing a snapshot", async () => {

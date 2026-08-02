@@ -75,6 +75,12 @@ type StatePointer = {
   updatedAt: string;
 };
 
+export type OfficialEtfDailyChange = {
+  code: string;
+  market: "SSE" | "SZSE";
+  value: number | null;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -189,6 +195,7 @@ export function mergeSnapshotIntoEtfFlowState(
   previous: EtfFlowState | null,
   snapshot: DashboardSnapshot,
   sourceSnapshotSha256: string,
+  officialDailyChanges: OfficialEtfDailyChange[] = [],
 ): EtfFlowState | null {
   const terminal = snapshot.etfTerminal;
   if (
@@ -215,10 +222,15 @@ export function mergeSnapshotIntoEtfFlowState(
 
   const currentIndex = dateIndex.get(snapshot.asOf);
   if (currentIndex === undefined) return previous;
+  const officialChanges = new Map(
+    officialDailyChanges.map((item) => [instrumentKey(item), item.value]),
+  );
   for (const item of terminal.instruments) {
-    const value = item.periods["1d"];
-    if (value === null || value === undefined || !Number.isFinite(value)) continue;
     const key = instrumentKey(item);
+    const value = officialChanges.has(key)
+      ? officialChanges.get(key)
+      : item.periods["1d"];
+    if (value === null || value === undefined || !Number.isFinite(value)) continue;
     const existing = rows.get(key);
     const row: StateInstrument = {
       code: item.code,
