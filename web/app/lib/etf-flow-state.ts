@@ -85,7 +85,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function isEtfFlowState(value: unknown): value is EtfFlowState {
+function isEtfFlowState(
+  value: unknown,
+  options: { deep?: boolean } = {},
+): value is EtfFlowState {
+  const deep = options.deep ?? true;
   if (!isRecord(value)) return false;
   if (
     value.version !== ETF_FLOW_STATE_VERSION ||
@@ -101,17 +105,21 @@ function isEtfFlowState(value: unknown): value is EtfFlowState {
   }
   return value.instruments.every((item) => {
     if (!isRecord(item)) return false;
-    return Boolean(
+    const validShape = Boolean(
       typeof item.code === "string" &&
         /^\d{6}$/.test(item.code) &&
         (item.market === "SSE" || item.market === "SZSE") &&
         typeof item.name === "string" &&
         typeof item.category === "string" &&
         Array.isArray(item.values) &&
-        item.values.length === value.dates.length &&
-        item.values.every(
-          (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
-        ),
+        item.values.length === value.dates.length,
+    );
+    if (!validShape) return false;
+    return (
+      !deep ||
+      item.values.every(
+        (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
+      )
     );
   });
 }
@@ -128,6 +136,28 @@ export async function loadEtfFlowState(
   bucket?: R2Bucket,
 ): Promise<EtfFlowState | null> {
   if (!bucket || typeof bucket.get !== "function") return null;
+  const existingInFlight = etfFlowStateInFlight;
+  if (existingInFlight?.bucket === bucket) return existingInFlight.promise;
+  const promise = readEtfFlowState(bucket);
+  etfFlowStateInFlight = { bucket, promise };
+  try {
+    return await promise;
+  } finally {
+    if (etfFlowStateInFlight?.promise === promise) etfFlowStateInFlight = null;
+  }
+}
+
+type EtfFlowStateCache = {
+  bucket: R2Bucket;
+  objectKey: string;
+  sha256: string;
+  state: EtfFlowState | null;
+};
+
+let etfFlowStateCache: EtfFlowStateCache | null = null;
+let etfFlowStateInFlight: { bucket: R2Bucket; promise: Promise<EtfFlowState | null> } | null = null;
+
+async function readEtfFlowState(bucket: R2Bucket): Promise<EtfFlowState | null> {
   try {
     const pointerObject = await bucket.get(ETF_FLOW_STATE_POINTER_KEY);
     if (!pointerObject) return null;
@@ -141,12 +171,30 @@ export async function loadEtfFlowState(
     ) {
       return null;
     }
-    const stateObject = await bucket.get(pointer.objectKey);
+    const objectKey = pointer.objectKey;
+    const sha256 = pointer.sha256;
+    if (
+      etfFlowStateCache?.bucket === bucket &&
+      etfFlowStateCache.objectKey === objectKey &&
+      etfFlowStateCache.sha256 === sha256
+    ) {
+      return etfFlowStateCache.state;
+    }
+    const stateObject = await bucket.get(objectKey);
     if (!stateObject) return null;
+    const metadataSha256 = stateObject.customMetadata?.sha256;
     const body = await stateObject.text();
-    if ((await sha256Hex(body)) !== pointer.sha256) return null;
+    // Persisted objects carry the digest in metadata. This avoids hashing the
+    // full (often ~1 MB) state body on every cold request. Legacy fixtures and
+    // objects without metadata still use the full hash fallback.
+    if (metadataSha256 !== sha256 && (await sha256Hex(body)) !== sha256) {
+      etfFlowStateCache = { bucket, objectKey, sha256, state: null };
+      return null;
+    }
     const state: unknown = JSON.parse(body);
-    return isEtfFlowState(state) ? state : null;
+    const parsed = isEtfFlowState(state, { deep: false }) ? state : null;
+    etfFlowStateCache = { bucket, objectKey, sha256, state: parsed };
+    return parsed;
   } catch {
     return null;
   }

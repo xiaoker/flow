@@ -16,6 +16,30 @@ type RuntimeEnv = {
   INGEST_API_KEY?: string;
 };
 
+const DASHBOARD_CACHE_TTL_MS = 30_000;
+const HISTORY_DATES_CACHE_TTL_MS = 60_000;
+
+type DashboardSnapshotCache = {
+  db: D1Database;
+  bucket?: R2Bucket;
+  value: DashboardSnapshot;
+  expiresAt: number;
+};
+
+let dashboardSnapshotCache: DashboardSnapshotCache | null = null;
+let dashboardSnapshotInFlight:
+  | { db: D1Database; bucket?: R2Bucket; promise: Promise<DashboardSnapshot> }
+  | null = null;
+
+type HistoryDatesCache = {
+  db: D1Database;
+  value: string[];
+  expiresAt: number;
+};
+
+let historyDatesCache: HistoryDatesCache | null = null;
+let historyDatesInFlight: { db: D1Database; promise: Promise<string[]> } | null = null;
+
 export async function runtimeEnv(): Promise<RuntimeEnv> {
   const injected = (
     globalThis as typeof globalThis & { __FLOW_RUNTIME_ENV__?: RuntimeEnv }
@@ -89,6 +113,43 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   const runtime = await runtimeEnv();
   const db = runtime.DB;
   if (!db) return dashboardSnapshot;
+
+  const now = Date.now();
+  if (
+    dashboardSnapshotCache &&
+    dashboardSnapshotCache.db === db &&
+    dashboardSnapshotCache.bucket === runtime.RAW_BUCKET &&
+    dashboardSnapshotCache.expiresAt > now
+  ) {
+    return dashboardSnapshotCache.value;
+  }
+  if (
+    dashboardSnapshotInFlight?.db === db &&
+    dashboardSnapshotInFlight.bucket === runtime.RAW_BUCKET
+  ) {
+    return dashboardSnapshotInFlight.promise;
+  }
+
+  const promise = readDashboardSnapshot(runtime, db);
+  dashboardSnapshotInFlight = { db, bucket: runtime.RAW_BUCKET, promise };
+  try {
+    const value = await promise;
+    dashboardSnapshotCache = {
+      db,
+      bucket: runtime.RAW_BUCKET,
+      value,
+      expiresAt: Date.now() + DASHBOARD_CACHE_TTL_MS,
+    };
+    return value;
+  } finally {
+    if (dashboardSnapshotInFlight?.promise === promise) dashboardSnapshotInFlight = null;
+  }
+}
+
+async function readDashboardSnapshot(
+  runtime: RuntimeEnv,
+  db: D1Database,
+): Promise<DashboardSnapshot> {
 
   try {
     const row = await db
@@ -185,6 +246,30 @@ async function readHistoricalSnapshot(
 export async function getAvailableHistoryDates(): Promise<string[]> {
   const db = (await runtimeEnv()).DB;
   if (!db) return [];
+  const now = Date.now();
+  if (historyDatesCache?.db === db && historyDatesCache.expiresAt > now) {
+    return [...historyDatesCache.value];
+  }
+  if (historyDatesInFlight?.db === db) {
+    return historyDatesInFlight.promise.then((value) => [...value]);
+  }
+
+  const promise = readAvailableHistoryDates(db);
+  historyDatesInFlight = { db, promise };
+  try {
+    const value = await promise;
+    historyDatesCache = {
+      db,
+      value,
+      expiresAt: Date.now() + HISTORY_DATES_CACHE_TTL_MS,
+    };
+    return [...value];
+  } finally {
+    if (historyDatesInFlight?.promise === promise) historyDatesInFlight = null;
+  }
+}
+
+async function readAvailableHistoryDates(db: D1Database): Promise<string[]> {
   try {
     const result = await db
       .prepare(
