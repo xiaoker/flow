@@ -172,7 +172,7 @@ test("gives every ETF Radar detail view an official-share line chart", async () 
   );
   assert.match(source, /drawer-share-chart/);
   assert.match(source, /selectedShareHistory/);
-  assert.match(source, /name:\s*"份额锚点（亿份）"/);
+  assert.match(source, /name:\s*"官方总份额（亿份）"/);
   assert.match(source, /selectedShareHistory\.length >= 2/);
   assert.match(source, /type:\s*"line"/);
   assert.match(source, /不是现金净流入/);
