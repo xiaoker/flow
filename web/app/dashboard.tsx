@@ -371,6 +371,18 @@ export function Dashboard({
     ],
   }), [connectSeries]);
 
+  const marginPreview = useMemo(() => snapshot.marginSeries.slice(-12).map((item, index, rows) => {
+    const previous = rows[index - 1]?.balance;
+    const state = previous === undefined
+      ? "baseline"
+      : item.balance > previous
+        ? "expansion"
+        : item.balance < previous
+          ? "contraction"
+          : "flat";
+    return { ...item, state, dailyChange: previous === undefined ? null : item.balance - previous };
+  }), [snapshot.marginSeries]);
+
   const marginTrendOption = useMemo(() => {
     const definition = marginMetricDefinitions[marginDisplayMetric];
     const data = snapshot.marginSeries.map((item) => item[marginDisplayMetric] ?? null);
@@ -722,8 +734,8 @@ export function Dashboard({
               </article>
               <article className="terminal-panel compact-panel">
                 <div className="panel-heading"><div><span className="eyebrow">融资融券 · 官方汇总</span><h2>杠杆余额连续变化</h2></div><button className="link-button" onClick={() => setView("margin")} type="button">展开<CaretRight size={15} /></button></div>
-                <div className="margin-spark">{snapshot.marginSeries.slice(-12).map((item, index, rows) => <div aria-label={`${item.date}，${item.label}`} className={`margin-spark-point ${index === rows.length - 1 ? "is-latest" : ""}`} key={item.date}><span className={index === rows.length - 1 ? "latest" : ""} style={{ height: `${52 + ((item.balance - Math.min(...rows.map((point) => point.balance))) / Math.max(1, Math.max(...rows.map((point) => point.balance)) - Math.min(...rows.map((point) => point.balance)))) * 42}%` }} /><strong>{compactDate(item.date)}</strong><small>{item.label}</small></div>)}</div>
-                <p className="method-note"><Info size={15} />余额变化代表杠杆规模扩张或收缩，不直接等同多空方向。</p>
+                <div className="margin-spark">{marginPreview.map((item, index, rows) => <div aria-label={`${item.date}，融资余额 ${item.label}${item.dailyChange === null ? "，无前日可比" : `，较前日${item.state === "expansion" ? "扩张" : item.state === "contraction" ? "收缩" : "持平"}${formatFlow(item.dailyChange)}亿元`}`} className={`margin-spark-point is-${item.state} ${index === rows.length - 1 ? "is-latest" : ""}`} key={item.date}><span className="margin-spark-bar" style={{ height: `${52 + ((item.balance - Math.min(...rows.map((point) => point.balance))) / Math.max(1, Math.max(...rows.map((point) => point.balance)) - Math.min(...rows.map((point) => point.balance)))) * 42}%` }} /><strong>{compactDate(item.date)}</strong><small>{item.label}</small></div>)}</div>
+                <p className="method-note"><Info size={15} />柱高为融资余额；红色表示较前日扩张，绿色表示收缩，青色描边为最新官方数据。余额变化不直接等同多空方向。</p>
               </article>
             </section>
           </>

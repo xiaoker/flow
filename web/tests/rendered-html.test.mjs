@@ -50,6 +50,9 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark\s*\{[^}]*grid-template-columns:\s*repeat\(12,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(css, /\.margin-spark\s*\{[^}]*padding:\s*0 16px 0 2px/);
   assert.match(css, /\.margin-spark-point\.is-latest\s*\{[^}]*text-align:\s*right/);
+  assert.match(css, /\.margin-spark-point\.is-expansion\s*>\s*\.margin-spark-bar\s*\{[^}]*background:\s*#d95e61/);
+  assert.match(css, /\.margin-spark-point\.is-contraction\s*>\s*\.margin-spark-bar\s*\{[^}]*background:\s*#55b887/);
+  assert.match(css, /\.margin-spark-point\.is-latest\s*>\s*\.margin-spark-bar\s*\{[^}]*outline:\s*2px solid var\(--cyan\)/);
 });
 
 test("refreshes the latest dashboard and schedules collection through source release windows", async () => {

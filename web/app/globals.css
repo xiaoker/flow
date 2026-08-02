@@ -178,8 +178,11 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .margin-spark { display: grid; height: 132px; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: end; gap: clamp(4px, .7vw, 12px); margin-top: 12px; padding: 0 16px 0 2px; overflow: hidden; }
 .margin-spark-point { display: grid; min-width: 0; height: 100%; grid-template-rows: 1fr 16px 14px; align-items: end; gap: 3px; text-align: center; }
 .margin-spark-point:nth-last-child(n + 13) { display: none; }
-.margin-spark-point > span { display: block; width: min(30px, 72%); min-width: 8px; justify-self: center; border-radius: 4px 4px 0 0; background: #344459; }
-.margin-spark-point > span.latest { background: var(--outflow); box-shadow: 0 0 14px rgba(85,187,135,.18); }
+.margin-spark-bar { display: block; width: min(30px, 72%); min-width: 8px; justify-self: center; border-radius: 4px 4px 0 0; background: #344459; transition: background-color 160ms ease, box-shadow 160ms ease, outline-color 160ms ease; }
+.margin-spark-point.is-expansion > .margin-spark-bar { background: #d95e61; }
+.margin-spark-point.is-contraction > .margin-spark-bar { background: #55b887; }
+.margin-spark-point.is-flat > .margin-spark-bar { background: #9ba8ba; }
+.margin-spark-point.is-latest > .margin-spark-bar { outline: 2px solid var(--cyan); outline-offset: 3px; box-shadow: 0 0 14px rgba(80,183,217,.24); }
 .margin-spark-point strong, .margin-spark-point small { visibility: hidden; display: block; white-space: nowrap; }
 .margin-spark-point strong { color: var(--muted-strong); font-family: var(--font-geist-mono), monospace; font-size: 13px; }
 .margin-spark-point small { color: var(--muted); font-size: var(--text-xs); }
