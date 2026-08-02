@@ -512,19 +512,31 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .drawer-hero { display: flex; flex-direction: column; gap: 7px; margin: 18px 20px; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: #0e1926; }
 .drawer-hero span, .drawer-hero small { color: var(--muted); font-size: var(--text-sm); }
 .drawer-hero strong { font-family: var(--font-geist-mono), monospace; font-size: 36px; }
+.drawer-proof-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 20px 18px; }
+.drawer-proof-grid > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(7,13,22,.42); }
+.drawer-proof-grid span, .drawer-proof-grid small { color: var(--muted); font-size: 11px; }
+.drawer-proof-grid strong { overflow: hidden; color: var(--muted-strong); font-family: var(--font-geist-mono), monospace; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .drawer-share-chart { margin: 0 20px 18px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #0d1723; }
 .drawer-share-chart > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .drawer-share-chart > div:first-child strong { color: var(--text); font-size: 15px; }
 .drawer-share-chart > div:first-child span, .drawer-share-chart > p { color: var(--muted); font-size: 12px; }
 .drawer-share-echart { height: 230px !important; }
 .drawer-share-chart > p { margin: 7px 0 0; line-height: 1.6; }
-.drawer-chart-empty { display: flex; min-height: 170px; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.drawer-chart-empty { display: flex; min-height: 170px; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: var(--muted); font-size: 13px; text-align: center; }
+.drawer-chart-empty svg { color: var(--cyan); }
+.drawer-chart-empty strong { color: var(--muted-strong); font-size: 15px; }
+.drawer-chart-empty span { max-width: 270px; line-height: 1.6; }
 .drawer-periods { display: block; margin: 0 20px; border-top: 1px solid var(--line-soft); }
 .drawer-periods > div { display: grid; min-height: 58px; grid-template-columns: 86px minmax(0, 1fr) 96px; align-items: center; gap: 12px; padding: 0 8px; border-bottom: 1px solid var(--line-soft); }
 .drawer-periods > div.active { background: linear-gradient(90deg, var(--cyan-soft), transparent 70%); box-shadow: inset 2px 0 0 var(--cyan); }
 .drawer-periods span, .drawer-periods small { color: var(--muted); font-size: 13px; }
 .drawer-periods strong { justify-self: end; font-family: var(--font-geist-mono), monospace; font-size: 17px; }
 .drawer-periods small { text-align: right; }
+.drawer-periods-more { margin: 0 20px; border-bottom: 1px solid var(--line-soft); }
+.drawer-periods-more summary { padding: 14px 8px; color: var(--muted-strong); cursor: pointer; font-size: 13px; list-style-position: inside; }
+.drawer-pending-periods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 8px 14px; }
+.drawer-pending-periods span { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); font-size: 12px; }
+.drawer-pending-periods small { color: var(--muted); font-size: 11px; }
 .drawer-note { display: flex; align-items: flex-start; gap: 9px; margin: 18px 20px; padding: 14px; border: 1px solid rgba(80,183,217,.2); border-radius: 9px; background: var(--cyan-soft); color: var(--cyan); }
 .drawer-note svg { flex: 0 0 auto; }
 .drawer-note p { margin: 0; color: #b7d6e2; font-size: var(--text-sm); line-height: 1.7; }
@@ -641,7 +653,8 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .terminal-footer > span:nth-child(2) { display: none; }
   .detail-drawer { width: 100%; border-left: 0; }
   .drawer-header { padding: 18px; }
-  .drawer-periods { margin: 0 16px; }
+  .drawer-proof-grid { margin-inline: 16px; }
+  .drawer-periods, .drawer-periods-more { margin-inline: 16px; }
   .drawer-share-chart { margin-inline: 16px; }
   .drawer-periods > div { grid-template-columns: 72px minmax(0, 1fr) 88px; }
 }

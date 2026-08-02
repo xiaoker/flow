@@ -484,6 +484,12 @@ export function Dashboard({
       { label: "当前", value: selected.shares },
     ];
   }, [selected]);
+  const selectedPeriodRows = useMemo(() => periods.map((item) => ({
+    ...item,
+    value: selected?.periods[item.id] ?? null,
+  })), [selected]);
+  const selectedAvailablePeriods = selectedPeriodRows.filter((item) => typeof item.value === "number");
+  const selectedPendingPeriods = selectedPeriodRows.filter((item) => item.value === null);
   const selectedShareChartOption = useMemo(() => ({
     animationDuration: 350,
     grid: { left: 62, right: 18, top: 18, bottom: 42 },
@@ -509,7 +515,7 @@ export function Dashboard({
       axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 11 },
     },
     series: [{
-      name: "官方总份额",
+      name: "份额锚点（亿份）",
       type: "line",
       smooth: 0.16,
       showSymbol: true,
@@ -744,7 +750,7 @@ export function Dashboard({
         {view === "radar" && (
           <section className="terminal-panel radar-panel">
             <div className="radar-heading">
-              <div><span className="eyebrow">ETF 份额雷达 · 公式计算</span><h2>横向比较份额变化</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 深市单日快照不生成变化值</p></div>
+              <div><span className="eyebrow">ETF 份额雷达 · 公式计算</span><h2>横向比较份额变化</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 连续官方份额不足时保持为空</p></div>
               <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>亿份</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{terminal.universe?.periodComparable ?? terminal.instruments.length}<em>只</em></strong></span></div>
             </div>
             <div className="radar-toolbar">
@@ -819,17 +825,19 @@ export function Dashboard({
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {groupTypeLabels[selected.groupType ?? "other"] ?? selected.groupType} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
-            <div className="drawer-hero"><span>{currentPeriod}份额变化</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值</small></div>
+            <div className="drawer-hero"><span>{currentPeriod}份额变化 · 官方份额差</span><strong className={(activeValue(selected) ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(activeValue(selected))}<em>亿份</em></strong><small>覆盖 {selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值 · 不等同现金净流入</small></div>
+            <div className="drawer-proof-grid" aria-label="ETF 数据凭据"><div><span>展示快照日</span><strong>{snapshot.asOf}</strong><small>当前归档日</small></div><div><span>原始来源</span><strong>{selected.market === "SZSE" ? "深交所" : "上交所"}</strong><small>ETF 规模文件</small></div><div><span>当前总份额</span><strong>{typeof selected.shares === "number" ? selected.shares.toFixed(2) : "待快照"}</strong><small>亿份</small></div></div>
             <div className="drawer-share-chart">
-              <div><strong>官方总份额走势</strong><span>周期锚点复算 · 当前 {selected.shares?.toFixed(2) ?? "—"} 亿份</span></div>
-              {selectedShareHistory.length ? (
+              <div><strong>份额锚点走势</strong><span>由官方份额变化复算 · {selectedShareHistory.length >= 2 ? "可视化" : "等待连续节点"}</span></div>
+              {selectedShareHistory.length >= 2 ? (
                 <ReactECharts className="drawer-share-echart" option={selectedShareChartOption} notMerge lazyUpdate />
               ) : (
-                <div className="drawer-chart-empty"><Database size={22} />等待官方份额快照</div>
+                <div className="drawer-chart-empty"><Database size={22} /><strong>{typeof selected.shares === "number" ? "历史节点积累中" : "等待官方总份额快照"}</strong><span>{typeof selected.shares === "number" ? `当前只有 ${selectedShareHistory.length} 个可复算节点，达到 2 个节点后显示走势。` : "拿到官方总份额后，才会显示可验证的历史节点。"}</span></div>
               )}
-              <p>历史节点＝当前官方总份额－对应周期份额变化；不是现金净流入。</p>
+              <p>历史节点＝当前官方总份额－对应周期份额变化；这是复算锚点，不是原始逐日快照，也不是现金净流入。</p>
             </div>
-            <div className="drawer-periods">{periods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(selected.periods[item.id] ?? 0) > 0 ? "text-in" : (selected.periods[item.id] ?? 0) < 0 ? "text-out" : ""}>{formatFlow(selected.periods[item.id])}</strong><small>{selected.periods[item.id] === null || selected.periods[item.id] === undefined ? "数据积累中" : "亿份"}</small></div>)}</div>
+            <div className="drawer-periods">{selectedAvailablePeriods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(item.value ?? 0) > 0 ? "text-in" : (item.value ?? 0) < 0 ? "text-out" : ""}>{formatFlow(item.value)}</strong><small>亿份</small></div>)}</div>
+            {selectedPendingPeriods.length ? <details className="drawer-periods-more"><summary>历史周期积累中 · {selectedPendingPeriods.length} 项</summary><div className="drawer-pending-periods">{selectedPendingPeriods.map((item) => <span key={item.id}>{item.label}<small>待积累</small></span>)}</div></details> : null}
             <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。估算资金仅在净值与区间份额同时完整时提供。</p></div>
           </aside>
         </div>

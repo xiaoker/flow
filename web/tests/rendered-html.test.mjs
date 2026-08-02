@@ -55,6 +55,22 @@ test("keeps the margin history preview inside its dashboard card", async () => {
   assert.match(css, /\.margin-spark-point\.is-latest\s*>\s*\.margin-spark-bar\s*\{[^}]*outline:\s*2px solid var\(--cyan\)/);
 });
 
+test("keeps ETF detail evidence and unavailable periods explicit", async () => {
+  const [source, css] = await Promise.all([
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /drawer-proof-grid/);
+  assert.match(source, /展示快照日/);
+  assert.match(source, /原始来源/);
+  assert.match(source, /selectedShareHistory\.length >= 2/);
+  assert.match(source, /复算锚点，不是原始逐日快照/);
+  assert.match(source, /drawer-periods-more/);
+  assert.match(css, /\.drawer-proof-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3/);
+  assert.match(css, /\.drawer-chart-empty\s*\{[^}]*flex-direction:\s*column/);
+  assert.match(css, /\.drawer-periods-more\s*\{/);
+});
+
 test("refreshes the latest dashboard and schedules collection through source release windows", async () => {
   const [source, configText] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
@@ -156,7 +172,8 @@ test("gives every ETF Radar detail view an official-share line chart", async () 
   );
   assert.match(source, /drawer-share-chart/);
   assert.match(source, /selectedShareHistory/);
-  assert.match(source, /name:\s*"官方总份额"/);
+  assert.match(source, /name:\s*"份额锚点（亿份）"/);
+  assert.match(source, /selectedShareHistory\.length >= 2/);
   assert.match(source, /type:\s*"line"/);
   assert.match(source, /不是现金净流入/);
 });
