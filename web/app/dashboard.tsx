@@ -49,6 +49,7 @@ type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
 type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
 type EtfDetailHistoryPoint = { date: string; shares: number; delta: number | null };
+type EtfHistoryBasis = "official_daily_change_replay" | "official_daily_share_snapshots";
 
 const periods: Array<{ id: FlowPeriod; label: string }> = [
   { id: "1d", label: "最近1日" },
@@ -218,6 +219,7 @@ export function Dashboard({
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<EtfDetailHistoryPoint[]>([]);
+  const [selectedHistoryBasis, setSelectedHistoryBasis] = useState<EtfHistoryBasis | null>(null);
   const [selectedHistoryLoading, setSelectedHistoryLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [notice, setNotice] = useState("");
@@ -233,22 +235,26 @@ export function Dashboard({
   useEffect(() => {
     if (!selectedCode) {
       setSelectedHistory([]);
+      setSelectedHistoryBasis(null);
       setSelectedHistoryLoading(false);
       return;
     }
     const controller = new AbortController();
     setSelectedHistory([]);
+    setSelectedHistoryBasis(null);
     setSelectedHistoryLoading(true);
     const params = new URLSearchParams({ code: selectedCode, market: selectedMarket });
     fetch(`/api/v1/etf/history?${params.toString()}`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`history_${response.status}`);
-        const payload = await response.json() as { history?: EtfDetailHistoryPoint[] };
+        const payload = await response.json() as { history?: EtfDetailHistoryPoint[]; basis?: EtfHistoryBasis };
         setSelectedHistory(Array.isArray(payload.history) ? payload.history : []);
+        setSelectedHistoryBasis(payload.basis ?? null);
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setSelectedHistory([]);
+        setSelectedHistoryBasis(null);
       })
       .finally(() => {
         if (!controller.signal.aborted) setSelectedHistoryLoading(false);
@@ -879,13 +885,13 @@ export function Dashboard({
             <div className="drawer-hero"><span>{currentPeriod}份额变化 · 官方份额差</span><strong className={(selectedActiveValue ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(selectedActiveValue)}<em>亿份</em></strong><small>{selectedHistory.length >= 2 ? `基于 ${selectedHistory.length} 个原始官方份额日点` : `覆盖 ${selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值`} · 不等同现金净流入</small></div>
             <div className="drawer-proof-grid" aria-label="ETF 数据凭据"><div><span>展示快照日</span><strong>{snapshot.asOf}</strong><small>当前归档日</small></div><div><span>原始来源</span><strong>{selected.market === "SZSE" ? "深交所" : "上交所"}</strong><small>ETF 规模文件</small></div><div><span>当前总份额</span><strong>{typeof selected.shares === "number" ? selected.shares.toFixed(2) : "待快照"}</strong><small>亿份</small></div></div>
             <div className="drawer-share-chart">
-              <div><strong>官方份额走势</strong><span>{selectedHistoryLoading ? "正在读取原始日点…" : selectedHistory.length >= 2 ? `原始日点 · ${selectedHistory[0].date} 至 ${selectedHistory.at(-1)?.date}` : "复算锚点 · 等待原始日点"}</span></div>
+              <div><strong>官方份额走势</strong><span>{selectedHistoryLoading ? "正在读取官方历史…" : selectedHistory.length >= 2 ? `${selectedHistoryBasis === "official_daily_change_replay" ? "官方变化回溯" : "原始日点"} · ${selectedHistory[0].date} 至 ${selectedHistory.at(-1)?.date}` : "复算锚点 · 等待原始日点"}</span></div>
               {selectedShareHistory.length >= 2 ? (
                 <ReactECharts className="drawer-share-echart" option={selectedShareChartOption} notMerge lazyUpdate />
               ) : (
                 <div className="drawer-chart-empty"><Database size={22} /><strong>{selectedHistoryLoading ? "正在读取原始份额" : typeof selected.shares === "number" ? "历史节点积累中" : "等待官方总份额快照"}</strong><span>{selectedHistoryLoading ? "详情页正在按基金代码读取交易所归档数据。" : typeof selected.shares === "number" ? `当前只有 ${selectedShareHistory.length} 个可复算节点，达到 2 个节点后显示走势。` : "拿到官方总份额后，才会显示可验证的历史节点。"}</span></div>
               )}
-              <p>{selectedHistory.length >= 2 ? "折线为交易所归档的官方总份额日点；下方周期值为当前份额减去对应历史日点，不是现金净流入。" : "在原始日点接口可用前，历史节点由当前官方总份额减去周期份额变化复算；复算锚点，不是原始逐日快照，也不是现金净流入。"}</p>
+              <p>{selectedHistory.length >= 2 ? (selectedHistoryBasis === "official_daily_change_replay" ? "折线由官方逐日份额变化回溯到当前总份额；下方周期值不是现金净流入。" : "折线为交易所归档的官方总份额日点；下方周期值为当前份额减去对应历史日点，不是现金净流入。") : "在原始日点接口可用前，历史节点由当前官方总份额减去周期份额变化复算；复算锚点，不是原始逐日快照，也不是现金净流入。"}</p>
             </div>
             <div className="drawer-periods">{selectedAvailablePeriods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(item.value ?? 0) > 0 ? "text-in" : (item.value ?? 0) < 0 ? "text-out" : ""}>{formatFlow(item.value)}</strong><small>亿份</small></div>)}</div>
             {selectedPendingPeriods.length ? <details className="drawer-periods-more"><summary>历史周期积累中 · {selectedPendingPeriods.length} 项</summary><div className="drawer-pending-periods">{selectedPendingPeriods.map((item) => <span key={item.id}>{item.label}<small>待积累</small></span>)}</div></details> : null}
