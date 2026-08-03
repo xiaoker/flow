@@ -81,11 +81,20 @@ const worker = {
     return handler.fetch(request, env, ctx);
   },
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(dispatchDailyCollection(env));
+    ctx.waitUntil(
+      dispatchDailyCollection(env).catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error("Daily collection dispatch failed", {
+          cron: controller.cron,
+          scheduledTime: new Date(controller.scheduledTime).toISOString(),
+          detail,
+        });
+      }),
+    );
   },
 };
 

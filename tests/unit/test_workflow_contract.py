@@ -22,6 +22,7 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "daily-data.yml/dispatches" in worker
     assert 'JSON.stringify({ ref: "main" })' in worker
     assert "response.status !== 200 && response.status !== 204" in worker
+    assert 'console.error("Daily collection dispatch failed"' in worker
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
