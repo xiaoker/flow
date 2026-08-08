@@ -62,22 +62,28 @@ HKEX_CONNECT_PAGE_URL = (
 )
 
 SSE_ETF_NAV_CLASSES = (
-    # Official SSE ETF product subtype codes (F111--F150).  The list page
-    # renders these as client-side tabs; querying the subtype codes directly
-    # keeps the raw response auditable and includes stock, bond, cross-border,
-    # commodity and money-market ETF products without depending on tab order.
-    "F111",  # single-market Shanghai equity ETF
-    "F112",  # cross-market Shanghai/Shenzhen/Beijing equity ETF
-    "F113",  # cross-market Shanghai/Hong Kong/Shenzhen/Beijing equity ETF
-    "F114",  # single-market STAR-market equity ETF
-    "F115",  # cross-market equity ETF including STAR market
-    "F121",  # single-market Shanghai bond ETF
-    "F122",  # cross-market bond ETF
-    "F123",  # cash-substitution bond ETF
-    "F131",  # cross-border ETF
-    "F141",  # gold ETF
-    "F142",  # commodity-futures ETF
-    "F150",  # exchange-traded money-market fund
+    # These are the ETF_CLASS values used by the SSE ETF disclosure page's
+    # public script.  The page groups them into stock, bond, cross-border,
+    # commodity and exchange-traded money-market tabs; querying the values
+    # directly keeps the raw responses auditable and avoids relying on tab
+    # order.  The F111--F150 values previously used here are not accepted by
+    # this endpoint and return an empty result.
+    "01",  # single-market Shanghai equity ETF
+    "03",  # cross-market equity (Shanghai/Shenzhen/Beijing) ETF
+    "08",  # cross-market equity (including Hong Kong) ETF
+    "09",  # single-market STAR-market equity ETF
+    "31",  # cross-market equity ETF including STAR market
+    "02",  # single-market Shanghai bond ETF
+    "36",  # cross-market bond ETF (interbank)
+    "37",  # cash-substitution bond ETF
+    "32",  # cross-market bond (Shanghai/Shenzhen) ETF
+    "33",  # cross-border ETF
+    "34",  # multi-market cross-border ETF (intraday rotation)
+    "35",  # multi-market cross-border ETF (non-intraday rotation)
+    "38",  # commodity-futures ETF
+    "06",  # gold ETF
+    "05",  # exchange-traded money-market fund
+    "07",  # exchange-traded money-market fund (legacy subtype)
 )
 
 

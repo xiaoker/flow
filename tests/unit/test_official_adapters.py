@@ -137,6 +137,27 @@ def test_sse_etf_nav_uses_exact_publication_date_and_previous_trading_day(
     assert "sse_etf_nav" in str(artifact.normalized_path)
 
 
+def test_sse_etf_nav_uses_live_public_page_class_codes() -> None:
+    assert official.SSE_ETF_NAV_CLASSES == (
+        "01",
+        "03",
+        "08",
+        "09",
+        "31",
+        "02",
+        "36",
+        "37",
+        "32",
+        "33",
+        "34",
+        "35",
+        "38",
+        "06",
+        "05",
+        "07",
+    )
+
+
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:
