@@ -383,7 +383,7 @@ export function Dashboard({
   const marketHistoryCoverage = snapshot.marketHistoryCoverage;
   const connectTrendOption = useMemo(() => ({
     animationDuration: 450,
-    legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
+    legend: { type: "scroll", top: 2, left: 68, right: 10, itemGap: 16, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
     grid: { left: 16, right: 20, top: 44, bottom: 54, containLabel: true },
     dataZoom: [
       { type: "inside", filterMode: "none" },
@@ -392,8 +392,8 @@ export function Dashboard({
     tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 } },
     xAxis: { type: "category", data: connectSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13, formatter: compactDate } },
     yAxis: [
-      { type: "value", name: "南向净买入", nameTextStyle: { color: "#8795a8", fontSize: 13 }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
-      { type: "value", name: "北向成交", nameTextStyle: { color: "#8795a8", fontSize: 13 }, splitLine: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
+      { type: "value", splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
+      { type: "value", splitLine: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
     ],
     series: [
       { name: "南向净买入（亿港元）", type: "bar", barMaxWidth: 30, data: connectSeries.map((item) => ({ value: item.southboundNet, itemStyle: { color: item.southboundNet >= 0 ? "#e36464" : "#55b887", borderRadius: item.southboundNet >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) },
@@ -403,7 +403,7 @@ export function Dashboard({
 
   const channelOption = useMemo(() => ({
     animationDuration: 450,
-    legend: { top: 2, right: 10, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
+    legend: { type: "scroll", top: 2, left: 68, right: 10, itemGap: 16, textStyle: { color: "#9ba8ba", fontSize: 13 }, itemWidth: 14, itemHeight: 8 },
     grid: { left: 12, right: 14, top: 42, bottom: 54, containLabel: true },
     dataZoom: [
       { type: "inside", filterMode: "none" },
@@ -845,7 +845,7 @@ export function Dashboard({
         {view === "connect" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main connect-detail">
-              <div className="panel-heading connect-heading"><div className="connect-heading-copy"><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度 · {marketHistoryCoverage?.connect.points ?? connectSeries.length} 个官方历史点{marketHistoryCoverage?.connect.from ? `（${marketHistoryCoverage.connect.from} 至 ${marketHistoryCoverage.connect.to}）` : ""}</p></div><p className="connect-heading-note"><span>当日四通道</span>南向看方向 · 北向看活跃度</p></div>
+              <div className="panel-heading connect-heading"><div className="connect-heading-copy"><span className="eyebrow">沪港通 · 深港通</span><h2>互联互通数据</h2><p>南向看公式净买入；北向只看官方成交活跃度 · {marketHistoryCoverage?.connect.points ?? connectSeries.length} 个官方历史点{marketHistoryCoverage?.connect.from ? `（${marketHistoryCoverage.connect.from} 至 ${marketHistoryCoverage.connect.to}）` : ""}</p></div><p className="connect-heading-note"><span className="connect-heading-note-badge">当日四通道</span><span className="connect-heading-note-copy">南向看方向 · 北向看活跃度</span></p></div>
               <div className="connect-top-summary" aria-label="南北互通当日摘要">
                 <section className="connect-top-group connect-channel-south" aria-labelledby="southbound-channel-title">
                   <header><span className="evidence-badge evidence-calculated">公式计算</span><div><h3 id="southbound-channel-title">南向资金</h3><p>净买入方向与通道成交</p></div></header>

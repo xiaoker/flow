@@ -277,13 +277,15 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .detail-chart { height: 300px !important; }
 .connect-chart-stack { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .connect-chart-stack .detail-chart { height: 320px !important; }
-.connect-heading { align-items: flex-end; gap: 22px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
+.connect-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 320px); align-items: end; gap: 22px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
 .connect-heading-copy { min-width: 0; }
-.connect-heading-note { display: flex; max-width: 310px; align-items: center; justify-content: flex-end; gap: 7px; margin: 0 0 2px auto; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: right; }
-.connect-heading-note span { flex: 0 0 auto; padding: 3px 7px; border: 1px solid rgba(80,183,217,.28); border-radius: 999px; background: var(--cyan-soft); color: var(--cyan); font-size: 11px; font-weight: 700; }
+.connect-heading-note { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 7px; margin: 0 0 2px auto; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: right; }
+.connect-heading-note-badge { flex: 0 0 auto; padding: 3px 7px; border: 1px solid rgba(80,183,217,.28); border-radius: 999px; background: var(--cyan-soft); color: var(--cyan); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.connect-heading-note-copy { min-width: 0; overflow-wrap: anywhere; }
 .connect-top-summary { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(7,13,22,.5); box-shadow: inset 0 1px rgba(255,255,255,.018); }
 .connect-top-group { min-width: 0; }
 .connect-top-group + .connect-top-group { border-left: 1px solid var(--line-soft); }
+.connect-top-group > header > div { min-width: 0; }
 .connect-top-group > header { display: flex; min-height: 62px; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line-soft); }
 .connect-top-group > header .evidence-badge { min-height: 20px; padding-inline: 6px; font-size: 11px; }
 .connect-top-group h3 { margin: 0; color: var(--ink); font-size: 16px; }
