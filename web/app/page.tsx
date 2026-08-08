@@ -11,7 +11,7 @@ export default async function Home({
   const { date, view } = await searchParams;
   const data = await getDashboardViewData(date);
   const initialView =
-    view === "radar" || view === "national" || view === "connect" || view === "margin"
+    view === "rotation" || view === "radar" || view === "national" || view === "connect" || view === "margin"
       ? view
       : undefined;
   return <Dashboard {...data} initialView={initialView} />;

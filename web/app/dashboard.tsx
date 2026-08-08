@@ -36,6 +36,7 @@ import type {
   FlowPeriod,
 } from "./lib/dashboard-data";
 import { NationalTeamView } from "./national-team-view";
+import { SectorRotationView } from "./sector-rotation-view";
 
 type DashboardProps = {
   snapshot: DashboardSnapshot;
@@ -44,7 +45,7 @@ type DashboardProps = {
   exactDateMatch?: boolean;
   initialView?: DeskView;
 };
-type DeskView = "overview" | "radar" | "national" | "connect" | "margin";
+type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
 type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
@@ -89,6 +90,7 @@ const shareHistoryLookbacks: Partial<Record<FlowPeriod, number>> = {
 
 const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> = [
   { id: "overview", label: "数据总览", icon: ChartLineUp },
+  { id: "rotation", label: "板块轮动", icon: ArrowsClockwise },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
   { id: "national", label: "国家队持仓", icon: Buildings },
   { id: "connect", label: "南北互通", icon: ArrowsLeftRight },
@@ -656,12 +658,20 @@ export function Dashboard({
   ).length;
   const currentViewTitle: Record<DeskView, string> = {
     overview: "市场数据全景",
+    rotation: "板块资金轮动",
     radar: "ETF 份额雷达",
     national: "国家队持仓",
     connect: "互联互通",
     margin: "融资融券",
   };
   const displayMode = snapshot.mode.replace(/GitHub\s*Actions\s*/gi, "").trim() || "官方数据快照";
+  const navigateView = (nextView: DeskView) => {
+    setView(nextView);
+    const url = new URL(window.location.href);
+    if (nextView === "overview") url.searchParams.delete("view");
+    else url.searchParams.set("view", nextView);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+  };
   const dateIndex = availableDates.indexOf(snapshot.asOf);
   const previousAvailableDate = dateIndex > 0 ? availableDates[dateIndex - 1] : null;
   const nextAvailableDate = dateIndex >= 0 && dateIndex < availableDates.length - 1
@@ -749,7 +759,7 @@ export function Dashboard({
         <nav className="desk-nav" aria-label="交易台导航">
           {navigation.map((item) => {
             const Icon = item.icon;
-            return <button aria-current={view === item.id ? "page" : undefined} aria-label={item.label} className={view === item.id ? "active" : ""} key={item.id} onClick={() => { setView(item.id); const url = new URL(window.location.href); if (item.id === "national") url.searchParams.set("view", "national"); else url.searchParams.delete("view"); window.history.replaceState({}, "", url); }} title={item.label} type="button"><Icon size={17} /><span>{item.label}</span></button>;
+            return <button aria-current={view === item.id ? "page" : undefined} aria-label={item.label} className={view === item.id ? "active" : ""} key={item.id} onClick={() => navigateView(item.id)} title={item.label} type="button"><Icon size={17} /><span>{item.label}</span></button>;
           })}
         </nav>
         <div className="top-actions">
@@ -810,7 +820,7 @@ export function Dashboard({
         <strong>未披露的数据不展示、不补造</strong>
       </section>
 
-      {(view === "overview" || view === "radar" || view === "national") && (
+      {(view === "overview" || view === "rotation" || view === "radar" || view === "national") && (
         <section className="period-strip" aria-label="ETF 观察口径">
           {view !== "national" && <div className="metric-switch" aria-label="指标口径">
             <button className={etfDisplayMetric === "shares" ? "active" : ""} onClick={() => setEtfDisplayMetric("shares")} type="button">份额（亿份）</button>
@@ -832,7 +842,7 @@ export function Dashboard({
               <article className="terminal-panel rotation-panel">
                 <div className="panel-heading">
                   <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>{`板块${metricLabel}`}</h2><p>{terminal.classificationVersion ?? "未标版本"} · {etfDisplayMetric === "cash" ? "逐日份额变化按对应交易日官方单位净值折算后累计" : terminal.calculation ?? `当前展示 ${currentPeriod} 官方份额差`}</p></div>
-                  <div className="panel-kpis"><span><small>样本净变化（{metricUnit}）</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
+                  <div className="panel-kpis panel-kpis-with-link"><span><small>样本净变化（{metricUnit}）</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span><button className="link-button" onClick={() => navigateView("rotation")} type="button">展开<CaretRight size={15} /></button></div>
                 </div>
                 <ReactECharts className="rotation-chart" option={rotationOption} notMerge lazyUpdate />
                 <div className="insight-row">
@@ -845,7 +855,7 @@ export function Dashboard({
               <article className="terminal-panel trend-panel">
                 <div className="panel-heading">
                   <div><span className="eyebrow">全市场 ETF</span><h2>净{metricLabel}走势</h2><p>{etfDisplayMetric === "cash" ? "逐日份额变化 × 对应交易日官方单位净值；缺失净值不计入" : "相邻官方交易日份额差；正值为增加"}</p></div>
-                  <button className="link-button" onClick={() => setView("radar")} type="button">打开雷达<CaretRight size={15} /></button>
+                  <button className="link-button" onClick={() => navigateView("radar")} type="button">打开雷达<CaretRight size={15} /></button>
                 </div>
                 {terminal.dailySeries.length ? <ReactECharts className="trend-chart" option={trendOption} notMerge lazyUpdate /> : <div className="empty-chart"><Database size={30} /><strong>等待第二个交易日快照</strong><span>有连续数据后自动生成走势</span></div>}
                 <div className="trend-summary">
@@ -869,6 +879,21 @@ export function Dashboard({
               </article>
             </section>
           </>
+        )}
+
+        {view === "rotation" && (
+          <SectorRotationView
+            asOf={snapshot.asOf}
+            crowding={crowding}
+            dailySeries={terminal.dailySeries}
+            metricLabel={metricLabel}
+            metricUnit={metricUnit}
+            onBack={() => navigateView("overview")}
+            onOpenRadar={() => navigateView("radar")}
+            periodLabel={currentPeriod}
+            rows={groupRows}
+            totalFlow={totalGroupFlow}
+          />
         )}
 
         {view === "radar" && (
