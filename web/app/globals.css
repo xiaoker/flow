@@ -448,6 +448,17 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .national-chart-title > div { display: flex; align-items: baseline; gap: 12px; }
 .national-chart-title strong { font-size: 18px; }
 .national-chart-title span { color: var(--muted); font-size: 13px; }
+.national-chart-tools { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 10px; }
+.national-chart-mode { display: inline-flex; min-height: 34px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: #0a121d; }
+.national-chart-mode button { min-height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 700; }
+.national-chart-mode button.active { background: var(--cyan-soft); color: var(--cyan); box-shadow: inset 0 0 0 1px rgba(80,183,217,.32); }
+.national-chart-callout { display: flex; min-width: 116px; flex-direction: column; gap: 1px; padding: 4px 9px; border: 1px solid rgba(80,183,217,.25); border-radius: 8px; background: rgba(80,183,217,.07); }
+.national-chart-callout small { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.national-chart-callout strong { font-family: var(--font-geist-mono), monospace; font-size: 15px; line-height: 1.1; }
+.national-chart-callout strong em { font-size: 10px; }
+.national-chart-callout b { color: var(--muted-strong); font-family: var(--font-geist-mono), monospace; font-size: 11px; }
+.national-chart-callout.text-in { border-color: rgba(85,187,135,.35); background: var(--outflow-soft); }
+.national-chart-callout.text-out { border-color: rgba(235,104,106,.35); background: var(--inflow-soft); }
 .disclosure-pending {
   display: inline-flex;
   min-height: 32px;
@@ -733,6 +744,10 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .national-summary > span:nth-child(3) { padding-left: 0; border-left: 0; }
   .national-chart-title { align-items: flex-start; flex-direction: column; padding: 14px 14px 0; }
   .national-chart-title > div { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .national-chart-tools { width: 100%; align-items: stretch; justify-content: flex-start; flex-wrap: wrap; }
+  .national-chart-mode { min-height: 40px; }
+  .national-chart-mode button { min-height: 36px; padding-inline: 13px; }
+  .national-chart-callout { min-width: 0; flex: 1; }
   .national-chart { height: 330px !important; }
   .national-table-wrap { max-width: calc(100vw - 16px); }
   .national-detail-header { padding: 16px; }

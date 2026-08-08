@@ -63,6 +63,8 @@ type NationalTeamRow = {
   instrument: EtfTerminalInstrument | null;
 };
 
+type NationalChartMode = "relative" | "absolute";
+
 function signed(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
@@ -93,6 +95,7 @@ export function NationalTeamView({
     }));
   }, [terminal.instruments]);
   const [selectedCode, setSelectedCode] = useState(nationalTeamEtfs[0].code);
+  const [chartMode, setChartMode] = useState<NationalChartMode>("relative");
   const selected = rows.find((item) => item.code === selectedCode) ?? rows[0];
   const normalizedQuery = query.trim().toLowerCase();
   const filteredRows = rows.filter(
@@ -127,16 +130,43 @@ export function NationalTeamView({
           { label: "当前", value: selectedInstrument.shares },
         ]
       : [];
+  const chartBase = shareHistory[0]?.value ?? null;
+  const chartPoints = shareHistory.map((item) => ({
+    ...item,
+    delta: chartBase === null ? null : item.value - chartBase,
+    relative: chartBase && chartBase !== 0 ? ((item.value / chartBase) - 1) * 100 : null,
+  }));
+  const largestChartMove = chartPoints.reduce<{ label: string; delta: number; relative: number | null } | null>(
+    (largest, item) => {
+      if (item.delta === null) return largest;
+      if (!largest || Math.abs(item.delta) > Math.abs(largest.delta)) {
+        return { label: item.label, delta: item.delta, relative: item.relative };
+      }
+      return largest;
+    },
+    null,
+  );
+  const chartValues = chartMode === "relative"
+    ? chartPoints.map((item) => item.relative)
+    : chartPoints.map((item) => item.value);
+  const chartUnit = chartMode === "relative" ? "%" : "亿份";
+  const chartSeriesName = chartMode === "relative" ? "相对最早节点变化" : "官方总份额";
   const chartOption = {
     animationDuration: 420,
-    grid: { left: 72, right: 34, top: 28, bottom: 46 },
+    grid: { left: chartMode === "relative" ? 68 : 72, right: 34, top: 28, bottom: 46 },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "line", lineStyle: { color: "#728197", type: "dashed" } },
       backgroundColor: "#111923",
       borderColor: "#334155",
       textStyle: { color: "#e7edf5", fontSize: 14 },
-      valueFormatter: (value: number) => `${Number(value).toFixed(2)} 亿份`,
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const point = chartPoints[params[0]?.dataIndex ?? 0];
+        if (!point) return "";
+        const relative = point.relative === null ? "—" : `${point.relative >= 0 ? "+" : ""}${point.relative.toFixed(2)}%`;
+        const delta = point.delta === null ? "—" : `${point.delta >= 0 ? "+" : ""}${point.delta.toFixed(2)} 亿份`;
+        return `${point.label}<br/>官方总份额：${point.value.toFixed(2)} 亿份<br/>相对最早节点：${relative}<br/>变化：${delta}`;
+      },
     },
     xAxis: {
       type: "category",
@@ -153,24 +183,25 @@ export function NationalTeamView({
     yAxis: {
       type: "value",
       scale: true,
-      name: "亿份",
+      name: chartUnit,
       nameTextStyle: { color: "#7f8da0", padding: [0, 0, 8, 0] },
       splitLine: { lineStyle: { color: "rgba(68,82,102,.32)", type: "dashed" } },
       axisLabel: {
         color: "#8795a8",
         fontFamily: "monospace",
         fontSize: 13,
+        formatter: (value: number) => chartMode === "relative" ? `${value > 0 ? "+" : ""}${value.toFixed(0)}%` : value.toFixed(0),
       },
     },
     series: [
       {
-        name: "官方总份额",
+        name: chartSeriesName,
         type: "line",
         smooth: 0.16,
         showSymbol: true,
-        symbolSize: 8,
-        data: shareHistory.map((item) => item.value),
-        lineStyle: { width: 3, color: "#e14f45" },
+        symbolSize: (value: number, params: { dataIndex: number }) => params.dataIndex === chartPoints.length - 1 ? 11 : 7,
+        data: chartValues,
+        lineStyle: { width: 3, color: chartMode === "relative" ? "#50b7d9" : "#e14f45" },
         itemStyle: { color: "#f2b24a", borderColor: "#132234", borderWidth: 2 },
         areaStyle: {
           color: {
@@ -180,11 +211,18 @@ export function NationalTeamView({
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: "rgba(225,79,69,.28)" },
-              { offset: 1, color: "rgba(225,79,69,.015)" },
+              { offset: 0, color: chartMode === "relative" ? "rgba(80,183,217,.26)" : "rgba(225,79,69,.28)" },
+              { offset: 1, color: chartMode === "relative" ? "rgba(80,183,217,.015)" : "rgba(225,79,69,.015)" },
             ],
           },
         },
+        markLine: chartMode === "relative" ? {
+          silent: true,
+          symbol: "none",
+          lineStyle: { color: "rgba(241,174,66,.75)", type: "dashed", width: 1 },
+          label: { color: "#f1ae42", formatter: "起点 0%" },
+          data: [{ yAxis: 0 }],
+        } : undefined,
       },
     ],
   };
@@ -223,12 +261,19 @@ export function NationalTeamView({
         </div>
         <div className="national-chart-title">
           <div>
-            <strong>{selected.fundShortName} · 官方总份额</strong>
-            <span>{selected.code} · 周期锚点复算 · 截至 {asOf}</span>
+            <strong>{selected.fundShortName} · {chartMode === "relative" ? "份额变化" : "官方总份额"}</strong>
+            <span>{selected.code} · {chartMode === "relative" ? "相对最早可比节点" : "周期锚点复算"} · 截至 {asOf}</span>
           </div>
-          <span className="disclosure-pending">
-            <Info size={15} />持有人披露待接入
-          </span>
+          <div className="national-chart-tools">
+            <div className="national-chart-mode" aria-label="图表显示方式" role="tablist">
+              <button aria-selected={chartMode === "relative"} className={chartMode === "relative" ? "active" : ""} onClick={() => setChartMode("relative")} role="tab" type="button">变化%</button>
+              <button aria-selected={chartMode === "absolute"} className={chartMode === "absolute" ? "active" : ""} onClick={() => setChartMode("absolute")} role="tab" type="button">绝对份额</button>
+            </div>
+            {largestChartMove && <span className={`national-chart-callout ${flowClass(largestChartMove.delta)}`}><small>最大变化 · {largestChartMove.label}</small><strong>{signed(largestChartMove.delta)}<em>亿份</em></strong>{largestChartMove.relative !== null && <b>{largestChartMove.relative >= 0 ? "+" : ""}{largestChartMove.relative.toFixed(1)}%</b>}</span>}
+            <span className="disclosure-pending">
+              <Info size={15} />持有人披露待接入
+            </span>
+          </div>
         </div>
         {shareHistory.length >= 2 ? (
           <ReactECharts
@@ -245,7 +290,7 @@ export function NationalTeamView({
           </div>
         )}
         <p className="national-chart-footnote">
-          历史节点＝当前官方总份额－对应周期份额变化；这是 ETF 总份额曲线，不代表国家队持仓变化。
+          {chartMode === "relative" ? "变化%＝（节点总份额 ÷ 最早可比节点总份额 − 1）× 100%；悬停可查看官方总份额。" : "历史节点＝当前官方总份额－对应周期份额变化；"}这是 ETF 总份额曲线，不代表国家队持仓变化。
         </p>
       </article>
 
