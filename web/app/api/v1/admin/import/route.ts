@@ -3,6 +3,7 @@ import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
 import {
   enrichSnapshotWithEtfFlowState,
   loadEtfFlowState,
+  validateEtfTerminalCoverage,
 } from "@/app/lib/etf-flow-state";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
@@ -462,6 +463,28 @@ export async function POST(request: Request) {
     }
     const flowState = await loadEtfFlowState(runtime.RAW_BUCKET);
     const publishedSnapshot = enrichSnapshotWithEtfFlowState(snapshot, flowState);
+    const etfQualityIssues = validateEtfTerminalCoverage(publishedSnapshot.etfTerminal);
+    if (etfQualityIssues.length) {
+      const finishedAt = new Date().toISOString();
+      await runtime.DB
+        .prepare(
+          "UPDATE ingest_run SET finished_at = ?, status = 'PENDING', error_count = ?, manifest_key = ? WHERE id = ?",
+        )
+        .bind(
+          finishedAt,
+          etfQualityIssues.length,
+          archiveResult.manifestKey,
+          payload.archive.runId,
+        )
+        .run();
+      return NextResponse.json({
+        status: "archived_pending",
+        asOf: snapshot.asOf,
+        reason: "derived_etf_quality_failed",
+        qualityIssues: etfQualityIssues.slice(0, 50),
+        ...archiveResult,
+      });
+    }
     const publishedAt = new Date().toISOString();
     const snapshotId = `${publishedSnapshot.asOf}:${crypto.randomUUID()}`;
     const objectKey = `dashboard/${publishedSnapshot.asOf}/${publishedAt.replaceAll(":", "-")}.json`;

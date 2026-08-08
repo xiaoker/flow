@@ -220,27 +220,35 @@ def _build_etf_terminal_data(
         latest_nav = nav_pivot.at[key, latest_date] if key in nav_pivot.index else None
         latest_nav_date = nav_date_pivot.at[key, latest_date] if key in nav_date_pivot.index else None
         period_values: dict[str, float | None] = {}
+        period_coverage: dict[str, int] = {}
         estimated_cash_values: dict[str, float | None] = {}
         cash_period_coverage: dict[str, int] = {}
         for period in available_periods:
-            anchor = anchors[period]
-            current_value = pivot.at[key, latest_date]
-            anchor_value = pivot.at[key, anchor]
-            period_values[period] = (
-                None
-                if pd.isna(current_value) or pd.isna(anchor_value)
-                else round(float(current_value - anchor_value) / 100_000_000, 2)
-            )
             if period == "ytd":
-                cash_dates = [date for date in available_dates if date[:4] == current_year]
+                window_dates = [date for date in available_dates if date[:4] == current_year]
             else:
                 offset = lookbacks[period]
-                cash_dates = available_dates[-offset:]
-            observed_cash = [daily_cash[key].get(date) for date in cash_dates]
+                window_dates = available_dates[-offset:]
+
+            # A period value is the sum of its adjacent, official daily
+            # changes.  Requiring every interval prevents an endpoint delta
+            # from disguising a missing middle date as a complete 3d/1w flow.
+            observed_share = [daily_share[key].get(date) for date in window_dates]
+            observed_share = [value for value in observed_share if value is not None]
+            period_coverage[period] = len(observed_share)
+            period_values[period] = (
+                None
+                if len(observed_share) != len(window_dates) or not window_dates
+                else round(float(sum(observed_share)), 2)
+            )
+
+            observed_cash = [daily_cash[key].get(date) for date in window_dates]
             observed_cash = [value for value in observed_cash if value is not None]
             cash_period_coverage[period] = len(observed_cash)
             estimated_cash_values[period] = (
-                None if not observed_cash else round(float(sum(observed_cash)), 2)
+                None
+                if len(observed_cash) != len(window_dates) or not window_dates
+                else round(float(sum(observed_cash)), 2)
             )
         instruments.append(
             {
@@ -258,6 +266,7 @@ def _build_etf_terminal_data(
                 "nav": None if pd.isna(latest_nav) else round(float(latest_nav), 4),
                 "navDate": None if latest_nav_date is None or pd.isna(latest_nav_date) else str(latest_nav_date),
                 "periods": period_values,
+                "periodCoverage": period_coverage,
                 "estimatedCashPeriods": estimated_cash_values,
                 "cashPeriodCoverage": cash_period_coverage,
                 "coverage": int(pivot.loc[key, available_dates].notna().sum()),
@@ -309,7 +318,10 @@ def _build_etf_terminal_data(
         {
             "name": name,
             "groupType": aggregate["groupType"],
-            "periods": {key: round(value, 2) for key, value in aggregate["periods"].items()},
+            "periods": {
+                key: round(value, 2) if aggregate["comparableCount"][key] > 0 else None
+                for key, value in aggregate["periods"].items()
+            },
             "estimatedCashPeriods": {
                 key: round(value, 2) if aggregate["estimatedCashCoverage"][key] > 0 else None
                 for key, value in aggregate["estimatedCashPeriods"].items()

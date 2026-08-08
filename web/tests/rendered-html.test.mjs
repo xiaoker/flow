@@ -294,14 +294,17 @@ test("restores long ETF periods from the hash-verified R2 flow state", async () 
         classificationConfidence: "medium",
         classificationRule: "technology",
         includeInGroup: true,
-        values: [1, 2, 3, 4, 5],
+        // The first two dates are absent.  A complete 1d/3d value is still
+        // valid, but a 1w sum must remain unavailable rather than summing the
+        // three observed points and presenting it as five days.
+        values: [null, null, 3, 4, 5],
       },
     ],
     sourceSnapshots: dates.map((date) => ({ date, sha256: "a".repeat(64) })),
     quality: {
       snapshotCount: 5,
       instrumentCount: 1,
-      populatedValues: 5,
+      populatedValues: 3,
       rejectedRows: 0,
       duplicateRows: 0,
       status: "pass",
@@ -350,8 +353,8 @@ test("restores long ETF periods from the hash-verified R2 flow state", async () 
   const item = payload.terminal.instruments.find((row) => row.code === "588170");
   assert.equal(item.periods["1d"], 5);
   assert.equal(item.periods["3d"], 12);
-  assert.equal(item.periods["1w"], 15);
-  assert.equal(item.periodCoverage["1w"], 5);
+  assert.equal(item.periods["1w"], null);
+  assert.equal(item.periodCoverage["1w"], 3);
   assert.equal(payload.terminal.historyCoverage.tradingDays, 5);
 });
 

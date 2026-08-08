@@ -447,6 +447,22 @@ class OfficialMarketAdapters:
         frame = pd.read_excel(
             io.BytesIO(response.content), engine="openpyxl", dtype={"基金代码": str}
         )
+        # The SZSE list is a fund-product list, not an ETF-only list: it also
+        # contains LOF and REIT rows.  Keep the original XLSX intact for
+        # evidence, but never let non-ETF products enter etf_daily or the ETF
+        # state.  A missing category column is treated as an explicit warning
+        # rather than silently classifying the whole response as ETF.
+        product_type = frame.get("基金类别")
+        if product_type is None:
+            artifact.warnings.append("深交所 ETF 列表缺少基金类别列；未进行产品类型过滤")
+        else:
+            etf_mask = product_type.astype(str).str.strip().eq("ETF")
+            excluded_count = int((~etf_mask).sum())
+            if excluded_count:
+                artifact.warnings.append(
+                    f"深交所列表保留 ETF {int(etf_mask.sum())} 行，排除非 ETF 产品 {excluded_count} 行"
+                )
+            frame = frame.loc[etf_mask].copy()
         normalized = pd.DataFrame(
             {
                 "trade_date": trade_date,

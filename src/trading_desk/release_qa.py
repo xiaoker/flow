@@ -767,6 +767,220 @@ def _all_numbers_finite(value: Any) -> bool:
     return True
 
 
+ETF_PERIOD_WINDOWS: dict[str, int] = {
+    "1d": 1,
+    "3d": 3,
+    "1w": 5,
+    "2w": 10,
+    "1m": 21,
+    "3m": 63,
+    "6m": 126,
+    "12m": 252,
+}
+
+
+def validate_etf_terminal_data(snapshot: dict[str, Any]) -> list[QualityFinding]:
+    """Validate the derived ETF terminal, not only its raw input files.
+
+    Raw-to-normalized checks cannot detect a partial rolling window after the
+    data has been pivoted.  A terminal value is therefore publishable only if
+    its declared coverage equals the requested number of adjacent official
+    daily changes.  This is deliberately a hard gate: a partial value is less
+    useful than an explicit ``null``/``覆盖不足`` state for a decision product.
+    """
+
+    terminal = snapshot.get("etfTerminal")
+    if not isinstance(terminal, dict):
+        return [
+            _finding(
+                "derived.etf_terminal_shape",
+                "dashboard_snapshot",
+                False,
+                message="ETF 派生终端缺失，无法核验窗口覆盖",
+                evidence={},
+                remediation="先生成包含官方 ETF 份额窗口的终端，再进入发布门禁。",
+            )
+        ]
+
+    instruments = terminal.get("instruments")
+    if not isinstance(instruments, list):
+        instruments = []
+    duplicate_keys: list[str] = []
+    seen: set[str] = set()
+    coverage_issues: list[dict[str, Any]] = []
+    cash_issues: list[dict[str, Any]] = []
+    for index, item in enumerate(instruments):
+        if not isinstance(item, dict):
+            coverage_issues.append({"index": index, "reason": "invalid_instrument"})
+            continue
+        code = str(item.get("code") or "")
+        market = str(item.get("market") or "SSE")
+        key = f"{market}:{code}"
+        if key in seen:
+            duplicate_keys.append(key)
+        seen.add(key)
+        periods = item.get("periods") if isinstance(item.get("periods"), dict) else {}
+        period_coverage = item.get("periodCoverage") if isinstance(item.get("periodCoverage"), dict) else {}
+        cash_periods = item.get("estimatedCashPeriods") if isinstance(item.get("estimatedCashPeriods"), dict) else {}
+        cash_coverage = item.get("cashPeriodCoverage") if isinstance(item.get("cashPeriodCoverage"), dict) else {}
+        available_periods = terminal.get("availablePeriods") if isinstance(terminal.get("availablePeriods"), list) else list(periods)
+        for period in available_periods:
+            if not isinstance(period, str):
+                continue
+            expected = ETF_PERIOD_WINDOWS.get(period)
+            coverage = period_coverage.get(period)
+            value = periods.get(period)
+            if expected is not None:
+                if not isinstance(coverage, int) or coverage < 0 or coverage > expected:
+                    coverage_issues.append({"key": key, "period": period, "coverage": coverage, "expected": expected})
+                elif value is not None and coverage != expected:
+                    coverage_issues.append({"key": key, "period": period, "coverage": coverage, "expected": expected, "reason": "partial_value"})
+                elif value is None and coverage == expected:
+                    coverage_issues.append({"key": key, "period": period, "coverage": coverage, "expected": expected, "reason": "missing_value"})
+            cash_value = cash_periods.get(period)
+            cash_count = cash_coverage.get(period)
+            if cash_value is not None and expected is not None:
+                if not isinstance(cash_count, int) or cash_count != expected:
+                    cash_issues.append({"key": key, "period": period, "coverage": cash_count, "expected": expected})
+
+    findings = [
+        _finding(
+            "derived.etf_identity_unique",
+            "etfTerminal.instruments",
+            not duplicate_keys,
+            message="ETF 代码与市场组合键唯一" if not duplicate_keys else "ETF 代码与市场组合键重复",
+            evidence={"duplicate_keys": duplicate_keys[:20], "instrument_count": len(instruments)},
+            remediation="以 market + code 去重，保留原始发行市场，不按名称或页面行号合并。",
+        ),
+        _finding(
+            "derived.etf_period_coverage",
+            "etfTerminal.instruments",
+            not coverage_issues,
+            message="ETF 窗口只发布完整官方日点" if not coverage_issues else "ETF 窗口存在部分或错配日点",
+            evidence={"issues": coverage_issues[:50], "issue_count": len(coverage_issues)},
+            remediation="缺少任一官方日点时返回 null/覆盖不足；禁止用最新可用点补成 1d/3d/1w。",
+        ),
+        _finding(
+            "derived.etf_cash_period_coverage",
+            "etfTerminal.instruments",
+            not cash_issues,
+            message="ETF 金额估算只使用完整净值覆盖" if not cash_issues else "ETF 金额估算存在部分净值覆盖",
+            evidence={"issues": cash_issues[:50], "issue_count": len(cash_issues)},
+            severity="high",
+            remediation="份额或对应交易日 NAV 缺失时不估算金额，不用当前 NAV 代替历史 NAV。",
+        ),
+    ]
+    groups = terminal.get("groupPeriods") if isinstance(terminal.get("groupPeriods"), list) else []
+    group_issues: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            group_issues.append({"reason": "invalid_group"})
+            continue
+        group_periods = group.get("periods") if isinstance(group.get("periods"), dict) else {}
+        comparable = group.get("comparableCount") if isinstance(group.get("comparableCount"), dict) else {}
+        for period, value in group_periods.items():
+            if value is not None and int(comparable.get(period, 0) or 0) <= 0:
+                group_issues.append({"group": group.get("name"), "period": period, "reason": "value_without_components"})
+    findings.append(
+        _finding(
+            "derived.etf_group_reconciliation",
+            "etfTerminal.groupPeriods",
+            not group_issues,
+            message="板块汇总均有可追溯 ETF 组成" if not group_issues else "板块汇总缺少可追溯组成",
+            evidence={"issues": group_issues[:50], "issue_count": len(group_issues)},
+            remediation="板块只汇总通过完整窗口校验的 ETF，并保留可比数量。",
+        )
+    )
+    return findings
+
+
+def validate_etf_terminal_identity(
+    snapshot: dict[str, Any], frames: dict[str, pd.DataFrame], as_of: str
+) -> list[QualityFinding]:
+    """Reconcile displayed ETF identity and latest shares to raw rows."""
+
+    terminal = snapshot.get("etfTerminal")
+    instruments = terminal.get("instruments") if isinstance(terminal, dict) else None
+    if not isinstance(instruments, list):
+        return []
+    parts: list[pd.DataFrame] = []
+    for key, market in (("sse_etf", "SSE"), ("szse_etf", "SZSE")):
+        frame = frames.get(key, pd.DataFrame())
+        if frame.empty or not {"trade_date", "instrument_code", "instrument_name", "shares"}.issubset(frame.columns):
+            continue
+        selected = frame.loc[frame["trade_date"].astype(str).eq(as_of)].copy()
+        if not selected.empty:
+            selected["market"] = market
+            parts.append(selected[["market", "instrument_code", "instrument_name", "shares"]])
+    if not parts:
+        return [
+            _finding(
+                "derived.etf_identity_matches_raw",
+                "etfTerminal.instruments",
+                False,
+                message="无法找到用于核对 ETF 展示身份的原始日点",
+                evidence={"as_of": as_of},
+                remediation="缺少目标日原始 ETF 行时保持 pending，不从其他日期或名称表补值。",
+            )
+        ]
+    raw = pd.concat(parts, ignore_index=True)
+    raw["instrument_code"] = raw["instrument_code"].astype(str).str.zfill(6)
+    raw["instrument_name"] = raw["instrument_name"].astype(str).str.strip()
+    raw["shares"] = pd.to_numeric(raw["shares"], errors="coerce")
+    duplicate_conflicts = (
+        raw.groupby(["market", "instrument_code"])
+        .agg(names=("instrument_name", "nunique"), shares=("shares", "nunique"))
+        .reset_index()
+    )
+    conflict_keys = [
+        f"{row.market}:{row.instrument_code}"
+        for row in duplicate_conflicts.itertuples()
+        if int(row.names) > 1 or int(row.shares) > 1
+    ]
+    raw_latest = raw.drop_duplicates(["market", "instrument_code"], keep="last").set_index(["market", "instrument_code"])
+    identity_issues: list[dict[str, Any]] = []
+    share_issues: list[dict[str, Any]] = []
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        market = str(item.get("market") or "SSE")
+        code = str(item.get("code") or "").zfill(6)
+        key = (market, code)
+        if key not in raw_latest.index:
+            identity_issues.append({"key": f"{market}:{code}", "reason": "missing_raw_row"})
+            continue
+        source = raw_latest.loc[key]
+        source_name = str(source["instrument_name"])
+        if str(item.get("name") or "").strip() != source_name:
+            identity_issues.append({"key": f"{market}:{code}", "display": item.get("name"), "raw": source_name})
+        displayed_shares = item.get("shares")
+        if displayed_shares is not None and pd.notna(source["shares"]):
+            expected_shares = float(source["shares"]) / 100_000_000
+            try:
+                if abs(float(displayed_shares) - expected_shares) > 0.01:
+                    share_issues.append({"key": f"{market}:{code}", "display": displayed_shares, "raw_100m": round(expected_shares, 6)})
+            except (TypeError, ValueError):
+                share_issues.append({"key": f"{market}:{code}", "display": displayed_shares, "raw_100m": round(expected_shares, 6)})
+    return [
+        _finding(
+            "derived.etf_identity_matches_raw",
+            "etfTerminal.instruments",
+            not identity_issues and not conflict_keys,
+            message="ETF 名称、代码和市场与目标日原始行一致" if not identity_issues and not conflict_keys else "ETF 展示身份与原始行不一致",
+            evidence={"issues": identity_issues[:50], "conflict_keys": conflict_keys[:50], "issue_count": len(identity_issues)},
+            remediation="以目标日原始行核对 market+code+name；冲突时保留原始证据并阻断发布。",
+        ),
+        _finding(
+            "derived.etf_shares_matches_raw",
+            "etfTerminal.instruments",
+            not share_issues,
+            message="ETF 展示份额与原始份额单位换算一致" if not share_issues else "ETF 展示份额与原始份额不一致",
+            evidence={"issues": share_issues[:50], "issue_count": len(share_issues), "unit": "100m shares"},
+            remediation="按原始份额/100,000,000 复算，禁止用规模或其他市场同代码数据替代。",
+        ),
+    ]
+
+
 def _metric_value(snapshot: dict[str, Any], metric_id: str) -> float:
     metric = next(item for item in snapshot.get("metrics", []) if item.get("id") == metric_id)
     return float(str(metric["value"]).replace(",", ""))
@@ -854,6 +1068,8 @@ def validate_snapshot_values(
             remediation="在计算层处理缺失值，不允许 NaN/Infinity 进入 JSON。",
         )
     )
+    findings.extend(validate_etf_terminal_data(snapshot))
+    findings.extend(validate_etf_terminal_identity(snapshot, frames, as_of))
 
     headline_ok = False
     evidence: dict[str, Any] = {}

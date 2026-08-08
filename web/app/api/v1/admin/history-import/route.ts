@@ -5,6 +5,7 @@ import {
   loadEtfFlowState,
   mergeSnapshotIntoEtfFlowState,
   persistEtfFlowState,
+  validateEtfTerminalCoverage,
   type OfficialEtfDailyChange,
 } from "@/app/lib/etf-flow-state";
 import { extractMarketHistoryPoint } from "@/app/lib/market-history";
@@ -313,36 +314,63 @@ async function loadOfficialEtfDailyChanges(
          WHERE trade_date = ?
        ), previous_rows AS (
          SELECT instrument_code, market, shares,
+                trade_date AS previous_trade_date,
                 ROW_NUMBER() OVER (
                   PARTITION BY instrument_code, market
                   ORDER BY trade_date DESC, observed_at DESC, release_id DESC
                 ) AS row_number
          FROM etf_daily
          WHERE trade_date < ?
+       ), expected_previous AS (
+         SELECT MAX(trade_date) AS expected_previous_trade_date
+         FROM (
+           SELECT trade_date FROM etf_daily
+           WHERE market = 'SSE' AND trade_date < ?
+           UNION
+           SELECT trade_date FROM margin_daily
+           WHERE market = 'SSE' AND trade_date < ?
+           UNION
+           SELECT trade_date FROM connect_daily
+           WHERE market = 'SSE' AND trade_date < ?
+         ) AS official_calendar
        )
        SELECT current_rows.instrument_code, current_rows.market,
               current_rows.shares AS current_shares,
-              previous_rows.shares AS previous_shares
+              previous_rows.shares AS previous_shares,
+              previous_rows.previous_trade_date,
+              expected_previous.expected_previous_trade_date
        FROM current_rows
        LEFT JOIN previous_rows
          ON previous_rows.instrument_code = current_rows.instrument_code
         AND previous_rows.market = current_rows.market
         AND previous_rows.row_number = 1
+       CROSS JOIN expected_previous
        WHERE current_rows.row_number = 1`,
     )
-    .bind(asOf, asOf)
+    .bind(asOf, asOf, asOf, asOf, asOf)
     .all<{
       instrument_code: string;
       market: "SSE" | "SZSE";
       current_shares: number;
       previous_shares: number | null;
+      previous_trade_date: string | null;
+      expected_previous_trade_date: string | null;
     }>();
   return (result.results ?? []).flatMap((row) => {
     if ((row.market !== "SSE" && row.market !== "SZSE") || !/^\d{6}$/.test(row.instrument_code)) return [];
+    const aligned =
+      row.previous_trade_date !== null &&
+      row.expected_previous_trade_date !== null &&
+      row.previous_trade_date === row.expected_previous_trade_date;
     return [{
       code: row.instrument_code,
       market: row.market,
-      value: row.previous_shares === null
+      previousTradeDate: row.previous_trade_date,
+      expectedPreviousTradeDate: row.expected_previous_trade_date,
+      // A market-specific row may have an older last snapshot than the
+      // official calendar anchor (for example SZSE after a delayed release).
+      // Keep the evidence, but never label that multi-day delta as 1d.
+      value: !aligned || row.previous_shares === null
         ? null
         : Number(((row.current_shares - row.previous_shares) / 100_000_000).toFixed(6)),
     }];
@@ -676,7 +704,8 @@ export async function POST(request: Request) {
 
   try {
     const { history } = value;
-    const publishHistory = isPublishableSnapshot(history.snapshot);
+    const etfQualityIssues = validateEtfTerminalCoverage(history.snapshot.etfTerminal);
+    const publishHistory = isPublishableSnapshot(history.snapshot) && etfQualityIssues.length === 0;
     const finalizeRequested = history.finalize !== false;
     const expectedArtifacts = history.expectedArtifacts;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
@@ -866,6 +895,9 @@ export async function POST(request: Request) {
         snapshotKey: null,
         manifestKey,
         publication: history.snapshot.publication ?? null,
+        ...(etfQualityIssues.length
+          ? { reason: "derived_etf_quality_failed", qualityIssues: etfQualityIssues.slice(0, 50) }
+          : {}),
         pendingArtifacts: collection.pending,
       });
     }

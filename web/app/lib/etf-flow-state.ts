@@ -68,6 +68,59 @@ export type EtfFlowState = {
   };
 };
 
+/**
+ * Server-side guard for the derived terminal contract.  Legacy snapshots may
+ * omit periodCoverage and are left readable for migration; every newly built
+ * terminal carries the field and must pass this check before publication.
+ */
+export function validateEtfTerminalCoverage(
+  terminal: EtfTerminalData | undefined,
+): string[] {
+  if (!terminal || !terminal.instruments.length) return [];
+  const contractPresent = terminal.instruments.some(
+    (item) => item.periodCoverage !== undefined,
+  );
+  if (!contractPresent) return [];
+  const periods = terminal.availablePeriods ?? PERIOD_ORDER;
+  const issues: string[] = [];
+  const keys = new Set<string>();
+  for (const item of terminal.instruments) {
+    const key = `${item.market ?? "SSE"}:${item.code}`;
+    if (keys.has(key)) issues.push(`duplicate:${key}`);
+    keys.add(key);
+    for (const period of periods) {
+      const expected = PERIOD_WINDOWS[period];
+      const coverage = item.periodCoverage?.[period];
+      const value = item.periods[period];
+      if (expected === undefined) {
+        if (value !== null && value !== undefined && !(coverage && coverage > 0)) {
+          issues.push(`missing_coverage:${key}:${period}`);
+        }
+        continue;
+      }
+      if (!Number.isInteger(coverage) || (coverage ?? 0) < 0 || (coverage ?? 0) > expected) {
+        issues.push(`invalid_coverage:${key}:${period}:${coverage ?? "null"}/${expected}`);
+      } else if (value !== null && value !== undefined && coverage !== expected) {
+        issues.push(`partial_value:${key}:${period}:${coverage}/${expected}`);
+      } else if (value === null && coverage === expected) {
+        issues.push(`missing_value:${key}:${period}`);
+      }
+      const cash = item.estimatedCashPeriods?.[period];
+      if (cash !== null && cash !== undefined && item.cashPeriodCoverage?.[period] !== expected) {
+        issues.push(`partial_cash:${key}:${period}:${item.cashPeriodCoverage?.[period] ?? "null"}/${expected}`);
+      }
+    }
+  }
+  for (const group of terminal.groupPeriods) {
+    for (const [period, value] of Object.entries(group.periods)) {
+      if (value !== null && value !== undefined && !(group.comparableCount?.[period as FlowPeriod] ?? 0)) {
+        issues.push(`group_without_components:${group.name}:${period}`);
+      }
+    }
+  }
+  return issues;
+}
+
 type StatePointer = {
   version: 1;
   classificationVersion: string;
@@ -82,6 +135,10 @@ export type OfficialEtfDailyChange = {
   code: string;
   market: "SSE" | "SZSE";
   value: number | null;
+  /** The raw previous ETF snapshot used by the official delta query. */
+  previousTradeDate?: string | null;
+  /** The immediately preceding SSE ETF trading date used as the calendar anchor. */
+  expectedPreviousTradeDate?: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -252,7 +309,7 @@ export function mergeSnapshotIntoEtfFlowState(
   previous: EtfFlowState | null,
   snapshot: DashboardSnapshot,
   sourceSnapshotSha256: string,
-  officialDailyChanges: OfficialEtfDailyChange[] = [],
+  officialDailyChanges?: OfficialEtfDailyChange[],
 ): EtfFlowState | null {
   const terminal = snapshot.etfTerminal;
   if (
@@ -262,7 +319,17 @@ export function mergeSnapshotIntoEtfFlowState(
   ) {
     return previous;
   }
-  const dates = [...new Set([...(previous?.dates ?? []), snapshot.asOf])]
+  // Keep the immediately preceding official date in the state calendar even
+  // when no complete dashboard snapshot was published for that date.  The
+  // placeholder carries a null value, so a 3d/1w sum cannot silently bridge a
+  // source gap while the current 1d value can still remain valid.
+  const expectedPreviousDates = (officialDailyChanges ?? [])
+    .map((item) => item.expectedPreviousTradeDate)
+    .filter(
+      (date): date is string =>
+        typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && date < snapshot.asOf,
+    );
+  const dates = [...new Set([...(previous?.dates ?? []), ...expectedPreviousDates, snapshot.asOf])]
     .sort()
     .slice(-ETF_FLOW_STATE_MAX_DATES);
   const dateIndex = new Map(dates.map((date, index) => [date, index]));
@@ -283,12 +350,17 @@ export function mergeSnapshotIntoEtfFlowState(
 
   const currentIndex = dateIndex.get(snapshot.asOf);
   if (currentIndex === undefined) return previous;
+  const hasOfficialChanges = officialDailyChanges !== undefined;
   const officialChanges = new Map(
-    officialDailyChanges.map((item) => [instrumentKey(item), item.value]),
+    (officialDailyChanges ?? []).map((item) => [instrumentKey(item), item.value]),
   );
   for (const item of terminal.instruments) {
     const key = instrumentKey(item);
-    const value = officialChanges.has(key)
+    // When the D1 raw table was queried, it is the source of truth.  Do not
+    // fall back to a snapshot-calculated value for a missing code: that value
+    // may have been calculated across a source gap.  The optional argument is
+    // kept for legacy fixtures that do not have a raw table at all.
+    const value = hasOfficialChanges
       ? officialChanges.get(key)
       : item.periods["1d"];
     if (value === null || value === undefined || !Number.isFinite(value)) continue;
@@ -388,7 +460,10 @@ function sumValues(
     .map((index) => values[index])
     .filter((value): value is number => value !== null && value !== undefined);
   return {
-    value: observed.length
+    // A period is valid only when every expected official trading-day point
+    // is present.  Returning a partial sum makes a 3d/1w number look complete
+    // and was the root of the repeated cross-gap values in the radar.
+    value: observed.length === indexes.length && indexes.length > 0
       ? Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2))
       : null,
     coverage: observed.length,
@@ -426,18 +501,21 @@ export function enrichSnapshotWithEtfFlowState(
         ? sumValues(stateItem.cashValues, indexes[period] ?? [])
         : { value: null, coverage: 0 };
       const fallbackCash = item.estimatedCashPeriods?.[period];
-      cashPeriodCoverage[period] =
-        cashResult.coverage ||
-        (typeof fallbackCash === "number"
-          ? item.cashPeriodCoverage?.[period] ?? 0
-          : 0);
+      const expectedCoverage = indexes[period]?.length ?? 0;
+      const fallbackCoverage = item.cashPeriodCoverage?.[period] ?? 0;
+      const fallbackIsComplete =
+        typeof fallbackCash === "number" &&
+        Number.isFinite(fallbackCash) &&
+        expectedCoverage > 0 &&
+        fallbackCoverage === expectedCoverage;
+      cashPeriodCoverage[period] = cashResult.coverage || (fallbackIsComplete ? fallbackCoverage : 0);
       // Never multiply a multi-day share change by the latest NAV.  The
       // persisted state carries one cash estimate per trading day, already
       // valued with that day's official NAV.  Legacy snapshots can retain an
       // already-calculated value as a compatibility fallback, but no new
       // value is inferred from the current NAV here.
       estimatedCashPeriods[period] =
-        cashResult.value ?? fallbackCash ?? null;
+        cashResult.value ?? (fallbackIsComplete ? fallbackCash : null);
     }
     return {
       ...item,

@@ -211,6 +211,62 @@ def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     assert "szse_etf_scale" in str(artifact.normalized_path)
 
 
+def test_szse_etf_excludes_non_etf_products_but_preserves_raw_artifact(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "基金代码": "159001",
+                "基金简称": "货币ETF易方达",
+                "基金类别": "ETF",
+                "投资类别": "货币市场基金",
+                "当前规模(份)": "19,042,471",
+                "净值": 100.0,
+            },
+            {
+                "基金代码": "160001",
+                "基金简称": "示例LOF",
+                "基金类别": "LOF",
+                "投资类别": "股票型",
+                "当前规模(份)": "10,000,000",
+                "净值": 1.0,
+            },
+        ]
+    )
+    content = io.BytesIO()
+    with pd.ExcelWriter(content, engine="openpyxl") as writer:
+        source.to_excel(writer, index=False)
+    responses = iter(
+        [
+            FakeResponse(
+                [
+                    {
+                        "metadata": {
+                            "subname": "2026-07-16",
+                            "cols": {"dqgm": "当前规模（份）（2026-07-15）"},
+                        }
+                    }
+                ]
+            ),
+            BinaryResponse(
+                content.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        ]
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: next(responses))
+
+    frame, artifact = adapters.fetch_szse_etf_current(
+        ["2026-07-13", "2026-07-14", "2026-07-15"]
+    )
+
+    assert list(frame["instrument_code"]) == ["159001"]
+    assert artifact.row_count == 1
+    assert any("排除非 ETF 产品 1 行" in warning for warning in artifact.warnings)
+    assert Path(artifact.raw_path).exists()
+
+
 def test_szse_etf_uses_previous_trading_day_when_header_shows_disclosure_date() -> None:
     payload = [
         {

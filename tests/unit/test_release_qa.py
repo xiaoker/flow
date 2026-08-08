@@ -14,6 +14,8 @@ from trading_desk.release_qa import (
     _pending_future_warning,
     validate_artifact_lineage,
     validate_combined_data,
+    validate_etf_terminal_data,
+    validate_etf_terminal_identity,
 )
 
 
@@ -214,3 +216,92 @@ def test_missing_hkex_top_name_is_warning_not_required_value_failure() -> None:
     assert required.status == "pass"
     assert resolution.status == "warn"
     assert resolution.evidence["unresolved_rows"] == 1
+
+
+def test_release_qa_blocks_partial_etf_window_in_derived_terminal() -> None:
+    snapshot = {
+        "etfTerminal": {
+            "availablePeriods": ["1d", "3d"],
+            "instruments": [
+                {
+                    "code": "159813",
+                    "market": "SZSE",
+                    "periods": {"1d": -3.68, "3d": -3.68},
+                    "periodCoverage": {"1d": 1, "3d": 1},
+                    "estimatedCashPeriods": {"1d": -2.77, "3d": -2.77},
+                    "cashPeriodCoverage": {"1d": 1, "3d": 1},
+                }
+            ],
+            "groupPeriods": [],
+        }
+    }
+
+    findings = validate_etf_terminal_data(snapshot)
+    period = next(item for item in findings if item.check_id == "derived.etf_period_coverage")
+    cash = next(item for item in findings if item.check_id == "derived.etf_cash_period_coverage")
+
+    assert period.status == "fail"
+    assert cash.status == "fail"
+    assert any(issue["period"] == "3d" for issue in period.evidence["issues"])
+
+
+def test_release_qa_accepts_complete_etf_window() -> None:
+    snapshot = {
+        "etfTerminal": {
+            "availablePeriods": ["1d", "3d"],
+            "instruments": [
+                {
+                    "code": "510300",
+                    "market": "SSE",
+                    "periods": {"1d": 1.0, "3d": 3.0},
+                    "periodCoverage": {"1d": 1, "3d": 3},
+                    "estimatedCashPeriods": {"1d": 2.0, "3d": 6.0},
+                    "cashPeriodCoverage": {"1d": 1, "3d": 3},
+                }
+            ],
+            "groupPeriods": [
+                {
+                    "name": "宽基",
+                    "periods": {"1d": 1.0, "3d": 3.0},
+                    "comparableCount": {"1d": 1, "3d": 1},
+                }
+            ],
+        }
+    }
+
+    findings = validate_etf_terminal_data(snapshot)
+
+    assert all(item.status == "pass" for item in findings)
+
+
+def test_release_qa_blocks_etf_name_or_share_mismatch_against_raw_row() -> None:
+    snapshot = {
+        "etfTerminal": {
+            "instruments": [
+                {
+                    "code": "510300",
+                    "market": "SSE",
+                    "name": "错误名称",
+                    "shares": 99.0,
+                }
+            ]
+        }
+    }
+    frames = {
+        "sse_etf": pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-06",
+                    "instrument_code": "510300",
+                    "instrument_name": "沪深300ETF",
+                    "shares": 100_000_000,
+                }
+            ]
+        ),
+        "szse_etf": pd.DataFrame(),
+    }
+
+    findings = validate_etf_terminal_identity(snapshot, frames, "2026-08-06")
+
+    assert next(item for item in findings if item.check_id == "derived.etf_identity_matches_raw").status == "fail"
+    assert next(item for item in findings if item.check_id == "derived.etf_shares_matches_raw").status == "fail"
