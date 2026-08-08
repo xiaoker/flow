@@ -49,6 +49,7 @@ function groupTypeLabel(value?: string) {
     bond: "债券",
     commodity: "商品",
     money: "货币",
+    unclassified: "未归类",
   };
   return labels[value ?? ""] ?? "板块";
 }
@@ -80,21 +81,25 @@ export function SectorRotationView({
   onOpenRadar,
 }: SectorRotationViewProps) {
   const { outflows, inflows, outflowTotal, inflowTotal } = useMemo(() => {
-    const outflowRows = rows
+    const allOutflowRows = rows
       .filter((row) => row.value < 0)
-      .sort((left, right) => left.value - right.value)
+      .sort((left, right) => left.value - right.value);
+    const allInflowRows = rows
+      .filter((row) => row.value > 0)
+      .sort((left, right) => right.value - left.value);
+    const outflowRows = allOutflowRows
       .slice(0, 6)
       .map((row, index) => ({ ...row, rank: index + 1, unit: metricUnit }));
-    const inflowRows = rows
-      .filter((row) => row.value > 0)
-      .sort((left, right) => right.value - left.value)
+    const inflowRows = allInflowRows
       .slice(0, 7)
       .map((row, index) => ({ ...row, rank: index + 1, unit: metricUnit }));
     return {
       outflows: outflowRows,
       inflows: inflowRows,
-      outflowTotal: outflowRows.reduce((sum, row) => sum + Math.abs(row.value), 0),
-      inflowTotal: inflowRows.reduce((sum, row) => sum + row.value, 0),
+      // Totals cover every group; the lists intentionally show only the
+      // largest contributors to keep the bridge readable.
+      outflowTotal: allOutflowRows.reduce((sum, row) => sum + Math.abs(row.value), 0),
+      inflowTotal: allInflowRows.reduce((sum, row) => sum + row.value, 0),
     };
   }, [metricUnit, rows]);
 
@@ -137,7 +142,7 @@ export function SectorRotationView({
         <div className="rotation-flow-card">
           <div className="rotation-flow-head">
             <div><span>流出来源</span><strong>流出合计 <b className="text-out">{formatFlow(-outflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
-            <div className="rotation-flow-head-center"><span>资金桥接</span><small>同一套 ETF 分类口径 · 拥挤度 {crowding}%</small></div>
+            <div className="rotation-flow-head-center"><span>资金桥接</span><small>同一全市场 ETF 口径 · 合计覆盖 {rows.length} 个板块 · 拥挤度 {crowding}%</small></div>
             <div><span>流入去向</span><strong>流入合计 <b className="text-in">{formatFlow(inflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
           </div>
 
@@ -155,7 +160,7 @@ export function SectorRotationView({
               {inflows.length ? inflows.map((row) => <FlowRow direction="in" key={row.name} max={maxInflow} row={row} />) : <div className="rotation-empty">暂无可比流入板块</div>}
             </div>
           </div>
-          <p className="rotation-method-note"><Info size={16} />金额是官方份额变化 × 对应交易日官方单位净值的估算，不等同真实申赎现金；缺少官方净值的 ETF 不进入金额汇总。</p>
+          <p className="rotation-method-note"><Info size={16} />当前按沪深两市官方份额变化对账；“金额估算”才使用对应交易日官方单位净值，不等同真实申赎现金。低置信度 ETF 进入“未归类”，不强行归入行业；缺少净值的 ETF 不进入金额汇总。</p>
         </div>
       </article>
 

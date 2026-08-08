@@ -28,6 +28,8 @@ export interface EtfTerminalInstrument {
 }
 
 export interface EtfTerminalData {
+  /** The radar/rotation display universe. Current scope is both exchanges. */
+  scope?: "SSE+SZSE" | string;
   dailySeries: Array<{
     date: string;
     value: number;
@@ -70,6 +72,8 @@ export interface EtfTerminalData {
     exclusionCounts?: Record<string, number>;
     marketCounts: Record<string, number>;
     categoryCounts: Record<string, number>;
+    classified?: number;
+    unclassified?: number;
     periodComparable: number;
     cashFlowEligible?: number;
   };
@@ -237,7 +241,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
   etfTerminal: {
     dailySeries: [{ date: "07-14", value: 79.89, coverage: 878 }],
     availablePeriods: ["1d"],
-    classification: "官方产品/投资类型优先，版本化名称规则补充；低置信度不进入板块汇总",
+    classification: "官方产品/投资类型优先，版本化名称规则补充；低置信度产品进入‘未归类’，不强行归入行业",
     classificationVersion: "2026-07-v3",
     universe: { total: 10, excluded: 0, exclusionCounts: {}, marketCounts: { SSE: 10, SZSE: 0 }, categoryCounts: { "科技": 4, "宽基": 1, "医药": 2, "周期资源": 1, "港股海外": 2 }, periodComparable: 10 },
     groupPeriods: [

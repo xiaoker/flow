@@ -10,6 +10,8 @@ export const ETF_CLASSIFICATION_VERSION = "2026-07-v3";
 export const ETF_FLOW_STATE_MAX_DATES = 260;
 export const ETF_FLOW_STATE_POINTER_KEY =
   `market-data/derived/etf-flow-state/${ETF_CLASSIFICATION_VERSION}/latest.json`;
+const UNCLASSIFIED_CATEGORY = "未归类";
+const UNCLASSIFIED_GROUP_TYPE = "unclassified";
 
 const PERIOD_WINDOWS: Partial<Record<FlowPeriod, number>> = {
   "1d": 1,
@@ -115,6 +117,29 @@ export function validateEtfTerminalCoverage(
     for (const [period, value] of Object.entries(group.periods)) {
       if (value !== null && value !== undefined && !(group.comparableCount?.[period as FlowPeriod] ?? 0)) {
         issues.push(`group_without_components:${group.name}:${period}`);
+      }
+    }
+  }
+  if (terminal.groupPeriods.length && terminal.scope === "SSE+SZSE") {
+    for (const period of periods) {
+      const instrumentTotal = terminal.instruments.reduce((sum, item) => {
+        const value = item.periods[period];
+        return typeof value === "number" ? sum + value : sum;
+      }, 0);
+      const groupTotal = terminal.groupPeriods.reduce((sum, group) => {
+        const value = group.periods[period];
+        return typeof value === "number" ? sum + value : sum;
+      }, 0);
+      const comparable = terminal.instruments.filter(
+        (item) => typeof item.periods[period] === "number",
+      ).length;
+      // Values are rounded to 2 decimal 亿份 at the terminal boundary, so a
+      // small tolerance is expected. A larger difference means a product was
+      // silently dropped or counted twice by the sector aggregation.
+      if (comparable > 0 && Math.abs(groupTotal - instrumentTotal) > 0.05) {
+        issues.push(
+          `group_reconciliation:${period}:${groupTotal.toFixed(2)}:${instrumentTotal.toFixed(2)}`,
+        );
       }
     }
   }
@@ -470,6 +495,22 @@ function sumValues(
   };
 }
 
+function displayClassification(item: StateInstrument) {
+  const unclassified =
+    item.classificationRule === "unmatched" ||
+    item.classificationSource === "unmatched" ||
+    (item.includeInGroup === false && item.category === "其他");
+  return {
+    category: unclassified ? UNCLASSIFIED_CATEGORY : item.category,
+    groupType: unclassified ? UNCLASSIFIED_GROUP_TYPE : item.groupType,
+    // Eligible ETFs are all represented in exactly one visible bucket.  The
+    // raw classifier fields above remain intact for audit and future rule
+    // improvements; this flag describes the display universe only.
+    includeInGroup: true,
+    unclassified,
+  };
+}
+
 export function enrichSnapshotWithEtfFlowState(
   snapshot: DashboardSnapshot,
   state: EtfFlowState | null,
@@ -487,6 +528,7 @@ export function enrichSnapshotWithEtfFlowState(
   const instruments: EtfTerminalInstrument[] = terminal.instruments.map((item) => {
     const stateItem = stateRows.get(instrumentKey(item));
     if (!stateItem) return item;
+    const display = displayClassification(stateItem);
     const periods: EtfTerminalInstrument["periods"] = {};
     const estimatedCashPeriods: NonNullable<
       EtfTerminalInstrument["estimatedCashPeriods"]
@@ -519,13 +561,13 @@ export function enrichSnapshotWithEtfFlowState(
     }
     return {
       ...item,
-      category: stateItem.category,
-      groupType: stateItem.groupType,
+      category: display.category,
+      groupType: display.groupType,
       assetClass: stateItem.assetClass,
       classificationSource: stateItem.classificationSource,
       classificationConfidence: stateItem.classificationConfidence,
       classificationRule: stateItem.classificationRule,
-      includeInGroup: stateItem.includeInGroup,
+      includeInGroup: display.includeInGroup,
       periods,
       estimatedCashPeriods,
       cashPeriodCoverage,
@@ -536,7 +578,6 @@ export function enrichSnapshotWithEtfFlowState(
 
   const groups = new Map<string, EtfTerminalData["groupPeriods"][number]>();
   for (const item of instruments) {
-    if (!item.includeInGroup) continue;
     const group = groups.get(item.category) ?? {
       name: item.category,
       groupType: item.groupType,
@@ -611,6 +652,9 @@ export function enrichSnapshotWithEtfFlowState(
   const cashFlowEligible = instruments.filter(
     (item) => item.estimatedCashPeriods?.["1d"] !== null && item.estimatedCashPeriods?.["1d"] !== undefined,
   ).length;
+  const unclassified = instruments.filter(
+    (item) => item.category === UNCLASSIFIED_CATEGORY,
+  ).length;
 
   return {
     ...snapshot,
@@ -622,7 +666,8 @@ export function enrichSnapshotWithEtfFlowState(
       availablePeriods,
       classificationVersion: ETF_CLASSIFICATION_VERSION,
       calculation:
-        "各交易日官方份额变化逐日累计；金额估算=逐日份额变化×对应交易日官方单位净值后累计（单位：亿元）",
+        "各交易日官方份额变化逐日累计；低置信度产品统一进入‘未归类’，不强行归入行业；金额估算=逐日份额变化×对应交易日官方单位净值后累计（单位：亿元）",
+      scope: "SSE+SZSE",
       cashFlow: {
         available: cashFlowEligible > 0,
         unit: "亿元",
@@ -639,7 +684,14 @@ export function enrichSnapshotWithEtfFlowState(
         stateVersion: state.version,
       },
       universe: terminal.universe
-        ? { ...terminal.universe, categoryCounts, periodComparable, cashFlowEligible }
+        ? {
+            ...terminal.universe,
+            categoryCounts,
+            periodComparable,
+            cashFlowEligible,
+            classified: instruments.length - unclassified,
+            unclassified,
+          }
         : terminal.universe,
     },
   };

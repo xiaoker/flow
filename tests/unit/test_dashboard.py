@@ -374,3 +374,43 @@ def test_etf_group_aggregation_keeps_share_and_cash_estimates_separate() -> None
     assert groups["科技"]["comparableCount"]["1d"] == 1
     assert groups["宽基"]["periods"]["1d"] == -0.1
     assert groups["宽基"]["estimatedCashPeriods"]["1d"] is None
+
+
+def test_etf_terminal_puts_eligible_unmatched_products_in_reconciliation_bucket() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-20",
+                "instrument_code": "510010",
+                "instrument_name": "治理ETF",
+                "shares": 100_000_000,
+                "nav": 1.0,
+                "etf_type": "单市",
+                "investment_type": "股票基金",
+            },
+            {
+                "trade_date": "2026-07-21",
+                "instrument_code": "510010",
+                "instrument_name": "治理ETF",
+                "shares": 110_000_000,
+                "nav": 1.0,
+                "etf_type": "单市",
+                "investment_type": "股票基金",
+            },
+        ]
+    )
+    terminal = _build_etf_terminal_data(
+        frame,
+        pd.DataFrame(),
+        ["2026-07-20", "2026-07-21"],
+    )
+
+    item = terminal["instruments"][0]
+    bucket = next(row for row in terminal["groupPeriods"] if row["name"] == "未归类")
+    assert item["category"] == "未归类"
+    assert item["groupType"] == "unclassified"
+    assert item["includeInGroup"] is True
+    assert item["periods"]["1d"] == 0.1
+    assert bucket["periods"]["1d"] == 0.1
+    assert terminal["universe"]["classified"] == 0
+    assert terminal["universe"]["unclassified"] == 1

@@ -38,7 +38,8 @@ def classify_etf(
     both exchanges. Asset class and product eligibility therefore use official
     fields where available, while equity group assignment remains a conservative
     name-based inference. Unmatched products stay visible in the terminal but do
-    not enter group aggregates.
+    not enter classifier-level group aggregates; the presentation layer may
+    place them in an explicit “未归类” bucket so no eligible ETF is dropped.
     """
 
     normalized_name = str(name or "").upper().replace(" ", "")

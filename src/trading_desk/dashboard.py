@@ -124,6 +124,7 @@ def _build_etf_terminal_data(
             "instruments": [],
             "groupPeriods": [],
             "availablePeriods": [],
+            "scope": "SSE+SZSE",
         }
 
     selected = selected.loc[selected["trade_date"].isin(available_dates)].copy()
@@ -250,18 +251,32 @@ def _build_etf_terminal_data(
                 if len(observed_cash) != len(window_dates) or not window_dates
                 else round(float(sum(observed_cash)), 2)
             )
+        # Keep the classifier's raw decision for auditability, but make the
+        # presentation universe exhaustive: an eligible ETF that does not
+        # match a conservative rule is shown in a dedicated 未归类 bucket
+        # instead of silently disappearing from the sector totals.
+        is_unclassified = (
+            classification.rule_id == "unmatched"
+            or classification.source == "unmatched"
+            or (
+                classification.category == "其他"
+                and not classification.include_in_group
+            )
+        )
+        display_category = "未归类" if is_unclassified else classification.category
+        display_group_type = "unclassified" if is_unclassified else classification.group_type
         instruments.append(
             {
                 "code": code,
                 "name": name,
                 "market": market,
-                "category": classification.category,
-                "groupType": classification.group_type,
+                "category": display_category,
+                "groupType": display_group_type,
                 "assetClass": classification.asset_class,
                 "classificationSource": classification.source,
                 "classificationConfidence": classification.confidence,
                 "classificationRule": classification.rule_id,
-                "includeInGroup": classification.include_in_group,
+                "includeInGroup": True,
                 "shares": None if pd.isna(latest_shares) else round(float(latest_shares) / 100_000_000, 2),
                 "nav": None if pd.isna(latest_nav) else round(float(latest_nav), 4),
                 "navDate": None if latest_nav_date is None or pd.isna(latest_nav_date) else str(latest_nav_date),
@@ -290,8 +305,9 @@ def _build_etf_terminal_data(
 
     groups: dict[str, dict[str, Any]] = {}
     for item in instruments:
-        if not item["includeInGroup"]:
-            continue
+        # Every eligible ETF participates exactly once.  Non-ETF products are
+        # removed above by the eligibility rule and remain visible only in
+        # the exclusion counts.
         category = item["category"]
         aggregate = groups.setdefault(
             category,
@@ -348,7 +364,8 @@ def _build_etf_terminal_data(
         "instruments": instruments,
         "groupPeriods": group_periods,
         "availablePeriods": available_periods,
-        "classification": "官方产品/投资类型优先，版本化名称规则补充；低置信度不进入板块汇总",
+        "scope": "SSE+SZSE",
+        "classification": "官方产品/投资类型优先，版本化名称规则补充；低置信度产品统一进入‘未归类’，不强行归入行业",
         "classificationVersion": CLASSIFICATION_VERSION,
         "calculation": "份额变化按官方快照计算；金额估算=逐日份额变化×对应官方单位净值后累计（单位：亿元）",
         "cashFlow": {
@@ -366,6 +383,8 @@ def _build_etf_terminal_data(
             "exclusionCounts": exclusion_counts,
             "marketCounts": market_counts,
             "categoryCounts": category_counts,
+            "classified": sum(1 for item in instruments if item["category"] != "未归类"),
+            "unclassified": sum(1 for item in instruments if item["category"] == "未归类"),
             "periodComparable": sum(1 for item in instruments if item["periods"].get("1d") is not None),
             "cashFlowEligible": cash_eligible,
         },

@@ -113,6 +113,7 @@ const groupTypeLabels: Record<string, string> = {
   commodity: "商品",
   money: "货币",
   other: "其他",
+  unclassified: "未归类",
 };
 
 const classificationRuleLabels: Record<string, string> = {
@@ -175,6 +176,7 @@ function fallbackTerminal(snapshot: DashboardSnapshot): EtfTerminalData {
     coverage: 2,
   }));
   return {
+    scope: "SSE+SZSE",
     dailySeries: [],
     instruments,
     groupPeriods: [],
@@ -343,6 +345,14 @@ export function Dashboard({
       id,
       accessorFn: (row) => metricValueFor(row, id) ?? undefined,
       sortUndefined: "last",
+      sortingFn: (left, right, columnId) => {
+        const leftValue = left.getValue<number | undefined>(columnId);
+        const rightValue = right.getValue<number | undefined>(columnId);
+        if (leftValue === undefined && rightValue === undefined) return 0;
+        if (leftValue === undefined) return 1;
+        if (rightValue === undefined) return -1;
+        return Math.abs(leftValue) - Math.abs(rightValue);
+      },
       header: () => (
         <span className="period-heading"><strong>{label}</strong><small>{metricAvailablePeriods.has(id) ? metricLabel : "待积累"}</small></span>
       ),
@@ -384,6 +394,36 @@ export function Dashboard({
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)), [etfDisplayMetric, period, terminal.groupPeriods]);
   const totalGroupFlow = groupRows.reduce((sum, item) => sum + item.value, 0);
   const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (metricValueFor(item, period) ?? 0), 0);
+  const reconciliation = useMemo(() => {
+    const instrumentTotal = terminal.instruments.reduce((sum, item) => {
+      const value = metricValueFor(item, period);
+      return typeof value === "number" ? sum + value : sum;
+    }, 0);
+    const groupTotal = terminal.groupPeriods.reduce((sum, item) => {
+      const value = etfDisplayMetric === "cash"
+        ? item.estimatedCashPeriods?.[period]
+        : item.periods[period];
+      return typeof value === "number" ? sum + value : sum;
+    }, 0);
+    const comparable = terminal.instruments.filter((item) => typeof metricValueFor(item, period) === "number");
+    const increased = comparable.filter((item) => (metricValueFor(item, period) ?? 0) > 0).length;
+    const decreased = comparable.filter((item) => (metricValueFor(item, period) ?? 0) < 0).length;
+    const unchanged = comparable.length - increased - decreased;
+    const unclassifiedTotal = terminal.instruments.filter((item) => item.category === "未归类").length;
+    const classifiedTotal = terminal.instruments.length - unclassifiedTotal;
+    return {
+      instrumentTotal,
+      groupTotal,
+      delta: groupTotal - instrumentTotal,
+      comparable: comparable.length,
+      increased,
+      decreased,
+      unchanged,
+      classifiedTotal,
+      unclassifiedTotal,
+      unclassifiedComparable: comparable.filter((item) => item.category === "未归类").length,
+    };
+  }, [etfDisplayMetric, metricValueFor, period, terminal.groupPeriods, terminal.instruments]);
   const positiveGroups = groupRows.filter((item) => item.value > 0);
   const crowding = positiveGroups.length
     ? Math.round((positiveGroups.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / positiveGroups.reduce((sum, item) => sum + item.value, 0)) * 100)
@@ -833,6 +873,20 @@ export function Dashboard({
         </section>
       )}
 
+      {(view === "overview" || view === "rotation" || view === "radar") && (
+        <section className="etf-reconciliation-strip" aria-label="ETF 样本对账">
+          <div className="reconciliation-title"><span className="eyebrow">同口径校验</span><strong>{terminal.scope ?? "SSE+SZSE"} · {currentPeriod}</strong></div>
+          <div className="reconciliation-stats">
+            <span><small>可比样本</small><strong>{reconciliation.comparable}<em>只</em></strong></span>
+            <span><small>增加 / 减少 / 不变</small><strong className="reconciliation-counts"><b className="text-in">{reconciliation.increased}</b><b className="text-out">{reconciliation.decreased}</b><b>{reconciliation.unchanged}</b><em>只</em></strong></span>
+            <span><small>已归类 / 未归类</small><strong>{reconciliation.classifiedTotal}<b className="text-amber"> / {reconciliation.unclassifiedTotal}</b><em>只</em></strong></span>
+            <span><small>ETF 合计</small><strong className={reconciliation.instrumentTotal >= 0 ? "text-in" : "text-out"}>{formatFlow(reconciliation.instrumentTotal, 2)}<em>{metricUnit}</em></strong></span>
+            <span><small>板块合计 · 对账差异</small><strong>{formatFlow(reconciliation.groupTotal, 2)}<b className={Math.abs(reconciliation.delta) < 0.01 ? "text-in" : "text-amber"}> · {formatFlow(reconciliation.delta, 2)}</b><em>{metricUnit}</em></strong></span>
+          </div>
+          <p>板块合计 = ETF 合计 + 对账差异；未归类产品保留在“未归类”桶内，不强行归入行业。{etfDisplayMetric === "cash" ? "金额为逐日份额变化 × 对应交易日官方单位净值估算。" : "当前为官方份额变化，不等同现金净流入。"}</p>
+        </section>
+      )}
+
       {notice && <div className="toast" role="status"><Info size={17} />{notice}</div>}
 
       <div className="desk-content">
@@ -848,7 +902,7 @@ export function Dashboard({
                 <div className="insight-row">
                   <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中{metricLabel}最显著。</p></span>
                   <span><i>02</i><p><strong>集中度 {crowding}%</strong>前三流入方向占可见流入样本。</p></span>
-                  <span><i>03</i><p><strong>口径可审计</strong>官方类型优先，低置信度产品不进入汇总。</p></span>
+                  <span><i>03</i><p><strong>口径可审计</strong>官方类型优先，低置信度产品进入“未归类”并纳入对账。</p></span>
                 </div>
               </article>
 
@@ -899,7 +953,7 @@ export function Dashboard({
         {view === "radar" && (
           <section className="terminal-panel radar-panel">
             <div className="radar-heading">
-              <div><span className="eyebrow">ETF 雷达 · 公式计算</span><h2>横向比较{metricLabel}</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · {etfDisplayMetric === "cash" ? "官方单位净值覆盖不足时保持为空" : "连续官方份额不足时保持为空"}</p></div>
+              <div><span className="eyebrow">ETF 雷达 · 公式计算</span><h2>横向比较{metricLabel}</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 默认按绝对变化排序 · {etfDisplayMetric === "cash" ? "官方单位净值覆盖不足时保持为空" : "连续官方份额不足时保持为空"}</p></div>
               <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>{metricUnit}</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{metricComparableCount}<em>只</em></strong></span></div>
             </div>
             <div className="radar-toolbar">
@@ -908,7 +962,7 @@ export function Dashboard({
                 <div className="market-tabs">{(["all", "SSE", "SZSE"] as MarketFilter[]).map((item) => <button className={marketFilter === item ? "active" : ""} key={item} onClick={() => setMarketFilter(item)} type="button">{item === "all" ? "沪深" : item === "SSE" ? "沪市" : "深市"}</button>)}</div>
                 <label className="category-select"><span>主分类</span><select aria-label="ETF 主分类" onChange={(event) => setCategoryFilter(event.target.value)} value={categoryFilter}><option value="all">全部分类</option>{categories.map((category) => <option key={category} value={category}>{category} ({terminal.universe?.categoryCounts[category] ?? terminal.instruments.filter((item) => item.category === category).length})</option>)}</select></label>
               </div>
-              <span className="sort-status"><ArrowsLeftRight size={16} />当前排序：{periods.find((item) => item.id === (sorting[0]?.id ?? period))?.label ?? currentPeriod} · {sorting[0]?.desc ? "降序" : "升序"}</span>
+              <span className="sort-status"><ArrowsLeftRight size={16} />当前排序：{periods.find((item) => item.id === (sorting[0]?.id ?? period))?.label ?? currentPeriod} · {periods.some((item) => item.id === sorting[0]?.id) ? `绝对变化${sorting[0]?.desc ? "降序" : "升序"}` : sorting[0]?.desc ? "降序" : "升序"}</span>
             </div>
             <div className="table-scroll-hint"><ArrowsLeftRight size={15} />左右滑动查看全部周期</div>
             <div className="radar-table-wrap">
