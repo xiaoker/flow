@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 
 const MAX_BODY_BYTES = 12_000_000;
 const MAX_ARTIFACTS = 16;
+const MAX_EXPECTED_ARTIFACTS = 32;
 const MAX_NORMALIZED_FILES = 2;
 const HISTORY_RETENTION_DAYS = 0;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -55,6 +56,14 @@ type HistoryBundle = {
     asOf: string;
     snapshot: DashboardSnapshot;
     artifacts: HistoryArtifact[];
+    /**
+     * Chunked collection contract.  Each request may carry one artifact, and
+     * the final request sets finalize=true.  The expected ids are persisted in
+     * R2 state so a missing exchange/date cannot be mistaken for a complete
+     * publication.
+     */
+    expectedArtifacts?: string[];
+    finalize?: boolean;
   };
 };
 
@@ -153,6 +162,18 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
 function isHistoryBundle(value: unknown): value is HistoryBundle {
   if (!isRecord(value) || value.version !== 1 || !isRecord(value.history)) return false;
   const history = value.history;
+  const expectedArtifacts = history.expectedArtifacts;
+  const expectedArtifactsValid =
+    expectedArtifacts === undefined ||
+    (Array.isArray(expectedArtifacts) &&
+      expectedArtifacts.length > 0 &&
+      expectedArtifacts.length <= MAX_EXPECTED_ARTIFACTS &&
+      new Set(expectedArtifacts).size === expectedArtifacts.length &&
+      expectedArtifacts.every(
+        (item) =>
+          typeof item === "string" &&
+          /^[A-Za-z0-9+:_.-]{6,180}$/.test(item),
+      ));
   return Boolean(
     typeof history.runId === "string" &&
       /^[A-Za-z0-9+:_-]{6,100}$/.test(history.runId) &&
@@ -167,9 +188,29 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
       history.artifacts.length > 0 &&
       history.artifacts.length <= MAX_ARTIFACTS &&
       history.artifacts.every(isHistoryArtifact) &&
+      expectedArtifactsValid &&
+      (history.finalize === undefined || typeof history.finalize === "boolean") &&
       isDashboardSnapshot(history.snapshot) &&
       history.snapshot.asOf === history.asOf
   );
+}
+
+const D1_BATCH_SIZE = 200;
+
+/** Execute D1 writes in bounded batches, with a small test/compatibility
+ * fallback for local adapters that only implement prepare().run(). */
+async function executeD1Statements(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+): Promise<void> {
+  for (let offset = 0; offset < statements.length; offset += D1_BATCH_SIZE) {
+    const batch = statements.slice(offset, offset + D1_BATCH_SIZE);
+    if (typeof db.batch === "function") {
+      await db.batch(batch);
+      continue;
+    }
+    for (const statement of batch) await statement.run();
+  }
 }
 
 function decodeBase64(value: string): Uint8Array {
@@ -320,35 +361,49 @@ async function persistStandardRows(
       return parsed;
     });
     if (!rows.length) throw new Error("missing_etf_data");
-    await db.prepare("DELETE FROM etf_daily WHERE release_id = ?").bind(artifact.releaseId).run();
-    for (const row of rows) {
+    const values = rows.map((row) => {
       validateStandardRow(artifact, row);
       const code = String(row.instrument_code ?? "").trim().padStart(6, "0");
       if (!/^\d{6}$/.test(code) || !row.instrument_name) throw new Error("invalid_etf_identity");
       const nav = row.nav === undefined || row.nav === "" ? null : Number(row.nav);
       if (nav !== null && !Number.isFinite(nav)) throw new Error("invalid_etf_nav");
-      await db
-        .prepare(
-          `INSERT INTO etf_daily (
-             release_id, trade_date, market, instrument_code, instrument_name,
-             category, shares, nav_micros, date_basis, source_id, observed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          artifact.releaseId,
-          row.trade_date,
-          market,
-          code,
-          row.instrument_name,
-          row.investment_type || row.etf_type || null,
-          requiredInteger(row, "shares"),
-          nav === null ? null : Math.round(nav * 1_000_000),
-          row.date_basis,
-          artifact.sourceId,
-          row.observed_at,
-        )
-        .run();
-    }
+      return {
+        tradeDate: row.trade_date,
+        code,
+        name: row.instrument_name,
+        category: row.investment_type || row.etf_type || null,
+        shares: requiredInteger(row, "shares"),
+        navMicros: nav === null ? null : Math.round(nav * 1_000_000),
+        dateBasis: row.date_basis,
+        observedAt: row.observed_at,
+      };
+    });
+    const statements: D1PreparedStatement[] = [
+      db.prepare("DELETE FROM etf_daily WHERE release_id = ?").bind(artifact.releaseId),
+      ...values.map((value) =>
+        db
+          .prepare(
+            `INSERT INTO etf_daily (
+               release_id, trade_date, market, instrument_code, instrument_name,
+               category, shares, nav_micros, date_basis, source_id, observed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            artifact.releaseId,
+            value.tradeDate,
+            market,
+            value.code,
+            value.name,
+            value.category,
+            value.shares,
+            value.navMicros,
+            value.dateBasis,
+            artifact.sourceId,
+            value.observedAt,
+          ),
+      ),
+    ];
+    await executeD1Statements(db, statements);
     return rows.length;
   }
 
@@ -357,35 +412,51 @@ async function persistStandardRows(
     if (!normalized) throw new Error("missing_connect_summary");
     const rows = parseCsv(normalized.content);
     if (rows.length !== normalized.file.rowCount) throw new Error("connect_row_count_mismatch");
-    await db.prepare("DELETE FROM connect_daily WHERE release_id = ?").bind(artifact.releaseId).run();
-    for (const row of rows) {
+    const values = rows.map((row) => {
       validateStandardRow(artifact, row);
       if (!["SSE", "SZSE"].includes(row.market) || !["northbound", "southbound"].includes(row.direction)) {
         throw new Error("invalid_connect_channel");
       }
-      await db
-        .prepare(
-          `INSERT INTO connect_daily (
-             release_id, trade_date, market, direction, currency, total_turnover,
-             buy_turnover, sell_turnover, net_buy, etf_turnover, source_id, observed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          artifact.releaseId,
-          row.trade_date,
-          row.market,
-          row.direction,
-          row.currency,
-          requiredInteger(row, "total_turnover"),
-          optionalInteger(row, "buy_turnover"),
-          optionalInteger(row, "sell_turnover"),
-          optionalInteger(row, "net_buy"),
-          requiredInteger(row, "etf_turnover"),
-          artifact.sourceId,
-          row.observed_at,
-        )
-        .run();
-    }
+      return {
+        tradeDate: row.trade_date,
+        market: row.market,
+        direction: row.direction,
+        currency: row.currency,
+        totalTurnover: requiredInteger(row, "total_turnover"),
+        buyTurnover: optionalInteger(row, "buy_turnover"),
+        sellTurnover: optionalInteger(row, "sell_turnover"),
+        netBuy: optionalInteger(row, "net_buy"),
+        etfTurnover: requiredInteger(row, "etf_turnover"),
+        observedAt: row.observed_at,
+      };
+    });
+    const statements: D1PreparedStatement[] = [
+      db.prepare("DELETE FROM connect_daily WHERE release_id = ?").bind(artifact.releaseId),
+      ...values.map((value) =>
+        db
+          .prepare(
+            `INSERT INTO connect_daily (
+               release_id, trade_date, market, direction, currency, total_turnover,
+               buy_turnover, sell_turnover, net_buy, etf_turnover, source_id, observed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            artifact.releaseId,
+            value.tradeDate,
+            value.market,
+            value.direction,
+            value.currency,
+            value.totalTurnover,
+            value.buyTurnover,
+            value.sellTurnover,
+            value.netBuy,
+            value.etfTurnover,
+            artifact.sourceId,
+            value.observedAt,
+          ),
+      ),
+    ];
+    await executeD1Statements(db, statements);
     return rows.length;
   }
 
@@ -394,31 +465,44 @@ async function persistStandardRows(
     if (!normalized) throw new Error("missing_margin_data");
     const rows = parseCsv(normalized.content);
     if (rows.length !== normalized.file.rowCount) throw new Error("margin_row_count_mismatch");
-    await db.prepare("DELETE FROM margin_daily WHERE release_id = ?").bind(artifact.releaseId).run();
-    for (const row of rows) {
+    const values = rows.map((row) => {
       validateStandardRow(artifact, row);
       if (!["SSE", "SZSE"].includes(row.market)) throw new Error("invalid_margin_market");
-      await db
-        .prepare(
-          `INSERT INTO margin_daily (
-             release_id, trade_date, market, financing_balance_yuan,
-             financing_buy_yuan, securities_lending_balance_yuan,
-             margin_total_balance_yuan, source_id, observed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          artifact.releaseId,
-          row.trade_date,
-          row.market,
-          requiredInteger(row, "financing_balance_yuan"),
-          requiredInteger(row, "financing_buy_yuan"),
-          requiredInteger(row, "securities_lending_balance_yuan"),
-          requiredInteger(row, "margin_total_balance_yuan"),
-          artifact.sourceId,
-          row.observed_at,
-        )
-        .run();
-    }
+      return {
+        tradeDate: row.trade_date,
+        market: row.market,
+        financingBalance: requiredInteger(row, "financing_balance_yuan"),
+        financingBuy: requiredInteger(row, "financing_buy_yuan"),
+        lendingBalance: requiredInteger(row, "securities_lending_balance_yuan"),
+        totalBalance: requiredInteger(row, "margin_total_balance_yuan"),
+        observedAt: row.observed_at,
+      };
+    });
+    const statements: D1PreparedStatement[] = [
+      db.prepare("DELETE FROM margin_daily WHERE release_id = ?").bind(artifact.releaseId),
+      ...values.map((value) =>
+        db
+          .prepare(
+            `INSERT INTO margin_daily (
+               release_id, trade_date, market, financing_balance_yuan,
+               financing_buy_yuan, securities_lending_balance_yuan,
+               margin_total_balance_yuan, source_id, observed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            artifact.releaseId,
+            value.tradeDate,
+            value.market,
+            value.financingBalance,
+            value.financingBuy,
+            value.lendingBalance,
+            value.totalBalance,
+            artifact.sourceId,
+            value.observedAt,
+          ),
+      ),
+    ];
+    await executeD1Statements(db, statements);
     return rows.length;
   }
 
@@ -457,6 +541,85 @@ async function putImmutableRaw(
   }
 }
 
+function collectionStateKey(runId: string, asOf: string, releaseId: string): string {
+  return `market-data/collection/${runId}/${asOf}/${releaseId}.json`;
+}
+
+async function writeCollectionState(
+  bucket: R2Bucket,
+  input: {
+    runId: string;
+    asOf: string;
+    releaseId: string;
+    sourceId: string;
+    dataset: string;
+    requestedDate: string;
+    status: "PENDING" | "VERIFIED" | "FAILED" | "PUBLISHED";
+    rawKey?: string;
+    normalizedKeys?: string[];
+    rowCount?: number;
+    error?: string;
+  },
+): Promise<string> {
+  const key = collectionStateKey(input.runId, input.asOf, input.releaseId);
+  await bucket.put(
+    key,
+    JSON.stringify({ ...input, updatedAt: new Date().toISOString() }),
+    {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: {
+        runId: input.runId,
+        asOf: input.asOf,
+        releaseId: input.releaseId,
+        status: input.status,
+      },
+    },
+  );
+  return key;
+}
+
+async function checkCollectionComplete(
+  bucket: R2Bucket,
+  runId: string,
+  asOf: string,
+  expectedArtifacts: string[] | undefined,
+): Promise<{ complete: boolean; pending: string[] }> {
+  // Legacy whole-bundle callers do not provide an expected set. Their
+  // validated request is already the atomic unit and remains compatible.
+  if (
+    !expectedArtifacts?.length ||
+    (typeof bucket.head !== "function" && typeof bucket.get !== "function")
+  ) {
+    return { complete: true, pending: [] };
+  }
+  const checks = await Promise.all(
+    expectedArtifacts.map(async (releaseId) => {
+      const key = collectionStateKey(runId, asOf, releaseId);
+      if (typeof bucket.get === "function") {
+        const object = await bucket.get(key);
+        if (!object) return { releaseId, exists: false };
+        try {
+          const state = JSON.parse(await object.text()) as { status?: string };
+          return {
+            releaseId,
+            exists: state.status === "VERIFIED" || state.status === "PUBLISHED",
+          };
+        } catch {
+          return { releaseId, exists: false };
+        }
+      }
+      return {
+        releaseId,
+        exists: Boolean(await bucket.head!(key)),
+      };
+    }),
+  );
+  return {
+    complete: checks.every((item) => item.exists),
+    pending: checks.filter((item) => !item.exists).map((item) => item.releaseId),
+  };
+}
+
 export async function POST(request: Request) {
   const runtime = await runtimeEnv();
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
@@ -487,89 +650,163 @@ export async function POST(request: Request) {
   try {
     const { history } = value;
     const publishHistory = isPublishableSnapshot(history.snapshot);
+    const finalizeRequested = history.finalize !== false;
+    const expectedArtifacts = history.expectedArtifacts;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
+    const collectionStateKeys: string[] = [];
     let standardizedRows = 0;
     for (const artifact of history.artifacts) {
-      const raw = decodeBase64(artifact.rawContentBase64);
-      if ((await sha256Hex(raw)) !== artifact.sha256) {
-        throw new Error(`raw_sha256_mismatch:${artifact.releaseId}`);
-      }
-      const prefix = `market-data/raw/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}`;
-      const rawKey = `${prefix}.${artifact.extension}`;
-      const metadataKey = `${prefix}.metadata.json`;
-      await putImmutableRaw(runtime.RAW_BUCKET, rawKey, raw, artifact.sha256, {
-        httpMetadata: { contentType: artifact.contentType },
-        customMetadata: {
-          sourceId: artifact.sourceId,
-          dataset: artifact.dataset,
-          requestedDate: artifact.requestedDate,
-          sha256: artifact.sha256,
-        },
-      });
-      await putImmutableRaw(
-        runtime.RAW_BUCKET,
-        metadataKey,
-        JSON.stringify({ ...artifact.metadata, release_id: artifact.releaseId, archived_raw_key: rawKey }),
-        artifact.sha256,
-        {
-          httpMetadata: { contentType: "application/json; charset=utf-8" },
-          customMetadata: { sha256: artifact.sha256 },
-        },
-      );
-      const normalizedKeys: string[] = [];
-      const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }> = [];
-      for (const normalized of artifact.normalized) {
-        const content = decodeBase64(normalized.contentBase64);
-        if ((await sha256Hex(content)) !== normalized.sha256) {
-          throw new Error(`normalized_sha256_mismatch:${artifact.releaseId}:${normalized.name}`);
+      try {
+        const raw = decodeBase64(artifact.rawContentBase64);
+        if ((await sha256Hex(raw)) !== artifact.sha256) {
+          throw new Error(`raw_sha256_mismatch:${artifact.releaseId}`);
         }
-        const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}.csv`;
-        await runtime.RAW_BUCKET.put(key, content, {
-          httpMetadata: { contentType: "text/csv; charset=utf-8" },
+        const prefix = `market-data/raw/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}`;
+        const rawKey = `${prefix}.${artifact.extension}`;
+        const metadataKey = `${prefix}.metadata.json`;
+        await putImmutableRaw(runtime.RAW_BUCKET, rawKey, raw, artifact.sha256, {
+          httpMetadata: { contentType: artifact.contentType },
           customMetadata: {
             sourceId: artifact.sourceId,
             dataset: artifact.dataset,
-            rowCount: String(normalized.rowCount),
-            sha256: normalized.sha256,
+            requestedDate: artifact.requestedDate,
+            sha256: artifact.sha256,
           },
         });
-        normalizedKeys.push(key);
-        normalizedFiles.push({ file: normalized, content });
-      }
-      try {
-        standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "unknown_standardization_error";
-        throw new Error(
-          `standardize_failed:${artifact.dataset}:${artifact.sourceId}:${artifact.requestedDate}:${detail}`,
+        await putImmutableRaw(
+          runtime.RAW_BUCKET,
+          metadataKey,
+          JSON.stringify({ ...artifact.metadata, release_id: artifact.releaseId, archived_raw_key: rawKey }),
+          artifact.sha256,
+          {
+            httpMetadata: { contentType: "application/json; charset=utf-8" },
+            customMetadata: { sha256: artifact.sha256 },
+          },
         );
+        const normalizedKeys: string[] = [];
+        const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }> = [];
+        for (const normalized of artifact.normalized) {
+          const content = decodeBase64(normalized.contentBase64);
+          if ((await sha256Hex(content)) !== normalized.sha256) {
+            throw new Error(`normalized_sha256_mismatch:${artifact.releaseId}:${normalized.name}`);
+          }
+          const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}.csv`;
+          await runtime.RAW_BUCKET.put(key, content, {
+            httpMetadata: { contentType: "text/csv; charset=utf-8" },
+            customMetadata: {
+              sourceId: artifact.sourceId,
+              dataset: artifact.dataset,
+              rowCount: String(normalized.rowCount),
+              sha256: normalized.sha256,
+            },
+          });
+          normalizedKeys.push(key);
+          normalizedFiles.push({ file: normalized, content });
+        }
+        const normalizedRowCount = normalizedFiles.reduce(
+          (sum, item) => sum + item.file.rowCount,
+          0,
+        );
+        if (normalizedRowCount === 0) {
+          const stateKey = await writeCollectionState(runtime.RAW_BUCKET, {
+            runId: history.runId,
+            asOf: history.asOf,
+            releaseId: artifact.releaseId,
+            sourceId: artifact.sourceId,
+            dataset: artifact.dataset,
+            requestedDate: artifact.requestedDate,
+            status: "PENDING",
+            rawKey,
+            normalizedKeys,
+            rowCount: 0,
+            error: "source_not_available_yet",
+          });
+          collectionStateKeys.push(stateKey);
+          manifestArtifacts.push({
+            releaseId: artifact.releaseId,
+            sourceId: artifact.sourceId,
+            dataset: artifact.dataset,
+            requestedDate: artifact.requestedDate,
+            tradeDates: artifact.tradeDates,
+            observedAt: artifact.observedAt,
+            rawKey,
+            metadataKey,
+            normalizedKeys,
+            stateKey,
+            status: "PENDING",
+          });
+          continue;
+        }
+        try {
+          standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "unknown_standardization_error";
+          throw new Error(
+            `standardize_failed:${artifact.dataset}:${artifact.sourceId}:${artifact.requestedDate}:${detail}`,
+          );
+        }
+        const stateKey = await writeCollectionState(runtime.RAW_BUCKET, {
+          runId: history.runId,
+          asOf: history.asOf,
+          releaseId: artifact.releaseId,
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          requestedDate: artifact.requestedDate,
+          status: "VERIFIED",
+          rawKey,
+          normalizedKeys,
+          rowCount: normalizedRowCount,
+        });
+        collectionStateKeys.push(stateKey);
+        manifestArtifacts.push({
+          releaseId: artifact.releaseId,
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          requestedDate: artifact.requestedDate,
+          tradeDates: artifact.tradeDates,
+          observedAt: artifact.observedAt,
+          rawKey,
+          metadataKey,
+          normalizedKeys,
+          stateKey,
+        });
+      } catch (error) {
+        await writeCollectionState(runtime.RAW_BUCKET, {
+          runId: history.runId,
+          asOf: history.asOf,
+          releaseId: artifact.releaseId,
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          requestedDate: artifact.requestedDate,
+          status: "FAILED",
+          error: error instanceof Error ? error.message : "unknown_artifact_error",
+        }).catch(() => undefined);
+        throw error;
       }
-      manifestArtifacts.push({
-        releaseId: artifact.releaseId,
-        sourceId: artifact.sourceId,
-        dataset: artifact.dataset,
-        requestedDate: artifact.requestedDate,
-        tradeDates: artifact.tradeDates,
-        observedAt: artifact.observedAt,
-        rawKey,
-        metadataKey,
-        normalizedKeys,
-      });
     }
 
+    const collection = await checkCollectionComplete(
+      runtime.RAW_BUCKET,
+      history.runId,
+      history.asOf,
+      expectedArtifacts,
+    );
+    const shouldPublish = publishHistory && finalizeRequested && collection.complete;
     const snapshotBody = JSON.stringify(history.snapshot);
     const snapshotBytes = new TextEncoder().encode(snapshotBody);
     const snapshotSha256 = await sha256Hex(snapshotBytes);
-    const historyPrefix = publishHistory ? "market-data/history" : "market-data/history-pending";
-    const manifestPrefix = publishHistory
+    const historyPrefix = shouldPublish ? "market-data/history" : "market-data/history-pending";
+    const manifestPrefix = shouldPublish
       ? "market-data/history-manifests"
       : "market-data/history-pending-manifests";
     const snapshotKey = `${historyPrefix}/${history.asOf}/${snapshotSha256}.json`;
     const manifestKey = `${manifestPrefix}/${history.runId}/${history.asOf}.json`;
-    await runtime.RAW_BUCKET.put(snapshotKey, snapshotBytes, {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-      customMetadata: { asOf: history.asOf, sha256: snapshotSha256 },
-    });
+    if (shouldPublish) {
+      await runtime.RAW_BUCKET.put(snapshotKey, snapshotBytes, {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { asOf: history.asOf, sha256: snapshotSha256 },
+      });
+    }
     await runtime.RAW_BUCKET.put(
       manifestKey,
       JSON.stringify({
@@ -579,22 +816,26 @@ export async function POST(request: Request) {
         finishedAt: history.finishedAt,
         retentionDays: history.retentionDays,
         asOf: history.asOf,
-        snapshotKey,
+        snapshotKey: shouldPublish ? snapshotKey : null,
         snapshotSha256,
         artifacts: manifestArtifacts,
+        expectedArtifacts: expectedArtifacts ?? history.artifacts.map((artifact) => artifact.releaseId),
+        collectionStateKeys,
+        pendingArtifacts: collection.pending,
       }),
       { httpMetadata: { contentType: "application/json; charset=utf-8" } },
     );
-    if (!publishHistory) {
+    if (!shouldPublish) {
       return NextResponse.json({
-        status: "archived_pending",
+        status: collection.complete ? "archived_pending" : "waiting_sources",
         asOf: history.asOf,
         artifacts: history.artifacts.length,
         standardizedRows,
         snapshotSha256,
-        snapshotKey,
+        snapshotKey: null,
         manifestKey,
         publication: history.snapshot.publication ?? null,
+        pendingArtifacts: collection.pending,
       });
     }
     const createdAt = new Date().toISOString();

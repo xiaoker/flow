@@ -28,6 +28,8 @@ R2 flow
     ├── normalized/{source}/{dataset}/{requestedDate}/{rawSha}/{part}.csv
     ├── history/{tradeDate}/{snapshotSha}.json
     ├── history-manifests/{runId}/{tradeDate}.json
+    ├── history-pending-manifests/{runId}/{tradeDate}.json
+    ├── collection/{runId}/{asOf}/{releaseId}.json
     └── derived/etf-flow-state/{classificationVersion}/...
 
 D1 flow
@@ -40,6 +42,8 @@ D1 flow
 数十万 ETF 明细不重复塞入 D1。原始文件、规范化 CSV 和页面历史快照放在 R2；D1 只保存按日期定位所需的小索引。`market-data/` 不设置自动过期，其中 `market-data/raw/` 还启用无限期 Bucket Lock，防止官方原件被覆盖或误删。
 
 两融与互通走势图使用 `market_history_daily` 紧凑索引，避免每次打开页面读取数百个 R2 快照。索引值逐日从已通过质量门禁的不可变历史快照提取，可用 `scripts/rebuild_remote_market_history.py --apply` 从 R2 原件重建；日常 09:15 任务在归档当日快照时自动追加。港交所已下架的早期文件保持 `connect_available=0`，不使用相邻日或第三方数据填补。
+
+历史导入按单个原始工件提交：`scripts/publish_history_artifacts.py` 先逐个写入 raw/normalized 对象和 `collection` 状态，最后用 `finalize=true` 请求核对预期工件集合。只有所有状态均为 `VERIFIED`/`PUBLISHED` 且快照质量门禁通过时，才写入 `historical_snapshot`；空响应会标记为 `PENDING`，不会被当作成功数据。重复请求使用相同哈希键，可从任意失败工件继续。
 
 ETF 长周期使用单独的紧凑派生状态：从通过质量门禁且哈希一致的历史快照提取单只 ETF 每日份额变化，保留最近 260 个交易日。1 日、3 日、1 周、2 周、1 月、3 月、6 月和 12 月均为每日变化逐日累计；今年以来为当年每日变化累计。派生状态使用内容哈希路径保存，并由带 SHA-256 的指针定位，加载时再次复验。原始文件始终是事实来源，派生状态可以随时重建。
 

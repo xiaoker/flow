@@ -67,9 +67,12 @@ def collect_phase0(
     data_root: Path,
     report_root: Path,
     workspace_root: Path,
+    collection_window: str = "auto",
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
+    if collection_window not in {"auto", "evening", "morning", "reconcile"}:
+        raise ValueError(f"unsupported collection window: {collection_window}")
     dates = sorted(dates)
     run_id = new_run_id()
     started_at = now_iso()
@@ -218,6 +221,7 @@ def collect_phase0(
     quality["errors"] = errors
     manifest = {
         "run_id": run_id,
+        "collection_window": collection_window,
         "started_at": started_at,
         "finished_at": now_iso(),
         "requested_dates": dates,

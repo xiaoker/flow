@@ -517,6 +517,83 @@ def _latest_complete_snapshot_date(
     return None, target_pending
 
 
+def _pending_snapshot(
+    *,
+    requested_dates: list[str],
+    observed_at: str,
+    quality: dict[str, Any],
+    pending_domains: list[str],
+) -> dict[str, Any]:
+    """Create a valid, explicitly non-publishable envelope for partial runs.
+
+    Acquisition must be able to archive a source response even when another
+    exchange has not released its file yet.  Keeping this envelope shape-valid
+    lets the history importer persist those raw artifacts without ever making
+    a partial dashboard look complete.
+    """
+    target = requested_dates[-1] if requested_dates else ""
+    counts = quality.get("counts") or {}
+    return {
+        "asOf": target,
+        "observedAt": observed_at,
+        "mode": "官方数据快照",
+        "gate": "blocked",
+        "quality": {
+            "pass": int(counts.get("pass", 0)),
+            "warn": int(counts.get("warn", 0)),
+            "fail": max(1, int(counts.get("fail", 0))),
+        },
+        "publication": {
+            "status": "pending",
+            "targetAsOf": target,
+            "pendingDomains": pending_domains,
+            "detail": "已归档已到达的原始数据，等待其余官方来源后统一发布",
+        },
+        "metrics": [
+            {
+                "id": metric_id,
+                "eyebrow": label,
+                "value": "—",
+                "unit": unit,
+                "delta": "等待官方来源",
+                "tone": "neutral",
+                "note": "当前交易日尚未形成完整跨市场快照",
+                "basis": {
+                    "kind": "official",
+                    "label": "等待核验",
+                    "detail": "不使用不完整来源推断资金方向",
+                },
+            }
+            for metric_id, label, unit in (
+                ("etf", "ETF 份额变化", "亿份"),
+                ("southbound", "南向净买入", "亿港元"),
+                ("margin", "沪深融资余额", "万亿元"),
+                ("northbound", "北向成交总额", "亿元"),
+            )
+        ],
+        "etfFlows": {"inflow": [], "outflow": []},
+        "marginSeries": [],
+        "connect": [],
+        "connectSeries": [],
+        "dataStatus": [
+            {
+                "name": domain,
+                "status": "warning",
+                "asOf": target,
+                "detail": "等待官方来源发布或完成校验",
+                "basis": "official",
+            }
+            for domain in pending_domains
+        ],
+        "etfTerminal": {
+            "dailySeries": [],
+            "instruments": [],
+            "groupPeriods": [],
+            "availablePeriods": [],
+        },
+    }
+
+
 def build_dashboard_snapshot(
     *, manifest_path: Path, quality_path: Path, workspace_root: Path
 ) -> dict[str, Any]:
@@ -535,6 +612,21 @@ def build_dashboard_snapshot(
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
+
+    required_frames = {
+        "上交所 ETF": sse_etf,
+        "上交所融资融券": sse_margin,
+        "深交所融资融券": szse_margin,
+        "港交所互联互通": connect,
+    }
+    missing_frames = [name for name, frame in required_frames.items() if frame.empty]
+    if missing_frames:
+        return _pending_snapshot(
+            requested_dates=requested_dates,
+            observed_at=str(manifest.get("finished_at") or ""),
+            quality=quality,
+            pending_domains=missing_frames,
+        )
 
     complete_as_of, target_pending_domains = _latest_complete_snapshot_date(
         requested_dates=requested_dates,
@@ -599,7 +691,11 @@ def build_dashboard_snapshot(
         .to_dict("index")
     )
     latest_margin = float(margin_daily.iloc[-1]["financing_balance_yuan"])
-    previous_margin = float(margin_daily.iloc[-2]["financing_balance_yuan"])
+    previous_margin = (
+        float(margin_daily.iloc[-2]["financing_balance_yuan"])
+        if len(margin_daily) > 1
+        else latest_margin
+    )
     three_day_start = float(margin_daily.iloc[0]["financing_balance_yuan"])
 
     connect_latest = connect[connect["trade_date"].astype(str).eq(as_of)].copy()

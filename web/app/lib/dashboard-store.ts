@@ -81,6 +81,26 @@ export function isDashboardSnapshot(value: unknown): value is DashboardSnapshot 
   );
 }
 
+/**
+ * Published snapshots already contain the ETF periods and daily series built
+ * by the ingestion pipeline.  Re-reading the large R2 state on every page
+ * request is only needed for legacy snapshots that predate that materialized
+ * view.  Keeping this check here makes the read path cheap while retaining a
+ * backwards-compatible fallback for old historical snapshots and fixtures.
+ */
+function needsEtfFlowStateHydration(snapshot: DashboardSnapshot): boolean {
+  const coverage = snapshot.etfTerminal?.historyCoverage;
+  return !(
+    coverage &&
+    typeof coverage.from === "string" &&
+    typeof coverage.to === "string" &&
+    Number.isInteger(coverage.tradingDays) &&
+    coverage.tradingDays > 0 &&
+    Number.isInteger(coverage.stateVersion) &&
+    coverage.stateVersion > 0
+  );
+}
+
 async function loadMarketHistoryRows(
   db: D1Database | undefined,
   asOf: string,
@@ -167,11 +187,13 @@ async function readDashboardSnapshot(
       return dashboardSnapshot;
     }
     const [state, marketHistory] = await Promise.all([
-      loadEtfFlowState(runtime.RAW_BUCKET),
+      needsEtfFlowStateHydration(parsed)
+        ? loadEtfFlowState(runtime.RAW_BUCKET)
+        : Promise.resolve(null),
       loadMarketHistoryRows(db, parsed.asOf),
     ]);
     return enrichSnapshotWithMarketHistory(
-      enrichSnapshotWithEtfFlowState(parsed, state),
+      state ? enrichSnapshotWithEtfFlowState(parsed, state) : parsed,
       marketHistory,
     );
   } catch {
@@ -228,12 +250,14 @@ async function readHistoricalSnapshot(
     const parsed: unknown = JSON.parse(await object.text());
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) return null;
     const [state, marketHistory] = await Promise.all([
-      loadEtfFlowState(runtime.RAW_BUCKET),
+      needsEtfFlowStateHydration(parsed)
+        ? loadEtfFlowState(runtime.RAW_BUCKET)
+        : Promise.resolve(null),
       loadMarketHistoryRows(runtime.DB, parsed.asOf),
     ]);
     return {
       snapshot: enrichSnapshotWithMarketHistory(
-        enrichSnapshotWithEtfFlowState(parsed, state),
+        state ? enrichSnapshotWithEtfFlowState(parsed, state) : parsed,
         marketHistory,
       ),
       exact,

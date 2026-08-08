@@ -81,9 +81,9 @@ test("refreshes the latest dashboard and schedules collection through source rel
   assert.match(source, /window\.setInterval\(refresh, AUTO_REFRESH_MS\)/);
   assert.match(source, /if \(!autoRefresh \|\| requestedDate\) return/);
   assert.deepEqual(config.triggers.crons, [
-    "15 10 * * mon-fri",
-    "15 15 * * mon-fri",
-    "30 1,2 * * mon-fri",
+    "30 10 * * mon-fri",
+    "45 23 * * sun-thu",
+    "10 0 * * mon-fri",
   ]);
 });
 
@@ -354,6 +354,47 @@ test("restores long ETF periods from the hash-verified R2 flow state", async () 
   assert.equal(payload.terminal.historyCoverage.tradingDays, 5);
 });
 
+test("serves materialized ETF periods without re-reading the large R2 state", async () => {
+  const worker = await loadWorker();
+  const fallbackResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const snapshot = await fallbackResponse.json();
+  snapshot.etfTerminal.historyCoverage = {
+    from: "2026-07-01",
+    to: snapshot.asOf,
+    tradingDays: 20,
+    stateVersion: 1,
+  };
+  const db = {
+    prepare() {
+      return {
+        async first() {
+          return { payload_json: JSON.stringify(snapshot) };
+        },
+        async all() {
+          return { results: [] };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get() {
+      throw new Error("materialized snapshot must not hydrate R2 ETF state");
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/etf/flows"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.terminal.historyCoverage.tradingDays, 20);
+});
+
 test("labels margin fields as official balances rather than net capital flow", async () => {
   const worker = await loadWorker();
   const response = await worker.fetch(
@@ -606,6 +647,9 @@ test("archives full-source history with server-side hash verification", async ()
       objects.set(key, value);
       return {};
     },
+    async head(key) {
+      return objects.has(key) ? { customMetadata: {} } : null;
+    },
   };
   const bundle = {
     version: 1,
@@ -678,6 +722,10 @@ test("archives full-source history with server-side hash verification", async ()
       ],
     },
   };
+  bundle.history.expectedArtifacts = bundle.history.artifacts.map(
+    (artifact) => artifact.releaseId,
+  );
+  bundle.history.finalize = true;
   const response = await worker.fetch(
     new Request("http://localhost/api/v1/admin/history-import", {
       method: "POST",

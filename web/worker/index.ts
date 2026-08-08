@@ -30,7 +30,13 @@ interface ScheduledController {
 const DAILY_DATA_DISPATCH_URL =
   "https://api.github.com/repos/xiaoker/flow/actions/workflows/daily-data.yml/dispatches";
 
-async function dispatchDailyCollection(env: Env): Promise<void> {
+function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
+  if (cron.startsWith("45 23")) return "morning";
+  if (cron.startsWith("10 0")) return "reconcile";
+  return "evening";
+}
+
+async function dispatchDailyCollection(env: Env, cron: string): Promise<void> {
   if (!env.GITHUB_ACTIONS_TOKEN) {
     throw new Error("GITHUB_ACTIONS_TOKEN is not configured");
   }
@@ -43,7 +49,10 @@ async function dispatchDailyCollection(env: Env): Promise<void> {
       "User-Agent": "flow-cloudflare-scheduler",
       "X-GitHub-Api-Version": "2026-03-10",
     },
-    body: JSON.stringify({ ref: "main" }),
+    body: JSON.stringify({
+      ref: "main",
+      inputs: { collection_window: collectionWindowForCron(cron) },
+    }),
   });
   if (response.status !== 200 && response.status !== 204) {
     const detail = (await response.text()).slice(0, 500);
@@ -86,7 +95,7 @@ const worker = {
     ctx: ExecutionContext,
   ): Promise<void> {
     ctx.waitUntil(
-      dispatchDailyCollection(env).catch((error: unknown) => {
+      dispatchDailyCollection(env, controller.cron).catch((error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
         console.error("Daily collection dispatch failed", {
           cron: controller.cron,

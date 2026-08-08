@@ -12,17 +12,30 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
 
     assert "schedule:" in workflow
-    assert '- cron: "30 1 * * 1-5"' in workflow
-    assert '- cron: "30 2 * * 1-5"' in workflow
-    assert '- cron: "15 10 * * 1-5"' in workflow
-    assert '- cron: "15 15 * * 1-5"' in workflow
+    assert '- cron: "45 10 * * 1-5"' in workflow
+    assert '- cron: "0 0 * * 1-5"' in workflow
+    assert '- cron: "25 0 * * 1-5"' in workflow
     assert "workflow_dispatch:" in workflow
-    assert '"crons": ["15 10 * * mon-fri", "15 15 * * mon-fri", "30 1,2 * * mon-fri"]' in wrangler
+    assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "10 0 * * mon-fri"]' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
-    assert 'JSON.stringify({ ref: "main" })' in worker
+    assert 'ref: "main"' in worker
+    assert 'inputs: { collection_window: collectionWindowForCron(cron) }' in worker
     assert "response.status !== 200 && response.status !== 204" in worker
     assert 'console.error("Daily collection dispatch failed"' in worker
+
+
+def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
+    workflow_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (REPOSITORY_ROOT / ".github/workflows").glob("*.yml")
+    )
+    assert "actions/checkout@v4" not in workflow_text
+    assert "actions/setup-python@v5" not in workflow_text
+    assert "actions/upload-artifact@v4" not in workflow_text
+    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in workflow_text
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow_text
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow_text
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:

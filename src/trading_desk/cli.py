@@ -15,6 +15,12 @@ def _parser() -> argparse.ArgumentParser:
         "collect-phase0", help="Collect and validate exactly three trading dates"
     )
     collect.add_argument("--dates", nargs=3, required=True, metavar="YYYY-MM-DD")
+    collect.add_argument(
+        "--window",
+        choices=["auto", "evening", "morning", "reconcile"],
+        default="auto",
+        help="Source release window used for audit/reconciliation metadata",
+    )
     collect.add_argument("--data-root", default="data")
     collect.add_argument("--report-root", default="reports/phase0")
     qa = subparsers.add_parser(
@@ -36,10 +42,12 @@ def main() -> None:
             data_root=Path(args.data_root),
             report_root=Path(args.report_root),
             workspace_root=workspace_root,
+            collection_window=args.window,
         )
         summary = {
             "run_id": result["manifest"]["run_id"],
             "requested_dates": result["manifest"]["requested_dates"],
+            "collection_window": result["manifest"].get("collection_window", "auto"),
             "counts": result["quality"]["counts"],
             "phase0_gate_status": result["quality"]["phase0_gate_status"],
             "phase0_gate_passed": result["quality"]["phase0_gate_passed"],

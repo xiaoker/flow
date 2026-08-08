@@ -13,6 +13,7 @@ import requests
 from .adapters import OfficialMarketAdapters
 from .dashboard import build_dashboard_snapshot
 from .history_bundle import build_history_bundle
+from .history_publish import publish_history_bundle
 from .http import build_session
 from .models import FetchArtifact
 from .quality import validate_connect_summary, validate_etf, validate_margin
@@ -86,37 +87,13 @@ def _publish(
     access_client_id: str,
     access_client_secret: str,
 ) -> dict[str, Any]:
-    body = json.dumps(bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {ingest_key}",
-        "CF-Access-Client-Id": access_client_id,
-        "CF-Access-Client-Secret": access_client_secret,
-        "Content-Type": "application/json",
-    }
-    last_error: Exception | None = None
-    # Cloudflare can briefly return 503 while committing a multi-object R2 bundle.
-    # The import is idempotent, so a longer bounded retry window is safer than
-    # aborting a multi-hour backfill on a transient platform response.
-    max_attempts = 8
-    for attempt in range(max_attempts):
-        try:
-            response = requests.post(url, data=body, headers=headers, timeout=(10, 90))
-            if not response.ok:
-                detail = response.text[:500].replace("\n", " ")
-                raise requests.HTTPError(
-                    f"{response.status_code} response from history import: {detail}",
-                    response=response,
-                )
-            result = response.json()
-            if not isinstance(result, dict):
-                raise ValueError("history import did not return a JSON object")
-            return result
-        except Exception as exc:
-            last_error = exc
-            if attempt == max_attempts - 1:
-                break
-            time.sleep(min(30, 2**attempt))
-    raise RuntimeError(f"history import failed after retries: {last_error}")
+    return publish_history_bundle(
+        url=url,
+        bundle=bundle,
+        ingest_key=ingest_key,
+        access_client_id=access_client_id,
+        access_client_secret=access_client_secret,
+    )
 
 
 def _existing_dates(
