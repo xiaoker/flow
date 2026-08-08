@@ -8,7 +8,14 @@ import pytest
 from trading_desk.etf_flow_state import build_etf_flow_state
 
 
-def _snapshot(path: Path, date: str, value: float, *, name: str = "芯片ETF") -> tuple[Path, dict]:
+def _snapshot(
+    path: Path,
+    date: str,
+    value: float,
+    *,
+    name: str = "芯片ETF",
+    cash: float | None = None,
+) -> tuple[Path, dict]:
     payload = {
         "asOf": date,
         "etfTerminal": {
@@ -19,6 +26,7 @@ def _snapshot(path: Path, date: str, value: float, *, name: str = "芯片ETF") -
                     "market": "SSE",
                     "assetClass": "股票",
                     "periods": {"1d": value},
+                    "estimatedCashPeriods": {"1d": cash},
                 }
             ]
         },
@@ -38,10 +46,22 @@ def test_builds_compact_versioned_daily_flow_state(tmp_path: Path) -> None:
     assert state["dates"] == ["2026-07-21", "2026-07-22"]
     assert state["classificationVersion"] == "2026-07-v3"
     assert state["calculationMethod"] == "sum_of_daily_official_share_changes"
+    assert state["cashCalculationMethod"] == "sum_of_daily_share_changes_times_same_day_nav"
     assert state["quality"]["status"] == "pass"
     assert state["instruments"][0]["category"] == "科技"
     assert state["instruments"][0]["values"] == [1.2, -0.4]
     assert len(state["sourceSnapshots"][0]["sha256"]) == 64
+
+
+def test_carries_daily_cash_values_without_revaluing_old_share_changes(tmp_path: Path) -> None:
+    snapshots = [
+        _snapshot(tmp_path / "2026-07-21.json", "2026-07-21", 1.2, cash=2.4),
+        _snapshot(tmp_path / "2026-07-22.json", "2026-07-22", -0.4, cash=-0.8),
+    ]
+
+    state = build_etf_flow_state(snapshots)
+
+    assert state["instruments"][0]["cashValues"] == [2.4, -0.8]
 
 
 def test_rejects_duplicate_snapshot_dates(tmp_path: Path) -> None:

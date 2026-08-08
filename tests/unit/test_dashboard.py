@@ -236,6 +236,39 @@ def test_etf_terminal_calculates_szse_period_changes_from_official_history() -> 
     assert szse_item["estimatedCashPeriods"]["1d"] == 4.0
 
 
+def test_etf_cash_estimate_values_each_daily_delta_with_that_day_nav() -> None:
+    dates = ["2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"]
+    sse = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "instrument_code": "510300",
+                "instrument_name": "沪深300ETF",
+                "shares": shares,
+                "nav": nav,
+                "nav_date": trade_date,
+                "investment_type": "股票基金",
+            }
+            for trade_date, shares, nav in zip(
+                dates,
+                [100_000_000, 110_000_000, 130_000_000, 140_000_000],
+                [1.0, 2.0, 3.0, 4.0],
+            )
+        ]
+    )
+
+    terminal = _build_etf_terminal_data(sse, pd.DataFrame(), dates)
+    item = terminal["instruments"][0]
+
+    # Daily cash: +10m*2/1e8=.20, +20m*3/1e8=.60, +10m*4/1e8=.40.
+    assert item["estimatedCashPeriods"]["1d"] == 0.4
+    assert item["estimatedCashPeriods"]["3d"] == 1.2
+    assert item["cashPeriodCoverage"]["3d"] == 3
+    assert terminal["dailySeries"][-1]["cashValue"] == 0.4
+    assert terminal["dailySeries"][-1]["cashCoverage"] == 1
+    assert terminal["cashFlow"]["method"] == "sum_of_daily_share_changes_times_same_day_nav"
+
+
 def test_etf_classification_blocks_known_cross_category_pollution() -> None:
     cases = {
         "科创债券": "债券",

@@ -45,12 +45,15 @@ type StateInstrument = {
   classificationRule?: string;
   includeInGroup?: boolean;
   values: Array<number | null>;
+  /** Daily cash estimates in CNY 亿元, aligned with `dates`. Optional for v1 legacy state. */
+  cashValues?: Array<number | null>;
 };
 
 export type EtfFlowState = {
   version: 1;
   classificationVersion: string;
   calculationMethod: "sum_of_daily_official_share_changes";
+  cashCalculationMethod?: "sum_of_daily_share_changes_times_same_day_nav";
   generatedAt: string;
   dates: string[];
   instruments: StateInstrument[];
@@ -115,12 +118,18 @@ function isEtfFlowState(
         item.values.length === value.dates.length,
     );
     if (!validShape) return false;
-    return (
-      !deep ||
-      item.values.every(
-        (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
-      )
+    if (!deep) return true;
+    const validValues = item.values.every(
+      (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
     );
+    const validCashValues =
+      item.cashValues === undefined ||
+      (Array.isArray(item.cashValues) &&
+        item.cashValues.length === value.dates.length &&
+        item.cashValues.every(
+          (point) => point === null || (typeof point === "number" && Number.isFinite(point)),
+        ));
+    return validValues && validCashValues;
   });
 }
 
@@ -261,11 +270,15 @@ export function mergeSnapshotIntoEtfFlowState(
 
   for (const item of previous?.instruments ?? []) {
     const values = Array<number | null>(dates.length).fill(null);
+    const cashValues = Array<number | null>(dates.length).fill(null);
     previous?.dates.forEach((date, index) => {
       const nextIndex = dateIndex.get(date);
-      if (nextIndex !== undefined) values[nextIndex] = item.values[index] ?? null;
+      if (nextIndex !== undefined) {
+        values[nextIndex] = item.values[index] ?? null;
+        if (item.cashValues) cashValues[nextIndex] = item.cashValues[index] ?? null;
+      }
     });
-    rows.set(instrumentKey(item), { ...item, values });
+    rows.set(instrumentKey(item), { ...item, values, cashValues });
   }
 
   const currentIndex = dateIndex.get(snapshot.asOf);
@@ -292,8 +305,16 @@ export function mergeSnapshotIntoEtfFlowState(
       classificationRule: item.classificationRule,
       includeInGroup: item.includeInGroup,
       values: existing?.values ?? Array<number | null>(dates.length).fill(null),
+      cashValues: existing?.cashValues ?? Array<number | null>(dates.length).fill(null),
     };
     row.values[currentIndex] = Number(value.toFixed(6));
+    const cashValue = item.estimatedCashPeriods?.["1d"];
+    if (row.cashValues) {
+      row.cashValues[currentIndex] =
+        typeof cashValue === "number" && Number.isFinite(cashValue)
+          ? Number(cashValue.toFixed(2))
+          : null;
+    }
     rows.set(key, row);
   }
 
@@ -315,6 +336,7 @@ export function mergeSnapshotIntoEtfFlowState(
     version: ETF_FLOW_STATE_VERSION,
     classificationVersion: ETF_CLASSIFICATION_VERSION,
     calculationMethod: "sum_of_daily_official_share_changes",
+    cashCalculationMethod: "sum_of_daily_share_changes_times_same_day_nav",
     generatedAt: new Date().toISOString(),
     dates,
     instruments,
@@ -394,15 +416,28 @@ export function enrichSnapshotWithEtfFlowState(
     const estimatedCashPeriods: NonNullable<
       EtfTerminalInstrument["estimatedCashPeriods"]
     > = {};
+    const cashPeriodCoverage: Partial<Record<FlowPeriod, number>> = {};
     const periodCoverage: Partial<Record<FlowPeriod, number>> = {};
     for (const period of availablePeriods) {
       const result = sumValues(stateItem.values, indexes[period] ?? []);
       periods[period] = result.value;
       periodCoverage[period] = result.coverage;
+      const cashResult = stateItem.cashValues
+        ? sumValues(stateItem.cashValues, indexes[period] ?? [])
+        : { value: null, coverage: 0 };
+      const fallbackCash = item.estimatedCashPeriods?.[period];
+      cashPeriodCoverage[period] =
+        cashResult.coverage ||
+        (typeof fallbackCash === "number"
+          ? item.cashPeriodCoverage?.[period] ?? 0
+          : 0);
+      // Never multiply a multi-day share change by the latest NAV.  The
+      // persisted state carries one cash estimate per trading day, already
+      // valued with that day's official NAV.  Legacy snapshots can retain an
+      // already-calculated value as a compatibility fallback, but no new
+      // value is inferred from the current NAV here.
       estimatedCashPeriods[period] =
-        result.value === null || item.nav === null || item.nav === undefined
-          ? null
-          : Number((result.value * item.nav).toFixed(2));
+        cashResult.value ?? fallbackCash ?? null;
     }
     return {
       ...item,
@@ -415,6 +450,7 @@ export function enrichSnapshotWithEtfFlowState(
       includeInGroup: stateItem.includeInGroup,
       periods,
       estimatedCashPeriods,
+      cashPeriodCoverage,
       coverage: Math.max(0, ...Object.values(periodCoverage)),
       periodCoverage,
     };
@@ -428,6 +464,7 @@ export function enrichSnapshotWithEtfFlowState(
       groupType: item.groupType,
       periods: {},
       estimatedCashPeriods: {},
+      estimatedCashCoverage: {},
       componentCount: 0,
       comparableCount: {},
     };
@@ -447,10 +484,20 @@ export function enrichSnapshotWithEtfFlowState(
           ((group.estimatedCashPeriods?.[period] ?? 0) + cash).toFixed(2),
         );
       }
+      group.estimatedCashCoverage![period] =
+        (group.estimatedCashCoverage?.[period] ?? 0) +
+        (item.cashPeriodCoverage?.[period] ?? 0);
     }
     groups.set(item.category, group);
   }
-  const groupPeriods = [...groups.values()].sort(
+  const groupPeriods = [...groups.values()].map((group) => {
+    for (const period of availablePeriods) {
+      if (!(group.estimatedCashCoverage?.[period] ?? 0)) {
+        group.estimatedCashPeriods![period] = null;
+      }
+    }
+    return group;
+  }).sort(
     (left, right) =>
       Math.abs(right.periods["1d"] ?? 0) - Math.abs(left.periods["1d"] ?? 0),
   );
@@ -463,10 +510,17 @@ export function enrichSnapshotWithEtfFlowState(
     const observed = state.instruments
       .map((item) => item.values[index])
       .filter((value): value is number => value !== null && value !== undefined);
+    const observedCash = state.instruments
+      .map((item) => item.cashValues?.[index])
+      .filter((value): value is number => value !== null && value !== undefined);
     return {
       date: date.slice(5),
       value: Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2)),
       coverage: observed.length,
+      cashValue: observedCash.length
+        ? Number(observedCash.reduce((sum, value) => sum + value, 0).toFixed(2))
+        : null,
+      cashCoverage: observedCash.length,
     };
   });
   const categoryCounts: Record<string, number> = {};
@@ -475,6 +529,9 @@ export function enrichSnapshotWithEtfFlowState(
   }
   const periodComparable = instruments.filter(
     (item) => item.periods["1d"] !== null && item.periods["1d"] !== undefined,
+  ).length;
+  const cashFlowEligible = instruments.filter(
+    (item) => item.estimatedCashPeriods?.["1d"] !== null && item.estimatedCashPeriods?.["1d"] !== undefined,
   ).length;
 
   return {
@@ -487,7 +544,16 @@ export function enrichSnapshotWithEtfFlowState(
       availablePeriods,
       classificationVersion: ETF_CLASSIFICATION_VERSION,
       calculation:
-        "各交易日官方份额变化逐日累计；单日变化=当日份额−前一交易日份额",
+        "各交易日官方份额变化逐日累计；金额估算=逐日份额变化×对应交易日官方单位净值后累计（单位：亿元）",
+      cashFlow: {
+        available: cashFlowEligible > 0,
+        unit: "亿元",
+        method: "sum_of_daily_share_changes_times_same_day_nav",
+        eligibleInstruments: cashFlowEligible,
+        totalInstruments: instruments.length,
+        coverageDate: snapshot.asOf,
+        warning: "缺少对应日期官方单位净值的 ETF 不计入金额汇总",
+      },
       historyCoverage: {
         from: state.dates[0],
         to: state.dates.at(-1) ?? snapshot.asOf,
@@ -495,7 +561,7 @@ export function enrichSnapshotWithEtfFlowState(
         stateVersion: state.version,
       },
       universe: terminal.universe
-        ? { ...terminal.universe, categoryCounts, periodComparable }
+        ? { ...terminal.universe, categoryCounts, periodComparable, cashFlowEligible }
         : terminal.universe,
     },
   };

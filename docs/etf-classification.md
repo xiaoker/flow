@@ -79,14 +79,17 @@ group_share_change
 
 ## 估算资金
 
-仅当某只 ETF 同时具有周期份额变化和可用净值时计算：
+仅当某只 ETF 同时具有逐日份额变化和对应交易日官方单位净值时计算：
 
 ```text
+daily_cash_change_100m_yuan
+= daily_share_change_100m × same_day_official_nav_yuan_per_share
+
 estimated_cash_change_100m_yuan
-= share_change_100m × latest_nav_yuan_per_share
+= Σ daily_cash_change_100m_yuan
 ```
 
-这是估算值，不是申赎清算金额。缺少净值时保持 `null`，不得用零填充。当前沪市规模源没有净值字段，深市尚未形成连续份额历史，因此页面仍以“亿份”为主口径。
+这是估算值，不是申赎清算金额。多日窗口逐日估算后再累加，不能用最新净值重估整段份额差。缺少净值时保持 `null`，不得用零值、收盘价或最新净值静默替代；页面同时展示金额覆盖率。
 
 ## 当前限制
 

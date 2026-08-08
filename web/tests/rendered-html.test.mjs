@@ -33,6 +33,7 @@ test("server-renders the trading flow dashboard", async () => {
   assert.match(html, /ETF 雷达/);
   assert.match(html, /南向净买入/);
   assert.match(html, /ETF 份额变化/);
+  assert.match(html, /金额估算（亿元）/);
   assert.match(html, /官方事实/);
   assert.match(html, /公式计算/);
   assert.match(html, /日期核验/);

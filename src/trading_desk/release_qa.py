@@ -175,6 +175,35 @@ def _expected_sse_etf(content: bytes, requested_date: str) -> pd.DataFrame:
     )
 
 
+def _expected_sse_etf_nav(content: bytes, requested_date: str) -> pd.DataFrame:
+    payload = json.loads(content)
+    rows: list[dict[str, Any]] = []
+    for response in payload.get("responses") or []:
+        for row in response.get("result") or []:
+            code = str(row.get("FUNDID2") or "").zfill(6)
+            nav = _number(str(row.get("NAV") or "").replace("￥", "").replace("¥", ""))
+            trading_day = _normalized_date(row.get("TRADING_DAY"), "")
+            if (
+                not re.fullmatch(r"\d{6}", code)
+                or nav is None
+                or not trading_day
+                or trading_day != requested_date
+            ):
+                continue
+            rows.append(
+                {
+                    "trade_date": trading_day,
+                    "market": "SSE",
+                    "instrument_code": code,
+                    "instrument_name": row.get("ETF_FULLNAME"),
+                    "nav": nav,
+                }
+            )
+    return pd.DataFrame(rows).drop_duplicates(
+        ["trade_date", "market", "instrument_code"], keep="last"
+    )
+
+
 def _expected_szse_etf(content: bytes, trade_date: str) -> pd.DataFrame:
     frame = pd.read_excel(io.BytesIO(content), engine="openpyxl", dtype={"基金代码": str})
     return pd.DataFrame(
@@ -317,6 +346,14 @@ def validate_raw_to_normalized_mapping(
                     keys=["trade_date", "market", "instrument_code"],
                     text_columns=["instrument_name"],
                     numeric_columns=["shares"],
+                )
+            elif (source_id, dataset) == ("sse", "etf_nav"):
+                result = _compare_frames(
+                    _expected_sse_etf_nav(content, requested_date),
+                    _read_csv(normalized_paths[0]),
+                    keys=["trade_date", "market", "instrument_code"],
+                    text_columns=["instrument_name"],
+                    numeric_columns=["nav"],
                 )
             elif (source_id, dataset) == ("szse", "etf_scale"):
                 result = _compare_frames(
@@ -939,7 +976,7 @@ def run_release_qa(
             "verdict": "pass" if summary["counts"]["fail"] == 0 else "blocked",
             "known_limitations": [
                 "深交所 ETF 文件按列表页披露日归属到前一已知交易日。",
-                "ETF 页面当前展示份额变化，不等同于精确申赎金额。",
+                "ETF 默认展示份额变化；金额口径仅在对应交易日官方单位净值覆盖时显示，仍是估算值而非精确申赎清算金额。",
                 "北向自披露调整后不提供买入额、卖出额或净流入，页面只展示官方成交总额。",
             ],
         }

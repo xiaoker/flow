@@ -22,6 +22,7 @@ type EtfRow = {
   category: string | null;
   shares: number;
   navMicros: number | null;
+  navDate?: string | null;
   dateBasis: string;
 };
 
@@ -78,6 +79,7 @@ function isEtfRow(value: unknown): value is EtfRow {
       value.shares >= 0 &&
       (value.navMicros === null ||
         (Number.isSafeInteger(value.navMicros) && value.navMicros >= 0)) &&
+      (value.navDate === undefined || value.navDate === null || (typeof value.navDate === "string" && ISO_DATE.test(value.navDate))) &&
       typeof value.dateBasis === "string" &&
       value.dateBasis.length > 0,
   );
@@ -312,8 +314,8 @@ async function archiveEtfData(
               .prepare(
                 `INSERT INTO etf_daily (
                    release_id, trade_date, market, instrument_code, instrument_name,
-                   category, shares, nav_micros, date_basis, source_id, observed_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                   category, shares, nav_micros, nav_date, date_basis, source_id, observed_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               )
               .bind(
                 artifact.releaseId,
@@ -324,6 +326,7 @@ async function archiveEtfData(
                 row.category,
                 row.shares,
                 row.navMicros,
+                row.navDate,
                 row.dateBasis,
                 artifact.sourceId,
                 artifact.observedAt,

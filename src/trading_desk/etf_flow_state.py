@@ -14,6 +14,7 @@ from .etf_classification import CLASSIFICATION_VERSION, classify_etf
 STATE_VERSION = 1
 MAX_TRADING_DAYS = 260
 CALCULATION_METHOD = "sum_of_daily_official_share_changes"
+CASH_CALCULATION_METHOD = "sum_of_daily_share_changes_times_same_day_nav"
 
 
 def _sha256(path: Path) -> str:
@@ -114,6 +115,7 @@ def build_etf_flow_state(
                     "classificationRule": classification.rule_id,
                     "includeInGroup": classification.include_in_group,
                     "values": [None] * len(dates),
+                    "cashValues": [None] * len(dates),
                 },
             )
             row["name"] = str(raw_item.get("name") or row["name"])
@@ -125,6 +127,16 @@ def build_etf_flow_state(
             row["classificationRule"] = classification.rule_id
             row["includeInGroup"] = classification.include_in_group
             row["values"][date_index[trade_date]] = round(daily_value, 6)
+            cash_value = (raw_item.get("estimatedCashPeriods") or {}).get("1d")
+            try:
+                cash_value = float(cash_value) if cash_value is not None else None
+            except (TypeError, ValueError):
+                cash_value = None
+            row["cashValues"][date_index[trade_date]] = (
+                round(cash_value, 2)
+                if cash_value is not None and math.isfinite(cash_value)
+                else None
+            )
 
     ordered = sorted(
         (
@@ -144,6 +156,7 @@ def build_etf_flow_state(
         "version": STATE_VERSION,
         "classificationVersion": CLASSIFICATION_VERSION,
         "calculationMethod": CALCULATION_METHOD,
+        "cashCalculationMethod": CASH_CALCULATION_METHOD,
         "generatedAt": generated_at,
         "dates": dates,
         "instruments": ordered,

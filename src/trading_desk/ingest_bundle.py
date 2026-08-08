@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _etf_artifact(artifact: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+def _etf_artifact(
+    artifact: dict[str, Any],
+    workspace_root: Path,
+    nav_lookup: dict[tuple[str, str, str], tuple[float, str | None]],
+) -> dict[str, Any]:
     source = artifact.get("source") or {}
     source_id = str(source.get("source_id", ""))
     if source_id not in {"sse", "szse"}:
@@ -79,13 +84,22 @@ def _etf_artifact(artifact: dict[str, Any], workspace_root: Path) -> dict[str, A
         category = _clean_text(row.get("investment_type")) or _clean_text(
             row.get("etf_type")
         )
+        code = str(row["instrument_code"]).strip().zfill(6)
+        trade_date = str(row["trade_date"])
+        nav = row.get("nav")
+        nav_date = _clean_text(row.get("nav_date"))
+        if nav is None or pd.isna(nav):
+            nav_value = nav_lookup.get((trade_date, "SSE" if source_id == "sse" else "SZSE", code))
+            if nav_value is not None:
+                nav, nav_date = nav_value
         rows.append(
             {
-                "code": str(row["instrument_code"]).strip().zfill(6),
+                "code": code,
                 "name": str(row["instrument_name"]).strip(),
                 "category": category,
                 "shares": _integer(row["shares"], field="shares"),
-                "navMicros": _nav_micros(row.get("nav")),
+                "navMicros": _nav_micros(nav),
+                "navDate": nav_date,
                 "dateBasis": str(row["date_basis"]),
             }
         )
@@ -113,8 +127,33 @@ def build_ingest_bundle(
 ) -> dict[str, Any]:
     snapshot = _read_json(snapshot_path)
     manifest = _read_json(manifest_path)
+    nav_lookup: dict[tuple[str, str, str], tuple[float, str | None]] = {}
+    for nav_artifact in manifest.get("artifacts") or []:
+        source = nav_artifact.get("source") or {}
+        if source.get("dataset") != "etf_nav":
+            continue
+        normalized_value = str(nav_artifact.get("normalized_path") or "")
+        if not normalized_value:
+            continue
+        nav_path = workspace_root / normalized_value.split(";", 1)[0]
+        if not nav_path.is_file():
+            continue
+        try:
+            nav_frame = pd.read_csv(nav_path, dtype={"instrument_code": "string"})
+        except pd.errors.EmptyDataError:
+            continue
+        for row in nav_frame.to_dict(orient="records"):
+            code = str(row.get("instrument_code") or "").strip().zfill(6)
+            value = row.get("nav")
+            if not re.fullmatch(r"\d{6}", code) or value is None or pd.isna(value):
+                continue
+            nav_lookup[(str(row.get("trade_date")), str(row.get("market")), code)] = (
+                float(value),
+                _clean_text(row.get("nav_date")),
+            )
+
     artifacts = [
-        _etf_artifact(artifact, workspace_root)
+        _etf_artifact(artifact, workspace_root, nav_lookup)
         for artifact in manifest.get("artifacts") or []
         if (artifact.get("source") or {}).get("dataset") == "etf_scale"
     ]

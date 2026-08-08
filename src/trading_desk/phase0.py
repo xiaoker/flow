@@ -16,6 +16,7 @@ from .quality import (
     validate_connect_summary,
     validate_connect_top,
     validate_etf,
+    validate_etf_nav,
     validate_margin,
 )
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
@@ -105,6 +106,22 @@ def collect_phase0(
             frames["sse_etf"].append(frame)
             artifacts.append(artifact)
 
+    # The SSE ETF list publishes the previous trading day's unit NAV.  Keep a
+    # same-window artifact for every ETF snapshot date so the raw lineage is
+    # date-aligned.  The public list may only return the latest publication;
+    # the adapter filters exact dates and leaves older requested dates empty
+    # instead of silently reusing a newer NAV.  NAV is optional enrichment and
+    # must never block the share snapshot from being published.
+    for publication_date in dates:
+        result = run_step(
+            f"sse_etf_nav:{publication_date}",
+            lambda date=publication_date: adapters.fetch_sse_etf_nav(date, dates),
+        )
+        if result:
+            frame, artifact = result
+            frames["sse_etf_nav"].append(frame)
+            artifacts.append(artifact)
+
     result = run_step(
         "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
     )
@@ -163,9 +180,47 @@ def collect_phase0(
         )
         combined_paths[dataset] = _relative(path, workspace_root)
 
+    # Enrich the share frame only after both official feeds have been written.
+    # Historical rows without an exact NAV match remain null.  This preserves
+    # the scale source's raw-to-normalized reconciliation while making the
+    # derived dashboard calculation date-safe.
+    sse_frame = combined.get("sse_etf", pd.DataFrame()).copy()
+    nav_frame = combined.get("sse_etf_nav", pd.DataFrame())
+    if not sse_frame.empty:
+        if "nav" not in sse_frame.columns:
+            sse_frame["nav"] = pd.NA
+        if "nav_date" not in sse_frame.columns:
+            sse_frame["nav_date"] = pd.NA
+        if not nav_frame.empty and {"trade_date", "market", "instrument_code", "nav"}.issubset(nav_frame.columns):
+            lookup = nav_frame.copy()
+            lookup["trade_date"] = lookup["trade_date"].astype(str)
+            lookup["instrument_code"] = lookup["instrument_code"].astype(str).str.zfill(6)
+            lookup = lookup.drop_duplicates(
+                ["trade_date", "market", "instrument_code"], keep="last"
+            )
+            sse_frame["trade_date"] = sse_frame["trade_date"].astype(str)
+            sse_frame["instrument_code"] = sse_frame["instrument_code"].astype(str).str.zfill(6)
+            sse_frame = sse_frame.drop(columns=["nav", "nav_date"], errors="ignore").merge(
+                lookup[
+                    ["trade_date", "market", "instrument_code", "nav", "nav_date"]
+                ],
+                on=["trade_date", "market", "instrument_code"],
+                how="left",
+            )
+        combined["sse_etf"] = sse_frame
+        enriched_path = write_normalized_csv(
+            root=data_root,
+            dataset="phase0_combined_sse_etf_enriched",
+            partition=run_id,
+            run_id=run_id,
+            frame=sse_frame,
+        )
+        combined_paths["sse_etf"] = _relative(enriched_path, workspace_root)
+
     validators: dict[str, Callable[[pd.DataFrame, str], list[QualityFinding]]] = {
         "sse_etf": validate_etf,
         "szse_etf": validate_etf,
+        "sse_etf_nav": validate_etf_nav,
         "sse_margin": validate_margin,
         "szse_margin": validate_margin,
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),
@@ -195,6 +250,15 @@ def collect_phase0(
             dates,
             warn_only=True,
             remediation="深交所只提供当前快照；从正式上线日起每日留存，不宣称可官方回填。",
+        )
+    )
+    findings.append(
+        _coverage_finding(
+            "sse_etf_nav",
+            profiles.get("sse_etf_nav", {}).get("distinct_trade_dates", []),
+            dates,
+            warn_only=True,
+            remediation="上交所单位净值只按公告日精确匹配；缺失时保留份额数据并等待该日官方发布，不把新公告日净值倒灌到历史日。",
         )
     )
 

@@ -158,6 +158,83 @@ def validate_etf(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
     return findings
 
 
+def validate_etf_nav(frame: pd.DataFrame, dataset: str = "sse_etf_nav") -> list[QualityFinding]:
+    """Validate the independent official NAV feed before it is joined to shares."""
+    # NAV is an optional enrichment of the ETF share snapshot.  The SSE public
+    # bulletin endpoint can legitimately have no exact-date row (for example
+    # when a historical day was not captured at publication time).  Keep that
+    # evidence visible, but do not block publication of the underlying shares.
+    findings = [
+        _finding(
+            "completeness.non_empty",
+            dataset,
+            not frame.empty,
+            message="官方 NAV 数据集非空" if not frame.empty else "该日期暂无精确匹配的官方 NAV",
+            evidence={"rows": int(len(frame)), "optional_enrichment": True},
+            severity="high",
+            warn_only=True,
+            remediation="保留空覆盖记录，等待下一次官方公告采集；金额估算在覆盖恢复前保持不可用。",
+        )
+    ]
+    required = ["trade_date", "nav_date", "market", "instrument_code", "nav", "date_basis"]
+    if frame.empty:
+        missing = sorted(set(required) - set(frame.columns))
+        findings.append(
+            _finding(
+                "schema.required_columns",
+                dataset,
+                not missing,
+                message="空 NAV 响应保留标准字段" if not missing else "空 NAV 响应未带标准字段",
+                evidence={"missing": missing, "required": sorted(required), "optional_enrichment": True},
+                severity="high",
+                warn_only=True,
+                remediation="保留空响应的原始证据；有记录时恢复标准化字段校验。",
+            )
+        )
+    else:
+        findings += check_required_columns(frame, dataset, required)
+    findings += check_unique(frame, dataset, ["trade_date", "market", "instrument_code"])
+    findings += check_nonnegative(frame, dataset, ["nav"])
+    if not frame.empty and "market" in frame.columns:
+        invalid_market = int((frame["market"].astype(str) != "SSE").sum())
+        findings.append(
+            _finding(
+                "validity.etf_nav_market",
+                dataset,
+                invalid_market == 0,
+                message="NAV 来源市场为上交所" if invalid_market == 0 else "NAV 来源市场异常",
+                evidence={"invalid_rows": invalid_market},
+                remediation="检查上交所 NAV 分类请求是否混入其他市场。",
+            )
+        )
+    if not frame.empty and {"trade_date", "nav_date"}.issubset(frame.columns):
+        nav_dates = pd.to_datetime(frame["nav_date"], errors="coerce")
+        trade_dates = pd.to_datetime(frame["trade_date"], errors="coerce")
+        invalid_dates = int(nav_dates.isna().sum() + trade_dates.isna().sum())
+        findings.append(
+            _finding(
+                "validity.etf_nav_dates",
+                dataset,
+                invalid_dates == 0,
+                message="NAV 日期可解析" if invalid_dates == 0 else "NAV 日期不可解析",
+                evidence={"invalid_rows": invalid_dates},
+                remediation="保留公告日与净值日，禁止把公告日当作净值日。",
+            )
+        )
+        invalid_order = int((nav_dates.ge(trade_dates)).fillna(False).sum())
+        findings.append(
+            _finding(
+                "consistency.etf_nav_previous_day",
+                dataset,
+                invalid_order == 0,
+                message="单位净值日早于公告交易日" if invalid_order == 0 else "单位净值日不早于公告交易日",
+                evidence={"invalid_rows": invalid_order},
+                remediation="检查公告日与净值日字段映射；不得使用未来或同日净值。",
+            )
+        )
+    return findings
+
+
 def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
     findings = check_empty(frame, dataset)
     required = [
@@ -284,4 +361,3 @@ def summarize_findings(findings: Iterable[QualityFinding]) -> dict[str, Any]:
     rows = [finding.to_dict() for finding in findings]
     counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "warn", "fail")}
     return {"counts": counts, "release_eligible": counts["fail"] == 0, "findings": rows}
-

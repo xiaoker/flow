@@ -19,20 +19,29 @@ export interface EtfTerminalInstrument {
   includeInGroup?: boolean;
   shares: number | null;
   nav?: number | null;
+  navDate?: string | null;
   periods: Partial<Record<FlowPeriod, number | null>>;
   estimatedCashPeriods?: Partial<Record<FlowPeriod, number | null>>;
   coverage: number;
   periodCoverage?: Partial<Record<FlowPeriod, number>>;
+  cashPeriodCoverage?: Partial<Record<FlowPeriod, number>>;
 }
 
 export interface EtfTerminalData {
-  dailySeries: Array<{ date: string; value: number; coverage: number }>;
+  dailySeries: Array<{
+    date: string;
+    value: number;
+    coverage: number;
+    cashValue?: number | null;
+    cashCoverage?: number;
+  }>;
   instruments: EtfTerminalInstrument[];
   groupPeriods: Array<{
     name: string;
     groupType?: string;
     periods: Partial<Record<FlowPeriod, number | null>>;
     estimatedCashPeriods?: Partial<Record<FlowPeriod, number | null>>;
+    estimatedCashCoverage?: Partial<Record<FlowPeriod, number>>;
     componentCount?: number;
     comparableCount?: Partial<Record<FlowPeriod, number>>;
   }>;
@@ -40,6 +49,15 @@ export interface EtfTerminalData {
   classification?: string;
   classificationVersion?: string;
   calculation?: string;
+  cashFlow?: {
+    available: boolean;
+    unit: "亿元" | string;
+    method: string;
+    eligibleInstruments: number;
+    totalInstruments: number;
+    coverageDate?: string;
+    warning?: string;
+  };
   historyCoverage?: {
     from: string;
     to: string;
@@ -53,6 +71,7 @@ export interface EtfTerminalData {
     marketCounts: Record<string, number>;
     categoryCounts: Record<string, number>;
     periodComparable: number;
+    cashFlowEligible?: number;
   };
 }
 

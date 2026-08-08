@@ -27,7 +27,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import ReactECharts from "echarts-for-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardSnapshot,
   EvidenceKind,
@@ -48,6 +48,7 @@ type DeskView = "overview" | "radar" | "national" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
 type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
+type EtfDisplayMetric = "shares" | "cash";
 type EtfDetailHistoryPoint = { date: string; shares: number; delta: number | null };
 type EtfHistoryBasis = "official_daily_change_replay" | "official_daily_share_snapshots";
 
@@ -214,6 +215,7 @@ export function Dashboard({
   const [direction, setDirection] = useState<DirectionFilter>("all");
   const [marketFilter, setMarketFilter] = useState<MarketFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [etfDisplayMetric, setEtfDisplayMetric] = useState<EtfDisplayMetric>("shares");
   const [marginDisplayMetric, setMarginDisplayMetric] = useState<MarginDisplayMetric>("balance");
   const [query, setQuery] = useState("");
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
@@ -228,9 +230,40 @@ export function Dashboard({
   const lastFocusedElement = useRef<HTMLElement | null>(null);
   const terminal = useMemo(() => snapshot.etfTerminal ?? fallbackTerminal(snapshot), [snapshot]);
   const categories = useMemo(() => Array.from(new Set(terminal.instruments.map((item) => item.category))).sort(), [terminal.instruments]);
-  const availablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
+  const shareAvailablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
+  const cashAvailable = Boolean(
+    terminal.cashFlow?.available ??
+      terminal.instruments.some((item) => typeof item.estimatedCashPeriods?.["1d"] === "number"),
+  );
+  const metricLabel = etfDisplayMetric === "cash" ? "金额估算" : "份额变化";
+  const metricUnit = etfDisplayMetric === "cash" ? "亿元" : "亿份";
+  const metricAvailablePeriods = useMemo(() => {
+    if (etfDisplayMetric === "shares") return shareAvailablePeriods;
+    return new Set(
+      periods
+        .map((item) => item.id)
+        .filter((id) => terminal.instruments.some((item) => typeof item.estimatedCashPeriods?.[id] === "number")),
+    );
+  }, [etfDisplayMetric, shareAvailablePeriods, terminal.instruments]);
+  const metricValueFor = useCallback((item: EtfTerminalInstrument, id: FlowPeriod) =>
+    etfDisplayMetric === "cash" ? item.estimatedCashPeriods?.[id] : item.periods[id], [etfDisplayMetric]);
+  const metricCoverageFor = useCallback((item: EtfTerminalInstrument, id: FlowPeriod) =>
+    etfDisplayMetric === "cash"
+      ? item.cashPeriodCoverage?.[id] ?? 0
+      : item.periodCoverage?.[id] ?? item.coverage, [etfDisplayMetric]);
   const selectedCode = selected?.code;
   const selectedMarket = selected?.market ?? "SSE";
+
+  useEffect(() => {
+    if (etfDisplayMetric === "cash" && !cashAvailable) {
+      setEtfDisplayMetric("shares");
+      return;
+    }
+    if (!metricAvailablePeriods.has(period)) {
+      const first = periods.find((item) => metricAvailablePeriods.has(item.id))?.id;
+      if (first) setPeriod(first);
+    }
+  }, [cashAvailable, etfDisplayMetric, metricAvailablePeriods, period]);
 
   useEffect(() => {
     if (!selectedCode) {
@@ -266,23 +299,23 @@ export function Dashboard({
     if (view !== "radar") return [];
     const normalized = query.trim().toLowerCase();
     return terminal.instruments.filter((item) => {
-      const value = item.periods[period];
+      const value = metricValueFor(item, period);
       const matchesDirection = direction === "all" || (direction === "inflow" ? (value ?? 0) > 0 : (value ?? 0) < 0);
       const matchesQuery = !normalized || item.name.toLowerCase().includes(normalized) || item.code.includes(normalized) || item.category.includes(normalized);
       const matchesMarket = marketFilter === "all" || item.market === marketFilter;
       const matchesCategory = categoryFilter === "all" || item.category === categoryFilter;
       return matchesDirection && matchesQuery && matchesMarket && matchesCategory;
     });
-  }, [categoryFilter, direction, marketFilter, period, query, terminal.instruments, view]);
+  }, [categoryFilter, direction, metricValueFor, marketFilter, period, query, terminal.instruments, view]);
 
   const periodMaxima = useMemo(() => {
     const maxima = new Map<FlowPeriod, number>();
     if (view !== "radar") return maxima;
     periods.forEach(({ id }) => {
-      maxima.set(id, Math.max(...terminal.instruments.map((item) => Math.abs(item.periods[id] ?? 0)), 0.01));
+      maxima.set(id, Math.max(...terminal.instruments.map((item) => Math.abs(metricValueFor(item, id) ?? 0)), 0.01));
     });
     return maxima;
-  }, [terminal.instruments, view]);
+  }, [metricValueFor, terminal.instruments, view]);
 
   const columns = useMemo<ColumnDef<EtfTerminalInstrument>[]>(() => [
     {
@@ -306,22 +339,22 @@ export function Dashboard({
     },
     ...periods.map(({ id, label }): ColumnDef<EtfTerminalInstrument> => ({
       id,
-      accessorFn: (row) => row.periods[id] ?? undefined,
+      accessorFn: (row) => metricValueFor(row, id) ?? undefined,
       sortUndefined: "last",
       header: () => (
-        <span className="period-heading"><strong>{label}</strong><small>{availablePeriods.has(id) ? "份额变化" : "待积累"}</small></span>
+        <span className="period-heading"><strong>{label}</strong><small>{metricAvailablePeriods.has(id) ? metricLabel : "待积累"}</small></span>
       ),
       cell: ({ row }) => {
-        const value = row.original.periods[id];
+        const value = metricValueFor(row.original, id);
         return (
           <span className={`heat-cell ${heatClass(value, periodMaxima.get(id) ?? 1)}`}>
             <strong>{formatFlow(value, 2)}</strong>
-            <small>{value === null || value === undefined ? "覆盖不足" : `${row.original.periodCoverage?.[id] ?? row.original.coverage} 日覆盖`}</small>
+            <small>{value === null || value === undefined ? "覆盖不足" : `${metricCoverageFor(row.original, id)} 日覆盖`}</small>
           </span>
         );
       },
     })),
-  ], [availablePeriods, periodMaxima]);
+  ], [metricAvailablePeriods, metricCoverageFor, metricLabel, metricValueFor, periodMaxima]);
 
   // TanStack Table exposes mutable callbacks by design; the table stays local to this component.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -340,13 +373,15 @@ export function Dashboard({
     .map((item) => ({
       name: item.name,
       groupType: item.groupType ?? "other",
-      value: item.periods[period] ?? 0,
+      value: (etfDisplayMetric === "cash" ? item.estimatedCashPeriods?.[period] : item.periods[period]) ?? 0,
       componentCount: item.componentCount ?? 0,
-      comparableCount: item.comparableCount?.[period] ?? 0,
+      comparableCount: etfDisplayMetric === "cash"
+        ? item.estimatedCashCoverage?.[period] ?? 0
+        : item.comparableCount?.[period] ?? 0,
     }))
-    .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)), [period, terminal.groupPeriods]);
+    .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)), [etfDisplayMetric, period, terminal.groupPeriods]);
   const totalGroupFlow = groupRows.reduce((sum, item) => sum + item.value, 0);
-  const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (item.periods[period] ?? 0), 0);
+  const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (metricValueFor(item, period) ?? 0), 0);
   const positiveGroups = groupRows.filter((item) => item.value > 0);
   const crowding = positiveGroups.length
     ? Math.round((positiveGroups.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / positiveGroups.reduce((sum, item) => sum + item.value, 0)) * 100)
@@ -355,7 +390,7 @@ export function Dashboard({
   const rotationOption = useMemo(() => ({
     animationDuration: 450,
     grid: { left: 112, right: 92, top: 18, bottom: 28 },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 }, formatter: (items: Array<{ dataIndex: number; name: string; value: number }>) => { const row = groupRows[items[0]?.dataIndex]; return `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} 亿份<br/>${groupTypeLabels[row?.groupType] ?? row?.groupType} · ${row?.comparableCount ?? 0} 只可比`; } },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 }, formatter: (items: Array<{ dataIndex: number; name: string; value: number }>) => { const row = groupRows[items[0]?.dataIndex]; const coverageLabel = etfDisplayMetric === "cash" ? "日净值覆盖" : "只可比"; return `${items[0]?.name}<br/>${formatFlow(items[0]?.value)} ${metricUnit}<br/>${groupTypeLabels[row?.groupType] ?? row?.groupType} · ${row?.comparableCount ?? 0} ${coverageLabel}`; } },
     xAxis: { type: "value", axisLine: { lineStyle: { color: "#394759" } }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
     yAxis: { type: "category", data: groupRows.map((item) => item.name), axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: "#dce4ee", fontSize: 14, fontWeight: 600 } },
     series: [{
@@ -364,7 +399,7 @@ export function Dashboard({
       barMaxWidth: 18,
       label: { show: true, position: "right", color: "#bec8d5", fontFamily: "monospace", fontSize: 13, formatter: ({ value }: { value: number }) => formatFlow(value, 1) },
     }],
-  }), [groupRows]);
+  }), [etfDisplayMetric, groupRows, metricUnit]);
 
   const trendOption = useMemo(() => ({
     animationDuration: 450,
@@ -372,8 +407,11 @@ export function Dashboard({
     tooltip: { trigger: "axis", backgroundColor: "#111923", borderColor: "#334155", textStyle: { color: "#e7edf5", fontSize: 14 } },
     xAxis: { type: "category", data: terminal.dailySeries.map((item) => item.date), axisLine: { lineStyle: { color: "#394759" } }, axisTick: { show: false }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
     yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
-    series: [{ type: "bar", barMaxWidth: 22, data: terminal.dailySeries.map((item) => ({ value: item.value, itemStyle: { color: item.value >= 0 ? "#e36464" : "#55b887", borderRadius: item.value >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } })) }],
-  }), [terminal.dailySeries]);
+    series: [{ type: "bar", barMaxWidth: 22, data: terminal.dailySeries.map((item) => {
+      const value = etfDisplayMetric === "cash" ? item.cashValue ?? null : item.value;
+      return { value, itemStyle: { color: value === null ? "#526176" : value >= 0 ? "#e36464" : "#55b887", borderRadius: value !== null && value >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4] } };
+    }) }],
+  }), [etfDisplayMetric, terminal.dailySeries]);
 
   const connectSeries = useMemo(() => snapshot.connectSeries ?? [], [snapshot.connectSeries]);
   const connectChannels = useMemo(() => ({
@@ -538,12 +576,16 @@ export function Dashboard({
     ];
   }, [selected, selectedHistory]);
   const selectedPeriodRows = useMemo(() => periods.map((item) => {
+    if (etfDisplayMetric === "cash") {
+      const rawCash = selected?.estimatedCashPeriods?.[item.id] ?? null;
+      return { ...item, value: typeof rawCash === "number" ? Number(rawCash.toFixed(2)) : null };
+    }
     const lookback = shareHistoryLookbacks[item.id];
     const rawValue = selectedHistory.length > (lookback ?? Number.MAX_SAFE_INTEGER) && lookback
       ? selectedHistory.at(-1)!.shares - selectedHistory.at(-(lookback + 1))!.shares
       : selected?.periods[item.id] ?? null;
     return { ...item, value: typeof rawValue === "number" ? Number(rawValue.toFixed(2)) : null };
-  }), [selected, selectedHistory]);
+  }), [etfDisplayMetric, selected, selectedHistory]);
   const selectedActiveValue = selectedPeriodRows.find((item) => item.id === period)?.value ?? null;
   const selectedAvailablePeriods = selectedPeriodRows.filter((item) => typeof item.value === "number");
   const selectedPendingPeriods = selectedPeriodRows.filter((item) => item.value === null);
@@ -590,6 +632,28 @@ export function Dashboard({
   const northboundMetric = metricValue(snapshot, "northbound");
   const evidenceFor = (id: string, basis?: { kind: EvidenceKind; label: string; detail: string }) => basis ?? defaultMetricBasis[id];
   const currentPeriod = periods.find((item) => item.id === period)?.label ?? "最近1日";
+  const latestShareValue = terminal.dailySeries.at(-1)?.value ?? Number(latestMetric?.value?.replaceAll(",", "") ?? "NaN");
+  const latestCashValues = terminal.instruments
+    .map((item) => item.estimatedCashPeriods?.["1d"])
+    .filter((value): value is number => typeof value === "number");
+  const latestCashValue = terminal.dailySeries.at(-1)?.cashValue ?? (
+    latestCashValues.length
+      ? latestCashValues.reduce((sum, value) => sum + value, 0)
+      : null
+  );
+  const latestCashCoverage = terminal.dailySeries.at(-1)?.cashCoverage ?? latestCashValues.length;
+  const latestDisplayValue = etfDisplayMetric === "cash"
+    ? latestCashValue
+    : Number.isFinite(latestShareValue) ? latestShareValue : null;
+  const latestDisplayText = formatFlow(latestDisplayValue);
+  const latestDisplayDirection = latestDisplayValue === null
+    ? "覆盖不足"
+    : latestDisplayValue >= 0
+      ? `${metricLabel}增加`
+      : `${metricLabel}减少`;
+  const metricComparableCount = terminal.instruments.filter(
+    (item) => typeof metricValueFor(item, period) === "number",
+  ).length;
   const currentViewTitle: Record<DeskView, string> = {
     overview: "市场数据全景",
     radar: "ETF 份额雷达",
@@ -641,7 +705,7 @@ export function Dashboard({
   }, [autoRefresh, requestedDate]);
 
   const choosePeriod = (next: FlowPeriod) => {
-    if (!availablePeriods.has(next)) {
+    if (!metricAvailablePeriods.has(next)) {
       setNotice(`${periods.find((item) => item.id === next)?.label}尚未达到所需的官方交易日覆盖`);
       window.setTimeout(() => setNotice(""), 2400);
       return;
@@ -748,11 +812,14 @@ export function Dashboard({
 
       {(view === "overview" || view === "radar" || view === "national") && (
         <section className="period-strip" aria-label="ETF 观察口径">
-          <div className="metric-switch" aria-label="指标口径"><button className="active" type="button">份额（亿份）</button><button disabled title="等待 ETF 净值字段" type="button">金额估算</button></div>
+          {view !== "national" && <div className="metric-switch" aria-label="指标口径">
+            <button className={etfDisplayMetric === "shares" ? "active" : ""} onClick={() => setEtfDisplayMetric("shares")} type="button">份额（亿份）</button>
+            <button className={etfDisplayMetric === "cash" ? "active" : ""} disabled={!cashAvailable} onClick={() => setEtfDisplayMetric("cash")} title={cashAvailable ? "逐日份额变化 × 对应交易日官方单位净值，单位亿元" : terminal.cashFlow?.warning ?? "等待官方单位净值覆盖"} type="button">金额估算（亿元）</button>
+          </div>}
           <div className="period-tabs" aria-label="观察周期">
-            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${availablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
+            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${metricAvailablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
           </div>
-          <div className="coverage-chip"><Database size={16} /><span>{availablePeriods.size} 个可用周期</span><strong>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
+          <div className="coverage-chip"><Database size={16} /><span>{metricAvailablePeriods.size} 个可用周期</span><strong>{etfDisplayMetric === "cash" ? `${terminal.cashFlow?.eligibleInstruments ?? 0} 只净值可比` : `${terminal.universe?.total ?? terminal.instruments.length} 只 ETF`} · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
         </section>
       )}
 
@@ -764,12 +831,12 @@ export function Dashboard({
             <section className="overview-grid">
               <article className="terminal-panel rotation-panel">
                 <div className="panel-heading">
-                  <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>板块份额变化</h2><p>{terminal.classificationVersion ?? "未标版本"} · {terminal.calculation ?? `当前展示 ${currentPeriod} 官方份额差`}</p></div>
-                  <div className="panel-kpis"><span><small>样本净变化</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
+                  <div><span className="eyebrow">ETF 版本化主分类 · 公式计算</span><h2>{`板块${metricLabel}`}</h2><p>{terminal.classificationVersion ?? "未标版本"} · {etfDisplayMetric === "cash" ? "逐日份额变化按对应交易日官方单位净值折算后累计" : terminal.calculation ?? `当前展示 ${currentPeriod} 官方份额差`}</p></div>
+                  <div className="panel-kpis"><span><small>样本净变化（{metricUnit}）</small><strong className={totalGroupFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalGroupFlow, 1)}</strong></span><span><small>拥挤度</small><strong className="text-amber">{crowding}%</strong></span></div>
                 </div>
                 <ReactECharts className="rotation-chart" option={rotationOption} notMerge lazyUpdate />
                 <div className="insight-row">
-                  <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中份额变化最显著。</p></span>
+                  <span><i>01</i><p><strong>{groupRows[0]?.name ?? "—"}居首</strong>可见样本中{metricLabel}最显著。</p></span>
                   <span><i>02</i><p><strong>集中度 {crowding}%</strong>前三流入方向占可见流入样本。</p></span>
                   <span><i>03</i><p><strong>口径可审计</strong>官方类型优先，低置信度产品不进入汇总。</p></span>
                 </div>
@@ -777,14 +844,14 @@ export function Dashboard({
 
               <article className="terminal-panel trend-panel">
                 <div className="panel-heading">
-                  <div><span className="eyebrow">全市场 ETF</span><h2>净份额变化走势</h2><p>相邻官方交易日份额差；正值为增加</p></div>
+                  <div><span className="eyebrow">全市场 ETF</span><h2>净{metricLabel}走势</h2><p>{etfDisplayMetric === "cash" ? "逐日份额变化 × 对应交易日官方单位净值；缺失净值不计入" : "相邻官方交易日份额差；正值为增加"}</p></div>
                   <button className="link-button" onClick={() => setView("radar")} type="button">打开雷达<CaretRight size={15} /></button>
                 </div>
                 {terminal.dailySeries.length ? <ReactECharts className="trend-chart" option={trendOption} notMerge lazyUpdate /> : <div className="empty-chart"><Database size={30} /><strong>等待第二个交易日快照</strong><span>有连续数据后自动生成走势</span></div>}
                 <div className="trend-summary">
-                  <span><small>当日</small><strong className="text-in">{latestMetric?.value}</strong></span>
-                  <span><small>覆盖</small><strong>{terminal.dailySeries.at(-1)?.coverage ?? 0}<em>只</em></strong></span>
-                  <span><small>当前方向</small><strong className="text-cyan">{Number(latestMetric?.value.replaceAll(",", "")) >= 0 ? "份额增加" : "份额减少"}</strong></span>
+                  <span><small>当日</small><strong className={latestDisplayValue === null ? "" : latestDisplayValue >= 0 ? "text-in" : "text-out"}>{latestDisplayText}<em>{metricUnit}</em></strong></span>
+                  <span><small>覆盖</small><strong>{(etfDisplayMetric === "cash" ? latestCashCoverage : terminal.dailySeries.at(-1)?.coverage) ?? 0}<em>{etfDisplayMetric === "cash" ? "只净值" : "只"}</em></strong></span>
+                  <span><small>当前方向</small><strong className="text-cyan">{latestDisplayDirection}</strong></span>
                 </div>
               </article>
             </section>
@@ -807,12 +874,12 @@ export function Dashboard({
         {view === "radar" && (
           <section className="terminal-panel radar-panel">
             <div className="radar-heading">
-              <div><span className="eyebrow">ETF 份额雷达 · 公式计算</span><h2>横向比较份额变化</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · 连续官方份额不足时保持为空</p></div>
-              <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>亿份</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{terminal.universe?.periodComparable ?? terminal.instruments.length}<em>只</em></strong></span></div>
+              <div><span className="eyebrow">ETF 雷达 · 公式计算</span><h2>横向比较{metricLabel}</h2><p>{terminal.universe?.total ?? terminal.instruments.length} 只 ETF · 红色增加，绿色减少 · {etfDisplayMetric === "cash" ? "官方单位净值覆盖不足时保持为空" : "连续官方份额不足时保持为空"}</p></div>
+              <div className="radar-stats"><span><small>当前筛选净变化</small><strong className={filteredTotalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(filteredTotalFlow, 1)}<em>{metricUnit}</em></strong></span><span><small>可比样本</small><strong className="text-cyan">{metricComparableCount}<em>只</em></strong></span></div>
             </div>
             <div className="radar-toolbar">
               <div className="radar-filters">
-                <div className="direction-tabs">{(["all", "inflow", "outflow"] as DirectionFilter[]).map((item) => <button className={direction === item ? "active" : ""} key={item} onClick={() => setDirection(item)} type="button">{item === "all" ? "全部" : item === "inflow" ? "份额增加" : "份额减少"}</button>)}</div>
+                <div className="direction-tabs">{(["all", "inflow", "outflow"] as DirectionFilter[]).map((item) => <button className={direction === item ? "active" : ""} key={item} onClick={() => setDirection(item)} type="button">{item === "all" ? "全部" : item === "inflow" ? `${metricLabel}增加` : `${metricLabel}减少`}</button>)}</div>
                 <div className="market-tabs">{(["all", "SSE", "SZSE"] as MarketFilter[]).map((item) => <button className={marketFilter === item ? "active" : ""} key={item} onClick={() => setMarketFilter(item)} type="button">{item === "all" ? "沪深" : item === "SSE" ? "沪市" : "深市"}</button>)}</div>
                 <label className="category-select"><span>主分类</span><select aria-label="ETF 主分类" onChange={(event) => setCategoryFilter(event.target.value)} value={categoryFilter}><option value="all">全部分类</option>{categories.map((category) => <option key={category} value={category}>{category} ({terminal.universe?.categoryCounts[category] ?? terminal.instruments.filter((item) => item.category === category).length})</option>)}</select></label>
               </div>
@@ -876,13 +943,13 @@ export function Dashboard({
         )}
       </div>
 
-      <footer className="terminal-footer"><span><i className="status-light" />{snapshot.publication?.status === "confirmed" ? "完整交易日已确认" : snapshot.gate === "conditional_pass" ? "条件通过" : snapshot.gate} · 观测于 {snapshot.observedAt}</span><span>份额变化不等同资金金额 · 仅供数据观察，不构成投资建议</span><a href="/api/v1/data-status">机器可读状态</a></footer>
+      <footer className="terminal-footer"><span><i className="status-light" />{snapshot.publication?.status === "confirmed" ? "完整交易日已确认" : snapshot.gate === "conditional_pass" ? "条件通过" : snapshot.gate} · 观测于 {snapshot.observedAt}</span><span>{etfDisplayMetric === "cash" ? "金额为逐日官方份额变化 × 对应交易日官方单位净值的估算，不等同真实申赎现金" : "份额变化不等同资金金额"} · 仅供数据观察，不构成投资建议</span><a href="/api/v1/data-status">机器可读状态</a></footer>
 
       {selected && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
           <aside aria-label={`${selected.name}详情`} aria-modal="true" className="detail-drawer" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="drawer-header"><div><span className="eyebrow">ETF 详情</span><h2>{selected.name}</h2><p>{selected.code} · {selected.market === "SZSE" ? "深交所" : "上交所"} · {selected.category} · {groupTypeLabels[selected.groupType ?? "other"] ?? selected.groupType} · {selected.assetClass ?? "未分类"}</p></div><button aria-label="关闭详情" className="icon-button" onClick={() => setSelected(null)} ref={closeButtonRef} type="button"><X size={19} /></button></div>
-            <div className="drawer-hero"><span>{currentPeriod}份额变化 · 官方份额差</span><strong className={(selectedActiveValue ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(selectedActiveValue)}<em>亿份</em></strong><small>{selectedHistory.length >= 2 ? `基于 ${selectedHistory.length} 个原始官方份额日点` : `覆盖 ${selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值`} · 不等同现金净流入</small></div>
+            <div className="drawer-hero"><span>{currentPeriod}{metricLabel} · {etfDisplayMetric === "cash" ? "对应交易日官方单位净值估算" : "官方份额差"}</span><strong className={(selectedActiveValue ?? 0) >= 0 ? "text-in" : "text-out"}>{formatFlow(selectedActiveValue)}<em>{metricUnit}</em></strong><small>{etfDisplayMetric === "cash" ? `${selected.cashPeriodCoverage?.[period] ?? 0} 个官方单位净值覆盖 · 不等同真实申赎现金` : selectedHistory.length >= 2 ? `基于 ${selectedHistory.length} 个原始官方份额日点` : `覆盖 ${selected.periodCoverage?.[period] ?? selected.coverage} 个官方交易日变化值 · 不等同现金净流入`}</small></div>
             <div className="drawer-proof-grid" aria-label="ETF 数据凭据"><div><span>展示快照日</span><strong>{snapshot.asOf}</strong><small>当前归档日</small></div><div><span>原始来源</span><strong>{selected.market === "SZSE" ? "深交所" : "上交所"}</strong><small>ETF 规模文件</small></div><div><span>当前总份额</span><strong>{typeof selected.shares === "number" ? selected.shares.toFixed(2) : "待快照"}</strong><small>亿份</small></div></div>
             <div className="drawer-share-chart">
               <div><strong>官方份额走势</strong><span>{selectedHistoryLoading ? "正在读取官方历史…" : selectedHistory.length >= 2 ? `${selectedHistoryBasis === "official_daily_change_replay" ? "官方变化回溯" : "原始日点"} · ${selectedHistory[0].date} 至 ${selectedHistory.at(-1)?.date}` : "复算锚点 · 等待原始日点"}</span></div>
@@ -893,9 +960,9 @@ export function Dashboard({
               )}
               <p>{selectedHistory.length >= 2 ? (selectedHistoryBasis === "official_daily_change_replay" ? "折线由官方逐日份额变化回溯到当前总份额；下方周期值不是现金净流入。" : "折线为交易所归档的官方总份额日点；下方周期值为当前份额减去对应历史日点，不是现金净流入。") : "在原始日点接口可用前，历史节点由当前官方总份额减去周期份额变化复算；复算锚点，不是原始逐日快照，也不是现金净流入。"}</p>
             </div>
-            <div className="drawer-periods">{selectedAvailablePeriods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(item.value ?? 0) > 0 ? "text-in" : (item.value ?? 0) < 0 ? "text-out" : ""}>{formatFlow(item.value)}</strong><small>亿份</small></div>)}</div>
+            <div className="drawer-periods">{selectedAvailablePeriods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(item.value ?? 0) > 0 ? "text-in" : (item.value ?? 0) < 0 ? "text-out" : ""}>{formatFlow(item.value)}</strong><small>{metricUnit}</small></div>)}</div>
             {selectedPendingPeriods.length ? <details className="drawer-periods-more"><summary>历史周期积累中 · {selectedPendingPeriods.length} 项</summary><div className="drawer-pending-periods">{selectedPendingPeriods.map((item) => <span key={item.id}>{item.label}<small>待积累</small></span>)}</div></details> : null}
-            <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。估算资金仅在净值与区间份额同时完整时提供。</p></div>
+            <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。{etfDisplayMetric === "cash" ? "金额估算按每日官方份额变化乘对应交易日官方单位净值后累加；缺少净值的日期不补造。" : "当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。"}</p></div>
           </aside>
         </div>
       )}

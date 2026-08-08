@@ -32,7 +32,7 @@ type NormalizedFile = {
 type HistoryArtifact = {
   releaseId: string;
   sourceId: "sse" | "szse" | "hkex";
-  dataset: "etf_scale" | "margin_market_daily" | "stock_connect_daily";
+  dataset: "etf_scale" | "etf_nav" | "margin_market_daily" | "stock_connect_daily";
   requestedDate: string;
   tradeDates: string[];
   observedAt: string;
@@ -121,12 +121,14 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
   if (
     (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "hkex") ||
     (dataset !== "etf_scale" &&
+      dataset !== "etf_nav" &&
       dataset !== "margin_market_daily" &&
       dataset !== "stock_connect_daily")
   ) return false;
   const expectedPair =
     (dataset === "stock_connect_daily" && sourceId === "hkex") ||
     (dataset === "etf_scale" && (sourceId === "sse" || sourceId === "szse")) ||
+    (dataset === "etf_nav" && sourceId === "sse") ||
     (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse"));
   if (!expectedPair) return false;
   return Boolean(
@@ -352,6 +354,27 @@ async function persistStandardRows(
   artifact: HistoryArtifact,
   normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }>,
 ): Promise<number> {
+  if (artifact.dataset === "etf_nav") {
+    const rows = normalizedFiles.flatMap(({ file, content }) => {
+      const parsed = parseCsv(content);
+      if (parsed.length !== file.rowCount) throw new Error("etf_nav_row_count_mismatch");
+      return parsed;
+    });
+    for (const row of rows) {
+      validateStandardRow(artifact, row);
+      const code = String(row.instrument_code ?? "").trim().padStart(6, "0");
+      const nav = Number(row.nav);
+      if (!/^\d{6}$/.test(code) || !row.instrument_name || !Number.isFinite(nav) || nav < 0) {
+        throw new Error("invalid_etf_nav_row");
+      }
+      if (!ISO_DATE.test(row.nav_date ?? "")) throw new Error("invalid_etf_nav_date");
+    }
+    // NAV is a source-enrichment feed.  It is archived in R2 and joined to
+    // etf_daily during the collector bundle build; it does not create a
+    // second D1 release or overwrite the shares source.
+    return rows.length;
+  }
+
   if (artifact.dataset === "etf_scale") {
     const market = artifact.sourceId === "sse" ? "SSE" : artifact.sourceId === "szse" ? "SZSE" : null;
     if (!market) throw new Error("invalid_etf_market_source");
@@ -367,6 +390,8 @@ async function persistStandardRows(
       if (!/^\d{6}$/.test(code) || !row.instrument_name) throw new Error("invalid_etf_identity");
       const nav = row.nav === undefined || row.nav === "" ? null : Number(row.nav);
       if (nav !== null && !Number.isFinite(nav)) throw new Error("invalid_etf_nav");
+      const navDate = row.nav_date === undefined || row.nav_date === "" ? null : row.nav_date;
+      if (navDate !== null && !ISO_DATE.test(navDate)) throw new Error("invalid_etf_nav_date");
       return {
         tradeDate: row.trade_date,
         code,
@@ -374,6 +399,7 @@ async function persistStandardRows(
         category: row.investment_type || row.etf_type || null,
         shares: requiredInteger(row, "shares"),
         navMicros: nav === null ? null : Math.round(nav * 1_000_000),
+        navDate,
         dateBasis: row.date_basis,
         observedAt: row.observed_at,
       };
@@ -385,8 +411,8 @@ async function persistStandardRows(
           .prepare(
             `INSERT INTO etf_daily (
                release_id, trade_date, market, instrument_code, instrument_name,
-               category, shares, nav_micros, date_basis, source_id, observed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               category, shares, nav_micros, nav_date, date_basis, source_id, observed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             artifact.releaseId,
@@ -397,6 +423,7 @@ async function persistStandardRows(
             value.category,
             value.shares,
             value.navMicros,
+            value.navDate,
             value.dateBasis,
             artifact.sourceId,
             value.observedAt,
@@ -707,7 +734,11 @@ export async function POST(request: Request) {
           (sum, item) => sum + item.file.rowCount,
           0,
         );
-        if (normalizedRowCount === 0) {
+        // NAV is an optional enrichment feed.  An exchange may return an
+        // empty exact-date list because its public page only retains the
+        // latest bulletin; archive that evidence as VERIFIED so an empty NAV
+        // feed cannot block the complete ETF share publication.
+        if (normalizedRowCount === 0 && artifact.dataset !== "etf_nav") {
           const stateKey = await writeCollectionState(runtime.RAW_BUCKET, {
             runId: history.runId,
             asOf: history.asOf,

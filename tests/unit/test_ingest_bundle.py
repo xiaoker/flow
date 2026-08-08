@@ -83,8 +83,9 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
             "code": "159001",
             "name": "货币ETF易方达",
             "category": "货币市场基金",
-            "shares": 19_042_471,
-            "navMicros": 100_000_000,
-            "dateBasis": "source_page_previous_trading_day",
+                "shares": 19_042_471,
+                "navMicros": 100_000_000,
+                "navDate": None,
+                "dateBasis": "source_page_previous_trading_day",
         }
     ]

@@ -6,6 +6,7 @@ from trading_desk.quality import (
     summarize_findings,
     validate_connect_summary,
     validate_etf,
+    validate_etf_nav,
     validate_margin,
 )
 
@@ -83,3 +84,36 @@ def test_inferred_szse_etf_date_is_warning_not_silent_pass() -> None:
     assert source_date["status"] == "warn"
     assert source_date["severity"] == "high"
 
+
+def test_etf_nav_requires_exact_date_pair_and_nonnegative_value() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "nav_date": "2026-07-14",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "nav": 4.321,
+                "date_basis": "source_publication_previous_trading_day_nav",
+            }
+        ]
+    )
+
+    summary = summarize_findings(validate_etf_nav(frame))
+
+    assert summary["counts"]["fail"] == 0
+    assert any(
+        item["check_id"] == "validity.etf_nav_dates" and item["status"] == "pass"
+        for item in summary["findings"]
+    )
+
+
+def test_empty_etf_nav_is_warn_only_optional_enrichment() -> None:
+    summary = summarize_findings(validate_etf_nav(pd.DataFrame()))
+
+    completeness = next(
+        item for item in summary["findings"] if item["check_id"] == "completeness.non_empty"
+    )
+    assert completeness["status"] == "warn"
+    assert completeness["evidence"]["optional_enrichment"] is True
+    assert summary["counts"]["fail"] == 0

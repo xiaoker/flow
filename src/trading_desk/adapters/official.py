@@ -21,6 +21,13 @@ SSE_ETF = SourceSpec(
     dataset="etf_scale",
     url="https://query.sse.com.cn/commonQuery.do",
 )
+SSE_ETF_NAV = SourceSpec(
+    source_id="sse",
+    publisher="上海证券交易所",
+    dataset="etf_nav",
+    url="https://query.sse.com.cn/commonQuery.do",
+    date_semantics="source_publication_previous_trading_day_nav",
+)
 SZSE_ETF = SourceSpec(
     source_id="szse",
     publisher="深圳证券交易所",
@@ -52,6 +59,25 @@ SZSE_ETF_METADATA_URL = "https://fund.szse.cn/api/report/ShowReport/data"
 HKEX_CONNECT_PAGE_URL = (
     "https://www.hkex.com.hk/Mutual-Market/Stock-Connect/Statistics/"
     "Historical-Daily?sc_lang=zh-CN"
+)
+
+SSE_ETF_NAV_CLASSES = (
+    # Official SSE ETF product subtype codes (F111--F150).  The list page
+    # renders these as client-side tabs; querying the subtype codes directly
+    # keeps the raw response auditable and includes stock, bond, cross-border,
+    # commodity and money-market ETF products without depending on tab order.
+    "F111",  # single-market Shanghai equity ETF
+    "F112",  # cross-market Shanghai/Shenzhen/Beijing equity ETF
+    "F113",  # cross-market Shanghai/Hong Kong/Shenzhen/Beijing equity ETF
+    "F114",  # single-market STAR-market equity ETF
+    "F115",  # cross-market equity ETF including STAR market
+    "F121",  # single-market Shanghai bond ETF
+    "F122",  # cross-market bond ETF
+    "F123",  # cash-substitution bond ETF
+    "F131",  # cross-border ETF
+    "F141",  # gold ETF
+    "F142",  # commodity-futures ETF
+    "F150",  # exchange-traded money-market fund
 )
 
 
@@ -98,6 +124,34 @@ def _number(value: Any, *, multiplier: float = 1.0) -> float | None:
 def _integer(value: Any) -> int | None:
     number = _number(value)
     return None if number is None else int(number)
+
+
+def _nav(value: Any) -> float | None:
+    """Parse SSE's display NAV, including the currency prefix (￥/¥)."""
+    if value is None or pd.isna(value):
+        return None
+    normalized = str(value).replace("￥", "").replace("¥", "").replace(",", "").strip()
+    if normalized in {"", "-", "--", "N/A", "NA"}:
+        return None
+    number = float(normalized)
+    return number if pd.notna(number) else None
+
+
+def _empty_sse_etf_nav_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "trade_date",
+            "nav_date",
+            "market",
+            "instrument_code",
+            "instrument_name",
+            "nav",
+            "source_id",
+            "source_grade",
+            "date_basis",
+            "observed_at",
+        ]
+    )
 
 
 def _iso_date(value: Any, *, field: str) -> str:
@@ -206,6 +260,134 @@ class OfficialMarketAdapters:
             ).dt.strftime("%Y-%m-%d")
         return self._persist(normalized, artifact, trade_date)
 
+    def fetch_sse_etf_nav(
+        self, publication_date: str, known_trading_dates: list[str]
+    ) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Fetch the SSE ETF list's official unit NAV for one publication day.
+
+        The SSE list is published on the trading morning and its NAV is the
+        previous trading day's unit NAV.  The endpoint only exposes the
+        current publication list, so a response whose ``TRADING_DAY`` does
+        not equal ``publication_date`` is retained as raw evidence but is not
+        assigned to the requested share snapshot.
+        """
+        parsed_dates = sorted(
+            _iso_date(value, field="known_trading_dates")
+            for value in known_trading_dates
+        )
+        prior_dates = [value for value in parsed_dates if value < publication_date]
+        nav_date = prior_dates[-1] if prior_dates else None
+        responses: list[dict[str, Any]] = []
+        request_log: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for etf_class in SSE_ETF_NAV_CLASSES:
+            params = {
+                "isPagination": "true",
+                "pageHelp.pageSize": "10000",
+                "pageHelp.pageNo": "1",
+                "pageHelp.beginPage": "1",
+                "pageHelp.cacheSize": "1",
+                "pageHelp.endPage": "1",
+                "sqlId": "COMMON_SSE_PL_ETFGGSGSHQD_L",
+                "ETF_CLASS": etf_class,
+                "type": "inParams",
+                "FUND_CODE": "",
+                "KEY_WORDS": "",
+            }
+            try:
+                response = get(
+                    self.session,
+                    SSE_ETF_NAV.url,
+                    params=params,
+                    headers=self._headers("https://www.sse.com.cn/disclosure/fund/etflist/"),
+                )
+            except Exception as exc:
+                warnings.append(f"ETF_CLASS={etf_class} 请求失败：{type(exc).__name__}")
+                continue
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                warnings.append(f"ETF_CLASS={etf_class} 返回不是 JSON")
+                continue
+            rows = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                rows = []
+            responses.append(
+                {
+                    "etf_class": etf_class,
+                    "status_code": response.status_code,
+                    "result": rows,
+                }
+            )
+            request_log.append(params)
+
+        raw_payload = json.dumps(
+            {
+                "publication_date_requested": publication_date,
+                "nav_date": nav_date,
+                "requests": request_log,
+                "responses": responses,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        artifact = write_raw_response(
+            root=self.data_root,
+            source=SSE_ETF_NAV,
+            requested_date=publication_date,
+            run_id=self.run_id,
+            content=raw_payload,
+            extension="json",
+            status_code=200 if responses else 503,
+            content_type="application/json",
+            request_params={
+                "sqlId": "COMMON_SSE_PL_ETFGGSGSHQD_L",
+                "ETF_CLASS": list(SSE_ETF_NAV_CLASSES),
+                "publication_date": publication_date,
+                "nav_date_rule": "TRADING_DAY_previous_known_trading_day",
+            },
+        )
+        artifact.warnings.extend(warnings)
+
+        normalized_rows: list[dict[str, Any]] = []
+        for response_payload in responses:
+            for row in response_payload["result"]:
+                row_date = row.get("TRADING_DAY") if isinstance(row, dict) else None
+                if not row_date:
+                    continue
+                row_date = _iso_date(row_date, field="TRADING_DAY")
+                if row_date != publication_date:
+                    continue
+                code = str(row.get("FUNDID2") or "").strip().zfill(6)
+                value = _nav(row.get("NAV"))
+                if not re.fullmatch(r"\d{6}", code) or value is None:
+                    continue
+                normalized_rows.append(
+                    {
+                        "trade_date": publication_date,
+                        "nav_date": nav_date,
+                        "market": "SSE",
+                        "instrument_code": code,
+                        "instrument_name": row.get("ETF_FULLNAME") or code,
+                        "nav": value,
+                        "source_id": SSE_ETF_NAV.source_id,
+                        "source_grade": SSE_ETF_NAV.source_grade,
+                        "date_basis": SSE_ETF_NAV.date_semantics,
+                        "observed_at": artifact.observed_at,
+                    }
+                )
+        normalized = pd.DataFrame(normalized_rows)
+        if normalized.empty:
+            artifact.warnings.append(
+                f"上交所未返回 {publication_date} 的可匹配 ETF 单位净值；不把其他公告日净值用于该日。"
+            )
+            normalized = _empty_sse_etf_nav_frame()
+        else:
+            normalized = normalized.drop_duplicates(
+                ["trade_date", "market", "instrument_code"], keep="last"
+            ).reset_index(drop=True)
+        return self._persist(normalized, artifact, publication_date)
+
     def fetch_szse_etf_current(
         self, known_trading_dates: list[str]
     ) -> tuple[pd.DataFrame, FetchArtifact]:
@@ -272,6 +454,7 @@ class OfficialMarketAdapters:
                     errors="coerce",
                 ),
                 "nav": pd.to_numeric(frame.get("净值"), errors="coerce"),
+                "nav_date": trade_date,
                 "date_basis": "source_page_previous_trading_day",
                 "source_page_date": page_date,
                 "source_scale_date": trade_date,

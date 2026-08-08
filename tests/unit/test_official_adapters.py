@@ -103,6 +103,40 @@ def test_sse_etf_matches_code_name_date_and_ten_thousand_share_unit(
     assert "sse_etf_scale" in str(artifact.normalized_path)
 
 
+def test_sse_etf_nav_uses_exact_publication_date_and_previous_trading_day(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "result": [
+            {
+                "TRADING_DAY": "20260715",
+                "FUNDID2": "510300",
+                "ETF_FULLNAME": "沪深300ETF",
+                "NAV": "￥4.3210",
+            },
+            {
+                "TRADING_DAY": "20260714",
+                "FUNDID2": "510300",
+                "ETF_FULLNAME": "沪深300ETF",
+                "NAV": "4.0000",
+            },
+        ]
+    }
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_sse_etf_nav(
+        "2026-07-15", ["2026-07-14", "2026-07-15"]
+    )
+
+    assert len(frame) == 1
+    assert frame.loc[0, "trade_date"] == "2026-07-15"
+    assert frame.loc[0, "nav_date"] == "2026-07-14"
+    assert frame.loc[0, "instrument_code"] == "510300"
+    assert frame.loc[0, "nav"] == pytest.approx(4.321)
+    assert frame.loc[0, "date_basis"] == "source_publication_previous_trading_day_nav"
+    assert "sse_etf_nav" in str(artifact.normalized_path)
+
+
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

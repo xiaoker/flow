@@ -98,6 +98,7 @@ export const etfDaily = sqliteTable("etf_daily", {
   category: text("category"),
   shares: integer("shares").notNull(),
   navMicros: integer("nav_micros"),
+  navDate: text("nav_date"),
   dateBasis: text("date_basis").notNull(),
   sourceId: text("source_id").notNull(),
   observedAt: text("observed_at").notNull(),
