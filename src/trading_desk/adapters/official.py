@@ -10,6 +10,7 @@ import pandas as pd
 import requests
 
 from ..http import get
+from ..instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from ..models import FetchArtifact, SourceSpec
 from ..storage import write_normalized_csv, write_raw_response
 
@@ -456,6 +457,8 @@ class OfficialMarketAdapters:
                     "rank",
                     "instrument_code",
                     "instrument_name",
+                    "instrument_name_raw",
+                    "instrument_name_source",
                     "buy_turnover",
                     "sell_turnover",
                     "total_turnover",
@@ -549,6 +552,19 @@ class OfficialMarketAdapters:
                     for row in table.get("tr", []):
                         values = row.get("td", [[]])[0]
                         raw = dict(zip(schema, values))
+                        instrument_code = (
+                            str(raw.get("Stock Code", "")).zfill(6)
+                            if direction == "northbound"
+                            else str(raw.get("Stock Code", "")).zfill(5)
+                        )
+                        raw_name = clean_instrument_name(raw.get("Stock Name"))
+                        instrument_name, instrument_name_source = (
+                            resolve_hkex_instrument_name(
+                                code=instrument_code,
+                                direction=direction,
+                                raw_name=raw_name,
+                            )
+                        )
                         top_rows.append(
                             {
                                 "trade_date": market_payload.get("date") or trade_date,
@@ -556,12 +572,10 @@ class OfficialMarketAdapters:
                                 "direction": direction,
                                 "currency": currency,
                                 "rank": _integer(raw.get("Rank")),
-                                "instrument_code": (
-                                    str(raw.get("Stock Code", "")).zfill(6)
-                                    if direction == "northbound"
-                                    else str(raw.get("Stock Code", "")).zfill(5)
-                                ),
-                                "instrument_name": str(raw.get("Stock Name") or "").strip(),
+                                "instrument_code": instrument_code,
+                                "instrument_name": instrument_name,
+                                "instrument_name_raw": raw_name,
+                                "instrument_name_source": instrument_name_source,
                                 "buy_turnover": _number(raw.get("Buy Turnover")),
                                 "sell_turnover": _number(raw.get("Sell Turnover")),
                                 "total_turnover": _number(raw.get("Total Turnover")),

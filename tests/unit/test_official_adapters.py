@@ -332,3 +332,42 @@ def test_hkex_accepts_javascript_only_string_escapes(
     assert summary.empty
     assert top.loc[0, "instrument_name"] == "L'Occitane Intl"
     assert artifact.status_code == 200
+
+
+def test_hkex_missing_name_uses_small_override_and_keeps_source_name(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = [
+        {
+            "date": "2026-08-06",
+            "market": "SSE Southbound",
+            "tradingDay": 1,
+            "content": [
+                {
+                    "style": 2,
+                    "table": {
+                        "schema": [["Rank", "Stock Code", "Stock Name", "Total Turnover"]],
+                        "tr": [
+                            {"td": [["2", "00100", "\u3000\u3000", "1,234"]]},
+                            {"td": [["3", "09999", "\u3000", "100"]]},
+                        ],
+                    },
+                }
+            ],
+        }
+    ]
+    wrapper = "tabData = " + json.dumps(payload, ensure_ascii=False) + ";"
+    monkeypatch.setattr(
+        official,
+        "get",
+        lambda *args, **kwargs: FakeResponse(wrapper, "application/javascript"),
+    )
+
+    _, top, _ = adapters.fetch_hkex_connect("2026-08-06")
+
+    assert top.loc[0, "instrument_code"] == "00100"
+    assert top.loc[0, "instrument_name"] == "MINIMAX-W"
+    assert pd.isna(top.loc[0, "instrument_name_raw"])
+    assert top.loc[0, "instrument_name_source"] == "override"
+    assert pd.isna(top.loc[1, "instrument_name"])
+    assert top.loc[1, "instrument_name_source"] == "unresolved"

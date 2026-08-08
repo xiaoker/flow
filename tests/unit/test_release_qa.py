@@ -9,7 +9,12 @@ import pandas as pd
 from trading_desk.adapters.official import OfficialMarketAdapters, SSE_ETF, SZSE_ETF
 from trading_desk.models import FetchArtifact
 from trading_desk.models import QualityFinding
-from trading_desk.release_qa import _future_only_failure, _pending_future_warning, validate_artifact_lineage
+from trading_desk.release_qa import (
+    _future_only_failure,
+    _pending_future_warning,
+    validate_artifact_lineage,
+    validate_combined_data,
+)
 
 
 def _artifact(
@@ -147,3 +152,65 @@ def test_normalized_storage_is_namespaced_by_source(tmp_path: Path) -> None:
     assert sse_path != szse_path
     assert "sse_etf_scale" in sse_path
     assert "szse_etf_scale" in szse_path
+
+
+def test_missing_hkex_top_name_is_warning_not_required_value_failure() -> None:
+    manifest = {
+        "requested_dates": ["2026-08-06"],
+        "artifacts": [
+            {
+                "source": {"source_id": "hkex", "dataset": "stock_connect_daily"},
+                "row_count": 2,
+            }
+        ],
+    }
+    frames = {
+        "sse_etf": pd.DataFrame(),
+        "szse_etf": pd.DataFrame(),
+        "sse_margin": pd.DataFrame(),
+        "szse_margin": pd.DataFrame(),
+        "stock_connect_summary": pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-06",
+                    "market": "SSE",
+                    "direction": "southbound",
+                    "currency": "HKD",
+                    "total_turnover": 100.0,
+                    "total_trade_count": 1,
+                    "etf_turnover": 0.0,
+                    "source_id": "hkex",
+                }
+            ]
+        ),
+        "stock_connect_top": pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-06",
+                    "market": "SSE",
+                    "direction": "southbound",
+                    "rank": 1,
+                    "instrument_code": "09999",
+                    "instrument_name": None,
+                    "total_turnover": 100.0,
+                    "source_id": "hkex",
+                }
+            ]
+        ),
+    }
+
+    findings = validate_combined_data(manifest, frames)
+    required = next(
+        item
+        for item in findings
+        if item.check_id == "mapping.required_values" and item.dataset == "stock_connect_top"
+    )
+    resolution = next(
+        item
+        for item in findings
+        if item.check_id == "mapping.instrument_name_resolution"
+    )
+
+    assert required.status == "pass"
+    assert resolution.status == "warn"
+    assert resolution.evidence["unresolved_rows"] == 1

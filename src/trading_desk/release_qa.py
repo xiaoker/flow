@@ -14,6 +14,7 @@ import pandas as pd
 
 from .adapters.official import parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
+from .instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from .models import QualityFinding
 from .quality import summarize_findings
 from .storage import now_iso, write_json
@@ -261,18 +262,29 @@ def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, p
                 for row in table.get("tr", []):
                     values = row.get("td", [[]])[0]
                     raw = dict(zip(schema, values))
+                    instrument_code = (
+                        str(raw.get("Stock Code", "")).zfill(6)
+                        if direction == "northbound"
+                        else str(raw.get("Stock Code", "")).zfill(5)
+                    )
+                    raw_name = clean_instrument_name(raw.get("Stock Name"))
+                    instrument_name, instrument_name_source = (
+                        resolve_hkex_instrument_name(
+                            code=instrument_code,
+                            direction=direction,
+                            raw_name=raw_name,
+                        )
+                    )
                     top_rows.append(
                         {
                             "trade_date": trade_date,
                             "market": market,
                             "direction": direction,
                             "rank": None if _number(raw.get("Rank")) is None else int(_number(raw.get("Rank"))),
-                                "instrument_code": (
-                                    str(raw.get("Stock Code", "")).zfill(6)
-                                    if direction == "northbound"
-                                    else str(raw.get("Stock Code", "")).zfill(5)
-                                ),
-                                "instrument_name": str(raw.get("Stock Name") or "").strip(),
+                                "instrument_code": instrument_code,
+                                "instrument_name": instrument_name,
+                                "instrument_name_raw": raw_name,
+                                "instrument_name_source": instrument_name_source,
                             "buy_turnover": _number(raw.get("Buy Turnover")),
                             "sell_turnover": _number(raw.get("Sell Turnover")),
                             "total_turnover": _number(raw.get("Total Turnover")),
@@ -346,7 +358,12 @@ def validate_raw_to_normalized_mapping(
                     expected_top,
                     actual_top,
                     keys=["trade_date", "market", "direction", "rank"],
-                    text_columns=["instrument_code", "instrument_name"],
+                    text_columns=[
+                        "instrument_code",
+                        "instrument_name",
+                        "instrument_name_raw",
+                        "instrument_name_source",
+                    ],
                     numeric_columns=["buy_turnover", "sell_turnover", "total_turnover"],
                 )
                 result = {
@@ -577,7 +594,7 @@ def validate_combined_data(
             )
         )
 
-    required_values = {
+    required_columns = {
         "sse_etf": ["trade_date", "market", "instrument_code", "instrument_name", "shares", "source_id", "source_grade"],
         "szse_etf": ["trade_date", "market", "instrument_code", "instrument_name", "shares", "source_id", "source_grade"],
         "sse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
@@ -585,9 +602,24 @@ def validate_combined_data(
         "stock_connect_summary": ["trade_date", "market", "direction", "currency", "total_turnover", "total_trade_count", "etf_turnover", "source_id"],
         "stock_connect_top": ["trade_date", "market", "direction", "rank", "instrument_code", "instrument_name", "total_turnover", "source_id"],
     }
+    # Names are descriptive metadata for HKEX's top-10 table.  The official
+    # file can omit one while the code, rank and turnover remain valid, so do
+    # not make a missing name a hard release blocker.
+    required_values = {
+        **required_columns,
+        "stock_connect_top": [
+            "trade_date",
+            "market",
+            "direction",
+            "rank",
+            "instrument_code",
+            "total_turnover",
+            "source_id",
+        ],
+    }
     for name, (source_id, markets) in EXPECTED_CONTEXT.items():
         frame = frames.get(name, pd.DataFrame())
-        missing_columns = sorted(set(required_values[name]) - set(frame.columns))
+        missing_columns = sorted(set(required_columns[name]) - set(frame.columns))
         null_rows = 0 if missing_columns else int(frame[required_values[name]].isna().any(axis=1).sum())
         invalid_context = len(frame)
         if not frame.empty and {"source_id", "market"}.issubset(frame.columns):
@@ -604,6 +636,32 @@ def validate_combined_data(
                 remediation="不要用行号拼接；以日期、市场、代码等业务键重新映射。",
             )
         )
+        if name == "stock_connect_top" and not frame.empty:
+            name_series = frame.get("instrument_name", pd.Series(dtype="string"))
+            normalized_names = name_series.astype("string").str.strip()
+            unresolved = int(normalized_names.isna().sum() + normalized_names.eq("").sum())
+            override_rows = int(
+                frame.get("instrument_name_source", pd.Series(dtype="string"))
+                .astype(str)
+                .eq("override")
+                .sum()
+            )
+            findings.append(
+                _finding(
+                    "mapping.instrument_name_resolution",
+                    name,
+                    unresolved == 0,
+                    message="证券名称已解析" if unresolved == 0 else "部分证券名称尚未解析",
+                    evidence={
+                        "unresolved_rows": unresolved,
+                        "override_rows": override_rows,
+                        "rows": len(frame),
+                    },
+                    severity="medium",
+                    warn_only=True,
+                    remediation="保留代码并显示“名称待确认”；确认官方名称后只更新异常兜底表，不修改原始文件。",
+                )
+            )
         findings.append(
             _finding(
                 "mapping.source_market_consistency",
