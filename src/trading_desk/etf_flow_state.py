@@ -15,6 +15,17 @@ STATE_VERSION = 1
 MAX_TRADING_DAYS = 260
 CALCULATION_METHOD = "sum_of_daily_official_share_changes"
 CASH_CALCULATION_METHOD = "sum_of_daily_share_changes_times_same_day_nav"
+PERIOD_LOOKBACKS: dict[str, int] = {
+    "1d": 1,
+    "3d": 3,
+    "1w": 5,
+    "2w": 10,
+    "1m": 21,
+    "3m": 63,
+    "6m": 126,
+    "12m": 252,
+}
+PERIOD_ORDER = ("1d", "3d", "1w", "2w", "1m", "3m", "6m", "ytd", "12m")
 
 
 def _sha256(path: Path) -> str:
@@ -189,3 +200,189 @@ def build_etf_flow_state_from_directory(
         snapshots,
         max_trading_days=max_trading_days,
     )
+
+
+def materialize_etf_terminal(
+    state: dict[str, Any],
+    *,
+    base_terminal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Materialize the dashboard ETF view from the offline rolling state.
+
+    This is deliberately a pure function. It is used by the collector/build
+    job, never by a Worker request. The resulting terminal contains all
+    period values, daily series, group totals, coverage and history metadata
+    needed by the UI, so the serving path only streams a published artifact.
+    """
+
+    dates = [str(value) for value in state.get("dates") or []]
+    if not dates:
+        raise ValueError("ETF state has no dates")
+    state_rows = [item for item in state.get("instruments") or [] if isinstance(item, dict)]
+    base_by_key = {
+        f"{item.get('market', 'SSE')}:{str(item.get('code', '')).zfill(6)}": item
+        for item in (base_terminal or {}).get("instruments") or []
+        if isinstance(item, dict)
+    }
+
+    def key_for(item: dict[str, Any]) -> str:
+        return f"{item.get('market', 'SSE')}:{str(item.get('code', '')).zfill(6)}"
+
+    def value_at(item: dict[str, Any], field: str, index: int) -> float | None:
+        values = item.get(field) or []
+        if index >= len(values) or values[index] is None:
+            return None
+        try:
+            number = float(values[index])
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    available_periods: list[str] = []
+    anchors: dict[str, int] = {}
+    for period, offset in PERIOD_LOOKBACKS.items():
+        if len(dates) > offset:
+            available_periods.append(period)
+            anchors[period] = offset
+    current_year = dates[-1][:4]
+    prior_year_indices = [index for index, date in enumerate(dates) if date[:4] < current_year]
+    if prior_year_indices:
+        available_periods.insert(-1 if "12m" in available_periods else len(available_periods), "ytd")
+
+    instruments: list[dict[str, Any]] = []
+    for state_item in state_rows:
+        key = key_for(state_item)
+        original = base_by_key.get(key, {})
+        merged = {**original, **{
+            "code": str(state_item.get("code") or original.get("code") or "").zfill(6),
+            "name": str(state_item.get("name") or original.get("name") or state_item.get("code") or ""),
+            "market": state_item.get("market") or original.get("market") or "SSE",
+            "category": state_item.get("category") or original.get("category") or "未归类",
+            "groupType": state_item.get("groupType") or original.get("groupType") or "unclassified",
+            "assetClass": state_item.get("assetClass") or original.get("assetClass"),
+            "classificationSource": state_item.get("classificationSource") or original.get("classificationSource"),
+            "classificationConfidence": state_item.get("classificationConfidence") or original.get("classificationConfidence"),
+            "classificationRule": state_item.get("classificationRule") or original.get("classificationRule"),
+            "includeInGroup": True,
+        }}
+        periods: dict[str, float | None] = {}
+        period_coverage: dict[str, int] = {}
+        cash_periods: dict[str, float | None] = {}
+        cash_coverage: dict[str, int] = {}
+        for period in available_periods:
+            if period == "ytd":
+                indices = [index for index, date in enumerate(dates) if date[:4] == current_year]
+            else:
+                indices = list(range(max(0, len(dates) - anchors[period]), len(dates)))
+            values = [value_at(state_item, "values", index) for index in indices]
+            observed = [value for value in values if value is not None]
+            period_coverage[period] = len(observed)
+            periods[period] = round(sum(observed), 2) if observed and len(observed) == len(indices) else None
+            cash_values = [value_at(state_item, "cashValues", index) for index in indices]
+            cash_observed = [value for value in cash_values if value is not None]
+            cash_coverage[period] = len(cash_observed)
+            cash_periods[period] = round(sum(cash_observed), 2) if cash_observed and len(cash_observed) == len(indices) else None
+        values = [value_at(state_item, "values", index) for index in range(len(dates))]
+        merged["periods"] = periods
+        merged["periodCoverage"] = period_coverage
+        merged["estimatedCashPeriods"] = cash_periods
+        merged["cashPeriodCoverage"] = cash_coverage
+        merged["coverage"] = sum(value is not None for value in values)
+        instruments.append(merged)
+
+    instruments.sort(key=lambda item: abs(item.get("periods", {}).get("1d") or 0), reverse=True)
+
+    daily_series: list[dict[str, Any]] = []
+    for index, trade_date in enumerate(dates):
+        share_values = [value_at(item, "values", index) for item in state_rows]
+        share_observed = [value for value in share_values if value is not None]
+        cash_values = [value_at(item, "cashValues", index) for item in state_rows]
+        cash_observed = [value for value in cash_values if value is not None]
+        daily_series.append({
+            "date": trade_date[5:],
+            "value": round(sum(share_observed), 2),
+            "coverage": len(share_observed),
+            "cashValue": round(sum(cash_observed), 2) if cash_observed else None,
+            "cashCoverage": len(cash_observed),
+        })
+
+    groups: dict[str, dict[str, Any]] = {}
+    for item in instruments:
+        category = str(item.get("category") or "未归类")
+        aggregate = groups.setdefault(category, {
+            "groupType": item.get("groupType") or "unclassified",
+            "periods": {period: 0.0 for period in available_periods},
+            "estimatedCashPeriods": {period: 0.0 for period in available_periods},
+            "estimatedCashCoverage": {period: 0 for period in available_periods},
+            "componentCount": 0,
+            "comparableCount": {period: 0 for period in available_periods},
+        })
+        aggregate["componentCount"] += 1
+        for period in available_periods:
+            value = item["periods"].get(period)
+            if value is not None:
+                aggregate["periods"][period] += value
+                aggregate["comparableCount"][period] += 1
+            cash_value = item["estimatedCashPeriods"].get(period)
+            if cash_value is not None:
+                aggregate["estimatedCashPeriods"][period] += cash_value
+            aggregate["estimatedCashCoverage"][period] += item["cashPeriodCoverage"].get(period, 0)
+    group_periods = [
+        {
+            "name": name,
+            "groupType": aggregate["groupType"],
+            "periods": {period: round(value, 2) if aggregate["comparableCount"][period] else None for period, value in aggregate["periods"].items()},
+            "estimatedCashPeriods": {period: round(value, 2) if aggregate["estimatedCashCoverage"][period] else None for period, value in aggregate["estimatedCashPeriods"].items()},
+            "estimatedCashCoverage": aggregate["estimatedCashCoverage"],
+            "componentCount": aggregate["componentCount"],
+            "comparableCount": aggregate["comparableCount"],
+        }
+        for name, aggregate in groups.items()
+    ]
+    group_periods.sort(key=lambda item: abs(item["periods"].get("1d") or 0), reverse=True)
+
+    market_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    for item in instruments:
+        market = str(item.get("market") or "SSE")
+        category = str(item.get("category") or "未归类")
+        market_counts[market] = market_counts.get(market, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+    cash_eligible = sum(item["estimatedCashPeriods"].get("1d") is not None for item in instruments)
+    previous_terminal = base_terminal or {}
+    return {
+        "scope": previous_terminal.get("scope", "SSE+SZSE"),
+        "dailySeries": daily_series,
+        "instruments": instruments,
+        "groupPeriods": group_periods,
+        "availablePeriods": [period for period in PERIOD_ORDER if period in available_periods],
+        "classification": previous_terminal.get("classification", "官方产品/投资类型优先，低置信度产品统一进入‘未归类’"),
+        "classificationVersion": state.get("classificationVersion") or previous_terminal.get("classificationVersion"),
+        "calculation": "离线汇总官方逐日份额变化；金额估算按逐日份额变化 × 对应交易日官方单位净值累计",
+        "cashFlow": {
+            "available": cash_eligible > 0,
+            "unit": "亿元",
+            "method": CASH_CALCULATION_METHOD,
+            "eligibleInstruments": cash_eligible,
+            "totalInstruments": len(instruments),
+            "coverageDate": dates[-1],
+            "warning": "缺少对应日期官方单位净值的 ETF 不计入金额汇总",
+        },
+        "historyCoverage": {
+            "from": dates[0],
+            "to": dates[-1],
+            "tradingDays": len(dates),
+            "stateVersion": int(state.get("version") or STATE_VERSION),
+        },
+        "universe": {
+            "total": len(instruments),
+            "excluded": int((previous_terminal.get("universe") or {}).get("excluded", 0)),
+            "exclusionCounts": (previous_terminal.get("universe") or {}).get("exclusionCounts", {}),
+            "marketCounts": market_counts,
+            "categoryCounts": category_counts,
+            "classified": sum(item["category"] != "未归类" for item in instruments),
+            "unclassified": sum(item["category"] == "未归类" for item in instruments),
+            "periodComparable": sum(item["periods"].get("1d") is not None for item in instruments),
+            "cashFlowEligible": cash_eligible,
+        },
+    }

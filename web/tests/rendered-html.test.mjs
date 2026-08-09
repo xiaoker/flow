@@ -16,7 +16,7 @@ const env = {
 };
 const context = { waitUntil() {}, passThroughOnException() {} };
 
-test("server-renders the trading flow dashboard", async () => {
+test("serves a static dashboard shell", async () => {
   const worker = await loadWorker();
   const response = await worker.fetch(
     new Request("http://localhost/", { headers: { accept: "text/html" } }),
@@ -28,19 +28,10 @@ test("server-renders the trading flow dashboard", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>[^<]*市场数据台[^<]*<\/title>/i);
-  assert.match(html, /啸傲的市场资金流向交易台/);
-  assert.match(html, /板块份额变化/);
-  assert.match(html, /ETF 雷达/);
-  assert.match(html, /南向净买入/);
-  assert.match(html, /ETF 份额变化/);
-  assert.match(html, /金额估算（亿元）/);
-  assert.match(html, /官方事实/);
-  assert.match(html, /公式计算/);
-  assert.match(html, /日期核验/);
-  assert.match(html, /未披露的数据不展示、不补造/);
-  assert.match(html, /当前官方不披露北向净流入/);
-  assert.match(html, /份额变化不等同资金金额/);
-  assert.doesNotMatch(html, /板块资金轮动|资金流全景/);
+  assert.match(html, /bootstrap-card/);
+  assert.match(html, /只读取已经通过 QA 的完整数据/);
+  assert.match(html, /dashboard-bootstrap/);
+  assert.doesNotMatch(html, /啸傲的市场资金流向交易台/);
   assert.doesNotMatch(html, /β\s*压强/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
@@ -186,6 +177,7 @@ test("requires explicit confirmation before opening a historical date", async ()
   );
   assert.match(source, /setDraftDate\(event\.target\.value\)/);
   assert.match(source, />\s*查看\s*<\/button>/);
+  assert.match(source, /if \(!availableDates\.includes\(date\)\)/);
   assert.doesNotMatch(source, /onChange=\{\(event\) => event\.target\.value && openDate/);
 });
 
@@ -261,7 +253,7 @@ test("exposes ETF terminal coverage without inventing unavailable periods", asyn
   assert.match(payload.limitations.join(" "), /tracked-index metadata/);
 });
 
-test("restores long ETF periods from the hash-verified R2 flow state", async () => {
+test("does not hydrate the large R2 ETF state in the read path", async () => {
   const worker = await loadWorker();
   const fallbackResponse = await worker.fetch(
     new Request("http://localhost/api/v1/overview"),
@@ -276,69 +268,24 @@ test("restores long ETF periods from the hash-verified R2 flow state", async () 
     "2026-07-21",
     "2026-07-22",
   ];
-  const state = {
-    version: 1,
-    classificationVersion: "2026-07-v3",
-    calculationMethod: "sum_of_daily_official_share_changes",
-    generatedAt: "2026-07-23T09:00:00+08:00",
-    dates,
-    instruments: [
-      {
-        code: "588170",
-        name: "科创半导",
-        market: "SSE",
-        category: "科技",
-        groupType: "industry",
-        assetClass: "股票",
-        classificationSource: "name_rule",
-        classificationConfidence: "medium",
-        classificationRule: "technology",
-        includeInGroup: true,
-        // The first two dates are absent.  A complete 1d/3d value is still
-        // valid, but a 1w sum must remain unavailable rather than summing the
-        // three observed points and presenting it as five days.
-        values: [null, null, 3, 4, 5],
-      },
-    ],
-    sourceSnapshots: dates.map((date) => ({ date, sha256: "a".repeat(64) })),
-    quality: {
-      snapshotCount: 5,
-      instrumentCount: 1,
-      populatedValues: 3,
-      rejectedRows: 0,
-      duplicateRows: 0,
-      status: "pass",
-    },
-  };
-  const body = JSON.stringify(state);
-  const digest = createHash("sha256").update(body).digest("hex");
-  const stateKey = `market-data/derived/etf-flow-state/2026-07-v3/2026-07-22/${digest}.json`;
-  const pointer = {
-    version: 1,
-    classificationVersion: "2026-07-v3",
-    objectKey: stateKey,
-    sha256: digest,
-    asOf: "2026-07-22",
-    dateCount: 5,
-    updatedAt: "2026-07-23T09:00:00+08:00",
-  };
-  snapshot.asOf = "2026-07-22";
+  snapshot.asOf = dates.at(-1);
+  let bucketReads = 0;
   const db = {
     prepare() {
       return {
         async first() {
           return { payload_json: JSON.stringify(snapshot) };
         },
+        async all() {
+          return { results: [] };
+        },
       };
     },
   };
   const bucket = {
-    async get(key) {
-      if (key.endsWith("/latest.json")) {
-        return { text: async () => JSON.stringify(pointer) };
-      }
-      if (key === stateKey) return { text: async () => body };
-      return null;
+    async get() {
+      bucketReads += 1;
+      throw new Error("read path must not hydrate ETF state");
     },
   };
 
@@ -349,13 +296,8 @@ test("restores long ETF periods from the hash-verified R2 flow state", async () 
   );
   assert.equal(response.status, 200);
   const payload = await response.json();
-  assert.deepEqual(payload.terminal.availablePeriods, ["1d", "3d", "1w"]);
-  const item = payload.terminal.instruments.find((row) => row.code === "588170");
-  assert.equal(item.periods["1d"], 5);
-  assert.equal(item.periods["3d"], 12);
-  assert.equal(item.periods["1w"], null);
-  assert.equal(item.periodCoverage["1w"], 3);
-  assert.equal(payload.terminal.historyCoverage.tradingDays, 5);
+  assert.deepEqual(payload.terminal.availablePeriods, ["1d"]);
+  assert.equal(bucketReads, 0);
 });
 
 test("serves materialized ETF periods without re-reading the large R2 state", async () => {
@@ -546,7 +488,7 @@ test("keeps the official-source relay private and allowlisted", async () => {
   });
 });
 
-test("serves an archived dashboard for an explicitly selected date", async () => {
+test("streams an archived dashboard for an explicitly selected date", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(
     new Request("http://localhost/api/v1/overview"),
@@ -581,20 +523,82 @@ test("serves an archived dashboard for an explicitly selected date", async () =>
   const bucket = {
     async get(key) {
       assert.equal(key, "market-data/history/2025-01-02/test.json");
-      return { text: async () => JSON.stringify(archived) };
+      return {
+        body: new Response(JSON.stringify(archived)).body,
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        httpEtag: '"archived-test"',
+      };
     },
   };
 
   const response = await worker.fetch(
-    new Request("http://localhost/?date=2025-01-02", { headers: { accept: "text/html" } }),
+    new Request("http://localhost/api/v2/dashboard?date=2025-01-02"),
     { ...env, DB: db, RAW_BUCKET: bucket },
     context,
   );
   assert.equal(response.status, 200);
-  const html = await response.text();
-  assert.match(html, /2025-01-02/);
-  assert.match(html, /官方历史归档/);
-  assert.match(html, /选择归档日期/);
+  assert.equal(response.headers.get("x-flow-as-of"), "2025-01-02");
+  assert.equal(response.headers.get("x-flow-historical"), "true");
+  const streamed = await response.json();
+  assert.equal(streamed.asOf, "2025-01-02");
+});
+
+test("streams the active release through the D1 pointer without parsing it", async () => {
+  const worker = await loadWorker();
+  const snapshot = {
+    asOf: "2026-08-06",
+    mode: "官方数据快照",
+    quality: { fail: 0 },
+  };
+  const manifest = {
+    schemaVersion: 2,
+    releaseId: "release:2026-08-06:0123456789abcdef",
+    asOf: "2026-08-06",
+    artifacts: {
+      bootstrap: {
+        key: "market-data/releases/2026-08-06/release:2026-08-06:0123456789abcdef/bootstrap.json",
+      },
+    },
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return this;
+        },
+        async first() {
+          if (sql.includes("active_release")) {
+            return {
+              release_id: manifest.releaseId,
+              as_of: manifest.asOf,
+              manifest_sha256: "a".repeat(64),
+              activated_at: "2026-08-06T09:00:00+08:00",
+              manifest_json: JSON.stringify(manifest),
+            };
+          }
+          return null;
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.equal(key, manifest.artifacts.bootstrap.key);
+      return {
+        body: new Response(JSON.stringify(snapshot)).body,
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        httpEtag: '"active-release"',
+      };
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v2/dashboard"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-flow-release-id"), manifest.releaseId);
+  assert.deepEqual(await response.json(), snapshot);
 });
 
 test("archives full-source history with server-side hash verification", async () => {

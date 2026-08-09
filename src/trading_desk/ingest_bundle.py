@@ -123,7 +123,11 @@ def _etf_artifact(
 
 
 def build_ingest_bundle(
-    *, snapshot_path: Path, manifest_path: Path, workspace_root: Path
+    *,
+    snapshot_path: Path,
+    manifest_path: Path,
+    workspace_root: Path,
+    read_model_dir: Path | None = None,
 ) -> dict[str, Any]:
     snapshot = _read_json(snapshot_path)
     manifest = _read_json(manifest_path)
@@ -159,7 +163,7 @@ def build_ingest_bundle(
     ]
     if not artifacts:
         raise ValueError("Manifest did not contain any ETF artifacts")
-    return {
+    result: dict[str, Any] = {
         "version": 1,
         "snapshot": snapshot,
         "archive": {
@@ -170,3 +174,27 @@ def build_ingest_bundle(
             "artifacts": artifacts,
         },
     }
+    if read_model_dir is not None:
+        read_manifest_path = read_model_dir / "manifest.json"
+        if not read_manifest_path.is_file():
+            raise ValueError(f"Read-model manifest does not exist: {read_manifest_path}")
+        read_manifest = _read_json(read_manifest_path)
+        read_artifacts: dict[str, Any] = {}
+        for name, metadata in (read_manifest.get("artifacts") or {}).items():
+            if not re.fullmatch(r"[a-z_]+", str(name)):
+                raise ValueError(f"Invalid read-model name: {name!r}")
+            path = read_model_dir / f"{name}.json"
+            if not path.is_file():
+                raise ValueError(f"Read-model artifact does not exist: {path}")
+            content = path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            if digest != str(metadata.get("sha256")):
+                raise ValueError(f"Read-model SHA-256 mismatch for {path}")
+            read_artifacts[name] = {
+                "key": str(metadata["key"]),
+                "sha256": digest,
+                "bytes": len(content),
+                "contentBase64": base64.b64encode(content).decode("ascii"),
+            }
+        result["readModels"] = {"manifest": read_manifest, "artifacts": read_artifacts}
+    return result

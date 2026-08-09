@@ -718,6 +718,11 @@ export function Dashboard({
     ? availableDates[dateIndex + 1]
     : null;
   const openDate = (date: string) => {
+    if (!availableDates.includes(date)) {
+      setNotice("该日期尚未形成完整发布版本，请选择已归档交易日");
+      window.setTimeout(() => setNotice(""), 2400);
+      return;
+    }
     const latest = availableDates.at(-1);
     const url = new URL(window.location.href);
     if (date === latest) url.searchParams.delete("date");

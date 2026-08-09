@@ -126,6 +126,17 @@ jobs:
             jq '.publication' dashboard-snapshot.json
           fi
 
+      - name: Build immutable read models offline
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            python scripts/build_read_models.py \
+              --snapshot dashboard-snapshot.json \
+              --output-dir read-models \
+              --require-materialized
+          else
+            echo "Pending snapshot has no active read models; preserving raw evidence only."
+          fi
+
       - name: Build full-source history archive bundle
         run: python scripts/build_history_bundle.py --output history-bundle.json
 
@@ -140,7 +151,14 @@ jobs:
             --url "https://flow.xiaoker.com/api/v1/admin/history-import"
 
       - name: Build verified archive and publish bundle
-        run: python scripts/build_ingest_bundle.py --output ingest-bundle.json
+        run: |
+          if [[ -d read-models ]]; then
+            python scripts/build_ingest_bundle.py \
+              --output ingest-bundle.json \
+              --read-model-dir read-models
+          else
+            python scripts/build_ingest_bundle.py --output ingest-bundle.json
+          fi
 
       - name: Archive raw evidence and publish normalized data
         env:
@@ -187,3 +205,4 @@ jobs:
             reports/phase0/latest-release-qa.json
             reports/backfill/latest-summary.json
             history-bundle.json
+            read-models/

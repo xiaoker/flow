@@ -63,6 +63,26 @@ export const historicalSnapshots = sqliteTable("historical_snapshot", {
   index("historical_snapshot_created_idx").on(table.createdAt),
 ]);
 
+export const releaseManifests = sqliteTable("release_manifest", {
+  releaseId: text("release_id").primaryKey(),
+  asOf: text("as_of").notNull(),
+  schemaVersion: integer("schema_version").notNull(),
+  manifestSha256: text("manifest_sha256").notNull(),
+  manifestJson: text("manifest_json").notNull(),
+  status: text("status").notNull().default("STAGED"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("release_manifest_as_of_idx").on(table.asOf, table.createdAt),
+]);
+
+export const activeReleases = sqliteTable("active_release", {
+  slot: text("slot").primaryKey(),
+  releaseId: text("release_id").notNull(),
+  asOf: text("as_of").notNull(),
+  manifestSha256: text("manifest_sha256").notNull(),
+  activatedAt: text("activated_at").notNull(),
+});
+
 export const marketHistoryDaily = sqliteTable("market_history_daily", {
   tradeDate: text("trade_date").primaryKey(),
   marginBalance: real("margin_balance"),

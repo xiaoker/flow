@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
-import {
-  enrichSnapshotWithEtfFlowState,
-  loadEtfFlowState,
-  validateEtfTerminalCoverage,
-} from "@/app/lib/etf-flow-state";
+import { validateEtfTerminalCoverage } from "@/app/lib/etf-flow-state";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +49,30 @@ type IngestBundle = {
     retentionDays: number;
     artifacts: ArchiveArtifact[];
   };
+  readModels?: ReadModelBundle;
+};
+
+type ReadModelArtifact = {
+  key: string;
+  sha256: string;
+  bytes: number;
+  contentBase64: string;
+};
+
+type ReadModelBundle = {
+  manifest: {
+    schemaVersion: number;
+    releaseId: string;
+    asOf: string;
+    manifestSha256?: string;
+    artifacts: Record<string, {
+      key: string;
+      sha256: string;
+      bytes: number;
+      contentType?: string;
+    }>;
+  };
+  artifacts: Record<string, ReadModelArtifact>;
 };
 
 function secureEqual(left: string, right: string): boolean {
@@ -158,6 +178,54 @@ function isIngestBundle(value: unknown): value is IngestBundle {
       0,
     ) <= MAX_ETF_ROWS
   );
+}
+
+function isReadModelBundle(value: unknown): value is ReadModelBundle {
+  if (!isRecord(value) || !isRecord(value.manifest) || !isRecord(value.artifacts)) {
+    return false;
+  }
+  const manifest = value.manifest;
+  if (
+    manifest.schemaVersion !== 2 ||
+    typeof manifest.releaseId !== "string" ||
+    !/^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/.test(manifest.releaseId) ||
+    typeof manifest.asOf !== "string" ||
+    !ISO_DATE.test(manifest.asOf) ||
+    (manifest.manifestSha256 !== undefined &&
+      (typeof manifest.manifestSha256 !== "string" || !SHA256.test(manifest.manifestSha256))) ||
+    !isRecord(manifest.artifacts)
+  ) {
+    return false;
+  }
+  const names = Object.keys(manifest.artifacts);
+  const provided = Object.keys(value.artifacts);
+  if (!names.length || names.length > 8 || names.some((name) => !/^[a-z_]+$/.test(name))) {
+    return false;
+  }
+  if (names.some((name) => !provided.includes(name)) || provided.some((name) => !names.includes(name))) {
+    return false;
+  }
+  return names.every((name) => {
+    const declared = manifest.artifacts[name];
+    const artifact = value.artifacts[name];
+    return Boolean(
+      isRecord(declared) &&
+        isRecord(artifact) &&
+        typeof declared.key === "string" &&
+        declared.key.startsWith("market-data/releases/") &&
+        !declared.key.includes("..") &&
+        typeof declared.sha256 === "string" &&
+        SHA256.test(declared.sha256) &&
+        Number.isSafeInteger(declared.bytes) &&
+        declared.bytes > 0 &&
+        declared.bytes <= 5_000_000 &&
+        artifact.key === declared.key &&
+        artifact.sha256 === declared.sha256 &&
+        artifact.bytes === declared.bytes &&
+        typeof artifact.contentBase64 === "string" &&
+        artifact.contentBase64.length > 0,
+    );
+  });
 }
 
 function unauthorized() {
@@ -403,6 +471,102 @@ async function archiveEtfData(
   }
 }
 
+async function archiveReadModels(
+  runtime: { DB: D1Database; RAW_BUCKET: R2Bucket },
+  bundle: ReadModelBundle,
+): Promise<{ releaseId: string; asOf: string; manifestKey: string; manifestSha256: string }> {
+  if (!isReadModelBundle(bundle)) throw new Error("invalid_read_model_bundle");
+  const manifestBody = JSON.stringify(bundle.manifest);
+  // `manifestSha256` is the hash of the canonical manifest before its own
+  // digest field is added. Keep that stable release identity in D1; the R2
+  // object additionally carries the body hash in custom metadata.
+  const manifestSha256 = bundle.manifest.manifestSha256 ??
+    await sha256Hex(new TextEncoder().encode(manifestBody));
+  const manifestBodySha256 = await sha256Hex(new TextEncoder().encode(manifestBody));
+  for (const artifact of Object.values(bundle.artifacts)) {
+    const content = decodeBase64(artifact.contentBase64);
+    if (content.byteLength !== artifact.bytes) throw new Error(`read_model_size_mismatch:${artifact.key}`);
+    if ((await sha256Hex(content)) !== artifact.sha256) {
+      throw new Error(`read_model_sha256_mismatch:${artifact.key}`);
+    }
+    await putImmutableRaw(runtime.RAW_BUCKET, artifact.key, content, artifact.sha256, {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: {
+        releaseId: bundle.manifest.releaseId,
+        asOf: bundle.manifest.asOf,
+        sha256: artifact.sha256,
+      },
+    });
+  }
+  const manifestKey = `market-data/releases/${bundle.manifest.asOf}/${bundle.manifest.releaseId}/manifest.json`;
+  await putImmutableRaw(
+    runtime.RAW_BUCKET,
+    manifestKey,
+    manifestBody,
+    manifestBodySha256,
+    {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: {
+        releaseId: bundle.manifest.releaseId,
+        asOf: bundle.manifest.asOf,
+        sha256: manifestBodySha256,
+      },
+    },
+  );
+  return {
+    releaseId: bundle.manifest.releaseId,
+    asOf: bundle.manifest.asOf,
+    manifestKey,
+    manifestSha256,
+  };
+}
+
+async function activateReadModels(
+  db: D1Database,
+  release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
+  manifest: ReadModelBundle["manifest"],
+  activatedAt: string,
+): Promise<void> {
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO release_manifest (
+           release_id, as_of, schema_version, manifest_sha256, manifest_json, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)
+         ON CONFLICT(release_id) DO UPDATE SET
+           as_of = excluded.as_of,
+           schema_version = excluded.schema_version,
+           manifest_sha256 = excluded.manifest_sha256,
+           manifest_json = excluded.manifest_json,
+           status = 'ACTIVE'`,
+      )
+      .bind(
+        release.releaseId,
+        release.asOf,
+        manifest.schemaVersion,
+        release.manifestSha256,
+        JSON.stringify(manifest),
+        activatedAt,
+      ),
+    db
+      .prepare(
+        "UPDATE release_manifest SET status = 'SUPERSEDED' WHERE status = 'ACTIVE' AND release_id <> ?",
+      )
+      .bind(release.releaseId),
+    db
+      .prepare(
+        `INSERT INTO active_release (slot, release_id, as_of, manifest_sha256, activated_at)
+         VALUES ('dashboard', ?, ?, ?, ?)
+         ON CONFLICT(slot) DO UPDATE SET
+           release_id = excluded.release_id,
+           as_of = excluded.as_of,
+           manifest_sha256 = excluded.manifest_sha256,
+           activated_at = excluded.activated_at`,
+      )
+      .bind(release.releaseId, release.asOf, release.manifestSha256, activatedAt),
+  ]);
+}
+
 export async function POST(request: Request) {
   const runtime = await runtimeEnv();
   const expectedKey = runtime.INGEST_API_KEY;
@@ -433,12 +597,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid_ingest_bundle" }, { status: 422 });
   }
   const snapshot = payload.snapshot;
+  if (payload.readModels && payload.readModels.manifest.asOf !== snapshot.asOf) {
+    return NextResponse.json({ error: "read_model_snapshot_date_mismatch" }, { status: 422 });
+  }
+
+  // Retries of the same GitHub run must be idempotent. The run id is derived
+  // from the source manifest and is stable across transport retries, so a
+  // successful prior import can return without rewriting raw or dashboard
+  // objects.
+  try {
+    const existingRun = await runtime.DB
+      .prepare("SELECT status, manifest_key FROM ingest_run WHERE id = ? LIMIT 1")
+      .bind(payload.archive.runId)
+      .first<{ status: string; manifest_key: string | null }>();
+    if (existingRun?.status === "SUCCESS") {
+      return NextResponse.json({
+        status: "already_published",
+        asOf: snapshot.asOf,
+        manifestKey: existingRun.manifest_key,
+        idempotent: true,
+      });
+    }
+  } catch (error) {
+    console.warn("ingest idempotency preflight unavailable", error);
+  }
 
   try {
     const archiveResult = await archiveEtfData(
       { DB: runtime.DB, RAW_BUCKET: runtime.RAW_BUCKET },
       payload,
     );
+    const readModelResult = payload.readModels
+      ? await archiveReadModels(
+          { DB: runtime.DB, RAW_BUCKET: runtime.RAW_BUCKET },
+          payload.readModels,
+        )
+      : null;
     if (!isPublishableSnapshot(snapshot)) {
       const finishedAt = new Date().toISOString();
       await runtime.DB
@@ -461,8 +655,10 @@ export async function POST(request: Request) {
         ...archiveResult,
       });
     }
-    const flowState = await loadEtfFlowState(runtime.RAW_BUCKET);
-    const publishedSnapshot = enrichSnapshotWithEtfFlowState(snapshot, flowState);
+    // The collector must send a materialized terminal. Never load or replay
+    // the large rolling R2 state in this request: doing so made publication
+    // itself susceptible to the same Worker 1102 resource ceiling as reads.
+    const publishedSnapshot = snapshot;
     const etfQualityIssues = validateEtfTerminalCoverage(publishedSnapshot.etfTerminal);
     if (etfQualityIssues.length) {
       const finishedAt = new Date().toISOString();
@@ -494,7 +690,7 @@ export async function POST(request: Request) {
       customMetadata: {
         asOf: publishedSnapshot.asOf,
         gate: publishedSnapshot.gate,
-        etfFlowStateVersion: String(flowState?.version ?? 0),
+        etfHistoryDays: String(publishedSnapshot.etfTerminal?.historyCoverage?.tradingDays ?? 0),
       },
     });
     await runtime.DB
@@ -522,13 +718,30 @@ export async function POST(request: Request) {
       )
       .bind(publishedAt, archiveResult.manifestKey, payload.archive.runId)
       .run();
+    if (readModelResult && payload.readModels) {
+      try {
+        await activateReadModels(
+          runtime.DB,
+          readModelResult,
+          payload.readModels.manifest,
+          publishedAt,
+        );
+      } catch (pointerError) {
+        // The release pointer migration can be applied independently of the
+        // existing ingest tables. Keep the dashboard publish successful on a
+        // legacy deployment; v2 falls back to dashboard_snapshot until the
+        // migration is applied.
+        console.error("read-model release pointer unavailable", pointerError);
+      }
+    }
 
     return NextResponse.json({
       status: "published",
       asOf: publishedSnapshot.asOf,
       publishedAt,
       snapshotId,
-      etfFlowStateDates: flowState?.dates.length ?? 0,
+      etfHistoryDays: publishedSnapshot.etfTerminal?.historyCoverage?.tradingDays ?? 0,
+      readModelReleaseId: readModelResult?.releaseId ?? null,
       ...archiveResult,
     });
   } catch (error) {

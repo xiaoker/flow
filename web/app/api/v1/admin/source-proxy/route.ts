@@ -132,14 +132,42 @@ export async function GET(request: Request) {
     );
   }
 
-  const content = await upstream.arrayBuffer();
-  if (content.byteLength > MAX_RESPONSE_BYTES) {
+  const declaredLength = Number(upstream.headers.get("content-length") ?? "0");
+  if (declaredLength > MAX_RESPONSE_BYTES) {
     return NextResponse.json(
       { error: "upstream_response_too_large" },
       { status: 502 },
     );
   }
-  return new Response(content, {
+  if (!upstream.body) {
+    return new Response(null, {
+      status: upstream.status,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
+        "X-Flow-Source-Transport": "cloudflare-sse-relay",
+      },
+    });
+  }
+
+  // Stream the allowlisted response through the Worker. The previous
+  // arrayBuffer() call buffered the entire upstream payload in the request
+  // isolate, which was unnecessary CPU/memory pressure during collection.
+  // Keep a byte guard for sources that omit Content-Length.
+  let streamedBytes = 0;
+  const boundedBody = upstream.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        streamedBytes += chunk.byteLength;
+        if (streamedBytes > MAX_RESPONSE_BYTES) {
+          controller.error(new Error("upstream_response_too_large"));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(boundedBody, {
     status: upstream.status,
     headers: {
       "Cache-Control": "no-store",

@@ -1,9 +1,5 @@
 import { dashboardSnapshot, type DashboardSnapshot } from "./dashboard-data";
 import {
-  enrichSnapshotWithEtfFlowState,
-  loadEtfFlowState,
-} from "./etf-flow-state";
-import {
   enrichSnapshotWithMarketHistory,
   MARKET_HISTORY_MAX_DATES,
   type MarketHistoryRow,
@@ -21,14 +17,13 @@ const HISTORY_DATES_CACHE_TTL_MS = 60_000;
 
 type DashboardSnapshotCache = {
   db: D1Database;
-  bucket?: R2Bucket;
   value: DashboardSnapshot;
   expiresAt: number;
 };
 
 let dashboardSnapshotCache: DashboardSnapshotCache | null = null;
 let dashboardSnapshotInFlight:
-  | { db: D1Database; bucket?: R2Bucket; promise: Promise<DashboardSnapshot> }
+  | { db: D1Database; promise: Promise<DashboardSnapshot> }
   | null = null;
 
 type HistoryDatesCache = {
@@ -81,26 +76,6 @@ export function isDashboardSnapshot(value: unknown): value is DashboardSnapshot 
   );
 }
 
-/**
- * Published snapshots already contain the ETF periods and daily series built
- * by the ingestion pipeline.  Re-reading the large R2 state on every page
- * request is only needed for legacy snapshots that predate that materialized
- * view.  Keeping this check here makes the read path cheap while retaining a
- * backwards-compatible fallback for old historical snapshots and fixtures.
- */
-function needsEtfFlowStateHydration(snapshot: DashboardSnapshot): boolean {
-  const coverage = snapshot.etfTerminal?.historyCoverage;
-  return !(
-    coverage &&
-    typeof coverage.from === "string" &&
-    typeof coverage.to === "string" &&
-    Number.isInteger(coverage.tradingDays) &&
-    coverage.tradingDays > 0 &&
-    Number.isInteger(coverage.stateVersion) &&
-    coverage.stateVersion > 0
-  );
-}
-
 async function loadMarketHistoryRows(
   db: D1Database | undefined,
   asOf: string,
@@ -129,6 +104,16 @@ async function loadMarketHistoryRows(
   }
 }
 
+/**
+ * Read-only market history endpoint support. This returns a bounded, already
+ * normalized D1 result; it never touches the ETF rolling state in R2.
+ */
+export async function getMarketHistoryRows(asOf?: string): Promise<MarketHistoryRow[]> {
+  const runtime = await runtimeEnv();
+  const target = asOf && /^\d{4}-\d{2}-\d{2}$/.test(asOf) ? asOf : undefined;
+  return loadMarketHistoryRows(runtime.DB, target ?? "9999-12-31");
+}
+
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   const runtime = await runtimeEnv();
   const db = runtime.DB;
@@ -138,25 +123,20 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   if (
     dashboardSnapshotCache &&
     dashboardSnapshotCache.db === db &&
-    dashboardSnapshotCache.bucket === runtime.RAW_BUCKET &&
     dashboardSnapshotCache.expiresAt > now
   ) {
     return dashboardSnapshotCache.value;
   }
-  if (
-    dashboardSnapshotInFlight?.db === db &&
-    dashboardSnapshotInFlight.bucket === runtime.RAW_BUCKET
-  ) {
+  if (dashboardSnapshotInFlight?.db === db) {
     return dashboardSnapshotInFlight.promise;
   }
 
   const promise = readDashboardSnapshot(runtime, db);
-  dashboardSnapshotInFlight = { db, bucket: runtime.RAW_BUCKET, promise };
+  dashboardSnapshotInFlight = { db, promise };
   try {
     const value = await promise;
     dashboardSnapshotCache = {
       db,
-      bucket: runtime.RAW_BUCKET,
       value,
       expiresAt: Date.now() + DASHBOARD_CACHE_TTL_MS,
     };
@@ -186,16 +166,11 @@ async function readDashboardSnapshot(
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) {
       return dashboardSnapshot;
     }
-    const [state, marketHistory] = await Promise.all([
-      needsEtfFlowStateHydration(parsed)
-        ? loadEtfFlowState(runtime.RAW_BUCKET)
-        : Promise.resolve(null),
-      loadMarketHistoryRows(db, parsed.asOf),
-    ]);
-    return enrichSnapshotWithMarketHistory(
-      state ? enrichSnapshotWithEtfFlowState(parsed, state) : parsed,
-      marketHistory,
-    );
+    // ETF terminal data is a release artifact. Never load the rolling R2
+    // state or aggregate the full ETF universe in a user request: that path
+    // is the primary cause of Worker 1102 failures.
+    const marketHistory = await loadMarketHistoryRows(db, parsed.asOf);
+    return enrichSnapshotWithMarketHistory(parsed, marketHistory);
   } catch {
     return dashboardSnapshot;
   }
@@ -249,16 +224,10 @@ async function readHistoricalSnapshot(
     if (!object) return null;
     const parsed: unknown = JSON.parse(await object.text());
     if (!isDashboardSnapshot(parsed) || !isPublishableSnapshot(parsed)) return null;
-    const [state, marketHistory] = await Promise.all([
-      needsEtfFlowStateHydration(parsed)
-        ? loadEtfFlowState(runtime.RAW_BUCKET)
-        : Promise.resolve(null),
-      loadMarketHistoryRows(runtime.DB, parsed.asOf),
-    ]);
     return {
       snapshot: enrichSnapshotWithMarketHistory(
-        state ? enrichSnapshotWithEtfFlowState(parsed, state) : parsed,
-        marketHistory,
+        parsed,
+        await loadMarketHistoryRows(runtime.DB, parsed.asOf),
       ),
       exact,
     };

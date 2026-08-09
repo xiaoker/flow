@@ -377,6 +377,12 @@ def _build_etf_terminal_data(
             "coverageDate": latest_date,
             "warning": "缺少对应日期官方单位净值的 ETF 不计入金额汇总",
         },
+        "historyCoverage": {
+            "from": available_dates[0],
+            "to": available_dates[-1],
+            "tradingDays": len(available_dates),
+            "stateVersion": 1,
+        },
         "universe": {
             "total": len(instruments),
             "excluded": sum(exclusion_counts.values()),
