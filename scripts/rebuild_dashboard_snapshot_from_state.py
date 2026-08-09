@@ -29,10 +29,24 @@ def main() -> None:
     state_dates = [str(value) for value in state.get("dates") or []]
     if not state_dates:
         raise ValueError("state has no dates")
-    if state_dates[-1] != args.as_of:
-        raise ValueError(
-            f"state latest date {state_dates[-1]} does not match --as-of {args.as_of}"
-        )
+    if args.as_of not in state_dates:
+        raise ValueError(f"state does not contain requested --as-of {args.as_of}")
+    target_index = state_dates.index(args.as_of)
+    if target_index != len(state_dates) - 1:
+        # A state pointer can be newer than the last complete cross-market
+        # dashboard day (for example, ETF shares arrive before SZSE margin).
+        # Trim the offline state to the same release date instead of mixing
+        # newer ETF observations into an older dashboard.
+        state = dict(state)
+        state["dates"] = state_dates[: target_index + 1]
+        state["instruments"] = [
+            {
+                **item,
+                "values": list(item.get("values") or [])[: target_index + 1],
+                "cashValues": list(item.get("cashValues") or [])[: target_index + 1],
+            }
+            for item in state.get("instruments") or []
+        ]
 
     terminal = materialize_etf_terminal(
         state,
