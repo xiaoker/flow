@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA_VERSION = 2
 VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin")
-ISO_DATE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class ReadModelError(ValueError):
