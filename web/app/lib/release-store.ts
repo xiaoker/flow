@@ -46,7 +46,13 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
       }>();
     if (!row) return null;
     const manifest: unknown = JSON.parse(row.manifest_json);
-    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
+    if (
+      !manifest ||
+      typeof manifest !== "object" ||
+      Array.isArray(manifest) ||
+      (manifest as Record<string, unknown>).releaseId !== row.release_id ||
+      (manifest as Record<string, unknown>).asOf !== row.as_of
+    ) return null;
     return {
       releaseId: row.release_id,
       asOf: row.as_of,
@@ -104,15 +110,18 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
           : null;
       if (active && typeof bootstrapKey === "string") {
         const object = await runtime.RAW_BUCKET.get(bootstrapKey);
-        if (object) {
-          return {
-            object,
-            asOf: active.asOf,
-            releaseId: active.releaseId,
-            historical: false,
-          };
-        }
+        // An active pointer is authoritative. If its object is missing or
+        // carries a different date, fail closed instead of silently showing
+        // an older dashboard_snapshot and misleading the user.
+        if (!object || object.customMetadata?.asOf !== active.asOf) return null;
+        return {
+          object,
+          asOf: active.asOf,
+          releaseId: active.releaseId,
+          historical: false,
+        };
       }
+      if (active) return null;
       row = await runtime.DB
         .prepare(
           `SELECT id, as_of, r2_object_key
@@ -126,7 +135,7 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
     if (!row) return null;
 
     const object = await runtime.RAW_BUCKET.get(row.r2_object_key);
-    if (!object) return null;
+    if (!object || object.customMetadata?.asOf !== row.as_of) return null;
     return {
       object,
       asOf: row.as_of,
@@ -147,6 +156,7 @@ export function responseFromPublishedObject(
     return new Response(null, {
       status: 304,
       headers: {
+        "Cache-Control": "private, no-store, must-revalidate",
         ETag: etag,
         "X-Flow-As-Of": published.asOf,
         "X-Flow-Release-Id": published.releaseId,
@@ -155,7 +165,10 @@ export function responseFromPublishedObject(
   }
   return new Response(published.object.body, {
     headers: {
-      "Cache-Control": "private, max-age=30, must-revalidate",
+      // A dashboard snapshot is selected by a mutable D1 release pointer.
+      // Do not let the browser keep yesterday's pointer result after a new
+      // collection has completed.
+      "Cache-Control": "private, no-store, must-revalidate",
       "Content-Type": published.object.httpMetadata?.contentType ?? "application/json; charset=utf-8",
       ...(etag ? { ETag: etag } : {}),
       "X-Flow-As-Of": published.asOf,

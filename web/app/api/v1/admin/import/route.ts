@@ -245,6 +245,24 @@ async function sha256Hex(content: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function verifyImmutableReadModel(
+  bucket: R2Bucket,
+  key: string,
+  bytes: number,
+  sha256: string,
+): Promise<void> {
+  // R2 exposes head() in production. Keep the compatibility guard for the
+  // lightweight test adapter, but never activate a release without checking
+  // size and digest when the real bucket is available.
+  if (typeof bucket.head !== "function") return;
+  const object = await bucket.head(key);
+  if (!object) throw new Error(`read_model_missing_after_upload:${key}`);
+  if (object.size !== bytes) throw new Error(`read_model_size_after_upload:${key}`);
+  if (object.customMetadata?.sha256 !== sha256) {
+    throw new Error(`read_model_digest_after_upload:${key}`);
+  }
+}
+
 async function putImmutableRaw(
   bucket: R2Bucket,
   key: string,
@@ -497,6 +515,7 @@ async function archiveReadModels(
         sha256: artifact.sha256,
       },
     });
+    await verifyImmutableReadModel(runtime.RAW_BUCKET, artifact.key, artifact.bytes, artifact.sha256);
   }
   const manifestKey = `market-data/releases/${bundle.manifest.asOf}/${bundle.manifest.releaseId}/manifest.json`;
   await putImmutableRaw(
@@ -512,6 +531,12 @@ async function archiveReadModels(
         sha256: manifestBodySha256,
       },
     },
+  );
+  await verifyImmutableReadModel(
+    runtime.RAW_BUCKET,
+    manifestKey,
+    new TextEncoder().encode(manifestBody).byteLength,
+    manifestBodySha256,
   );
   return {
     releaseId: bundle.manifest.releaseId,

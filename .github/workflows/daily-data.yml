@@ -205,7 +205,15 @@ jobs:
             --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
             --header "Content-Type: application/json" \
             --data-binary @ingest-bundle.json \
+            --output publish-response.json \
             "$PUBLISH_URL"
+          jq -e '
+            (.status == "published" or .status == "already_published") and
+            (.readModelActivation == null or
+             .readModelActivation == "activated" or
+             .readModelActivation == "staged_older_than_active")
+          ' publish-response.json >/dev/null
+          jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
 
       - name: Fail loudly on unresolved source errors
         if: always()
@@ -237,3 +245,4 @@ jobs:
             reports/backfill/latest-summary.json
             history-bundle.json
             read-models/
+            publish-response.json

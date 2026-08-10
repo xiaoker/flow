@@ -535,6 +535,7 @@ test("streams an archived dashboard for an explicitly selected date", async () =
         body: new Response(JSON.stringify(archived)).body,
         httpMetadata: { contentType: "application/json; charset=utf-8" },
         httpEtag: '"archived-test"',
+        customMetadata: { asOf: "2025-01-02" },
       };
     },
   };
@@ -596,6 +597,7 @@ test("streams the active release through the D1 pointer without parsing it", asy
         body: new Response(JSON.stringify(snapshot)).body,
         httpMetadata: { contentType: "application/json; charset=utf-8" },
         httpEtag: '"active-release"',
+        customMetadata: { asOf: manifest.asOf, releaseId: manifest.releaseId },
       };
     },
   };
@@ -607,6 +609,58 @@ test("streams the active release through the D1 pointer without parsing it", asy
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-flow-release-id"), manifest.releaseId);
   assert.deepEqual(await response.json(), snapshot);
+});
+
+test("fails closed when the active release object is missing", async () => {
+  const worker = await loadWorker();
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return this;
+        },
+        async first() {
+          if (sql.includes("active_release")) {
+            return {
+              release_id: "release:2026-08-07:0123456789abcdef",
+              as_of: "2026-08-07",
+              manifest_sha256: "a".repeat(64),
+              activated_at: "2026-08-07T09:00:00+08:00",
+              manifest_json: JSON.stringify({
+                releaseId: "release:2026-08-07:0123456789abcdef",
+                asOf: "2026-08-07",
+                artifacts: {
+                  bootstrap: {
+                    key: "market-data/releases/2026-08-07/release:2026-08-07:0123456789abcdef/bootstrap.json",
+                  },
+                },
+              }),
+            };
+          }
+          if (sql.includes("dashboard_snapshot")) {
+            return {
+              id: "old-dashboard",
+              as_of: "2026-08-06",
+              r2_object_key: "dashboard/2026-08-06/old.json",
+            };
+          }
+          return null;
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.match(key, /2026-08-07/);
+      return null;
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v2/dashboard"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 503);
 });
 
 test("archives full-source history with server-side hash verification", async () => {
