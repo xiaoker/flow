@@ -526,19 +526,28 @@ async function activateReadModels(
   release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
   manifest: ReadModelBundle["manifest"],
   activatedAt: string,
-): Promise<void> {
+): Promise<"activated" | "staged_older_than_active"> {
+  // A delayed/retried collection can finish after a newer trading date has
+  // already been published. The release pointer is a monotonic cursor: a
+  // newer date may replace an older one, and a release for the same date may
+  // correct it, but an older date must remain staged. Keep the guard in SQL
+  // so concurrent imports cannot regress the pointer between a preflight read
+  // and write.
   await db.batch([
     db
       .prepare(
         `INSERT INTO release_manifest (
            release_id, as_of, schema_version, manifest_sha256, manifest_json, status, created_at
-         ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)
+         ) VALUES (?, ?, ?, ?, ?, 'STAGED', ?)
          ON CONFLICT(release_id) DO UPDATE SET
            as_of = excluded.as_of,
            schema_version = excluded.schema_version,
            manifest_sha256 = excluded.manifest_sha256,
            manifest_json = excluded.manifest_json,
-           status = 'ACTIVE'`,
+           status = CASE
+             WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
+             ELSE 'STAGED'
+           END`,
       )
       .bind(
         release.releaseId,
@@ -550,9 +559,33 @@ async function activateReadModels(
       ),
     db
       .prepare(
-        "UPDATE release_manifest SET status = 'SUPERSEDED' WHERE status = 'ACTIVE' AND release_id <> ?",
+        `UPDATE release_manifest
+         SET status = 'SUPERSEDED'
+         WHERE status = 'ACTIVE'
+           AND release_id <> ?
+           AND (
+             NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+             OR EXISTS (
+               SELECT 1 FROM active_release
+               WHERE slot = 'dashboard' AND as_of <= ?
+             )
+           )`,
       )
-      .bind(release.releaseId),
+      .bind(release.releaseId, release.asOf),
+    db
+      .prepare(
+        `UPDATE release_manifest
+         SET status = 'ACTIVE'
+         WHERE release_id = ?
+           AND (
+             NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+             OR EXISTS (
+               SELECT 1 FROM active_release
+               WHERE slot = 'dashboard' AND as_of <= ?
+             )
+           )`,
+      )
+      .bind(release.releaseId, release.asOf),
     db
       .prepare(
         `INSERT INTO active_release (slot, release_id, as_of, manifest_sha256, activated_at)
@@ -561,10 +594,23 @@ async function activateReadModels(
            release_id = excluded.release_id,
            as_of = excluded.as_of,
            manifest_sha256 = excluded.manifest_sha256,
-           activated_at = excluded.activated_at`,
+           activated_at = excluded.activated_at
+         WHERE excluded.as_of >= active_release.as_of`,
       )
       .bind(release.releaseId, release.asOf, release.manifestSha256, activatedAt),
   ]);
+
+  const active = await db
+    .prepare(
+      `SELECT release_id
+       FROM active_release
+       WHERE slot = 'dashboard'
+       LIMIT 1`,
+    )
+    .first<{ release_id: string }>();
+  return active?.release_id === release.releaseId
+    ? "activated"
+    : "staged_older_than_active";
 }
 
 export async function POST(request: Request) {
@@ -718,9 +764,10 @@ export async function POST(request: Request) {
       )
       .bind(publishedAt, archiveResult.manifestKey, payload.archive.runId)
       .run();
+    let readModelActivation: "activated" | "staged_older_than_active" | "unavailable" | null = null;
     if (readModelResult && payload.readModels) {
       try {
-        await activateReadModels(
+        readModelActivation = await activateReadModels(
           runtime.DB,
           readModelResult,
           payload.readModels.manifest,
@@ -732,6 +779,7 @@ export async function POST(request: Request) {
         // legacy deployment; v2 falls back to dashboard_snapshot until the
         // migration is applied.
         console.error("read-model release pointer unavailable", pointerError);
+        readModelActivation = "unavailable";
       }
     }
 
@@ -742,6 +790,7 @@ export async function POST(request: Request) {
       snapshotId,
       etfHistoryDays: publishedSnapshot.etfTerminal?.historyCoverage?.tradingDays ?? 0,
       readModelReleaseId: readModelResult?.releaseId ?? null,
+      readModelActivation,
       ...archiveResult,
     });
   } catch (error) {

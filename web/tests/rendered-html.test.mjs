@@ -178,7 +178,15 @@ test("requires explicit confirmation before opening a historical date", async ()
   assert.match(source, /setDraftDate\(event\.target\.value\)/);
   assert.match(source, />\s*查看\s*<\/button>/);
   assert.match(source, /if \(!availableDates\.includes\(date\)\)/);
+  assert.match(source, /url\.searchParams\.set\("date", date\)/);
   assert.doesNotMatch(source, /onChange=\{\(event\) => event\.target\.value && openDate/);
+
+  const importSource = await readFile(
+    new URL("../app/api/v1/admin/import/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(importSource, /staged_older_than_active/);
+  assert.match(importSource, /WHERE excluded\.as_of >= active_release\.as_of/);
 });
 
 test("exposes connect trend series without inventing northbound direction", async () => {

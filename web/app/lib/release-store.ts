@@ -118,7 +118,7 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
           `SELECT id, as_of, r2_object_key
            FROM dashboard_snapshot
            WHERE quality_fail = 0
-           ORDER BY published_at DESC
+           ORDER BY as_of DESC, published_at DESC
            LIMIT 1`,
         )
         .first<DashboardReleaseRow>();
