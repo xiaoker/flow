@@ -735,10 +735,12 @@ export function Dashboard({
       return;
     }
     const url = new URL(window.location.href);
-    // Keep an explicit date even for “最新”. The date index is the latest
-    // complete historical snapshot; relying on the mutable active pointer
-    // allowed a delayed older run to make “最新” show the previous day.
-    url.searchParams.set("date", date);
+    // “最新” must use the active release. It contains the complete
+    // materialized ETF state; the historical archive is intentionally a
+    // compact snapshot and may only contain the 1d terminal period.
+    const latest = availableDates.at(-1);
+    if (date === latest) url.searchParams.delete("date");
+    else url.searchParams.set("date", date);
     if (view === "overview") url.searchParams.delete("view");
     else url.searchParams.set("view", view);
     window.location.assign(`${url.pathname}${url.search}`);

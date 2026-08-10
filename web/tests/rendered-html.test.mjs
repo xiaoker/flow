@@ -179,6 +179,8 @@ test("requires explicit confirmation before opening a historical date", async ()
   assert.match(source, />\s*查看\s*<\/button>/);
   assert.match(source, /if \(!availableDates\.includes\(date\)\)/);
   assert.match(source, /url\.searchParams\.set\("date", date\)/);
+  assert.match(source, /const latest = availableDates\.at\(-1\)/);
+  assert.match(source, /if \(date === latest\) url\.searchParams\.delete\("date"\)/);
   assert.doesNotMatch(source, /onChange=\{\(event\) => event\.target\.value && openDate/);
 
   const importSource = await readFile(
@@ -609,6 +611,64 @@ test("streams the active release through the D1 pointer without parsing it", asy
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-flow-release-id"), manifest.releaseId);
   assert.deepEqual(await response.json(), snapshot);
+});
+
+test("routes an explicit active date to the complete active release", async () => {
+  const worker = await loadWorker();
+  const snapshot = {
+    asOf: "2026-08-06",
+    mode: "官方数据快照",
+    quality: { fail: 0 },
+    etfTerminal: { availablePeriods: ["1d", "3d", "1w"] },
+  };
+  const manifest = {
+    schemaVersion: 2,
+    releaseId: "release:2026-08-06:fedcba9876543210",
+    asOf: "2026-08-06",
+    artifacts: {
+      bootstrap: {
+        key: "market-data/releases/2026-08-06/release:2026-08-06:fedcba9876543210/bootstrap.json",
+      },
+    },
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        bind() { return this; },
+        async first() {
+          if (sql.includes("active_release")) {
+            return {
+              release_id: manifest.releaseId,
+              as_of: manifest.asOf,
+              manifest_sha256: "b".repeat(64),
+              activated_at: "2026-08-06T09:00:00+08:00",
+              manifest_json: JSON.stringify(manifest),
+            };
+          }
+          throw new Error("historical archive must not be queried for active date");
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.equal(key, manifest.artifacts.bootstrap.key);
+      return {
+        body: new Response(JSON.stringify(snapshot)).body,
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        httpEtag: '"active-date"',
+        customMetadata: { asOf: manifest.asOf, releaseId: manifest.releaseId },
+      };
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v2/dashboard?date=2026-08-06"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-flow-historical"), "false");
+  assert.deepEqual((await response.json()).etfTerminal.availablePeriods, ["1d", "3d", "1w"]);
 });
 
 test("fails closed when the active release object is missing", async () => {

@@ -20,6 +20,8 @@ type HistoricalReleaseRow = {
   r2_object_key: string;
 };
 
+type Runtime = Awaited<ReturnType<typeof runtimeEnv>>;
+
 export type ActiveReleaseManifest = {
   releaseId: string;
   asOf: string;
@@ -72,6 +74,46 @@ export async function getActiveReleaseManifest(): Promise<ActiveReleaseManifest 
   return db ? readActiveReleaseManifest(db) : null;
 }
 
+function bootstrapKeyFromManifest(active: ActiveReleaseManifest): string | null {
+  const bootstrap = active.manifest?.artifacts;
+  const bootstrapArtifact =
+    bootstrap && typeof bootstrap === "object" && !Array.isArray(bootstrap)
+      ? (bootstrap as Record<string, unknown>).bootstrap
+      : null;
+  const bootstrapKey =
+    bootstrapArtifact && typeof bootstrapArtifact === "object" && !Array.isArray(bootstrapArtifact)
+      ? (bootstrapArtifact as Record<string, unknown>).key
+      : null;
+  return typeof bootstrapKey === "string" ? bootstrapKey : null;
+}
+
+async function readActivePublishedObject(
+  runtime: Runtime,
+  active: ActiveReleaseManifest,
+): Promise<PublishedObject | null> {
+  if (!runtime.RAW_BUCKET) return null;
+  const bootstrapKey = bootstrapKeyFromManifest(active);
+  if (!bootstrapKey) return null;
+  const object = await runtime.RAW_BUCKET.get(bootstrapKey);
+  // An active pointer is authoritative. If its object is missing or carries
+  // a different date/release, fail closed instead of serving an older
+  // snapshot. This is also the safe path for an explicit `?date=` request
+  // that names the currently active date.
+  const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
+  if (
+    !bootstrapKey.startsWith(releasePrefix) ||
+    !object ||
+    object.customMetadata?.asOf !== active.asOf ||
+    object.customMetadata?.releaseId !== active.releaseId
+  ) return null;
+  return {
+    object,
+    asOf: active.asOf,
+    releaseId: active.releaseId,
+    historical: false,
+  };
+}
+
 /**
  * Resolve a validated release pointer without reading its JSON body. The
  * caller can stream the R2 body directly to the browser, which keeps the
@@ -86,6 +128,16 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
 
     let row: DashboardReleaseRow | HistoricalReleaseRow | null;
     let historical = false;
+    const active = await readActiveReleaseManifest(runtime.DB);
+
+    // The latest date is represented by the active release, not by the
+    // short historical snapshot created by the collection/archive path. A
+    // browser may still retain `?date=<latest>` from an older UI version,
+    // so resolve that URL to the same complete release as the date-less URL.
+    if (requestedDate && active?.asOf === requestedDate) {
+      return await readActivePublishedObject(runtime, active);
+    }
+
     if (requestedDate) {
       historical = true;
       row = await runtime.DB
@@ -98,36 +150,7 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
         .bind(requestedDate)
         .first<HistoricalReleaseRow>();
     } else {
-      const active = await readActiveReleaseManifest(runtime.DB);
-      const bootstrap = active?.manifest?.artifacts;
-      const bootstrapArtifact =
-        bootstrap && typeof bootstrap === "object" && !Array.isArray(bootstrap)
-          ? (bootstrap as Record<string, unknown>).bootstrap
-          : null;
-      const bootstrapKey =
-        bootstrapArtifact && typeof bootstrapArtifact === "object" && !Array.isArray(bootstrapArtifact)
-          ? (bootstrapArtifact as Record<string, unknown>).key
-          : null;
-      if (active && typeof bootstrapKey === "string") {
-        const object = await runtime.RAW_BUCKET.get(bootstrapKey);
-        // An active pointer is authoritative. If its object is missing or
-        // carries a different date, fail closed instead of silently showing
-        // an older dashboard_snapshot and misleading the user.
-        const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
-        if (
-          !bootstrapKey.startsWith(releasePrefix) ||
-          !object ||
-          object.customMetadata?.asOf !== active.asOf ||
-          object.customMetadata?.releaseId !== active.releaseId
-        ) return null;
-        return {
-          object,
-          asOf: active.asOf,
-          releaseId: active.releaseId,
-          historical: false,
-        };
-      }
-      if (active) return null;
+      if (active) return await readActivePublishedObject(runtime, active);
       row = await runtime.DB
         .prepare(
           `SELECT id, as_of, r2_object_key
