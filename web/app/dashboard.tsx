@@ -147,7 +147,7 @@ const confidenceLabels: Record<string, string> = {
   low: "低",
 };
 
-const AUTO_REFRESH_MS = 5 * 60 * 1000;
+const AUTO_REFRESH_MS = 30 * 60 * 1000;
 
 function formatFlow(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
@@ -763,7 +763,7 @@ export function Dashboard({
     let lastCheck = Date.now();
     const refresh = () => {
       if (document.visibilityState === "visible") {
-        void (onAutoRefresh ? onAutoRefresh() : window.location.reload());
+        if (onAutoRefresh) void onAutoRefresh();
       }
     };
     const interval = window.setInterval(refresh, AUTO_REFRESH_MS);
@@ -834,15 +834,15 @@ export function Dashboard({
         <div className="top-actions">
           <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim() && view !== "national") setView("radar"); }} placeholder={view === "national" ? "搜索观察池 ETF 或代码" : "搜索基金或代码，回车查看"} value={query} /></label>
           <button className="icon-button" title="打印或保存当前页面" onClick={() => window.print()} type="button"><Camera size={19} /></button>
-          <button className={`refresh-toggle ${autoRefresh && !requestedDate ? "enabled" : ""}`} aria-pressed={autoRefresh && !requestedDate} disabled={Boolean(requestedDate) || refreshing} onClick={() => setAutoRefresh((value) => !value)} title={requestedDate ? "历史归档不会自动切换日期" : "每 5 分钟检查最新发布数据"} type="button"><span /><em>{refreshing ? "检查中" : "自动更新"}</em></button>
-          <button className={`icon-button ${refreshing ? "is-refreshing" : ""}`} title="刷新数据" aria-label="刷新数据" disabled={refreshing} onClick={() => void (onRefresh ? onRefresh() : window.location.reload())} type="button"><ArrowsClockwise size={19} /></button>
+          <button className={`refresh-toggle ${autoRefresh && !requestedDate ? "enabled" : ""}`} aria-pressed={autoRefresh && !requestedDate} disabled={Boolean(requestedDate) || refreshing} onClick={() => setAutoRefresh((value) => !value)} title={requestedDate ? "历史归档不会自动切换日期" : "每 30 分钟检查最新发布数据"} type="button"><span /><em>{refreshing ? "检查中" : "自动更新"}</em></button>
+          <button className={`icon-button ${refreshing ? "is-refreshing" : ""}`} title="刷新数据" aria-label="刷新数据" disabled={refreshing} onClick={() => void onRefresh?.()} type="button"><ArrowsClockwise size={19} /></button>
         </div>
       </header>
 
-      {(refreshing || refreshError) && (
-        <div className={`refresh-status ${refreshError ? "is-error" : ""}`} role="status" aria-live="polite">
+      {refreshError && (
+        <div className="refresh-status is-error" role="status" aria-live="polite">
           <ArrowsClockwise size={15} />
-          <span>{refreshError ?? "正在检查最新发布版本，当前数据继续可用"}</span>
+          <span>{refreshError}</span>
         </div>
       )}
 

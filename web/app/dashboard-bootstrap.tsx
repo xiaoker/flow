@@ -16,6 +16,9 @@ type ReleasePointer = {
   asOf?: string;
 };
 
+const REQUEST_TIMEOUT_MS = 15_000;
+const REFRESH_ERROR_THRESHOLD = 3;
+
 function requestedView(value: string | null): DeskView | undefined {
   return value === "rotation" || value === "radar" || value === "national" || value === "connect" || value === "margin"
     ? value
@@ -32,6 +35,7 @@ export function DashboardBootstrap() {
   const releaseIdRef = useRef<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
   const refreshInFlightRef = useRef(false);
+  const refreshFailureCountRef = useRef(0);
   const mountedRef = useRef(true);
 
   const getRequestedDate = useCallback(() => {
@@ -50,6 +54,11 @@ export function DashboardBootstrap() {
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
 
     try {
       const [snapshotResponse, datesResponse, marketResponse] = await Promise.all([
@@ -85,7 +94,11 @@ export function DashboardBootstrap() {
         setError(null);
       }
       return enrichedSnapshot;
+    } catch (cause: unknown) {
+      if (timedOut) throw new Error("request_timeout");
+      throw cause;
     } finally {
+      window.clearTimeout(timeoutId);
       if (requestRef.current === controller) requestRef.current = null;
     }
   }, [getRequestedDate]);
@@ -109,7 +122,24 @@ export function DashboardBootstrap() {
       const date = getRequestedDate();
       let expectedReleaseId: string | undefined;
       if (!force && !date) {
-        const pointerResponse = await fetch("/api/v2/releases/latest", { cache: "no-store" });
+        const pointerController = new AbortController();
+        let pointerTimedOut = false;
+        const pointerTimeoutId = window.setTimeout(() => {
+          pointerTimedOut = true;
+          pointerController.abort();
+        }, REQUEST_TIMEOUT_MS);
+        let pointerResponse: Response;
+        try {
+          pointerResponse = await fetch("/api/v2/releases/latest", {
+            cache: "no-store",
+            signal: pointerController.signal,
+          });
+        } catch (cause: unknown) {
+          if (pointerTimedOut) throw new Error("request_timeout");
+          throw cause;
+        } finally {
+          window.clearTimeout(pointerTimeoutId);
+        }
         if (!pointerResponse.ok) throw new Error("release_check_failed");
         const pointer = await pointerResponse.json() as ReleasePointer;
         if (!pointer.releaseId || !pointer.asOf) throw new Error("release_check_failed");
@@ -118,16 +148,21 @@ export function DashboardBootstrap() {
           ((releaseIdRef.current && pointer.releaseId === releaseIdRef.current) ||
             (!releaseIdRef.current && pointer.asOf === snapshotRef.current.asOf)),
         );
-        if (sameRelease) return;
+        if (sameRelease) {
+          refreshFailureCountRef.current = 0;
+          return;
+        }
         expectedReleaseId = pointer.releaseId;
       }
       await loadSnapshot(expectedReleaseId);
+      refreshFailureCountRef.current = 0;
     } catch (cause: unknown) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
-      if (mountedRef.current) {
+      refreshFailureCountRef.current += 1;
+      if (mountedRef.current && refreshFailureCountRef.current >= REFRESH_ERROR_THRESHOLD) {
         setRefreshError(cause instanceof Error && cause.message === "release_pending"
-          ? "新版本正在发布，暂时保留当前数据"
-          : "自动更新暂时失败，继续显示上一份完整数据");
+          ? "新版本仍在发布，暂时保留当前完整数据"
+          : "自动更新连续失败，已保留上一份完整数据；下次检查会自动重试");
       }
     } finally {
       refreshInFlightRef.current = false;
@@ -152,7 +187,7 @@ export function DashboardBootstrap() {
       <main className="terminal-shell bootstrap-state" role="alert">
         <div className="bootstrap-card">
           <strong>暂时无法读取完整数据</strong>
-          <span>{error}</span>
+          <span>{error === "request_timeout" ? "数据请求超时，请稍后重试" : error}</span>
           <button type="button" onClick={retryInitialLoad}>重新加载</button>
         </div>
       </main>
@@ -163,8 +198,8 @@ export function DashboardBootstrap() {
     return (
       <main className="terminal-shell bootstrap-state" aria-busy="true">
         <div className="bootstrap-card">
-          <strong>正在读取最新发布版本</strong>
-          <span>只读取已经通过 QA 的完整数据，不在 Worker 请求中重算 ETF 状态。</span>
+          <strong>正在加载已发布数据</strong>
+          <span>只读取已经通过 QA 的完整快照；若网络暂时不可用，会保留当前数据并支持重试。</span>
         </div>
       </main>
     );

@@ -70,13 +70,16 @@ test("refreshes the latest dashboard and schedules collection through source rel
     readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
   ]);
   const config = JSON.parse(configText);
-  assert.match(source, /AUTO_REFRESH_MS = 5 \* 60 \* 1000/);
+  assert.match(source, /AUTO_REFRESH_MS = 30 \* 60 \* 1000/);
   assert.match(source, /window\.setInterval\(refresh, AUTO_REFRESH_MS\)/);
   assert.match(source, /if \(!autoRefresh \|\| requestedDate\) return/);
   assert.match(source, /onAutoRefresh/);
   assert.doesNotMatch(source, /if \(document\.visibilityState === "visible"\) window\.location\.reload\(\);/);
   assert.match(bootstrapSource, /\/api\/v2\/releases\/latest/);
   assert.match(bootstrapSource, /release_pending/);
+  assert.match(bootstrapSource, /REFRESH_ERROR_THRESHOLD = 3/);
+  assert.match(bootstrapSource, /REQUEST_TIMEOUT_MS = 15_000/);
+  assert.doesNotMatch(source, /window\.location\.reload\(\)/);
   assert.match(bootstrapSource, /cache: "no-store"/);
   assert.deepEqual(config.triggers.crons, [
     "30 10 * * mon-fri",
