@@ -11,12 +11,28 @@ from trading_desk.models import FetchArtifact
 from trading_desk.models import QualityFinding
 from trading_desk.release_qa import (
     _future_only_failure,
+    _expected_szse_etf,
     _pending_future_warning,
     validate_artifact_lineage,
     validate_combined_data,
     validate_etf_terminal_data,
     validate_etf_terminal_identity,
 )
+
+
+def test_expected_szse_etf_matches_collector_universe_rule(tmp_path: Path) -> None:
+    workbook = tmp_path / "szse.xlsx"
+    pd.DataFrame(
+        [
+            {"基金代码": "159001", "基金简称": "示例ETF", "基金类别": "ETF", "当前规模(份)": "100", "净值": "1.0"},
+            {"基金代码": "180101", "基金简称": "示例REIT", "基金类别": "REIT", "当前规模(份)": "200", "净值": "1.0"},
+        ]
+    ).to_excel(workbook, index=False)
+
+    expected = _expected_szse_etf(workbook.read_bytes(), "2026-08-07")
+
+    assert expected["instrument_code"].tolist() == ["159001"]
+    assert len(expected) == 1
 
 
 def _artifact(

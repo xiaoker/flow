@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from trading_desk.etf_flow_state import build_etf_flow_state
+from trading_desk.etf_flow_state import build_etf_flow_state, materialize_etf_terminal
 
 
 def _snapshot(
@@ -84,3 +84,35 @@ def test_keeps_only_requested_rolling_window(tmp_path: Path) -> None:
 
     assert state["dates"] == ["2026-07-02", "2026-07-03", "2026-07-04"]
     assert state["instruments"][0]["values"] == [2.0, 3.0, 4.0]
+
+
+def test_materialization_hides_instruments_absent_from_latest_official_day() -> None:
+    state = {
+        "version": 1,
+        "classificationVersion": "2026-07-v3",
+        "dates": ["2026-08-06", "2026-08-07"],
+        "instruments": [
+            {
+                "code": "510300",
+                "name": "沪深300ETF",
+                "market": "SSE",
+                "category": "宽基",
+                "values": [1.0, 2.0],
+                "cashValues": [1.0, 2.0],
+            },
+            {
+                "code": "512280",
+                "name": " stale ETF ",
+                "market": "SSE",
+                "category": "科技",
+                "values": [3.0, None],
+                "cashValues": [3.0, None],
+            },
+        ],
+    }
+
+    terminal = materialize_etf_terminal(state)
+
+    assert [item["code"] for item in terminal["instruments"]] == ["510300"]
+    assert terminal["dailySeries"][0]["coverage"] == 2
+    assert terminal["dailySeries"][1]["coverage"] == 1

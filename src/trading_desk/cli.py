@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     qa.add_argument("--manifest", type=Path, default=Path("reports/phase0/latest-manifest.json"))
     qa.add_argument("--quality", type=Path, default=Path("reports/phase0/latest-quality-summary.json"))
     qa.add_argument("--snapshot", type=Path, default=Path("dashboard-snapshot.json"))
+    qa.add_argument("--state", type=Path, help="Verified rolling ETF state used to reproduce materialized terminal")
     qa.add_argument("--output", type=Path, default=Path("reports/phase0/latest-release-qa.json"))
     return parser
 
@@ -61,6 +62,7 @@ def main() -> None:
             snapshot_path=args.snapshot,
             output_path=args.output,
             workspace_root=Path.cwd(),
+            state_path=args.state,
         )
         summary = {
             "run_id": report.get("run_id"),

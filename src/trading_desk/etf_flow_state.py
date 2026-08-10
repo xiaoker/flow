@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -238,6 +239,8 @@ def materialize_etf_terminal(
             return None
         return number if math.isfinite(number) else None
 
+    latest_index = len(dates) - 1
+
     available_periods: list[str] = []
     anchors: dict[str, int] = {}
     for period, offset in PERIOD_LOOKBACKS.items():
@@ -251,6 +254,15 @@ def materialize_etf_terminal(
 
     instruments: list[dict[str, Any]] = []
     for state_item in state_rows:
+        # The rolling state intentionally keeps instruments that were present
+        # on an earlier official day so their historical series remain
+        # reproducible.  They are not part of the current display universe,
+        # however, when the latest official snapshot has no row for them.
+        # Excluding these inactive rows prevents stale metadata from failing
+        # raw-to-terminal identity QA and avoids showing obsolete ETFs as if
+        # they still traded.
+        if value_at(state_item, "values", latest_index) is None:
+            continue
         key = key_for(state_item)
         original = base_by_key.get(key, {})
         merged = {**original, **{
@@ -386,3 +398,66 @@ def materialize_etf_terminal(
             "cashFlowEligible": cash_eligible,
         },
     }
+
+
+def _trim_etf_flow_state(state: dict[str, Any], as_of: str) -> dict[str, Any]:
+    dates = [str(value) for value in state.get("dates") or []]
+    if not dates:
+        raise ValueError("ETF state has no dates")
+    if as_of not in dates:
+        raise ValueError(f"ETF state does not contain requested date: {as_of}")
+    target_index = dates.index(as_of)
+    if target_index == len(dates) - 1:
+        return state
+    trimmed = deepcopy(state)
+    trimmed["dates"] = dates[: target_index + 1]
+    for item in trimmed.get("instruments") or []:
+        if not isinstance(item, dict):
+            continue
+        item["values"] = list(item.get("values") or [])[: target_index + 1]
+        item["cashValues"] = list(item.get("cashValues") or [])[: target_index + 1]
+    return trimmed
+
+
+def materialize_dashboard_snapshot(
+    snapshot: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Overlay a verified rolling ETF state onto a base dashboard snapshot.
+
+    Collection and cross-market completeness are decided by
+    :func:`build_dashboard_snapshot`; this helper only performs the offline
+    state materialization after the history importer has persisted the latest
+    ETF state.  Keeping this step pure makes the final artifact reproducible
+    in release QA and keeps large-state work out of Worker requests.
+    """
+
+    target = str(as_of or snapshot.get("asOf") or "")
+    if not target:
+        raise ValueError("dashboard snapshot has no asOf")
+    trimmed_state = _trim_etf_flow_state(state, target)
+    result = deepcopy(snapshot)
+    result["asOf"] = target
+    result["gate"] = "conditional_pass"
+    publication = dict(result.get("publication") or {})
+    publication.update(
+        {
+            "status": "confirmed",
+            "targetAsOf": target,
+            "pendingDomains": [],
+            "detail": "ETF 原始份额已补齐并由离线连续官方快照物化；Worker 不再请求时重算",
+        }
+    )
+    result["publication"] = publication
+    result["etfTerminal"] = materialize_etf_terminal(
+        trimmed_state,
+        base_terminal=result.get("etfTerminal") or {},
+    )
+    for row in result.get("dataStatus") or []:
+        if isinstance(row, dict) and row.get("name") in {"上交所 ETF", "深交所 ETF"}:
+            row["asOf"] = target[5:]
+            row["status"] = "ready"
+            row["detail"] = "官方原始份额已补齐；ETF 状态由离线连续快照物化"
+    return result

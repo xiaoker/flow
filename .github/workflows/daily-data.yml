@@ -114,16 +114,58 @@ jobs:
           done
 
       - name: Build dashboard snapshot
-        run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot.json
+        run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json
 
       - name: Reconcile evidence, mappings and dashboard values
         shell: bash
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
-            trading-desk qa-release --snapshot dashboard-snapshot.json
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
+            trading-desk qa-release --snapshot dashboard-snapshot-base.json
           else
             echo "Snapshot is pending source confirmation; raw data will be archived and the active dashboard remains unchanged."
-            jq '.publication' dashboard-snapshot.json
+            jq '.publication' dashboard-snapshot-base.json
+          fi
+
+      - name: Build full-source history archive bundle
+        run: python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json --output history-bundle.json
+
+      - name: Archive all official raw and normalized sources
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python scripts/publish_history_artifacts.py \
+            --bundle history-bundle.json \
+            --url "https://flow.xiaoker.com/api/v1/admin/history-import"
+
+      - name: Materialize final dashboard after ETF state import
+        env:
+          INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
+            if [[ -z "$INGEST_API_KEY" || -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
+              echo "FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets must be configured." >&2
+              exit 1
+            fi
+            curl --fail-with-body --retry 3 --retry-all-errors \
+              --header "Authorization: Bearer $INGEST_API_KEY" \
+              --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+              "https://flow.xiaoker.com/api/v1/admin/etf-state" \
+              --output etf-flow-state.json
+            python scripts/build_dashboard_snapshot.py \
+              --state etf-flow-state.json \
+              --output dashboard-snapshot.json
+            trading-desk qa-release \
+              --snapshot dashboard-snapshot.json \
+              --state etf-flow-state.json
+          else
+            cp dashboard-snapshot-base.json dashboard-snapshot.json
+            echo "Pending snapshot has no ETF state materialization; active dashboard remains unchanged."
           fi
 
       - name: Build immutable read models offline
@@ -136,19 +178,6 @@ jobs:
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
           fi
-
-      - name: Build full-source history archive bundle
-        run: python scripts/build_history_bundle.py --output history-bundle.json
-
-      - name: Archive all official raw and normalized sources
-        env:
-          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
-          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
-          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
-        run: |
-          python scripts/publish_history_artifacts.py \
-            --bundle history-bundle.json \
-            --url "https://flow.xiaoker.com/api/v1/admin/history-import"
 
       - name: Build verified archive and publish bundle
         run: |
@@ -200,6 +229,8 @@ jobs:
           retention-days: 14
           path: |
             dashboard-snapshot.json
+            dashboard-snapshot-base.json
+            etf-flow-state.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json

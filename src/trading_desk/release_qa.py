@@ -14,6 +14,7 @@ import pandas as pd
 
 from .adapters.official import parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
+from .etf_flow_state import materialize_dashboard_snapshot
 from .instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from .models import QualityFinding
 from .quality import summarize_findings
@@ -206,6 +207,14 @@ def _expected_sse_etf_nav(content: bytes, requested_date: str) -> pd.DataFrame:
 
 def _expected_szse_etf(content: bytes, trade_date: str) -> pd.DataFrame:
     frame = pd.read_excel(io.BytesIO(content), engine="openpyxl", dtype={"基金代码": str})
+    # The SZSE fund list is broader than the ETF universe.  The collector
+    # deliberately keeps only rows whose official product type is ETF, so the
+    # independent raw-to-normalized comparison must apply the same explicit
+    # source rule before comparing keys.  Comparing the full workbook here
+    # would reject every valid run as soon as LOF/REIT rows are present.
+    product_type = frame.get("基金类别")
+    if product_type is not None:
+        frame = frame.loc[product_type.astype(str).str.strip().eq("ETF")].copy()
     return pd.DataFrame(
         {
             "trade_date": trade_date,
@@ -1037,6 +1046,7 @@ def validate_snapshot_values(
     manifest_path: Path,
     quality_path: Path,
     workspace_root: Path,
+    state_path: Path | None = None,
 ) -> list[QualityFinding]:
     findings: list[QualityFinding] = []
     dates = sorted(str(value) for value in manifest.get("requested_dates", []))
@@ -1047,6 +1057,13 @@ def validate_snapshot_values(
         quality_path=quality_path,
         workspace_root=workspace_root,
     )
+    if state_path is not None:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        expected_snapshot = materialize_dashboard_snapshot(
+            expected_snapshot,
+            state,
+            as_of=as_of,
+        )
     exact_match = snapshot == expected_snapshot
     findings.append(
         _finding(
@@ -1142,6 +1159,7 @@ def run_release_qa(
     snapshot_path: Path,
     output_path: Path,
     workspace_root: Path,
+    state_path: Path | None = None,
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     quality = json.loads(quality_path.read_text(encoding="utf-8"))
@@ -1172,6 +1190,7 @@ def run_release_qa(
                 manifest_path=manifest_path,
                 quality_path=quality_path,
                 workspace_root=workspace_root,
+                state_path=state_path,
             )
         )
 
