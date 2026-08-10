@@ -48,6 +48,10 @@ type DashboardProps = {
   requestedDate?: string | null;
   exactDateMatch?: boolean;
   initialView?: DeskView;
+  onRefresh?: () => void | Promise<void>;
+  onAutoRefresh?: () => void | Promise<void>;
+  refreshing?: boolean;
+  refreshError?: string | null;
 };
 type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin";
 type DirectionFilter = "all" | "inflow" | "outflow";
@@ -217,6 +221,10 @@ export function Dashboard({
   requestedDate = null,
   exactDateMatch = true,
   initialView = "overview",
+  onRefresh,
+  onAutoRefresh,
+  refreshing = false,
+  refreshError = null,
 }: DashboardProps) {
   const [view, setView] = useState<DeskView>(initialView);
   const [period, setPeriod] = useState<FlowPeriod>("1d");
@@ -754,7 +762,9 @@ export function Dashboard({
     if (!autoRefresh || requestedDate) return;
     let lastCheck = Date.now();
     const refresh = () => {
-      if (document.visibilityState === "visible") window.location.reload();
+      if (document.visibilityState === "visible") {
+        void (onAutoRefresh ? onAutoRefresh() : window.location.reload());
+      }
     };
     const interval = window.setInterval(refresh, AUTO_REFRESH_MS);
     const refreshAfterBackground = () => {
@@ -771,7 +781,7 @@ export function Dashboard({
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshAfterBackground);
     };
-  }, [autoRefresh, requestedDate]);
+  }, [autoRefresh, onAutoRefresh, requestedDate]);
 
   const choosePeriod = (next: FlowPeriod) => {
     if (!activeAvailablePeriods.has(next)) {
@@ -824,10 +834,17 @@ export function Dashboard({
         <div className="top-actions">
           <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && query.trim() && view !== "national") setView("radar"); }} placeholder={view === "national" ? "搜索观察池 ETF 或代码" : "搜索基金或代码，回车查看"} value={query} /></label>
           <button className="icon-button" title="打印或保存当前页面" onClick={() => window.print()} type="button"><Camera size={19} /></button>
-          <button className={`refresh-toggle ${autoRefresh && !requestedDate ? "enabled" : ""}`} aria-pressed={autoRefresh && !requestedDate} disabled={Boolean(requestedDate)} onClick={() => setAutoRefresh((value) => !value)} title={requestedDate ? "历史归档不会自动切换日期" : "每 5 分钟检查最新发布数据"} type="button"><span /><em>自动更新</em></button>
-          <button className="icon-button" title="刷新数据" onClick={() => window.location.reload()} type="button"><ArrowsClockwise size={19} /></button>
+          <button className={`refresh-toggle ${autoRefresh && !requestedDate ? "enabled" : ""}`} aria-pressed={autoRefresh && !requestedDate} disabled={Boolean(requestedDate) || refreshing} onClick={() => setAutoRefresh((value) => !value)} title={requestedDate ? "历史归档不会自动切换日期" : "每 5 分钟检查最新发布数据"} type="button"><span /><em>{refreshing ? "检查中" : "自动更新"}</em></button>
+          <button className={`icon-button ${refreshing ? "is-refreshing" : ""}`} title="刷新数据" aria-label="刷新数据" disabled={refreshing} onClick={() => void (onRefresh ? onRefresh() : window.location.reload())} type="button"><ArrowsClockwise size={19} /></button>
         </div>
       </header>
+
+      {(refreshing || refreshError) && (
+        <div className={`refresh-status ${refreshError ? "is-error" : ""}`} role="status" aria-live="polite">
+          <ArrowsClockwise size={15} />
+          <span>{refreshError ?? "正在检查最新发布版本，当前数据继续可用"}</span>
+        </div>
+      )}
 
       <section className="command-strip" aria-label="数据摘要">
         <div className="command-title">

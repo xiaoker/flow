@@ -79,6 +79,7 @@ h1, h2, h3 { text-wrap: balance; }
 .global-search input::placeholder { color: #6e7b8c; }
 .icon-button { display: grid; width: 44px; height: 44px; flex: 0 0 44px; place-items: center; border: 1px solid var(--line); border-radius: 9px; background: #0b131e; color: var(--muted-strong); cursor: pointer; }
 .icon-button:hover { border-color: rgba(80,183,217,.55); color: var(--cyan); }
+.icon-button.is-refreshing svg { animation: flow-spin 800ms linear infinite; }
 .refresh-toggle { position: relative; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 9px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .refresh-toggle span { position: relative; width: 35px; height: 20px; border: 1px solid var(--line); border-radius: 999px; background: #151e2b; }
 .refresh-toggle span::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #738095; content: ""; transition: transform 150ms ease, background 150ms ease; }
@@ -86,6 +87,11 @@ h1, h2, h3 { text-wrap: balance; }
 .refresh-toggle.enabled span::after { transform: translateX(15px); background: #dff7ff; }
 .refresh-toggle em { font-size: var(--text-sm); font-style: normal; font-weight: 650; }
 .refresh-toggle:disabled { opacity: .45; cursor: not-allowed; }
+.refresh-status { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; padding: 5px 18px; border-bottom: 1px solid rgba(80,183,217,.18); background: rgba(80,183,217,.07); color: var(--cyan); font-size: 13px; }
+.refresh-status svg { animation: flow-spin 800ms linear infinite; }
+.refresh-status.is-error { border-bottom-color: rgba(241,174,66,.24); background: rgba(241,174,66,.08); color: var(--amber); }
+
+@keyframes flow-spin { to { transform: rotate(360deg); } }
 
 .command-strip { display: flex; align-items: stretch; justify-content: space-between; gap: 18px; min-height: 108px; padding: 19px 24px; border-bottom: 1px solid var(--line); background: rgba(10,18,29,.88); }
 .command-title { display: flex; flex-direction: column; justify-content: center; gap: 3px; }

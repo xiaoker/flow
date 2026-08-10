@@ -64,14 +64,20 @@ test("keeps ETF detail evidence and unavailable periods explicit", async () => {
 });
 
 test("refreshes the latest dashboard and schedules collection through source release windows", async () => {
-  const [source, configText] = await Promise.all([
+  const [source, bootstrapSource, configText] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/dashboard-bootstrap.tsx", import.meta.url), "utf8"),
     readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
   ]);
   const config = JSON.parse(configText);
   assert.match(source, /AUTO_REFRESH_MS = 5 \* 60 \* 1000/);
   assert.match(source, /window\.setInterval\(refresh, AUTO_REFRESH_MS\)/);
   assert.match(source, /if \(!autoRefresh \|\| requestedDate\) return/);
+  assert.match(source, /onAutoRefresh/);
+  assert.doesNotMatch(source, /if \(document\.visibilityState === "visible"\) window\.location\.reload\(\);/);
+  assert.match(bootstrapSource, /\/api\/v2\/releases\/latest/);
+  assert.match(bootstrapSource, /release_pending/);
+  assert.match(bootstrapSource, /cache: "no-store"/);
   assert.deepEqual(config.triggers.crons, [
     "30 10 * * mon-fri",
     "45 23 * * sun-thu",
