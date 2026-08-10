@@ -18,7 +18,7 @@ import type {
 // The observation pool is still a code-based subset of ETF Radar. Fund short
 // names are display metadata; every share and period value continues to come
 // from the matching official ETF Radar row.
-const nationalTeamEtfs = [
+export const nationalTeamEtfs = [
   { code: "510300", fundShortName: "沪深300ETF华泰柏瑞" },
   { code: "510310", fundShortName: "沪深300ETF易方达" },
   { code: "510330", fundShortName: "沪深300ETF华夏" },
@@ -32,6 +32,23 @@ const nationalTeamEtfs = [
   { code: "159845", fundShortName: "中证1000ETF华夏" },
   { code: "512500", fundShortName: "中证500ETF华夏" },
 ] as const;
+
+/**
+ * The national-team page is a code-based subset of ETF Radar.  Period
+ * availability must therefore be derived from the matching official rows,
+ * rather than trusting the top-level terminal metadata (which can be
+ * conservative while a release is being rebuilt).
+ */
+export function getNationalAvailablePeriods(terminal: EtfTerminalData): Set<FlowPeriod> {
+  const codes = new Set(nationalTeamEtfs.map((item) => item.code));
+  return new Set(
+    (Object.keys(periodLabels) as FlowPeriod[]).filter((period) =>
+      terminal.instruments.some(
+        (item) => codes.has(item.code) && typeof item.periods[period] === "number",
+      ),
+    ),
+  );
+}
 
 const periodLabels: Record<FlowPeriod, string> = {
   "1d": "最近1日",
@@ -112,10 +129,12 @@ export function NationalTeamView({
     (sum, item) => sum + (item.instrument?.shares ?? 0),
     0,
   );
-  const periodFlow = matchedRows.reduce(
-    (sum, item) => sum + (item.instrument?.periods[period] ?? 0),
-    0,
-  );
+  const periodValues = matchedRows
+    .map((item) => item.instrument?.periods[period])
+    .filter((value): value is number => typeof value === "number");
+  const periodFlow = periodValues.length
+    ? periodValues.reduce((sum, value) => sum + value, 0)
+    : null;
 
   const selectedInstrument = selected.instrument;
   const shareHistory =

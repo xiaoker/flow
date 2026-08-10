@@ -17,3 +17,17 @@ test("national-team chart exposes a change-focused view without replacing offici
   assert.match(css, /\.national-chart-mode\s*\{/);
   assert.match(css, /\.national-chart-callout\s*\{/);
 });
+
+test("national-team periods come from the matched ETF rows, not terminal metadata", async () => {
+  const [nationalSource, dashboardSource] = await Promise.all([
+    readFile(new URL("../app/national-team-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(nationalSource, /export function getNationalAvailablePeriods/);
+  assert.match(nationalSource, /codes\.has\(item\.code\) && typeof item\.periods\[period\] === "number"/);
+  assert.match(nationalSource, /const periodValues = matchedRows/);
+  assert.match(nationalSource, /const periodFlow = periodValues\.length/);
+  assert.match(dashboardSource, /const nationalAvailablePeriods = useMemo/);
+  assert.match(dashboardSource, /view === "national"\s*\?\s*nationalAvailablePeriods/);
+  assert.match(dashboardSource, /activeAvailablePeriods\.has\(next\)/);
+});

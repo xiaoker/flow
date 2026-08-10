@@ -35,7 +35,11 @@ import type {
   EtfTerminalInstrument,
   FlowPeriod,
 } from "./lib/dashboard-data";
-import { NationalTeamView } from "./national-team-view";
+import {
+  getNationalAvailablePeriods,
+  nationalTeamEtfs,
+  NationalTeamView,
+} from "./national-team-view";
 import { SectorRotationView } from "./sector-rotation-view";
 
 type DashboardProps = {
@@ -249,6 +253,13 @@ export function Dashboard({
         .filter((id) => terminal.instruments.some((item) => typeof item.estimatedCashPeriods?.[id] === "number")),
     );
   }, [etfDisplayMetric, shareAvailablePeriods, terminal.instruments]);
+  const nationalAvailablePeriods = useMemo(
+    () => getNationalAvailablePeriods(terminal),
+    [terminal],
+  );
+  const activeAvailablePeriods = view === "national"
+    ? nationalAvailablePeriods
+    : metricAvailablePeriods;
   const metricValueFor = useCallback((item: EtfTerminalInstrument, id: FlowPeriod) =>
     etfDisplayMetric === "cash" ? item.estimatedCashPeriods?.[id] : item.periods[id], [etfDisplayMetric]);
   const metricCoverageFor = useCallback((item: EtfTerminalInstrument, id: FlowPeriod) =>
@@ -263,11 +274,11 @@ export function Dashboard({
       setEtfDisplayMetric("shares");
       return;
     }
-    if (!metricAvailablePeriods.has(period)) {
-      const first = periods.find((item) => metricAvailablePeriods.has(item.id))?.id;
+    if (!activeAvailablePeriods.has(period)) {
+      const first = periods.find((item) => activeAvailablePeriods.has(item.id))?.id;
       if (first) setPeriod(first);
     }
-  }, [cashAvailable, etfDisplayMetric, metricAvailablePeriods, period]);
+  }, [activeAvailablePeriods, cashAvailable, etfDisplayMetric, period]);
 
   useEffect(() => {
     if (!selectedCode) {
@@ -761,7 +772,7 @@ export function Dashboard({
   }, [autoRefresh, requestedDate]);
 
   const choosePeriod = (next: FlowPeriod) => {
-    if (!metricAvailablePeriods.has(next)) {
+    if (!activeAvailablePeriods.has(next)) {
       setNotice(`${periods.find((item) => item.id === next)?.label}尚未达到所需的官方交易日覆盖`);
       window.setTimeout(() => setNotice(""), 2400);
       return;
@@ -873,9 +884,9 @@ export function Dashboard({
             <button className={etfDisplayMetric === "cash" ? "active" : ""} disabled={!cashAvailable} onClick={() => setEtfDisplayMetric("cash")} title={cashAvailable ? "逐日份额变化 × 对应交易日官方单位净值，单位亿元" : terminal.cashFlow?.warning ?? "等待官方单位净值覆盖"} type="button">金额估算（亿元）</button>
           </div>}
           <div className="period-tabs" aria-label="观察周期">
-            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${metricAvailablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
+            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${activeAvailablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
           </div>
-          <div className="coverage-chip"><Database size={16} /><span>{metricAvailablePeriods.size} 个可用周期</span><strong>{etfDisplayMetric === "cash" ? `${terminal.cashFlow?.eligibleInstruments ?? 0} 只净值可比` : `${terminal.universe?.total ?? terminal.instruments.length} 只 ETF`} · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
+          <div className="coverage-chip"><Database size={16} /><span>{activeAvailablePeriods.size} 个可用周期</span><strong>{view === "national" ? `${nationalTeamEtfs.length} 只观察池 ETF` : etfDisplayMetric === "cash" ? `${terminal.cashFlow?.eligibleInstruments ?? 0} 只净值可比` : `${terminal.universe?.total ?? terminal.instruments.length} 只 ETF`} · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
         </section>
       )}
 
