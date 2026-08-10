@@ -113,7 +113,13 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
         // An active pointer is authoritative. If its object is missing or
         // carries a different date, fail closed instead of silently showing
         // an older dashboard_snapshot and misleading the user.
-        if (!object || object.customMetadata?.asOf !== active.asOf) return null;
+        const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
+        if (
+          !bootstrapKey.startsWith(releasePrefix) ||
+          !object ||
+          object.customMetadata?.asOf !== active.asOf ||
+          object.customMetadata?.releaseId !== active.releaseId
+        ) return null;
         return {
           object,
           asOf: active.asOf,

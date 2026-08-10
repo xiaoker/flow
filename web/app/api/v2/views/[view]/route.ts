@@ -36,11 +36,16 @@ export async function GET(
   const key = artifact && typeof artifact === "object" && !Array.isArray(artifact)
     ? (artifact as Record<string, unknown>).key
     : null;
-  if (typeof key !== "string" || !key.startsWith("market-data/releases/")) {
+  const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
+  if (typeof key !== "string" || !key.startsWith(releasePrefix)) {
     return Response.json({ error: "view_not_published" }, { status: 503 });
   }
   const object = await runtime.RAW_BUCKET.get(key);
-  if (!object) return Response.json({ error: "view_not_found" }, { status: 503 });
+  if (
+    !object ||
+    object.customMetadata?.asOf !== active.asOf ||
+    object.customMetadata?.releaseId !== active.releaseId
+  ) return Response.json({ error: "view_not_found" }, { status: 503 });
   const response = responseFromPublishedObject(
     { object, asOf: active.asOf, releaseId: active.releaseId, historical: false },
     request,
