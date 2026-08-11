@@ -767,6 +767,7 @@ export async function POST(request: Request) {
     const snapshotId = `${publishedSnapshot.asOf}:${crypto.randomUUID()}`;
     const objectKey = `dashboard/${publishedSnapshot.asOf}/${publishedAt.replaceAll(":", "-")}.json`;
     const snapshotBody = JSON.stringify(publishedSnapshot);
+    const snapshotBytes = new TextEncoder().encode(snapshotBody).byteLength;
     await runtime.RAW_BUCKET.put(objectKey, snapshotBody, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: {
@@ -775,25 +776,37 @@ export async function POST(request: Request) {
         etfHistoryDays: String(publishedSnapshot.etfTerminal?.historyCoverage?.tradingDays ?? 0),
       },
     });
-    await runtime.DB
-      .prepare(
-        `INSERT INTO dashboard_snapshot (
-           id, as_of, observed_at, payload_json, published_at,
-           quality_pass, quality_warn, quality_fail, r2_object_key
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        snapshotId,
-        publishedSnapshot.asOf,
-        publishedSnapshot.observedAt,
-        snapshotBody,
-        publishedAt,
-        publishedSnapshot.quality.pass,
-        publishedSnapshot.quality.warn,
-        publishedSnapshot.quality.fail,
-        objectKey,
-      )
-      .run();
+    // The legacy D1 fallback table is intentionally bounded. Full ETF
+    // terminals are multi-megabyte release artifacts and exceed D1 binding
+    // limits; v2 serves them directly from R2 through the active release
+    // pointer. Keep small snapshots for old deployments, but never let a
+    // large legacy write make an otherwise verified release fail.
+    if (snapshotBytes <= 900_000) {
+      await runtime.DB
+        .prepare(
+          `INSERT INTO dashboard_snapshot (
+             id, as_of, observed_at, payload_json, published_at,
+             quality_pass, quality_warn, quality_fail, r2_object_key
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          snapshotId,
+          publishedSnapshot.asOf,
+          publishedSnapshot.observedAt,
+          snapshotBody,
+          publishedAt,
+          publishedSnapshot.quality.pass,
+          publishedSnapshot.quality.warn,
+          publishedSnapshot.quality.fail,
+          objectKey,
+        )
+        .run();
+    } else {
+      console.info("legacy dashboard_snapshot omitted for large R2 release", {
+        asOf: publishedSnapshot.asOf,
+        bytes: snapshotBytes,
+      });
+    }
     await runtime.DB
       .prepare(
         "UPDATE ingest_run SET finished_at = ?, status = 'SUCCESS', error_count = 0, manifest_key = ? WHERE id = ?",
