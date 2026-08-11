@@ -1,10 +1,12 @@
 """Date-safe ETF-to-stock penetration calculations.
 
 The calculation in this module is deliberately pure and offline.  ETF share
-snapshots and the exchange's same-day PCF (portfolio composition file) are
-joined only when their dates and market/code keys match.  A missing or stale
-PCF never falls back to the latest available file: the result is explicitly
-marked unavailable instead.
+snapshots and the exchange's PCF (portfolio composition file) are joined only
+when their effective date and market/code keys match.  A PCF is either
+published on the share date or published on the next trading day with an
+explicit ``PRE_TRADING_DAY`` equal to that share date.  A missing, stale or
+unrelated PCF never falls back to the latest available file: the result is
+explicitly marked unavailable instead.
 
 This is an *estimated stock delivery/redemption equivalent*, not a claim about
 secondary-market cash flow.  Cash-substitution flags are retained as a caveat
@@ -73,6 +75,7 @@ def _empty_result(
             "shareDate": as_of,
             "previousShareDate": previous_date,
             "pcfDate": pcf_date,
+            "pcfAlignment": "unavailable",
             "timezone": "Asia/Shanghai",
             "calculation": "ETF份额变化 ÷ 最小申赎单位 × PCF成分数量",
             "source": "SSE ETF PCF + SSE/SZSE ETF official share snapshots",
@@ -121,6 +124,18 @@ def _normalise_pcf_frame(frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
         raise StockFlowInputError(f"pcf_columns_missing:{','.join(sorted(missing))}")
     value = frame.copy()
     value["trade_date"] = _date_series(value, "trade_date")
+    # Older archived PCF rows predate the explicit publication/effective-date
+    # split.  Treat their trade date as both fields so historical evidence
+    # remains readable while new captures retain the official PRE_TRADING_DAY
+    # relationship.
+    if "pcf_date" not in value.columns:
+        value["pcf_date"] = value["trade_date"]
+    else:
+        value["pcf_date"] = _date_series(value, "pcf_date")
+    if "pcf_previous_date" not in value.columns:
+        value["pcf_previous_date"] = value["trade_date"]
+    else:
+        value["pcf_previous_date"] = _date_series(value, "pcf_previous_date")
     value["market"] = value["market"].astype(str).str.upper().str.strip()
     value["etf_code"] = value["etf_code"].map(_code)
     value["stock_code"] = value["stock_code"].map(_code)
@@ -155,8 +170,9 @@ def build_stock_flow(
     """Build a bounded, auditable ETF-to-stock flow read model.
 
     ``share_frame`` contains official ETF total-share snapshots for the current
-    and previous trading dates. ``pcf_frame`` contains same-day PCF component
-    rows and a repeated ``creation_unit`` per ETF.  The returned ``stocks``
+    and previous trading dates. ``pcf_frame`` contains PCF component rows with
+    an effective ``trade_date`` and a repeated ``creation_unit`` per ETF.  The
+    returned ``stocks``
     list is sorted by absolute estimated stock-share flow, while ``coverage``
     retains full-universe totals so truncation cannot masquerade as a total.
     """
@@ -190,14 +206,27 @@ def build_stock_flow(
     shares = _normalise_share_frame(shares, as_of=as_of, previous_date=previous_date)
     pcf = _normalise_pcf_frame(pcf_frame, as_of=as_of)
     pcf_dates = sorted(
-        pd.to_datetime(pcf_frame["trade_date"], errors="coerce")
+        pd.to_datetime(pcf["pcf_date"], errors="coerce")
         .dropna()
         .dt.strftime("%Y-%m-%d")
         .unique()
-    ) if "trade_date" in pcf_frame.columns else []
+    ) if "pcf_date" in pcf.columns else []
     if pcf_date is None and len(pcf_dates) == 1:
         pcf_date = pcf_dates[0]
-    if pcf_date != as_of:
+    effective_dates = sorted(
+        pcf["trade_date"].dropna().astype(str).unique().tolist()
+    ) if "trade_date" in pcf.columns else []
+    previous_dates = sorted(
+        pcf["pcf_previous_date"].dropna().astype(str).unique().tolist()
+    ) if "pcf_previous_date" in pcf.columns else []
+    aligned_previous_day = (
+        pcf_date is not None
+        and pcf_date > as_of
+        and previous_dates == [as_of]
+    )
+    if not effective_dates or effective_dates != [as_of] or (
+        pcf_date != as_of and not aligned_previous_day
+    ):
         return _empty_result(
             as_of=as_of,
             previous_date=previous_date,
@@ -211,7 +240,7 @@ def build_stock_flow(
             previous_date=previous_date,
             pcf_date=pcf_date,
             warnings=[],
-            reason="same_day_pcf_missing",
+            reason="aligned_pcf_missing",
         )
 
     share_key = ["market", "instrument_code"]
@@ -244,7 +273,7 @@ def build_stock_flow(
             previous_date=previous_date,
             pcf_date=pcf_date,
             warnings=[],
-            reason="no_share_changed_etf_has_same_day_pcf",
+            reason="no_share_changed_etf_has_aligned_pcf",
         )
 
     joined = pcf.merge(
@@ -264,6 +293,12 @@ def build_stock_flow(
     joined["substitution_flag"] = substitution_flags.fillna("").astype(str)
 
     warnings: list[str] = []
+    pcf_alignment = "same_trading_day" if pcf_date == as_of else "next_day_previous_trade_date"
+    if pcf_alignment == "next_day_previous_trade_date":
+        warnings.append(
+            f"PCF 发布日 {pcf_date} 通过 PRE_TRADING_DAY 对齐到份额日 {as_of}；"
+            "个股数量为次日披露篮子等价估算"
+        )
     if joined["substitution_flag"].str.strip().ne("").any():
         warnings.append("PCF含现金替代标记；个股数量是申赎篮子等价估算，不等同实际交收")
 
@@ -324,6 +359,7 @@ def build_stock_flow(
             "shareDate": as_of,
             "previousShareDate": previous_date,
             "pcfDate": pcf_date,
+            "pcfAlignment": pcf_alignment,
             "timezone": "Asia/Shanghai",
             "calculation": "ETF份额变化 ÷ 最小申赎单位 × PCF成分数量",
             "source": "SSE ETF PCF + SSE/SZSE ETF official share snapshots",

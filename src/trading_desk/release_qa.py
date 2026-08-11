@@ -192,8 +192,19 @@ def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
     payload = json.loads(payload_bytes)
     expected: list[dict[str, Any]] = []
     for response in payload.get("responses") or []:
-        if not isinstance(response, dict) or response.get("observed_date") != requested_date:
+        if not isinstance(response, dict):
             continue
+        observed_date = response.get("observed_date")
+        previous_trading_date = response.get("previous_trading_date")
+        same_day = observed_date == requested_date
+        previous_day = previous_trading_date == requested_date
+        if not same_day and not previous_day:
+            continue
+        date_basis = (
+            "sse_pcf_same_day_morning"
+            if same_day
+            else "sse_pcf_next_day_previous_trading_day"
+        )
         basic = response.get("basic") or {}
         etf_code = str(response.get("code") or basic.get("FUNDID2") or "").strip().zfill(6)
         creation_unit = _number(
@@ -214,26 +225,27 @@ def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
             quantity = _number(component.get("QUANTITY"))
             if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
                 continue
-            expected.append(
-                {
-                    "trade_date": requested_date,
-                    "pcf_date": requested_date,
-                    "market": "SSE",
-                    "etf_code": etf_code,
-                    "etf_name": etf_name,
-                    "stock_code": stock_code,
-                    "stock_name": component.get("INSTRUMENT_NAME") or stock_code,
-                    "quantity": quantity,
-                    "creation_unit": creation_unit,
-                    "substitution_flag": component.get("SUBSTITUTION_FLAG") or "",
-                    "listing_market": component.get("UNDERLYION_SECURITY_ID")
-                    or component.get("UNDERLYING_SECURITY_ID")
-                    or "",
-                    "source_id": "sse",
-                    "source_grade": "A",
-                    "date_basis": "sse_pcf_same_day_morning",
-                }
-            )
+            expected_row = {
+                "trade_date": requested_date,
+                "pcf_date": observed_date,
+                "market": "SSE",
+                "etf_code": etf_code,
+                "etf_name": etf_name,
+                "stock_code": stock_code,
+                "stock_name": component.get("INSTRUMENT_NAME") or stock_code,
+                "quantity": quantity,
+                "creation_unit": creation_unit,
+                "substitution_flag": component.get("SUBSTITUTION_FLAG") or "",
+                "listing_market": component.get("UNDERLYION_SECURITY_ID")
+                or component.get("UNDERLYING_SECURITY_ID")
+                or "",
+                "source_id": "sse",
+                "source_grade": "A",
+                "date_basis": date_basis,
+            }
+            if previous_trading_date:
+                expected_row["pcf_previous_date"] = previous_trading_date
+            expected.append(expected_row)
     return pd.DataFrame(expected)
 
 

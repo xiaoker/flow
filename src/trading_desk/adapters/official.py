@@ -35,7 +35,7 @@ SSE_ETF_PCF = SourceSpec(
     publisher="上海证券交易所",
     dataset="etf_pcf",
     url="https://query.sse.com.cn/commonQuery.do",
-    date_semantics="sse_pcf_same_day_morning",
+    date_semantics="sse_pcf_current_day_or_previous_day_basket",
 )
 SZSE_ETF = SourceSpec(
     source_id="szse",
@@ -406,13 +406,17 @@ class OfficialMarketAdapters:
     def fetch_sse_etf_pcf(
         self, etf_codes: list[str], trade_date: str, *, max_workers: int = 4
     ) -> tuple[pd.DataFrame, FetchArtifact]:
-        """Fetch same-day SSE ETF PCFs for ETFs whose shares actually changed.
+        """Fetch PCFs for ETFs whose shares actually changed.
 
-        The SSE unified PCF endpoint exposes the current published basket.  It
-        is therefore a *same-day capture* source: a response carrying another
-        ``TRADING_DAY`` is retained in the raw request log but contributes no
-        normalized rows.  Limiting requests to changed ETFs and four workers
-        keeps the source load and the GitHub/Cloudflare bill bounded.
+        SSE publishes the PCF before the *current* trading day.  When the
+        collector runs after close, the endpoint has already advanced to the
+        next trading day; its ``PRE_TRADING_DAY`` then identifies the share
+        snapshot we are measuring.  We accept that explicit relationship and
+        preserve both dates in the normalized evidence.  A response that is
+        neither the requested trading day nor a PCF whose previous trading day
+        matches it is discarded as a date mismatch.  This keeps the estimate
+        auditable without adding requests or silently using an unrelated
+        basket.
         """
 
         requested_codes = list(
@@ -432,6 +436,7 @@ class OfficialMarketAdapters:
         response_log: list[dict[str, Any]] = []
         normalized_rows: list[dict[str, Any]] = []
         warnings: list[str] = []
+        aligned_previous_day_count = 0
 
         def fetch_one(code: str) -> dict[str, Any]:
             basic_params = {
@@ -479,13 +484,24 @@ class OfficialMarketAdapters:
                 basic_rows[0] if basic_rows and isinstance(basic_rows[0], dict) else None,
             )
             observed_date = None
+            previous_trading_date = None
             if basic:
-                observed_date = _iso_date(basic.get("TRADING_DAY"), field="TRADING_DAY") if basic.get("TRADING_DAY") else None
+                observed_date = (
+                    _iso_date(basic.get("TRADING_DAY"), field="TRADING_DAY")
+                    if basic.get("TRADING_DAY")
+                    else None
+                )
+                previous_trading_date = (
+                    _iso_date(basic.get("PRE_TRADING_DAY"), field="PRE_TRADING_DAY")
+                    if basic.get("PRE_TRADING_DAY")
+                    else None
+                )
             return {
                 "code": code,
                 "basic": basic,
                 "components": component_rows,
                 "observed_date": observed_date,
+                "previous_trading_date": previous_trading_date,
                 "basic_params": basic_params,
                 "component_params": component_params,
                 "basic_status": basic_response.status_code,
@@ -513,6 +529,7 @@ class OfficialMarketAdapters:
                     "basic_status": result["basic_status"],
                     "component_status": result["component_status"],
                     "observed_date": result["observed_date"],
+                    "previous_trading_date": result["previous_trading_date"],
                 }
             )
             response_log.append(
@@ -521,13 +538,24 @@ class OfficialMarketAdapters:
                     "basic": result["basic"],
                     "components": result["components"],
                     "observed_date": result["observed_date"],
+                    "previous_trading_date": result["previous_trading_date"],
                 }
             )
-            if result["observed_date"] != trade_date:
+            same_day = result["observed_date"] == trade_date
+            previous_day = result["previous_trading_date"] == trade_date
+            if not same_day and not previous_day:
                 warnings.append(
-                    f"{code} PCF 日期 {result['observed_date'] or '缺失'} 与请求日期 {trade_date} 不一致"
+                    f"{code} PCF 日期 {result['observed_date'] or '缺失'} / 前一交易日 "
+                    f"{result['previous_trading_date'] or '缺失'} 与请求日期 {trade_date} 不一致"
                 )
                 continue
+            date_basis = (
+                "sse_pcf_same_day_morning"
+                if same_day
+                else "sse_pcf_next_day_previous_trading_day"
+            )
+            if previous_day and not same_day:
+                aligned_previous_day_count += 1
             basic = result["basic"] or {}
             creation_unit = _integer(
                 basic.get("CREATION_REDEMPTION_UNIT")
@@ -549,27 +577,32 @@ class OfficialMarketAdapters:
                 quantity = _integer(row.get("QUANTITY"))
                 if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
                     continue
-                normalized_rows.append(
-                    {
-                        "trade_date": trade_date,
-                        "pcf_date": trade_date,
-                        "market": "SSE",
-                        "etf_code": code,
-                        "etf_name": etf_name,
-                        "stock_code": stock_code,
-                        "stock_name": row.get("INSTRUMENT_NAME") or stock_code,
-                        "quantity": quantity,
-                        "creation_unit": creation_unit,
-                        "substitution_flag": row.get("SUBSTITUTION_FLAG") or "",
-                        "listing_market": row.get("UNDERLYION_SECURITY_ID") or row.get("UNDERLYING_SECURITY_ID") or "",
-                        "source_id": SSE_ETF_PCF.source_id,
-                        "source_grade": SSE_ETF_PCF.source_grade,
-                        "date_basis": SSE_ETF_PCF.date_semantics,
-                    }
-                )
+                normalized_row = {
+                    "trade_date": trade_date,
+                    "pcf_date": result["observed_date"],
+                    "market": "SSE",
+                    "etf_code": code,
+                    "etf_name": etf_name,
+                    "stock_code": stock_code,
+                    "stock_name": row.get("INSTRUMENT_NAME") or stock_code,
+                    "quantity": quantity,
+                    "creation_unit": creation_unit,
+                    "substitution_flag": row.get("SUBSTITUTION_FLAG") or "",
+                    "listing_market": row.get("UNDERLYION_SECURITY_ID") or row.get("UNDERLYING_SECURITY_ID") or "",
+                    "source_id": SSE_ETF_PCF.source_id,
+                    "source_grade": SSE_ETF_PCF.source_grade,
+                    "date_basis": date_basis,
+                }
+                if result["previous_trading_date"]:
+                    normalized_row["pcf_previous_date"] = result["previous_trading_date"]
+                normalized_rows.append(normalized_row)
 
         if omitted_count:
             warnings.append(f"changed_etf_count_exceeds_cap:{omitted_count}")
+        if aligned_previous_day_count:
+            warnings.append(
+                f"pcf_previous_day_alignment_count:{aligned_previous_day_count}"
+            )
         raw_payload = json.dumps(
             {
                 "requested_date": trade_date,
@@ -600,7 +633,7 @@ class OfficialMarketAdapters:
                     "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C",
                     "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C",
                 ],
-                "same_day_required": True,
+                "same_day_or_previous_day_required": True,
                 "max_codes": max_codes,
             },
         )
@@ -609,7 +642,7 @@ class OfficialMarketAdapters:
         if normalized.empty:
             normalized = pd.DataFrame(
                 columns=[
-                    "trade_date", "pcf_date", "market", "etf_code", "etf_name",
+                    "trade_date", "pcf_date", "pcf_previous_date", "market", "etf_code", "etf_name",
                     "stock_code", "stock_name", "quantity", "creation_unit",
                     "substitution_flag", "listing_market", "source_id",
                     "source_grade", "date_basis",

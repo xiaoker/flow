@@ -120,7 +120,7 @@ def collect_phase0(
             frames["sse_etf"].append(frame)
             artifacts.append(artifact)
 
-    # PCF is an optional, same-day enrichment.  Fetch only ETFs whose official
+    # PCF is an optional date-aligned enrichment.  Fetch only ETFs whose official
     # total shares changed between the two latest requested dates.  This keeps
     # the request count bounded while preserving exact coverage for every
     # non-zero ETF flow.  The compressed response artifact is kept even when

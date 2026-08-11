@@ -98,7 +98,18 @@ def validate_snapshot(snapshot: dict[str, Any], *, require_materialized: bool = 
         if not isinstance(basis, dict):
             raise ReadModelError("etf_stock_flow_basis_missing")
         if stock_flow.get("available") is True:
-            if basis.get("shareDate") != as_of or basis.get("pcfDate") != as_of:
+            pcf_alignment = basis.get("pcfAlignment")
+            pcf_date = basis.get("pcfDate")
+            valid_pcf_alignment = (
+                pcf_date == as_of
+                or (
+                    pcf_alignment == "next_day_previous_trade_date"
+                    and isinstance(pcf_date, str)
+                    and ISO_DATE.fullmatch(pcf_date)
+                    and pcf_date > as_of
+                )
+            )
+            if basis.get("shareDate") != as_of or not valid_pcf_alignment:
                 raise ReadModelError("etf_stock_flow_date_mismatch")
             coverage = stock_flow.get("coverage")
             if not isinstance(coverage, dict) or not isinstance(stock_flow.get("stocks"), list):

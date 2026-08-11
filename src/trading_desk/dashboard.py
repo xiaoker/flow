@@ -673,6 +673,7 @@ def build_dashboard_snapshot(
                 "shareDate": as_of,
                 "previousShareDate": dates[-2] if len(dates) >= 2 else None,
                 "pcfDate": None,
+                "pcfAlignment": "unavailable",
                 "timezone": "Asia/Shanghai",
                 "calculation": "ETF份额变化 ÷ 最小申赎单位 × PCF成分数量",
                 "source": "SSE ETF PCF + SSE/SZSE ETF official share snapshots",

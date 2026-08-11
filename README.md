@@ -47,7 +47,7 @@ GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
 - 每次发布前自动运行单元/字段契约测试和发布级 Data QA；
 - 每个原始工件独立提交到 Worker，先写入 R2 不可变对象和状态检查点，最后一次请求才校验完整工件集合并建立历史快照；因此单个交易所延迟不会让整包请求超时或覆盖半成品；
-- ETF→个股穿透的同日 PCF 规范化 CSV 只在传输层 gzip 压缩，Worker 校验哈希后以普通 CSV 归档，避免宽成分篮子触碰 12 MB 请求上限；
+- ETF→个股穿透的 PCF 规范化 CSV 只在传输层 gzip 压缩，Worker 校验哈希后以普通 CSV 归档；PCF 可同日对齐，或按官方 `PRE_TRADING_DAY` 对齐到次日披露的前一交易日，避免宽成分篮子触碰 12 MB 请求上限；
 - 深交所 ETF 用列表页发布日和“当前规模”列标注日校验前一交易日；港交所使用简体中文历史每日页的中文数据文件；
 - 发布需要私有仓库 Actions Secrets：`FLOW_INGEST_API_KEY`、`FLOW_CF_ACCESS_CLIENT_ID` 和 `FLOW_CF_ACCESS_CLIENT_SECRET`。后两项只用于通过 Cloudflare Access 的 Service Auth 策略。
 

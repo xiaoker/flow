@@ -202,6 +202,50 @@ def test_sse_etf_pcf_requires_same_day_and_normalizes_components(
     assert "现金" not in artifact.warnings
 
 
+def test_sse_etf_pcf_aligns_next_day_publication_to_pre_trading_day(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    responses = iter(
+        [
+            FakeResponse(
+                {
+                    "result": [
+                        {
+                            "TRADING_DAY": "20260716",
+                            "PRE_TRADING_DAY": "20260715",
+                            "FUNDID2": "588000",
+                            "FUND_NAME": "科创50ETF",
+                            "CREATION_REDEMPTION_UNIT": "3000000",
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "result": [
+                        {
+                            "INSTRUMENT_ID": "688008",
+                            "INSTRUMENT_NAME": "澜起科技",
+                            "QUANTITY": "1813",
+                            "SUBSTITUTION_FLAG": "1",
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: next(responses))
+
+    frame, artifact = adapters.fetch_sse_etf_pcf(["588000"], "2026-07-15")
+
+    assert len(frame) == 1
+    assert frame.loc[0, "trade_date"] == "2026-07-15"
+    assert frame.loc[0, "pcf_date"] == "2026-07-16"
+    assert frame.loc[0, "pcf_previous_date"] == "2026-07-15"
+    assert frame.loc[0, "date_basis"] == "sse_pcf_next_day_previous_trading_day"
+    assert "pcf_previous_day_alignment_count:1" in artifact.warnings
+
+
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

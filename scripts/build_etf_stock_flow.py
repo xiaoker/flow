@@ -1,8 +1,9 @@
 """Build a bounded ETF-to-stock flow artifact from verified local CSVs.
 
 This helper is intentionally offline: it never calls an exchange and never
-falls back to a different PCF date.  The daily workflow can pass its combined
-official ETF shares and same-day SSE PCF normalized files to the same function.
+falls back to an unrelated PCF date.  The daily workflow can pass its combined
+official ETF shares and either a same-day SSE PCF or a PCF whose official
+PRE_TRADING_DAY matches the share date.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from trading_desk.etf_stock_flow import StockFlowLimits, build_stock_flow
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build a date-safe ETF-to-stock flow read model")
     parser.add_argument("--shares", type=Path, required=True, help="Official ETF share CSV")
-    parser.add_argument("--pcf", type=Path, required=True, help="Same-day SSE PCF normalized CSV")
+    parser.add_argument("--pcf", type=Path, required=True, help="SSE PCF normalized CSV with explicit effective-date alignment")
     parser.add_argument("--as-of", required=True, help="Share/PCF trading date YYYY-MM-DD")
     parser.add_argument("--previous-date", help="Previous official ETF share date YYYY-MM-DD")
     parser.add_argument("--max-stocks", type=int, default=500)

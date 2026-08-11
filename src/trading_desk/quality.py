@@ -236,22 +236,23 @@ def validate_etf_nav(frame: pd.DataFrame, dataset: str = "sse_etf_nav") -> list[
 
 
 def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[QualityFinding]:
-    """Validate the optional same-day ETF PCF enrichment feed.
+    """Validate the optional ETF PCF enrichment feed.
 
     PCF is intentionally optional for the base dashboard.  An empty response
     is therefore a warning, while malformed or duplicate component keys are a
-    hard failure whenever rows are present.
+    hard failure whenever rows are present.  A next-day PCF is valid only when
+    its official ``PRE_TRADING_DAY`` equals the ETF share date.
     """
     findings = [
         _finding(
             "completeness.pcf_non_empty",
             dataset,
             not frame.empty,
-            message="同日 PCF 非空" if not frame.empty else "同日 PCF 尚未归档",
+            message="PCF 非空" if not frame.empty else "PCF 尚未归档",
             evidence={"rows": int(len(frame)), "optional_enrichment": True},
             severity="high",
             warn_only=True,
-            remediation="只在交易所公布同日 PCF 后计算个股穿透；不使用其他日期篮子替代。",
+            remediation="仅接受同日 PCF，或接受其 PRE_TRADING_DAY 与份额日一致的次日披露篮子；不使用无关日期替代。",
         )
     ]
     required = [
@@ -268,7 +269,7 @@ def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[
                 evidence={"missing": sorted(set(required) - set(frame.columns))},
                 severity="high",
                 warn_only=True,
-                remediation="保留原始响应；恢复同日返回后再启用穿透计算。",
+                remediation="保留原始响应；恢复同日或 PRE_TRADING_DAY 对齐后再启用穿透计算。",
             )
         )
         return findings
@@ -283,9 +284,37 @@ def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[
                 "validity.pcf_date",
                 dataset,
                 invalid == 0,
-                message="PCF 日期可解析" if invalid == 0 else "PCF 日期不可解析",
+                message="份额日与 PCF 发布日可解析" if invalid == 0 else "PCF 日期不可解析",
                 evidence={"invalid_rows": invalid},
-                remediation="检查交易所 TRADING_DAY 字段，不允许用采集日期替代披露日期。",
+                remediation="检查交易所 TRADING_DAY/PRE_TRADING_DAY 字段，不允许用采集日期替代披露日期。",
+            )
+        )
+    if "pcf_date" in frame.columns:
+        pcf_dates = pd.to_datetime(frame["pcf_date"], errors="coerce")
+        invalid_pcf = int(pcf_dates.isna().sum())
+        findings.append(
+            _finding(
+                "validity.pcf_published_date",
+                dataset,
+                invalid_pcf == 0,
+                message="PCF 发布日可解析" if invalid_pcf == 0 else "PCF 发布日不可解析",
+                evidence={"invalid_rows": invalid_pcf},
+                remediation="保留交易所 TRADING_DAY 作为 PCF 发布日。",
+            )
+        )
+    if "pcf_previous_date" in frame.columns and "date_basis" in frame.columns:
+        previous = pd.to_datetime(frame["pcf_previous_date"], errors="coerce")
+        effective = pd.to_datetime(frame["trade_date"], errors="coerce")
+        next_day_rows = frame["date_basis"].astype(str).eq("sse_pcf_next_day_previous_trading_day")
+        invalid_previous = int((next_day_rows & (previous.isna() | previous.ne(effective))).sum())
+        findings.append(
+            _finding(
+                "consistency.pcf_previous_trading_day",
+                dataset,
+                invalid_previous == 0,
+                message="次日 PCF 的 PRE_TRADING_DAY 与份额日一致" if invalid_previous == 0 else "次日 PCF 的 PRE_TRADING_DAY 与份额日不一致",
+                evidence={"invalid_rows": invalid_previous},
+                remediation="只保留 PRE_TRADING_DAY 等于份额日的次日 PCF。",
             )
         )
     return findings

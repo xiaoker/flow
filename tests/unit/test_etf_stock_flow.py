@@ -46,6 +46,20 @@ def test_same_day_pcf_calculates_the_expected_stock_equivalent() -> None:
     assert result["coverage"]["matchedEtfCount"] == 1
 
 
+def test_next_day_pcf_uses_explicit_pre_trading_day_alignment() -> None:
+    pcf = _pcf().assign(
+        pcf_date="2026-07-03",
+        pcf_previous_date="2026-07-02",
+        date_basis="sse_pcf_next_day_previous_trading_day",
+    )
+    result = build_stock_flow(_shares(), pcf, as_of="2026-07-02", previous_date="2026-07-01")
+
+    assert result["available"] is True
+    assert result["basis"]["pcfDate"] == "2026-07-03"
+    assert result["basis"]["pcfAlignment"] == "next_day_previous_trade_date"
+    assert any("PRE_TRADING_DAY" in warning for warning in result["warnings"])
+
+
 def test_pcf_date_mismatch_is_unavailable_and_never_falls_back() -> None:
     result = build_stock_flow(
         _shares(), _pcf(date="2026-07-01"), as_of="2026-07-02", previous_date="2026-07-01"

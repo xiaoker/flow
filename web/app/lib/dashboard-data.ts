@@ -109,6 +109,7 @@ export interface EtfStockFlowData {
     shareDate: string;
     previousShareDate: string | null;
     pcfDate: string | null;
+    pcfAlignment?: "same_trading_day" | "next_day_previous_trade_date" | "unavailable" | string;
     timezone: string;
     calculation: string;
     source: string;
