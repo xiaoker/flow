@@ -136,6 +136,18 @@ export interface EtfStockFlowData {
     shareDelta: number;
     creationUnit: number;
     stockCount: number;
+    stockShownCount?: number;
+    stocks?: Array<{
+      market: "SSE" | "SZSE" | string;
+      listingMarket?: string;
+      listingMarketName?: string;
+      stockCode: string;
+      stockName: string;
+      stockFlowShares: number;
+      currentPenetratedShares: number;
+      quantity: number;
+      estimated: boolean;
+    }>;
     estimated: boolean;
   }>;
   warnings: string[];

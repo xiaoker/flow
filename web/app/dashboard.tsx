@@ -50,6 +50,7 @@ type DashboardProps = {
   initialView?: DeskView;
   onRefresh?: () => void | Promise<void>;
   onAutoRefresh?: () => void | Promise<void>;
+  onViewChange?: (view: DeskView) => void | Promise<void>;
   refreshing?: boolean;
   refreshError?: string | null;
 };
@@ -232,6 +233,7 @@ export function Dashboard({
   initialView = "overview",
   onRefresh,
   onAutoRefresh,
+  onViewChange,
   refreshing = false,
   refreshError = null,
 }: DashboardProps) {
@@ -698,22 +700,36 @@ export function Dashboard({
   const selectedStockFlow = useMemo(() => {
     const flow = snapshot.etfStockFlow;
     if (!flow) return null;
-    const rows = flow.stocks.flatMap((stock) =>
-      stock.contributors
-        .filter((contributor) => contributor.etfCode === selected?.code)
-        .map((contributor) => ({
-          stockCode: stock.stockCode,
-          stockName: stock.stockName,
-          market: stock.market,
-          listingMarket: stock.listingMarket,
-          listingMarketName: stock.listingMarketName,
-          value: contributor.stockFlowShares,
-          etfName: contributor.etfName,
-          estimated: contributor.estimated,
-        })),
-    );
-    const covered = flow.etfs.some((item) => item.code === selected?.code && item.market === selected?.market);
-    return { flow, rows, covered };
+    const etf = flow.etfs.find((item) => item.code === selected?.code && item.market === selected?.market);
+    const directRows = etf?.stocks?.map((stock) => ({
+      stockCode: stock.stockCode,
+      stockName: stock.stockName,
+      market: stock.market,
+      listingMarket: stock.listingMarket,
+      listingMarketName: stock.listingMarketName,
+      value: stock.stockFlowShares,
+      etfName: etf.name,
+      estimated: stock.estimated,
+    })) ?? [];
+    // Backward-compatible fallback for an older active release that has the
+    // global stock graph but predates ETF-first component lists.
+    const rows = directRows.length
+      ? directRows
+      : flow.stocks.flatMap((stock) =>
+          stock.contributors
+            .filter((contributor) => contributor.etfCode === selected?.code)
+            .map((contributor) => ({
+              stockCode: stock.stockCode,
+              stockName: stock.stockName,
+              market: stock.market,
+              listingMarket: stock.listingMarket,
+              listingMarketName: stock.listingMarketName,
+              value: contributor.stockFlowShares,
+              etfName: contributor.etfName,
+              estimated: contributor.estimated,
+            })),
+        );
+    return { flow, etf, rows, covered: Boolean(etf) };
   }, [selected, snapshot.etfStockFlow]);
 
   const latestMetric = metricValue(snapshot, "etf");
@@ -759,6 +775,7 @@ export function Dashboard({
     if (nextView === "overview") url.searchParams.delete("view");
     else url.searchParams.set("view", nextView);
     window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+    void onViewChange?.(nextView);
   };
   const dateIndex = availableDates.indexOf(snapshot.asOf);
   const previousAvailableDate = dateIndex > 0 ? availableDates[dateIndex - 1] : null;

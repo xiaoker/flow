@@ -43,6 +43,9 @@ def test_same_day_pcf_calculates_the_expected_stock_equivalent() -> None:
     # 11.67e8 / 3e6 * 1812 = 704,868 shares = 70.4868万股.
     assert result["stocks"][0]["stockCode"] == "688008"
     assert result["stocks"][0]["netShares"] == 704_868.0
+    assert result["etfs"][0]["code"] == "588000"
+    assert result["etfs"][0]["stocks"][0]["stockCode"] == "688008"
+    assert result["etfs"][0]["stockShownCount"] == 1
     assert result["coverage"]["matchedEtfCount"] == 1
 
 

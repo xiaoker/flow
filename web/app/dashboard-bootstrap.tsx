@@ -16,6 +16,14 @@ type ReleasePointer = {
   asOf?: string;
 };
 
+type ReadModelEnvelope = {
+  schemaVersion?: number;
+  asOf?: string;
+  observedAt?: string;
+  releaseStatus?: string;
+  data?: Record<string, unknown>;
+};
+
 const REQUEST_TIMEOUT_MS = 15_000;
 const REFRESH_ERROR_THRESHOLD = 3;
 
@@ -45,6 +53,9 @@ export function DashboardBootstrap() {
 
   const loadSnapshot = useCallback(async (expectedReleaseId?: string) => {
     const date = getRequestedDate();
+    const view = typeof window === "undefined"
+      ? undefined
+      : requestedView(new URLSearchParams(window.location.search).get("view"));
     const snapshotUrl = date
       ? `/api/v2/dashboard?date=${encodeURIComponent(date)}`
       : "/api/v2/dashboard";
@@ -61,24 +72,40 @@ export function DashboardBootstrap() {
     }, REQUEST_TIMEOUT_MS);
 
     try {
-      const [snapshotResponse, datesResponse, marketResponse] = await Promise.all([
+      const [snapshotResponse, datesResponse, marketResponse, viewResponse] = await Promise.all([
         fetch(snapshotUrl, { cache: "no-store", signal: controller.signal }),
         fetch("/api/v2/history/dates", { cache: "no-store", signal: controller.signal }),
         fetch(historyUrl, { cache: "no-store", signal: controller.signal }),
+        view && !date
+          ? fetch(`/api/v2/views/${view}`, { cache: "no-store", signal: controller.signal })
+          : Promise.resolve(null),
       ]);
       if (!snapshotResponse.ok) {
         throw new Error(snapshotResponse.status === 404 ? "该日期尚未形成完整发布版本" : `dashboard_${snapshotResponse.status}`);
       }
       if (!datesResponse.ok || !marketResponse.ok) throw new Error("history_unavailable");
-      const [nextSnapshot, datesPayload, marketPayload] = await Promise.all([
+      const [baseSnapshot, datesPayload, marketPayload, viewPayload] = await Promise.all([
         snapshotResponse.json() as Promise<DashboardSnapshot>,
         datesResponse.json() as Promise<HistoryResponse>,
         marketResponse.json() as Promise<{ rows?: Parameters<typeof enrichSnapshotWithMarketHistory>[1] }>,
+        viewResponse?.ok
+          ? viewResponse.json() as Promise<ReadModelEnvelope>
+          : Promise.resolve(null),
       ]);
       const nextReleaseId = snapshotResponse.headers.get("x-flow-release-id");
+      const viewReleaseId = viewResponse?.headers.get("x-flow-release-id");
       if (expectedReleaseId && nextReleaseId !== expectedReleaseId) {
         throw new Error("release_pending");
       }
+      if (viewPayload?.asOf && viewPayload.asOf !== baseSnapshot.asOf) {
+        throw new Error("release_pending");
+      }
+      if (nextReleaseId && viewReleaseId && nextReleaseId !== viewReleaseId) {
+        throw new Error("release_pending");
+      }
+      const nextSnapshot: DashboardSnapshot = viewPayload?.data
+        ? { ...baseSnapshot, ...viewPayload.data } as DashboardSnapshot
+        : baseSnapshot;
       const dates = Array.isArray(datesPayload.dates) ? [...datesPayload.dates] : [];
       if (!dates.includes(nextSnapshot.asOf)) dates.push(nextSnapshot.asOf);
       dates.sort();
@@ -216,6 +243,7 @@ export function DashboardBootstrap() {
       initialView={requestedView(params.get("view"))}
       onRefresh={() => refreshLatest(true)}
       onAutoRefresh={refreshLatest}
+      onViewChange={() => refreshLatest(true)}
       refreshing={refreshing}
       refreshError={refreshError}
     />

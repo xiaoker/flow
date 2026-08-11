@@ -32,6 +32,9 @@ class StockFlowLimits:
 
     max_stocks: int = 500
     max_contributors: int = 20
+    # Keep a bounded, ETF-first component list so every matched ETF can be
+    # opened in the UI even when its stocks do not make the global top-500.
+    max_etf_stocks: int = 30
 
 
 REQUIRED_SHARE_COLUMNS = {"trade_date", "market", "instrument_code", "shares"}
@@ -215,7 +218,7 @@ def build_stock_flow(
 
     as_of = pd.Timestamp(as_of).strftime("%Y-%m-%d")
     limits = limits or StockFlowLimits()
-    if limits.max_stocks <= 0 or limits.max_contributors <= 0:
+    if limits.max_stocks <= 0 or limits.max_contributors <= 0 or limits.max_etf_stocks <= 0:
         raise StockFlowInputError("invalid_payload_limits")
 
     shares = share_frame.copy()
@@ -381,6 +384,25 @@ def build_stock_flow(
     etf_rows: list[dict[str, Any]] = []
     for (market, etf_code), rows in joined.groupby(["market", "etf_code"], sort=False):
         row = rows.iloc[0]
+        stock_components = []
+        for component in rows.sort_values(
+            "stock_flow_shares",
+            key=lambda series: series.abs(),
+            ascending=False,
+        ).head(limits.max_etf_stocks).itertuples():
+            stock_components.append(
+                {
+                    "market": str(component.market),
+                    "listingMarket": str(component.listing_market),
+                    "listingMarketName": underlying_market_name(component.listing_market),
+                    "stockCode": str(component.stock_code),
+                    "stockName": str(component.stock_name),
+                    "stockFlowShares": round(float(component.stock_flow_shares), 2),
+                    "currentPenetratedShares": round(float(component.current_penetrated_shares), 2),
+                    "quantity": int(round(float(component.quantity))),
+                    "estimated": True,
+                }
+            )
         etf_rows.append(
             {
                 "market": str(market),
@@ -389,6 +411,8 @@ def build_stock_flow(
                 "shareDelta": round(float(row["share_delta"]), 2),
                 "creationUnit": int(round(float(row["creation_unit"]))),
                 "stockCount": int(rows[["listing_market", "stock_code"]].drop_duplicates().shape[0]),
+                "stockShownCount": len(stock_components),
+                "stocks": stock_components,
                 "estimated": True,
             }
         )

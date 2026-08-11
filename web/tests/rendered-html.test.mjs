@@ -79,6 +79,9 @@ test("refreshes the latest dashboard and schedules collection through source rel
   assert.match(bootstrapSource, /release_pending/);
   assert.match(bootstrapSource, /REFRESH_ERROR_THRESHOLD = 3/);
   assert.match(bootstrapSource, /REQUEST_TIMEOUT_MS = 15_000/);
+  assert.match(bootstrapSource, /\/api\/v2\/views\/\$\{view\}/);
+  assert.match(bootstrapSource, /viewReleaseId/);
+  assert.match(source, /onViewChange/);
   assert.doesNotMatch(source, /window\.location\.reload\(\)/);
   assert.match(bootstrapSource, /cache: "no-store"/);
   assert.deepEqual(config.triggers.crons, [
