@@ -34,7 +34,7 @@ class StockFlowLimits:
     max_contributors: int = 20
     # Keep a bounded, ETF-first component list so every matched ETF can be
     # opened in the UI even when its stocks do not make the global top-500.
-    max_etf_stocks: int = 30
+    max_etf_stocks: int = 12
 
 
 REQUIRED_SHARE_COLUMNS = {"trade_date", "market", "instrument_code", "shares"}
