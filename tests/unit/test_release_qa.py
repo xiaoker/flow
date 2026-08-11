@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from pathlib import Path
 
 import pandas as pd
 
-from trading_desk.adapters.official import OfficialMarketAdapters, SSE_ETF, SZSE_ETF
+from trading_desk.adapters.official import (
+    OfficialMarketAdapters,
+    SSE_ETF,
+    SSE_ETF_PCF,
+    SZSE_ETF,
+)
 from trading_desk.models import FetchArtifact
 from trading_desk.models import QualityFinding
 from trading_desk.release_qa import (
@@ -17,6 +23,7 @@ from trading_desk.release_qa import (
     validate_combined_data,
     validate_etf_terminal_data,
     validate_etf_terminal_identity,
+    validate_raw_to_normalized_mapping,
 )
 
 
@@ -127,6 +134,70 @@ def test_release_qa_detects_tampered_raw_response(tmp_path: Path) -> None:
     digest = next(finding for finding in findings if finding.check_id == "lineage.sha256_matches")
 
     assert digest.status == "fail"
+
+
+def test_release_qa_reconciles_compressed_same_day_pcf(tmp_path: Path) -> None:
+    raw = tmp_path / "pcf.json.gz"
+    payload = {
+        "responses": [
+            {
+                "code": "588000",
+                "observed_date": "2026-07-15",
+                "basic": {
+                    "FUNDID2": "588000",
+                    "FUND_NAME": "科创50ETF",
+                    "CREATION_REDEMPTION_UNIT": "3000000",
+                },
+                "components": [
+                    {
+                        "INSTRUMENT_ID": "688008",
+                        "INSTRUMENT_NAME": "澜起科技",
+                        "QUANTITY": "1813",
+                        "SUBSTITUTION_FLAG": "1",
+                    }
+                ],
+            }
+        ]
+    }
+    raw.write_bytes(gzip.compress(json.dumps(payload, ensure_ascii=False).encode()))
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    normalized = tmp_path / "pcf.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "pcf_date": "2026-07-15",
+                "market": "SSE",
+                "etf_code": "588000",
+                "etf_name": "科创50ETF",
+                "stock_code": "688008",
+                "stock_name": "澜起科技",
+                "quantity": 1813,
+                "creation_unit": 3000000,
+                "substitution_flag": "1",
+                "listing_market": "",
+                "source_id": "sse",
+                "source_grade": "A",
+                "date_basis": "sse_pcf_same_day_morning",
+            }
+        ]
+    ).to_csv(normalized, index=False)
+
+    artifact = _artifact(
+        source=SSE_ETF_PCF,
+        raw_path=raw,
+        metadata_path=tmp_path / "metadata.json",
+        normalized_path=normalized,
+        digest=digest,
+    )
+    findings = validate_raw_to_normalized_mapping({"artifacts": [artifact]}, tmp_path)
+    mapping = next(
+        finding
+        for finding in findings
+        if finding.check_id == "mapping.raw_to_normalized_values"
+    )
+
+    assert mapping.status == "pass"
 
 
 def test_release_qa_keeps_future_source_gap_as_pending_warning() -> None:

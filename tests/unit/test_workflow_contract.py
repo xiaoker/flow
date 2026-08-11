@@ -14,10 +14,10 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "schedule:" in workflow
     assert '- cron: "45 10 * * 1-5"' in workflow
     assert '- cron: "0 0 * * 1-5"' in workflow
-    assert '- cron: "25 0 * * 1-5"' in workflow
+    assert '- cron: "55 0 * * 1-5"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "cancel-in-progress: true" in workflow
-    assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "10 0 * * mon-fri"]' in wrangler
+    assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "45 0 * * mon-fri"]' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker

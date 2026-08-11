@@ -17,6 +17,7 @@ from .quality import (
     validate_connect_top,
     validate_etf,
     validate_etf_nav,
+    validate_etf_pcf,
     validate_margin,
 )
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
@@ -117,6 +118,50 @@ def collect_phase0(
         if result:
             frame, artifact = result
             frames["sse_etf"].append(frame)
+            artifacts.append(artifact)
+
+    # PCF is an optional, same-day enrichment.  Fetch only ETFs whose official
+    # total shares changed between the two latest requested dates.  This keeps
+    # the request count bounded while preserving exact coverage for every
+    # non-zero ETF flow.  The compressed response artifact is kept even when
+    # the endpoint is stale or empty, but a stale 200 response can never block
+    # publication or be used as a prior-day fallback.
+    if collection_window in {"auto", "morning", "reconcile"}:
+        sse_share_parts = [part for part in frames.get("sse_etf", []) if not part.empty]
+        changed_codes: list[str] = []
+        if sse_share_parts:
+            sse_share_window = pd.concat(sse_share_parts, ignore_index=True)
+            sse_share_window["trade_date"] = sse_share_window["trade_date"].astype(str)
+            sse_share_window["instrument_code"] = sse_share_window["instrument_code"].astype(str).str.zfill(6)
+            latest = sse_share_window.loc[
+                sse_share_window["trade_date"].eq(dates[-1]),
+                ["instrument_code", "shares"],
+            ].rename(columns={"shares": "latest_shares"})
+            previous = sse_share_window.loc[
+                sse_share_window["trade_date"].eq(dates[-2]),
+                ["instrument_code", "shares"],
+            ].rename(columns={"shares": "previous_shares"})
+            changed = latest.merge(previous, on="instrument_code", how="inner")
+            changed["share_delta"] = pd.to_numeric(
+                changed["latest_shares"], errors="coerce"
+            ).sub(pd.to_numeric(changed["previous_shares"], errors="coerce"))
+            changed_codes = (
+                changed.loc[changed["share_delta"].ne(0)]
+                .sort_values("share_delta", key=lambda series: series.abs(), ascending=False)["instrument_code"]
+                .astype(str)
+                .tolist()
+            )
+        result = run_step(
+            f"sse_etf_pcf:{dates[-1]}",
+            lambda: adapters.fetch_sse_etf_pcf(changed_codes, dates[-1]),
+        )
+        if result:
+            frame, artifact = result
+            # Keep the optional PCF artifact even when the source is stale or
+            # empty: its compressed raw response is useful evidence, but the
+            # empty normalized side must remain an unavailable enrichment and
+            # must never block the core dashboard publication.
+            frames["sse_etf_pcf"].append(frame)
             artifacts.append(artifact)
 
     # The SSE ETF list publishes the previous trading day's unit NAV.  Keep a
@@ -234,6 +279,7 @@ def collect_phase0(
         "sse_etf": validate_etf,
         "szse_etf": validate_etf,
         "sse_etf_nav": validate_etf_nav,
+        "sse_etf_pcf": validate_etf_pcf,
         "sse_margin": validate_margin,
         "szse_margin": validate_margin,
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),

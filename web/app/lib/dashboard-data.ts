@@ -79,6 +79,65 @@ export interface EtfTerminalData {
   };
 }
 
+export interface EtfStockFlowContributor {
+  etfCode: string;
+  etfName: string;
+  shareDelta: number;
+  quantity: number;
+  creationUnit: number;
+  stockFlowShares: number;
+  currentPenetratedShares: number;
+  estimated: boolean;
+}
+
+export interface EtfStockFlowStock {
+  market: "SSE" | "SZSE" | string;
+  stockCode: string;
+  stockName: string;
+  netShares: number;
+  inflowShares: number;
+  outflowShares: number;
+  etfCount: number;
+  contributors: EtfStockFlowContributor[];
+}
+
+export interface EtfStockFlowData {
+  available: boolean;
+  unit: string;
+  asOf: string;
+  basis: {
+    shareDate: string;
+    previousShareDate: string | null;
+    pcfDate: string | null;
+    timezone: string;
+    calculation: string;
+    source: string;
+    cashSubstitution?: string;
+  };
+  coverage: {
+    shareEtfCount: number;
+    pcfEtfCount: number;
+    matchedEtfCount: number;
+    stockCount: number;
+    shownStockCount: number;
+    limited: boolean;
+    netSharesTotal?: number;
+    shownNetShares?: number;
+    captureWarnings?: string[];
+  };
+  stocks: EtfStockFlowStock[];
+  etfs: Array<{
+    market: "SSE" | "SZSE" | string;
+    code: string;
+    name: string;
+    shareDelta: number;
+    creationUnit: number;
+    stockCount: number;
+    estimated: boolean;
+  }>;
+  warnings: string[];
+}
+
 export interface DashboardSnapshot {
   asOf: string;
   observedAt: string;
@@ -150,6 +209,7 @@ export interface DashboardSnapshot {
     basis?: "official" | "inferred_date" | "mixed";
   }>;
   etfTerminal?: EtfTerminalData;
+  etfStockFlow?: EtfStockFlowData;
 }
 
 export const dashboardSnapshot: DashboardSnapshot = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -75,7 +76,15 @@ def _paths(value: str | None) -> list[str]:
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, dtype={"instrument_code": str})
+    return pd.read_csv(
+        path,
+        dtype={
+            "instrument_code": str,
+            "etf_code": str,
+            "stock_code": str,
+            "listing_market": str,
+        },
+    )
 
 
 def _number(value: Any, multiplier: float = 1.0) -> float | None:
@@ -174,6 +183,58 @@ def _expected_sse_etf(content: bytes, requested_date: str) -> pd.DataFrame:
             for row in rows
         ]
     )
+
+
+def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
+    """Rebuild the normalized PCF rows from the immutable compressed response."""
+
+    payload_bytes = gzip.decompress(content) if content[:2] == b"\x1f\x8b" else content
+    payload = json.loads(payload_bytes)
+    expected: list[dict[str, Any]] = []
+    for response in payload.get("responses") or []:
+        if not isinstance(response, dict) or response.get("observed_date") != requested_date:
+            continue
+        basic = response.get("basic") or {}
+        etf_code = str(response.get("code") or basic.get("FUNDID2") or "").strip().zfill(6)
+        creation_unit = _number(
+            basic.get("CREATION_REDEMPTION_UNIT") or basic.get("CREATION_UNIT")
+        )
+        if not re.fullmatch(r"\d{6}", etf_code) or creation_unit is None or creation_unit <= 0:
+            continue
+        etf_name = basic.get("FUND_NAME") or basic.get("FUND_FULL_NAME") or etf_code
+        for component in response.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            stock_code = str(
+                component.get("INSTRUMENT_ID")
+                or component.get("STOCK_CODE")
+                or component.get("UNDERLYING_SECURITY_ID")
+                or ""
+            ).strip().zfill(6)
+            quantity = _number(component.get("QUANTITY"))
+            if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
+                continue
+            expected.append(
+                {
+                    "trade_date": requested_date,
+                    "pcf_date": requested_date,
+                    "market": "SSE",
+                    "etf_code": etf_code,
+                    "etf_name": etf_name,
+                    "stock_code": stock_code,
+                    "stock_name": component.get("INSTRUMENT_NAME") or stock_code,
+                    "quantity": quantity,
+                    "creation_unit": creation_unit,
+                    "substitution_flag": component.get("SUBSTITUTION_FLAG") or "",
+                    "listing_market": component.get("UNDERLYION_SECURITY_ID")
+                    or component.get("UNDERLYING_SECURITY_ID")
+                    or "",
+                    "source_id": "sse",
+                    "source_grade": "A",
+                    "date_basis": "sse_pcf_same_day_morning",
+                }
+            )
+    return pd.DataFrame(expected)
 
 
 def _expected_sse_etf_nav(content: bytes, requested_date: str) -> pd.DataFrame:
@@ -363,6 +424,25 @@ def validate_raw_to_normalized_mapping(
                     keys=["trade_date", "market", "instrument_code"],
                     text_columns=["instrument_name"],
                     numeric_columns=["nav"],
+                )
+            elif (source_id, dataset) == ("sse", "etf_pcf"):
+                actual = pd.concat(
+                    [_read_csv(path) for path in normalized_paths],
+                    ignore_index=True,
+                )
+                result = _compare_frames(
+                    _expected_sse_etf_pcf(content, requested_date),
+                    actual,
+                    keys=["trade_date", "market", "etf_code", "stock_code"],
+                    text_columns=[
+                        "etf_name",
+                        "stock_name",
+                        "substitution_flag",
+                        "source_id",
+                        "source_grade",
+                        "date_basis",
+                    ],
+                    numeric_columns=["quantity", "creation_unit"],
                 )
             elif (source_id, dataset) == ("szse", "etf_scale"):
                 result = _compare_frames(

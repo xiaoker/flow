@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import re
@@ -63,16 +64,26 @@ def _normalized_files(
         except pd.errors.EmptyDataError:
             row_count = 0
             trade_dates = []
-        output.append(
-            {
-                "name": name,
-                "format": "csv",
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "rowCount": row_count,
-                "tradeDates": trade_dates,
-                "contentBase64": base64.b64encode(content).decode("ascii"),
-            }
-        )
+        encoded_content = content
+        content_encoding: str | None = None
+        # PCF is the only intentionally wide normalized feed.  Compressing
+        # its CSV in transit keeps each resumable history request well below
+        # the Worker 12 MB body cap while the archived normalized R2 object
+        # remains the ordinary, human-readable CSV after server-side decode.
+        if dataset == "etf_pcf" and content:
+            encoded_content = gzip.compress(content, compresslevel=6)
+            content_encoding = "gzip"
+        item = {
+            "name": name,
+            "format": "csv",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "rowCount": row_count,
+            "tradeDates": trade_dates,
+            "contentBase64": base64.b64encode(encoded_content).decode("ascii"),
+        }
+        if content_encoding:
+            item["contentEncoding"] = content_encoding
+        output.append(item)
     return output
 
 
@@ -86,7 +97,7 @@ def serialize_history_artifact(
     requested_date = str(payload.get("requested_date") or "current")
     if source_id not in {"sse", "szse", "hkex"}:
         raise ValueError(f"Unsupported history source: {source_id!r}")
-    if dataset not in {"etf_scale", "etf_nav", "margin_market_daily", "stock_connect_daily"}:
+    if dataset not in {"etf_scale", "etf_nav", "etf_pcf", "margin_market_daily", "stock_connect_daily"}:
         raise ValueError(f"Unsupported history dataset: {dataset!r}")
     if not re.fullmatch(r"[0-9_-]{8,25}|current", requested_date):
         raise ValueError(f"Invalid history partition: {requested_date!r}")

@@ -90,6 +90,19 @@ def validate_snapshot(snapshot: dict[str, Any], *, require_materialized: bool = 
             raise ReadModelError("etf_history_coverage_incomplete")
         if not isinstance(coverage.get("stateVersion"), int) or coverage["stateVersion"] <= 0:
             raise ReadModelError("etf_history_state_version_missing")
+    stock_flow = snapshot.get("etfStockFlow")
+    if stock_flow is not None:
+        if not isinstance(stock_flow, dict):
+            raise ReadModelError("etf_stock_flow_not_object")
+        basis = stock_flow.get("basis")
+        if not isinstance(basis, dict):
+            raise ReadModelError("etf_stock_flow_basis_missing")
+        if stock_flow.get("available") is True:
+            if basis.get("shareDate") != as_of or basis.get("pcfDate") != as_of:
+                raise ReadModelError("etf_stock_flow_date_mismatch")
+            coverage = stock_flow.get("coverage")
+            if not isinstance(coverage, dict) or not isinstance(stock_flow.get("stocks"), list):
+                raise ReadModelError("etf_stock_flow_coverage_missing")
     _assert_finite(snapshot)
 
 
@@ -107,9 +120,17 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Split one validated snapshot into bounded, view-specific payloads."""
 
     terminal = snapshot["etfTerminal"]
-    overview = {key: value for key, value in snapshot.items() if key != "etfTerminal"}
+    # The penetration model is only needed by ETF Radar detail drawers.  Keep
+    # it out of the overview payload so the default page does not download a
+    # potentially wide stock-contribution graph.
+    overview = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"etfTerminal", "etfStockFlow"}
+    }
     radar = {
         "etfTerminal": terminal,
+        "etfStockFlow": snapshot.get("etfStockFlow"),
         "classificationVersion": terminal.get("classificationVersion"),
     }
     rotation = {

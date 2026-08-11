@@ -235,6 +235,62 @@ def validate_etf_nav(frame: pd.DataFrame, dataset: str = "sse_etf_nav") -> list[
     return findings
 
 
+def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[QualityFinding]:
+    """Validate the optional same-day ETF PCF enrichment feed.
+
+    PCF is intentionally optional for the base dashboard.  An empty response
+    is therefore a warning, while malformed or duplicate component keys are a
+    hard failure whenever rows are present.
+    """
+    findings = [
+        _finding(
+            "completeness.pcf_non_empty",
+            dataset,
+            not frame.empty,
+            message="同日 PCF 非空" if not frame.empty else "同日 PCF 尚未归档",
+            evidence={"rows": int(len(frame)), "optional_enrichment": True},
+            severity="high",
+            warn_only=True,
+            remediation="只在交易所公布同日 PCF 后计算个股穿透；不使用其他日期篮子替代。",
+        )
+    ]
+    required = [
+        "trade_date", "market", "etf_code", "stock_code", "quantity",
+        "creation_unit", "date_basis",
+    ]
+    if frame.empty:
+        findings.append(
+            _finding(
+                "schema.pcf_required_columns",
+                dataset,
+                not (set(required) - set(frame.columns)),
+                message="空 PCF 响应保留标准字段" if not (set(required) - set(frame.columns)) else "空 PCF 响应字段缺失",
+                evidence={"missing": sorted(set(required) - set(frame.columns))},
+                severity="high",
+                warn_only=True,
+                remediation="保留原始响应；恢复同日返回后再启用穿透计算。",
+            )
+        )
+        return findings
+    findings += check_required_columns(frame, dataset, required)
+    findings += check_unique(frame, dataset, ["trade_date", "market", "etf_code", "stock_code"])
+    findings += check_nonnegative(frame, dataset, ["quantity", "creation_unit"])
+    if "trade_date" in frame.columns:
+        parsed = pd.to_datetime(frame["trade_date"], errors="coerce")
+        invalid = int(parsed.isna().sum())
+        findings.append(
+            _finding(
+                "validity.pcf_date",
+                dataset,
+                invalid == 0,
+                message="PCF 日期可解析" if invalid == 0 else "PCF 日期不可解析",
+                evidence={"invalid_rows": invalid},
+                remediation="检查交易所 TRADING_DAY 字段，不允许用采集日期替代披露日期。",
+            )
+        )
+    return findings
+
+
 def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
     findings = check_empty(frame, dataset)
     required = [

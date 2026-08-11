@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import json
 import re
+import gzip
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,13 @@ SSE_ETF_NAV = SourceSpec(
     dataset="etf_nav",
     url="https://query.sse.com.cn/commonQuery.do",
     date_semantics="source_publication_previous_trading_day_nav",
+)
+SSE_ETF_PCF = SourceSpec(
+    source_id="sse",
+    publisher="上海证券交易所",
+    dataset="etf_pcf",
+    url="https://query.sse.com.cn/commonQuery.do",
+    date_semantics="sse_pcf_same_day_morning",
 )
 SZSE_ETF = SourceSpec(
     source_id="szse",
@@ -393,6 +402,222 @@ class OfficialMarketAdapters:
                 ["trade_date", "market", "instrument_code"], keep="last"
             ).reset_index(drop=True)
         return self._persist(normalized, artifact, publication_date)
+
+    def fetch_sse_etf_pcf(
+        self, etf_codes: list[str], trade_date: str, *, max_workers: int = 4
+    ) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Fetch same-day SSE ETF PCFs for ETFs whose shares actually changed.
+
+        The SSE unified PCF endpoint exposes the current published basket.  It
+        is therefore a *same-day capture* source: a response carrying another
+        ``TRADING_DAY`` is retained in the raw request log but contributes no
+        normalized rows.  Limiting requests to changed ETFs and four workers
+        keeps the source load and the GitHub/Cloudflare bill bounded.
+        """
+
+        requested_codes = list(
+            dict.fromkeys(
+                str(code).strip().zfill(6)
+                for code in etf_codes
+                if re.fullmatch(r"\d{6}", str(code).strip().zfill(6))
+            )
+        )
+        # A very large changed universe is a source/quality condition, not a
+        # reason to silently sample.  Keep the run bounded and expose the
+        # omitted count in the artifact warning.
+        max_codes = 800
+        omitted_count = max(0, len(requested_codes) - max_codes)
+        requested_codes = requested_codes[:max_codes]
+        request_log: list[dict[str, Any]] = []
+        response_log: list[dict[str, Any]] = []
+        normalized_rows: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        def fetch_one(code: str) -> dict[str, Any]:
+            basic_params = {
+                "isPagination": "false",
+                "FUNDID2": code,
+                "sqlId": "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C",
+            }
+            component_params = {
+                "isPagination": "false",
+                "FUNDID2": code,
+                "ETF_VERSION": "XML",
+                "sqlId": "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C",
+            }
+            basic_response = get(
+                self.session,
+                SSE_ETF_PCF.url,
+                params=basic_params,
+                headers=self._headers(
+                    f"https://www.sse.com.cn/disclosure/fund/etflist/detail.shtml?fundid={code}"
+                ),
+            )
+            component_response = get(
+                self.session,
+                SSE_ETF_PCF.url,
+                params=component_params,
+                headers=self._headers(
+                    f"https://www.sse.com.cn/disclosure/fund/etflist/detail.shtml?fundid={code}"
+                ),
+            )
+            basic_payload = basic_response.json()
+            component_payload = component_response.json()
+            basic_rows = basic_payload.get("result") if isinstance(basic_payload, dict) else []
+            component_rows = component_payload.get("result") if isinstance(component_payload, dict) else []
+            if not isinstance(basic_rows, list):
+                basic_rows = []
+            if not isinstance(component_rows, list):
+                component_rows = []
+            basic = next(
+                (
+                    row
+                    for row in basic_rows
+                    if isinstance(row, dict)
+                    and str(row.get("FUNDID2") or row.get("TRADE_CODE") or "").zfill(6) == code
+                ),
+                basic_rows[0] if basic_rows and isinstance(basic_rows[0], dict) else None,
+            )
+            observed_date = None
+            if basic:
+                observed_date = _iso_date(basic.get("TRADING_DAY"), field="TRADING_DAY") if basic.get("TRADING_DAY") else None
+            return {
+                "code": code,
+                "basic": basic,
+                "components": component_rows,
+                "observed_date": observed_date,
+                "basic_params": basic_params,
+                "component_params": component_params,
+                "basic_status": basic_response.status_code,
+                "component_status": component_response.status_code,
+            }
+
+        results: list[dict[str, Any]] = []
+        if requested_codes:
+            with ThreadPoolExecutor(max_workers=max(1, min(max_workers, 4))) as executor:
+                futures = {executor.submit(fetch_one, code): code for code in requested_codes}
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        warnings.append(f"{code} PCF 请求失败：{type(exc).__name__}")
+
+        for result in sorted(results, key=lambda item: item["code"]):
+            code = result["code"]
+            request_log.append(
+                {
+                    "code": code,
+                    "basic": result["basic_params"],
+                    "components": result["component_params"],
+                    "basic_status": result["basic_status"],
+                    "component_status": result["component_status"],
+                    "observed_date": result["observed_date"],
+                }
+            )
+            response_log.append(
+                {
+                    "code": code,
+                    "basic": result["basic"],
+                    "components": result["components"],
+                    "observed_date": result["observed_date"],
+                }
+            )
+            if result["observed_date"] != trade_date:
+                warnings.append(
+                    f"{code} PCF 日期 {result['observed_date'] or '缺失'} 与请求日期 {trade_date} 不一致"
+                )
+                continue
+            basic = result["basic"] or {}
+            creation_unit = _integer(
+                basic.get("CREATION_REDEMPTION_UNIT")
+                or basic.get("CREATION_UNIT")
+            )
+            if creation_unit is None or creation_unit <= 0:
+                warnings.append(f"{code} PCF 缺少有效最小申赎单位")
+                continue
+            etf_name = basic.get("FUND_NAME") or basic.get("FUND_FULL_NAME") or code
+            for row in result["components"]:
+                if not isinstance(row, dict):
+                    continue
+                stock_code = str(
+                    row.get("INSTRUMENT_ID")
+                    or row.get("STOCK_CODE")
+                    or row.get("UNDERLYING_SECURITY_ID")
+                    or ""
+                ).strip().zfill(6)
+                quantity = _integer(row.get("QUANTITY"))
+                if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
+                    continue
+                normalized_rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "pcf_date": trade_date,
+                        "market": "SSE",
+                        "etf_code": code,
+                        "etf_name": etf_name,
+                        "stock_code": stock_code,
+                        "stock_name": row.get("INSTRUMENT_NAME") or stock_code,
+                        "quantity": quantity,
+                        "creation_unit": creation_unit,
+                        "substitution_flag": row.get("SUBSTITUTION_FLAG") or "",
+                        "listing_market": row.get("UNDERLYION_SECURITY_ID") or row.get("UNDERLYING_SECURITY_ID") or "",
+                        "source_id": SSE_ETF_PCF.source_id,
+                        "source_grade": SSE_ETF_PCF.source_grade,
+                        "date_basis": SSE_ETF_PCF.date_semantics,
+                    }
+                )
+
+        if omitted_count:
+            warnings.append(f"changed_etf_count_exceeds_cap:{omitted_count}")
+        raw_payload = json.dumps(
+            {
+                "requested_date": trade_date,
+                "requested_etf_count": len(etf_codes),
+                "captured_etf_count": len(requested_codes),
+                "requests": request_log,
+                "responses": response_log,
+                "warnings": warnings,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        # The component response is the raw evidence. Compress only this
+        # optional combined artifact so the chunked importer stays below its
+        # 12 MB request cap even on a high-turnover day.
+        raw_payload = gzip.compress(raw_payload, compresslevel=6)
+        artifact = write_raw_response(
+            root=self.data_root,
+            source=SSE_ETF_PCF,
+            requested_date=trade_date,
+            run_id=self.run_id,
+            content=raw_payload,
+            extension="gz",
+            status_code=200 if request_log else 503,
+            content_type="application/gzip",
+            request_params={
+                "sqlId": [
+                    "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C",
+                    "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C",
+                ],
+                "same_day_required": True,
+                "max_codes": max_codes,
+            },
+        )
+        artifact.warnings.extend(warnings)
+        normalized = pd.DataFrame(normalized_rows)
+        if normalized.empty:
+            normalized = pd.DataFrame(
+                columns=[
+                    "trade_date", "pcf_date", "market", "etf_code", "etf_name",
+                    "stock_code", "stock_name", "quantity", "creation_unit",
+                    "substitution_flag", "listing_market", "source_id",
+                    "source_grade", "date_basis",
+                ]
+            )
+        else:
+            normalized["observed_at"] = artifact.observed_at
+        return self._persist(normalized, artifact, trade_date)
 
     def fetch_szse_etf_current(
         self, known_trading_dates: list[str]

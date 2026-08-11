@@ -199,7 +199,7 @@ export function DashboardBootstrap() {
       <main className="terminal-shell bootstrap-state" aria-busy="true">
         <div className="bootstrap-card">
           <strong>正在加载已发布数据</strong>
-          <span>只读取已经通过 QA 的完整快照；若网络暂时不可用，会保留当前数据并支持重试。</span>
+          <span>只读取已经通过 QA 的完整数据快照；若网络暂时不可用，会保留当前数据并支持重试。</span>
         </div>
       </main>
     );

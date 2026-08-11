@@ -32,7 +32,7 @@ const DAILY_DATA_DISPATCH_URL =
 
 function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
   if (cron.startsWith("45 23")) return "morning";
-  if (cron.startsWith("10 0")) return "reconcile";
+  if (cron.startsWith("45 0") || cron.startsWith("55 0")) return "reconcile";
   return "evening";
 }
 

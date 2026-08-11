@@ -648,6 +648,20 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .drawer-pending-periods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 8px 14px; }
 .drawer-pending-periods span { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); font-size: 12px; }
 .drawer-pending-periods small { color: var(--muted); font-size: 11px; }
+.drawer-stock-flow { margin: 18px 20px 0; padding: 15px; border: 1px solid rgba(80,183,217,.24); border-radius: 10px; background: linear-gradient(145deg, rgba(80,183,217,.08), rgba(10,18,29,.5)); }
+.drawer-stock-flow > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.drawer-stock-flow > header > div { display: flex; flex-direction: column; gap: 2px; }
+.drawer-stock-flow > header strong { color: var(--ink); font-size: 16px; }
+.drawer-stock-flow-basis { margin: 9px 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.drawer-stock-flow-list { border-top: 1px solid var(--line-soft); }
+.drawer-stock-flow-list > div { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line-soft); }
+.drawer-stock-flow-list span { display: flex; min-width: 0; flex-direction: column; }
+.drawer-stock-flow-list b { overflow: hidden; color: var(--muted-strong); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-stock-flow-list small { color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 11px; }
+.drawer-stock-flow-list strong { flex: 0 0 auto; font-family: var(--font-geist-mono), monospace; font-size: 14px; }
+.drawer-stock-flow-foot { display: block; margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.drawer-stock-flow-empty { display: flex; align-items: center; gap: 7px; padding: 12px 0 2px; color: var(--muted); font-size: 12px; }
+.drawer-stock-flow-empty svg { color: var(--cyan); }
 .drawer-note { display: flex; align-items: flex-start; gap: 9px; margin: 18px 20px; padding: 14px; border: 1px solid rgba(80,183,217,.2); border-radius: 9px; background: var(--cyan-soft); color: var(--cyan); }
 .drawer-note svg { flex: 0 0 auto; }
 .drawer-note p { margin: 0; color: #b7d6e2; font-size: var(--text-sm); line-height: 1.7; }

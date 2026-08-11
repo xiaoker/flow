@@ -10,6 +10,7 @@ import pandas as pd
 
 from .adapters import OfficialMarketAdapters
 from .etf_classification import CLASSIFICATION_VERSION, classify_etf
+from .etf_stock_flow import StockFlowInputError, build_stock_flow
 from .http import build_session
 from .storage import new_run_id
 
@@ -612,6 +613,11 @@ def build_dashboard_snapshot(
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
+    pcf = (
+        _read_csv(workspace_root, paths["sse_etf_pcf"])
+        if paths.get("sse_etf_pcf")
+        else pd.DataFrame()
+    )
 
     required_frames = {
         "上交所 ETF": sse_etf,
@@ -649,6 +655,55 @@ def build_dashboard_snapshot(
 
     etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
     etf_terminal = _build_etf_terminal_data(sse_etf, szse_etf, dates)
+    try:
+        stock_flow = build_stock_flow(
+            pd.concat([sse_etf, szse_etf], ignore_index=True),
+            pcf,
+            as_of=as_of,
+            previous_date=dates[-2] if len(dates) >= 2 else None,
+        )
+    except StockFlowInputError as exc:
+        # Never publish a guessed penetration value.  Keep the failure visible
+        # in the snapshot so QA and the UI can explain why the panel is empty.
+        stock_flow = {
+            "available": False,
+            "unit": "股",
+            "asOf": as_of,
+            "basis": {
+                "shareDate": as_of,
+                "previousShareDate": dates[-2] if len(dates) >= 2 else None,
+                "pcfDate": None,
+                "timezone": "Asia/Shanghai",
+                "calculation": "ETF份额变化 ÷ 最小申赎单位 × PCF成分数量",
+                "source": "SSE ETF PCF + SSE/SZSE ETF official share snapshots",
+            },
+            "coverage": {
+                "shareEtfCount": 0,
+                "pcfEtfCount": 0,
+                "matchedEtfCount": 0,
+                "stockCount": 0,
+                "shownStockCount": 0,
+                "limited": False,
+            },
+            "stocks": [],
+            "etfs": [],
+            "warnings": [f"stock_flow_input_error:{exc}"],
+        }
+    pcf_capture_warnings: list[str] = []
+    for artifact in manifest.get("artifacts") or []:
+        source = artifact.get("source") or {}
+        if source.get("dataset") != "etf_pcf":
+            continue
+        pcf_capture_warnings.extend(
+            str(warning)
+            for warning in artifact.get("warnings") or []
+            if str(warning).strip()
+        )
+    if pcf_capture_warnings:
+        stock_flow["warnings"] = list(
+            dict.fromkeys([*stock_flow.get("warnings", []), *pcf_capture_warnings])
+        )
+        stock_flow.setdefault("coverage", {})["captureWarnings"] = pcf_capture_warnings[:8]
     if "market" not in sse_margin.columns:
         sse_margin = sse_margin.assign(market="SSE")
     if "market" not in szse_margin.columns:
@@ -881,6 +936,7 @@ def build_dashboard_snapshot(
         ],
         "etfFlows": etf_flows,
         "etfTerminal": etf_terminal,
+        "etfStockFlow": stock_flow,
         "marginSeries": margin_series,
         "connect": connect_rows,
         "connectSeries": _build_connect_series(connect, dates[-60:]),

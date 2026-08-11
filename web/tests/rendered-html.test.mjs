@@ -84,7 +84,7 @@ test("refreshes the latest dashboard and schedules collection through source rel
   assert.deepEqual(config.triggers.crons, [
     "30 10 * * mon-fri",
     "45 23 * * sun-thu",
-    "10 0 * * mon-fri",
+    "45 0 * * mon-fri",
   ]);
 });
 

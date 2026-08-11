@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -75,3 +77,69 @@ def test_history_bundle_preserves_raw_and_normalized_hashes(tmp_path: Path) -> N
     assert artifact["tradeDates"] == ["2026-07-21"]
     assert [item["name"] for item in artifact["normalized"]] == ["summary", "top"]
     assert artifact["normalized"][0]["rowCount"] == 1
+
+
+def test_history_bundle_compresses_wide_pcf_in_transit(tmp_path: Path) -> None:
+    raw_path = tmp_path / "data/raw/sse/etf_pcf/2026-07-21/run.gz"
+    metadata_path = raw_path.with_name("run.metadata.json")
+    normalized_path = tmp_path / "data/normalized/sse_etf_pcf/2026-07-21/run.csv"
+    raw_path.parent.mkdir(parents=True)
+    normalized_path.parent.mkdir(parents=True)
+    raw = gzip.compress(b'{"responses":[]}')
+    digest = hashlib.sha256(raw).hexdigest()
+    raw_path.write_bytes(raw)
+    metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-21",
+                "market": "SSE",
+                "etf_code": "588000",
+                "stock_code": "688008",
+                "quantity": 1813,
+                "creation_unit": 3000000,
+            }
+        ]
+    ).to_csv(normalized_path, index=False)
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps({"asOf": "2026-07-21"}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "pcf-history-test",
+                "started_at": "2026-07-22T09:15:00+08:00",
+                "finished_at": "2026-07-22T09:16:00+08:00",
+                "artifacts": [
+                    {
+                        "source": {
+                            "source_id": "sse",
+                            "dataset": "etf_pcf",
+                            "url": "https://query.sse.com.cn/commonQuery.do",
+                            "date_semantics": "sse_pcf_same_day_morning",
+                        },
+                        "requested_date": "2026-07-21",
+                        "observed_at": "2026-07-22T09:15:20+08:00",
+                        "content_type": "application/gzip",
+                        "raw_path": str(raw_path.relative_to(tmp_path)),
+                        "metadata_path": str(metadata_path.relative_to(tmp_path)),
+                        "normalized_path": str(normalized_path.relative_to(tmp_path)),
+                        "sha256": digest,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = build_history_bundle_from_files(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+        workspace_root=tmp_path,
+    )
+    normalized = bundle["history"]["artifacts"][0]["normalized"][0]
+    decoded = gzip.decompress(base64.b64decode(normalized["contentBase64"]))
+
+    assert normalized["contentEncoding"] == "gzip"
+    assert hashlib.sha256(decoded).hexdigest() == normalized["sha256"]
+    assert b"588000" in decoded

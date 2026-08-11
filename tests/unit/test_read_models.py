@@ -94,6 +94,22 @@ def test_materialized_contract_rejects_legacy_runtime_hydration_snapshot() -> No
         build_read_models(snapshot, require_materialized=True)
 
 
+def test_stock_flow_read_model_rejects_cross_day_pcf() -> None:
+    snapshot = _snapshot()
+    snapshot["etfStockFlow"] = {
+        "available": True,
+        "basis": {
+            "shareDate": "2026-08-06",
+            "previousShareDate": "2026-08-05",
+            "pcfDate": "2026-08-05",
+        },
+        "coverage": {},
+        "stocks": [],
+    }
+    with pytest.raises(ReadModelError, match="etf_stock_flow_date_mismatch"):
+        build_read_models(snapshot, require_materialized=True)
+
+
 def test_write_read_models_uses_canonical_json(tmp_path: Path) -> None:
     result = write_read_models(_snapshot(), tmp_path, require_materialized=True)
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))

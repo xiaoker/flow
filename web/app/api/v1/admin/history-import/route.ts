@@ -28,12 +28,13 @@ type NormalizedFile = {
   rowCount: number;
   tradeDates: string[];
   contentBase64: string;
+  contentEncoding?: "gzip";
 };
 
 type HistoryArtifact = {
   releaseId: string;
   sourceId: "sse" | "szse" | "hkex";
-  dataset: "etf_scale" | "etf_nav" | "margin_market_daily" | "stock_connect_daily";
+  dataset: "etf_scale" | "etf_nav" | "etf_pcf" | "margin_market_daily" | "stock_connect_daily";
   requestedDate: string;
   tradeDates: string[];
   observedAt: string;
@@ -111,7 +112,8 @@ function isNormalizedFile(value: unknown): value is NormalizedFile {
       Array.isArray(value.tradeDates) &&
       value.tradeDates.length <= 750 &&
       value.tradeDates.every((date) => typeof date === "string" && ISO_DATE.test(date)) &&
-      typeof value.contentBase64 === "string",
+      typeof value.contentBase64 === "string" &&
+      (value.contentEncoding === undefined || value.contentEncoding === "gzip"),
   );
 }
 
@@ -123,6 +125,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
     (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "hkex") ||
     (dataset !== "etf_scale" &&
       dataset !== "etf_nav" &&
+      dataset !== "etf_pcf" &&
       dataset !== "margin_market_daily" &&
       dataset !== "stock_connect_daily")
   ) return false;
@@ -130,6 +133,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
     (dataset === "stock_connect_daily" && sourceId === "hkex") ||
     (dataset === "etf_scale" && (sourceId === "sse" || sourceId === "szse")) ||
     (dataset === "etf_nav" && sourceId === "sse") ||
+    (dataset === "etf_pcf" && sourceId === "sse") ||
     (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse"));
   if (!expectedPair) return false;
   return Boolean(
@@ -222,6 +226,13 @@ function decodeBase64(value: string): Uint8Array {
   }
   const binary = atob(value);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function decodeNormalizedContent(file: NormalizedFile): Promise<Uint8Array> {
+  const encoded = decodeBase64(file.contentBase64);
+  if (file.contentEncoding !== "gzip") return encoded;
+  const stream = new Blob([encoded]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 function parseCsv(content: Uint8Array): Array<Record<string, string>> {
@@ -401,6 +412,25 @@ async function persistStandardRows(
     // etf_daily during the collector bundle build; it does not create a
     // second D1 release or overwrite the shares source.
     return rows.length;
+  }
+
+  if (artifact.dataset === "etf_pcf") {
+    const normalized = normalizedFiles.find(({ file }) => file.name === "data");
+    if (!normalized) throw new Error("missing_etf_pcf_data");
+    // PCF is validated row-by-row offline (including raw-response replay and
+    // duplicate component keys).  Do not materialize hundreds of thousands of
+    // component objects in the Worker: verify the decompressed CSV header and
+    // its signed content hash here, then archive it without D1 insertion.
+    const text = new TextDecoder().decode(normalized.content).replace(/^\uFEFF/, "");
+    const header = text.split(/\r?\n/, 1)[0].split(",").map((item) => item.trim());
+    const requiredHeaders = ["trade_date", "market", "etf_code", "stock_code", "quantity", "creation_unit", "stock_name"];
+    if (requiredHeaders.some((field) => !header.includes(field))) {
+      throw new Error("invalid_etf_pcf_header");
+    }
+    // PCF is an immutable raw/normalized evidence feed.  It deliberately does
+    // not create one D1 row per component; the compact stock-flow read model
+    // is published with the verified snapshot instead.
+    return normalized.file.rowCount;
   }
 
   if (artifact.dataset === "etf_scale") {
@@ -740,15 +770,20 @@ export async function POST(request: Request) {
           },
         );
         const normalizedKeys: string[] = [];
-        const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }> = [];
+        const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array; wireContent: Uint8Array }> = [];
         for (const normalized of artifact.normalized) {
-          const content = decodeBase64(normalized.contentBase64);
+          const wireContent = decodeBase64(normalized.contentBase64);
+          const content = await decodeNormalizedContent(normalized);
           if ((await sha256Hex(content)) !== normalized.sha256) {
             throw new Error(`normalized_sha256_mismatch:${artifact.releaseId}:${normalized.name}`);
           }
-          const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}.csv`;
-          await runtime.RAW_BUCKET.put(key, content, {
-            httpMetadata: { contentType: "text/csv; charset=utf-8" },
+          const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}${normalized.contentEncoding === "gzip" ? ".csv.gz" : ".csv"}`;
+          await runtime.RAW_BUCKET.put(key, normalized.contentEncoding === "gzip" ? wireContent : content, {
+            httpMetadata: {
+              contentType: normalized.contentEncoding === "gzip"
+                ? "application/gzip"
+                : "text/csv; charset=utf-8",
+            },
             customMetadata: {
               sourceId: artifact.sourceId,
               dataset: artifact.dataset,
@@ -757,17 +792,17 @@ export async function POST(request: Request) {
             },
           });
           normalizedKeys.push(key);
-          normalizedFiles.push({ file: normalized, content });
+          normalizedFiles.push({ file: normalized, content, wireContent });
         }
         const normalizedRowCount = normalizedFiles.reduce(
           (sum, item) => sum + item.file.rowCount,
           0,
         );
-        // NAV is an optional enrichment feed.  An exchange may return an
-        // empty exact-date list because its public page only retains the
-        // latest bulletin; archive that evidence as VERIFIED so an empty NAV
-        // feed cannot block the complete ETF share publication.
-        if (normalizedRowCount === 0 && artifact.dataset !== "etf_nav") {
+        // NAV and PCF are optional enrichment feeds.  An exchange may return
+        // an empty exact-date list because its public page only retains the
+        // latest bulletin; archive that evidence as VERIFIED so an empty
+        // enrichment feed cannot block the complete ETF share publication.
+        if (normalizedRowCount === 0 && artifact.dataset !== "etf_nav" && artifact.dataset !== "etf_pcf") {
           const stateKey = await writeCollectionState(runtime.RAW_BUCKET, {
             runId: history.runId,
             asOf: history.asOf,

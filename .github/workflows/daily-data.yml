@@ -8,7 +8,7 @@ on:
   schedule:
     - cron: "45 10 * * 1-5"  # 18:45 Asia/Shanghai · failover after SSE/HKEX window
     - cron: "0 0 * * 1-5"    # 08:00 Asia/Shanghai · failover after SZSE window
-    - cron: "25 0 * * 1-5"   # 08:25 Asia/Shanghai · failover after reconciliation
+    - cron: "55 0 * * 1-5"   # 08:55 Asia/Shanghai · failover after PCF capture/reconciliation
   workflow_dispatch:
     inputs:
       dates:
@@ -33,7 +33,7 @@ permissions:
 concurrency:
   group: daily-market-data
   # A newer release-window run supersedes an older readiness poll.  Without
-  # cancellation, the 07:45/08:10/08:25 jobs can queue behind one another and
+  # cancellation, the 07:45/08:45/08:55 jobs can queue behind one another and
   # publish an older snapshot long after the source has become available.
   cancel-in-progress: true
 
@@ -90,7 +90,7 @@ jobs:
             case "${{ github.event.schedule || '' }}" in
               "45 10 * * 1-5") WINDOW="evening" ;;
               "0 0 * * 1-5") WINDOW="morning" ;;
-              "25 0 * * 1-5") WINDOW="reconcile" ;;
+              "55 0 * * 1-5") WINDOW="reconcile" ;;
             esac
           fi
           echo "collection_window=$WINDOW" >> "$GITHUB_OUTPUT"
