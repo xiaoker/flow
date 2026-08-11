@@ -3,7 +3,9 @@
 import { ArrowLeft, ArrowsClockwise, Database, MagnifyingGlass, WarningCircle } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import type {
+  EtfStockFlowData,
   StockFlowDetail,
+  StockFlowDetailContributor,
   StockSearchItem,
 } from "./lib/dashboard-data";
 
@@ -23,6 +25,11 @@ type StockShardPayload = {
   warnings?: string[];
 };
 
+type RadarFallbackPayload = {
+  data?: { etfStockFlow?: EtfStockFlowData };
+  etfStockFlow?: EtfStockFlowData;
+};
+
 type StockBasis = {
   shareDate?: string;
   previousShareDate?: string | null;
@@ -39,6 +46,95 @@ type Props = {
   venue: string | null;
   code: string | null;
 };
+
+const LEGACY_RADAR_WARNING = "legacy_radar_embedded_stock_flow";
+
+function inferEmbeddedListingMarket(code: string, listingMarket?: string): string {
+  if (listingMarket?.trim()) return listingMarket.trim();
+  if (/^6\d{5}$/.test(code)) return "101";
+  if (/^[03]\d{5}$/.test(code)) return "102";
+  if (/^[48]\d{5}$/.test(code)) return "104";
+  return "UNKNOWN";
+}
+
+function embeddedStockSearchItems(flow: EtfStockFlowData): StockSearchItem[] {
+  const items = new Map<string, StockSearchItem>();
+  const add = (stock: { stockCode: string; stockName: string; listingMarket?: string; listingMarketName?: string }) => {
+    const stockCode = String(stock.stockCode ?? "").trim();
+    const stockName = String(stock.stockName ?? "").trim();
+    if (!stockCode || !stockName) return;
+    const listingMarket = inferEmbeddedListingMarket(stockCode, stock.listingMarket);
+    const identity = `${listingMarket}:${stockCode}`;
+    if (items.has(identity)) return;
+    items.set(identity, {
+      listingMarket,
+      listingMarketName: stock.listingMarketName ?? (listingMarket === "101" ? "上交所" : listingMarket === "102" ? "深交所" : listingMarket === "104" ? "北交所" : "待核验市场"),
+      code: stockCode,
+      name: stockName,
+      shard: "",
+      available: false,
+    });
+  };
+  flow.stocks.forEach(add);
+  flow.etfs.forEach((etf) => etf.stocks?.forEach(add));
+  return [...items.values()];
+}
+
+function embeddedStockDetail(
+  flow: EtfStockFlowData,
+  code: string,
+  listingMarket?: string,
+): StockFlowDetail | null {
+  const matchesMarket = (candidate?: string) => !listingMarket || inferEmbeddedListingMarket(code, candidate) === listingMarket;
+  const global = flow.stocks.find((stock) => stock.stockCode === code && matchesMarket(stock.listingMarket));
+  const direct = flow.etfs.flatMap((etf) => (etf.stocks ?? [])
+    .filter((stock) => stock.stockCode === code && matchesMarket(stock.listingMarket))
+    .map((stock) => ({ etf, stock })));
+  if (!global && !direct.length) return null;
+
+  const contributors: StockFlowDetailContributor[] = global?.contributors.map((item) => ({
+    etfMarket: (item as unknown as { etfMarket?: string }).etfMarket,
+    etfCode: item.etfCode,
+    etfName: item.etfName,
+    shareDelta: item.shareDelta,
+    quantity: item.quantity,
+    creationUnit: item.creationUnit,
+    stockFlowShares: item.stockFlowShares,
+    currentPenetratedShares: item.currentPenetratedShares,
+    estimated: item.estimated,
+  })) ?? direct.map(({ etf, stock }) => ({
+    etfMarket: etf.market,
+    etfCode: etf.code,
+    etfName: etf.name,
+    shareDelta: etf.shareDelta,
+    quantity: stock.quantity,
+    creationUnit: etf.creationUnit,
+    stockFlowShares: stock.stockFlowShares,
+    currentPenetratedShares: stock.currentPenetratedShares,
+    estimated: stock.estimated,
+  }));
+  const etfCount = new Set(contributors.map((item) => item.etfCode)).size;
+  const netShares = global?.netShares ?? contributors.reduce((sum, item) => sum + item.stockFlowShares, 0);
+  const inflowShares = global?.inflowShares ?? contributors.reduce((sum, item) => sum + Math.max(0, item.stockFlowShares), 0);
+  const outflowShares = global?.outflowShares ?? contributors.reduce((sum, item) => sum + Math.max(0, -item.stockFlowShares), 0);
+  const first = global ?? direct[0]?.stock;
+  const resolvedMarket = inferEmbeddedListingMarket(code, first?.listingMarket);
+  return {
+    listingMarket: resolvedMarket,
+    listingMarketName: first?.listingMarketName ?? (resolvedMarket === "101" ? "上交所" : resolvedMarket === "102" ? "深交所" : resolvedMarket === "104" ? "北交所" : "待核验市场"),
+    stockCode: code,
+    stockName: first?.stockName ?? code,
+    netShares,
+    inflowShares,
+    outflowShares,
+    etfCount,
+    contributorCount: etfCount,
+    shownContributorCount: contributors.length,
+    contributorsLimited: global ? contributors.length < global.etfCount : false,
+    contributors,
+    estimated: true,
+  };
+}
 
 const venueToListingMarket: Record<string, string> = {
   SSE: "101",
@@ -83,6 +179,7 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
 
   const exactListingMarket = venue ? venueToListingMarket[venue] : undefined;
   const date = asOf;
+  const historicalRequest = typeof window !== "undefined" && Boolean(new URLSearchParams(window.location.search).get("date"));
   const requestKey = `${date}:${venue ?? ""}:${code ?? ""}`;
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
@@ -90,11 +187,44 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
     const controller = new AbortController();
     const load = async () => {
       if (!code) throw new Error("missing_stock_code");
+      let fallbackFlow: EtfStockFlowData | null = null;
+      const loadRadarFallback = async (): Promise<EtfStockFlowData | null> => {
+        if (fallbackFlow) return fallbackFlow;
+        const fallbackUrl = historicalRequest
+          ? `/api/v2/dashboard?date=${encodeURIComponent(date)}`
+          : "/api/v2/views/radar";
+        const fallbackResponse = await fetch(fallbackUrl, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!fallbackResponse.ok) return null;
+        const fallbackReleaseId = fallbackResponse.headers.get("x-flow-release-id");
+        if (releaseId && fallbackReleaseId && releaseId !== fallbackReleaseId) throw new Error("release_pending");
+        const payload = await fallbackResponse.json() as RadarFallbackPayload;
+        fallbackFlow = payload.data?.etfStockFlow ?? payload.etfStockFlow ?? null;
+        return fallbackFlow;
+      };
+      const loadRadarDetailFallback = async (): Promise<boolean> => {
+        const flow = await loadRadarFallback();
+        if (!flow) return false;
+        const fallbackItems = embeddedStockSearchItems(flow);
+        const fallbackDetail = embeddedStockDetail(flow, code, exactListingMarket);
+        if (!fallbackDetail) return false;
+        setSearchItems(fallbackItems);
+        setBasis(flow.basis);
+        setWarnings([...flow.warnings, LEGACY_RADAR_WARNING]);
+        setDetail(fallbackDetail);
+        setError(null);
+        return true;
+      };
       const searchResponse = await fetch(`/api/v2/stock-search?date=${encodeURIComponent(date)}`, {
         cache: "no-store",
         signal: controller.signal,
       });
-      if (!searchResponse.ok) throw new Error(searchResponse.status === 404 ? "stock_model_not_published_for_date" : `stock_search_${searchResponse.status}`);
+      if (!searchResponse.ok) {
+        if (await loadRadarDetailFallback()) return;
+        throw new Error(searchResponse.status === 404 ? "stock_model_not_published_for_date" : `stock_search_${searchResponse.status}`);
+      }
       const searchReleaseId = searchResponse.headers.get("x-flow-release-id");
       if (releaseId && searchReleaseId && releaseId !== searchReleaseId) throw new Error("release_pending");
       const searchPayload = await searchResponse.json() as StockSearchPayload;
@@ -102,12 +232,18 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
       setSearchItems(items);
       const matches = items.filter((item) => item.code === code && (!exactListingMarket || item.listingMarket === exactListingMarket));
       const match = matches[0];
-      if (!match) throw new Error("stock_not_covered");
+      if (!match || !match.shard) {
+        if (await loadRadarDetailFallback()) return;
+        throw new Error("stock_not_covered");
+      }
       const shardResponse = await fetch(`/api/v2/stocks/${encodeURIComponent(match.shard)}?date=${encodeURIComponent(date)}`, {
         cache: "no-store",
         signal: controller.signal,
       });
-      if (!shardResponse.ok) throw new Error(shardResponse.status === 404 ? "stock_model_not_published_for_date" : `stock_detail_${shardResponse.status}`);
+      if (!shardResponse.ok) {
+        if (await loadRadarDetailFallback()) return;
+        throw new Error(shardResponse.status === 404 ? "stock_model_not_published_for_date" : `stock_detail_${shardResponse.status}`);
+      }
       const shardReleaseId = shardResponse.headers.get("x-flow-release-id");
       if (searchReleaseId && shardReleaseId && searchReleaseId !== shardReleaseId) throw new Error("release_pending");
       if (releaseId && shardReleaseId && releaseId !== shardReleaseId) throw new Error("release_pending");
@@ -115,7 +251,10 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
       const row = (Array.isArray(shardPayload.items) ? shardPayload.items : []).find(
         (item) => item.stockCode === match.code && item.listingMarket === match.listingMarket,
       );
-      if (!row) throw new Error("stock_not_covered");
+      if (!row) {
+        if (await loadRadarDetailFallback()) return;
+        throw new Error("stock_not_covered");
+      }
       setError(null);
       setBasis(shardPayload.basis ?? searchPayload.basis ?? null);
       setWarnings([...(searchPayload.warnings ?? []), ...(shardPayload.warnings ?? [])]);
@@ -133,7 +272,7 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
         }
       });
     return () => controller.abort();
-  }, [asOf, code, date, exactListingMarket, releaseId, requestKey]);
+  }, [asOf, code, date, exactListingMarket, historicalRequest, releaseId, requestKey]);
 
   const isLoading = loading || loadedKey !== requestKey;
 
@@ -162,7 +301,7 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
           <label className="global-search stock-search-control"><MagnifyingGlass size={18} /><input aria-label="搜索个股" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && searchResults[0]) openSearchResult(searchResults[0]); }} placeholder="搜索个股或代码" value={query} /></label>
           <button className="stock-back-button" onClick={() => window.history.back()} type="button"><ArrowLeft size={17} />返回</button>
         </div>
-        {query.trim() && <div className="stock-search-results" role="listbox">{searchResults.length ? searchResults.map((item) => <button aria-selected={false} key={`${item.listingMarket}:${item.code}`} onClick={() => openSearchResult(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>个股</em></button>) : <span className="stock-search-no-result">没有找到当前 PCF 覆盖个股</span>}</div>}
+        {query.trim() && <div className="stock-search-results" role="listbox">{searchResults.length ? searchResults.map((item) => <button aria-selected={false} key={`${item.listingMarket}:${item.code}`} onClick={() => openSearchResult(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>{item.available ? "个股" : "雷达兼容"}</em></button>) : <span className="stock-search-no-result">没有找到当前 PCF 覆盖个股</span>}</div>}
       </header>
 
       <section className="stock-detail-heading">
@@ -194,7 +333,7 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
           </section>
 
           <section className="terminal-panel stock-history-empty"><div><span className="eyebrow">历史穿透走势</span><h2>历史节点积累中</h2><p>当前发布版本只展示经过日期门禁的当日穿透值。至少积累两个完整发布日后才绘制折线，不用单日数据制造趋势。</p></div><Database size={28} /></section>
-          {warnings.length > 0 && <p className="stock-warning-note"><WarningCircle size={16} />存在来源提示：{Array.from(new Set(warnings)).slice(0, 2).join("；")}</p>}
+          {warnings.length > 0 && <p className="stock-warning-note"><WarningCircle size={16} />存在来源提示：{Array.from(new Set(warnings)).slice(0, 2).map((warning) => warning === LEGACY_RADAR_WARNING ? "当前使用 ETF 雷达快照兼容数据，完整跨 ETF 个股分片将在下一次完整发布后可用" : warning).join("；")}</p>}
         </>
       )}
       <footer className="terminal-footer"><span><i className="status-light" />个股穿透数据截至 {date}</span><span>估算股数不等同真实成交资金 · 仅供数据观察，不构成投资建议</span></footer>

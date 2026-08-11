@@ -183,25 +183,31 @@ test("gives every ETF Radar detail view an official-share line chart", async () 
 });
 
 test("exposes a versioned ETF-to-stock search and detail contract", async () => {
-  const [dashboard, bootstrap, detail, releaseStore, searchRoute, shardRoute] = await Promise.all([
+  const [dashboard, bootstrap, detail, releaseStore, searchRoute, shardRoute, readModels] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/dashboard-bootstrap.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/stock-detail-view.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/release-store.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v2/stock-search/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v2/stocks/[shard]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../src/trading_desk/read_models.py", import.meta.url), "utf8"),
   ]);
   assert.match(dashboard, /搜索 ETF \/ 个股 \/ 代码/);
   assert.match(dashboard, /openStockDetail/);
+  assert.match(dashboard, /collectEmbeddedStockSearchItems/);
+  assert.match(dashboard, /api\/v2\/views\/radar/);
   assert.match(dashboard, /点击个股查看完整贡献拆解/);
   assert.match(bootstrap, /params\.get\("view"\) === "stock"/);
   assert.match(detail, /只读取已通过 QA 的同一发布版本/);
+  assert.match(detail, /legacy_radar_embedded_stock_flow/);
+  assert.match(detail, /embeddedStockDetail/);
   assert.match(detail, /ETF 份额变化 ÷ 最小申赎单位 × PCF 成分数量/);
   assert.match(detail, /历史节点积累中/);
   assert.match(releaseStore, /getReleaseManifestForDate/);
   assert.match(releaseStore, /readPublishedArtifact/);
   assert.match(searchRoute, /readPublishedArtifact\("stock_search"/);
   assert.match(shardRoute, /stock_\[0-7\]/);
+  assert.match(readModels, /stock_catalog_required_for_available_flow/);
 });
 
 test("requires explicit confirmation before opening a historical date", async () => {

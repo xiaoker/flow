@@ -32,6 +32,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type {
   DashboardSnapshot,
   EvidenceKind,
+  EtfStockFlowData,
   EtfTerminalData,
   EtfTerminalInstrument,
   FlowPeriod,
@@ -63,6 +64,38 @@ type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
 type EtfDisplayMetric = "shares" | "cash";
 type EtfDetailHistoryPoint = { date: string; shares: number; delta: number | null };
 type EtfHistoryBasis = "official_daily_change_replay" | "official_daily_share_snapshots";
+
+function inferEmbeddedListingMarket(code: string, listingMarket?: string): string {
+  if (listingMarket?.trim()) return listingMarket.trim();
+  if (/^6\d{5}$/.test(code)) return "101";
+  if (/^[03]\d{5}$/.test(code)) return "102";
+  if (/^[48]\d{5}$/.test(code)) return "104";
+  return "UNKNOWN";
+}
+
+function collectEmbeddedStockSearchItems(flow: EtfStockFlowData | undefined): StockSearchItem[] {
+  if (!flow) return [];
+  const items = new Map<string, StockSearchItem>();
+  const add = (stock: { stockCode: string; stockName: string; listingMarket?: string; listingMarketName?: string }) => {
+    const code = String(stock.stockCode ?? "").trim();
+    const name = String(stock.stockName ?? "").trim();
+    if (!code || !name) return;
+    const listingMarket = inferEmbeddedListingMarket(code, stock.listingMarket);
+    const identity = `${listingMarket}:${code}`;
+    if (items.has(identity)) return;
+    items.set(identity, {
+      listingMarket,
+      listingMarketName: stock.listingMarketName ?? (listingMarket === "101" ? "上交所" : listingMarket === "102" ? "深交所" : listingMarket === "104" ? "北交所" : "待核验市场"),
+      code,
+      name,
+      shard: "",
+      available: false,
+    });
+  };
+  flow.stocks.forEach(add);
+  flow.etfs.forEach((etf) => etf.stocks?.forEach(add));
+  return [...items.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+}
 
 const periods: Array<{ id: FlowPeriod; label: string }> = [
   { id: "1d", label: "最近1日" },
@@ -251,6 +284,7 @@ export function Dashboard({
   const [stockSearchItems, setStockSearchItems] = useState<StockSearchItem[]>([]);
   const [stockSearchLoading, setStockSearchLoading] = useState(false);
   const [stockSearchLoadedFor, setStockSearchLoadedFor] = useState<string | null>(null);
+  const [stockSearchFallback, setStockSearchFallback] = useState(false);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
@@ -300,14 +334,44 @@ export function Dashboard({
     if (!normalized || stockSearchLoadedFor === snapshot.asOf) return;
     const controller = new AbortController();
     setStockSearchLoading(true);
+    setStockSearchItems([]);
+    setStockSearchFallback(false);
+    const loadRadarFallback = async (): Promise<EtfStockFlowData | undefined> => {
+      if (snapshot.etfStockFlow) return snapshot.etfStockFlow;
+      const fallbackUrl = requestedDate
+        ? `/api/v2/dashboard?date=${encodeURIComponent(snapshot.asOf)}`
+        : "/api/v2/views/radar";
+      const fallbackResponse = await fetch(fallbackUrl, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!fallbackResponse.ok) return undefined;
+      const payload = await fallbackResponse.json() as DashboardSnapshot | { data?: DashboardSnapshot };
+      return "data" in payload ? payload.data?.etfStockFlow : payload.etfStockFlow;
+    };
     fetch(`/api/v2/stock-search?date=${encodeURIComponent(snapshot.asOf)}`, {
       cache: "no-store",
       signal: controller.signal,
     })
       .then(async (response) => {
-        if (!response.ok) throw new Error(`stock_search_${response.status}`);
-        const payload = await response.json() as { items?: StockSearchItem[] };
-        setStockSearchItems(Array.isArray(payload.items) ? payload.items : []);
+        let publishedItems: StockSearchItem[] = [];
+        if (response.ok) {
+          const payload = await response.json() as { items?: StockSearchItem[] };
+          publishedItems = Array.isArray(payload.items) ? payload.items : [];
+        }
+        const hasPublishedMatch = publishedItems.some((item) =>
+          item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized),
+        );
+        if (publishedItems.length && hasPublishedMatch) {
+          setStockSearchItems(publishedItems);
+          setStockSearchLoadedFor(snapshot.asOf);
+          return;
+        }
+        const fallbackItems = collectEmbeddedStockSearchItems(await loadRadarFallback());
+        const identities = new Set(publishedItems.map((item) => `${item.listingMarket}:${item.code}`));
+        const mergedItems = [...publishedItems, ...fallbackItems.filter((item) => !identities.has(`${item.listingMarket}:${item.code}`))];
+        setStockSearchItems(mergedItems);
+        setStockSearchFallback(fallbackItems.length > 0);
         setStockSearchLoadedFor(snapshot.asOf);
       })
       .catch((cause: unknown) => {
@@ -319,7 +383,7 @@ export function Dashboard({
         if (!controller.signal.aborted) setStockSearchLoading(false);
       });
     return () => controller.abort();
-  }, [globalQuery, snapshot.asOf, stockSearchLoadedFor]);
+  }, [globalQuery, requestedDate, snapshot.asOf, snapshot.etfStockFlow, stockSearchLoadedFor]);
 
   const globalSearchResults = useMemo(() => {
     const normalized = globalQuery.trim().toLowerCase();
@@ -981,9 +1045,9 @@ export function Dashboard({
             <label className="global-search"><MagnifyingGlass size={18} /><input aria-label="搜索 ETF、个股或代码" onChange={(event) => { const value = event.target.value; setGlobalQuery(value); setSearchActiveIndex(0); if (view === "national" || view === "radar") setQuery(value); }} onKeyDown={handleGlobalSearchKeyDown} placeholder="搜索 ETF / 个股 / 代码，回车查看" value={globalQuery} /></label>
             {globalQuery.trim() && (
               <div className="global-search-results" role="listbox" aria-label="搜索结果">
-                {globalSearchResults.stocks.length ? <section><header>个股</header>{globalSearchResults.stocks.map((item, index) => <button aria-selected={searchActiveIndex === index} className={searchActiveIndex === index ? "is-active" : ""} key={`${item.listingMarket}:${item.code}`} onClick={() => openStockDetail(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>个股</em></button>)}</section> : null}
+                {globalSearchResults.stocks.length ? <section><header>个股</header>{globalSearchResults.stocks.map((item, index) => <button aria-selected={searchActiveIndex === index} className={searchActiveIndex === index ? "is-active" : ""} key={`${item.listingMarket}:${item.code}`} onClick={() => openStockDetail(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>{item.available ? "个股" : "雷达兼容"}</em></button>)}</section> : null}
                 {globalSearchResults.etfs.length ? <section><header>ETF</header>{globalSearchResults.etfs.map((item, index) => { const optionIndex = globalSearchResults.stocks.length + index; return <button aria-selected={searchActiveIndex === optionIndex} className={searchActiveIndex === optionIndex ? "is-active" : ""} key={`${item.market}:${item.code}`} onClick={() => openEtfFromSearch(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.market === "SZSE" ? "深市" : "沪市"}</small></span><em>ETF</em></button>; })}</section> : null}
-                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取个股索引…" : "没有找到匹配的 ETF 或个股"}</span>}
+                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取个股索引…" : stockSearchFallback ? "当前雷达快照没有匹配的个股" : "没有找到匹配的 ETF 或个股"}</span>}
               </div>
             )}
           </div>

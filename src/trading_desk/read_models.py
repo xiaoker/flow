@@ -285,6 +285,13 @@ def build_read_models(
     """Return view payloads and a release manifest without touching storage."""
 
     validate_snapshot(snapshot, require_materialized=require_materialized)
+    stock_flow = snapshot.get("etfStockFlow")
+    if isinstance(stock_flow, dict) and stock_flow.get("available") is True and stock_catalog is None:
+        # The radar payload contains only a bounded compatibility graph.  Once
+        # the penetration model is available, publishing without its complete
+        # search/shard sidecars creates a release that can show clickable
+        # stocks but cannot resolve them on the detail page.
+        raise ReadModelError("stock_catalog_required_for_available_flow")
     payloads = build_view_payloads(snapshot)
     if stock_catalog is not None:
         payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
