@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import math
@@ -190,11 +191,19 @@ def build_ingest_bundle(
             digest = hashlib.sha256(content).hexdigest()
             if digest != str(metadata.get("sha256")):
                 raise ValueError(f"Read-model SHA-256 mismatch for {path}")
+            # Read models contain the full ETF history and the ETF→stock
+            # contribution graph.  They are immutable JSON at rest, but
+            # compressing the wire representation keeps the single signed
+            # import request below the free Worker body limit.  `bytes` and
+            # `sha256` deliberately continue to describe the uncompressed
+            # object that is written to R2.
+            wire_content = gzip.compress(content, compresslevel=6)
             read_artifacts[name] = {
                 "key": str(metadata["key"]),
                 "sha256": digest,
                 "bytes": len(content),
-                "contentBase64": base64.b64encode(content).decode("ascii"),
+                "contentBase64": base64.b64encode(wire_content).decode("ascii"),
+                "contentEncoding": "gzip",
             }
         result["readModels"] = {"manifest": read_manifest, "artifacts": read_artifacts}
     return result

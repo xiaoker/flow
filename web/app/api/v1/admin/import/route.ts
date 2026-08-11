@@ -57,6 +57,7 @@ type ReadModelArtifact = {
   sha256: string;
   bytes: number;
   contentBase64: string;
+  contentEncoding?: "gzip";
 };
 
 type ReadModelBundle = {
@@ -223,7 +224,8 @@ function isReadModelBundle(value: unknown): value is ReadModelBundle {
         artifact.sha256 === declared.sha256 &&
         artifact.bytes === declared.bytes &&
         typeof artifact.contentBase64 === "string" &&
-        artifact.contentBase64.length > 0,
+        artifact.contentBase64.length > 0 &&
+        (artifact.contentEncoding === undefined || artifact.contentEncoding === "gzip"),
     );
   });
 }
@@ -238,6 +240,13 @@ function decodeBase64(value: string): Uint8Array {
   }
   const binary = atob(value);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function decodeReadModelContent(artifact: ReadModelArtifact): Promise<Uint8Array> {
+  const encoded = decodeBase64(artifact.contentBase64);
+  if (artifact.contentEncoding !== "gzip") return encoded;
+  const stream = new Blob([encoded]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 async function sha256Hex(content: Uint8Array): Promise<string> {
@@ -502,7 +511,7 @@ async function archiveReadModels(
     await sha256Hex(new TextEncoder().encode(manifestBody));
   const manifestBodySha256 = await sha256Hex(new TextEncoder().encode(manifestBody));
   for (const artifact of Object.values(bundle.artifacts)) {
-    const content = decodeBase64(artifact.contentBase64);
+    const content = await decodeReadModelContent(artifact);
     if (content.byteLength !== artifact.bytes) throw new Error(`read_model_size_mismatch:${artifact.key}`);
     if ((await sha256Hex(content)) !== artifact.sha256) {
       throw new Error(`read_model_sha256_mismatch:${artifact.key}`);

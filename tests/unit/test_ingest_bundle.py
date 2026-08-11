@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -68,10 +70,34 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
         encoding="utf-8",
     )
 
+    read_model_dir = tmp_path / "read-models"
+    read_model_dir.mkdir()
+    read_model_content = ("{\"etfStockFlow\":\"" + ("x" * 10_000) + "\"}").encode()
+    read_model_digest = hashlib.sha256(read_model_content).hexdigest()
+    (read_model_dir / "radar.json").write_bytes(read_model_content)
+    (read_model_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "releaseId": "release:2026-07-15:1234567890abcdef",
+                "asOf": "2026-07-15",
+                "artifacts": {
+                    "radar": {
+                        "key": "market-data/releases/2026-07-15/release:2026-07-15:1234567890abcdef/radar.json",
+                        "sha256": read_model_digest,
+                        "bytes": len(read_model_content),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
     bundle = build_ingest_bundle(
         snapshot_path=snapshot_path,
         manifest_path=manifest_path,
         workspace_root=tmp_path,
+        read_model_dir=read_model_dir,
     )
 
     assert bundle["archive"]["retentionDays"] == RETENTION_DAYS
@@ -89,3 +115,9 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
                 "dateBasis": "source_page_previous_trading_day",
         }
     ]
+
+    artifact = bundle["readModels"]["artifacts"]["radar"]
+    assert artifact["contentEncoding"] == "gzip"
+    assert artifact["bytes"] == len(read_model_content)
+    assert artifact["sha256"] == read_model_digest
+    assert gzip.decompress(base64.b64decode(artifact["contentBase64"])) == read_model_content
