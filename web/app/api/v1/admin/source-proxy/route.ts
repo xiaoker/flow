@@ -7,6 +7,13 @@ const UPSTREAM_ORIGIN = "https://query.sse.com.cn";
 const MAX_RESPONSE_BYTES = 10_000_000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const COMPACT_DATE = /^\d{8}$/;
+const ETF_CODE = /^\d{6}$/;
+const ETF_CLASS = /^\d{2}$/;
+
+const SSE_ETF_SCALE_SQL = "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L";
+const SSE_ETF_NAV_SQL = "COMMON_SSE_PL_ETFGGSGSHQD_L";
+const SSE_ETF_PCF_BASIC_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C";
+const SSE_ETF_PCF_COMPONENT_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C";
 
 const COMMON_QUERY_PARAMETERS = new Set([
   "isPagination",
@@ -17,6 +24,12 @@ const COMMON_QUERY_PARAMETERS = new Set([
   "pageHelp.endPage",
   "sqlId",
   "STAT_DATE",
+  "FUNDID2",
+  "ETF_VERSION",
+  "ETF_CLASS",
+  "FUND_CODE",
+  "KEY_WORDS",
+  "type",
 ]);
 const MARGIN_QUERY_PARAMETERS = new Set([
   "isPagination",
@@ -68,14 +81,44 @@ function validateQuery(path: string, query: URLSearchParams): string | null {
     if (query.getAll(key).length !== 1) return `duplicate query parameter: ${key}`;
   }
   if (path === "/commonQuery.do") {
+    const sqlId = query.get("sqlId");
     if (
-      query.get("sqlId") !==
-      "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L"
+      ![
+        SSE_ETF_SCALE_SQL,
+        SSE_ETF_NAV_SQL,
+        SSE_ETF_PCF_BASIC_SQL,
+        SSE_ETF_PCF_COMPONENT_SQL,
+      ].includes(sqlId ?? "")
     ) {
       return "sqlId is not allowlisted";
     }
-    if (!ISO_DATE.test(query.get("STAT_DATE") ?? "")) {
-      return "STAT_DATE must be YYYY-MM-DD";
+    if (sqlId === SSE_ETF_SCALE_SQL) {
+      if (!ISO_DATE.test(query.get("STAT_DATE") ?? "")) {
+        return "STAT_DATE must be YYYY-MM-DD";
+      }
+    } else if (sqlId === SSE_ETF_NAV_SQL) {
+      if (!ETF_CLASS.test(query.get("ETF_CLASS") ?? "")) {
+        return "ETF_CLASS must be a two-digit code";
+      }
+      if (query.get("type") !== "inParams") {
+        return "type must be inParams";
+      }
+      if (query.get("FUND_CODE") !== "" || query.get("KEY_WORDS") !== "") {
+        return "FUND_CODE and KEY_WORDS must be empty";
+      }
+    } else {
+      if (!ETF_CODE.test(query.get("FUNDID2") ?? "")) {
+        return "FUNDID2 must be a six-digit ETF code";
+      }
+      if (query.get("isPagination") !== "false") {
+        return "isPagination must be false";
+      }
+      if (
+        sqlId === SSE_ETF_PCF_COMPONENT_SQL &&
+        query.get("ETF_VERSION") !== "XML"
+      ) {
+        return "ETF_VERSION must be XML";
+      }
     }
   } else {
     if (!COMPACT_DATE.test(query.get("beginDate") ?? "")) {
