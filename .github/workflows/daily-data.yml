@@ -190,7 +190,8 @@ jobs:
               --output etf-flow-state.json
             python scripts/build_dashboard_snapshot.py \
               --state etf-flow-state.json \
-              --output dashboard-snapshot.json
+              --output dashboard-snapshot.json \
+              --stock-catalog-output stock-flow-catalog.json
             trading-desk qa-release \
               --snapshot dashboard-snapshot.json \
               --state etf-flow-state.json
@@ -205,6 +206,7 @@ jobs:
             python scripts/build_read_models.py \
               --snapshot dashboard-snapshot.json \
               --output-dir read-models \
+              --stock-catalog stock-flow-catalog.json \
               --require-materialized
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
@@ -296,6 +298,7 @@ jobs:
             dashboard-snapshot.json
             dashboard-snapshot-base.json
             etf-flow-state.json
+            stock-flow-catalog.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json

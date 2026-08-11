@@ -8,10 +8,11 @@ export const dynamic = "force-dynamic";
 // intentionally small avoids making the free Worker parse the full dashboard
 // plus every view model in one invocation.
 const MAX_BODY_BYTES = 1_500_000;
+const MAX_ARTIFACTS = 20;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const RELEASE_ID = /^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/;
-const NAME = /^[a-z_]+$/;
+const NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|stock_search|stock_[0-7])$/;
 
 type ReadModelArtifactUpload = {
   name: string;
@@ -53,7 +54,7 @@ function isManifest(value: unknown): value is ReadModelManifest {
     !isRecord(value.artifacts)
   ) return false;
   const names = Object.keys(value.artifacts);
-  if (!names.length || names.length > 8 || names.some((name) => !NAME.test(name))) return false;
+  if (!names.length || names.length > MAX_ARTIFACTS || names.some((name) => !NAME.test(name))) return false;
   return names.every((name) => {
     const declared = value.artifacts[name];
     return Boolean(

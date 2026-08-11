@@ -10,7 +10,7 @@ import pandas as pd
 
 from .adapters import OfficialMarketAdapters
 from .etf_classification import CLASSIFICATION_VERSION, classify_etf
-from .etf_stock_flow import StockFlowInputError, build_stock_flow
+from .etf_stock_flow import StockFlowInputError, build_stock_flow, build_stock_flow_catalog
 from .http import build_session
 from .storage import new_run_id
 
@@ -596,7 +596,11 @@ def _pending_snapshot(
 
 
 def build_dashboard_snapshot(
-    *, manifest_path: Path, quality_path: Path, workspace_root: Path
+    *,
+    manifest_path: Path,
+    quality_path: Path,
+    workspace_root: Path,
+    stock_catalog_path: Path | None = None,
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     quality = json.loads(quality_path.read_text(encoding="utf-8"))
@@ -705,6 +709,37 @@ def build_dashboard_snapshot(
             dict.fromkeys([*stock_flow.get("warnings", []), *pcf_capture_warnings])
         )
         stock_flow.setdefault("coverage", {})["captureWarnings"] = pcf_capture_warnings[:8]
+    if stock_catalog_path is not None and publication_status == "confirmed":
+        try:
+            stock_catalog = build_stock_flow_catalog(
+                pd.concat([sse_etf, szse_etf], ignore_index=True),
+                pcf,
+                as_of=as_of,
+                previous_date=dates[-2] if len(dates) >= 2 else None,
+            )
+        except StockFlowInputError as exc:
+            stock_catalog = {
+                "schemaVersion": 1,
+                "asOf": as_of,
+                "basis": stock_flow.get("basis", {}),
+                "coverage": {
+                    "stockCount": 0,
+                    "shownStockCount": 0,
+                    "limited": False,
+                },
+                "items": [],
+                "warnings": [f"stock_flow_input_error:{exc}"],
+            }
+        if pcf_capture_warnings:
+            stock_catalog["warnings"] = list(
+                dict.fromkeys([*stock_catalog.get("warnings", []), *pcf_capture_warnings])
+            )
+            stock_catalog.setdefault("coverage", {})["captureWarnings"] = pcf_capture_warnings[:8]
+        stock_catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        stock_catalog_path.write_text(
+            json.dumps(stock_catalog, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
     if "market" not in sse_margin.columns:
         sse_margin = sse_margin.assign(market="SSE")
     if "market" not in szse_margin.columns:

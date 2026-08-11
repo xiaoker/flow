@@ -182,7 +182,10 @@ def build_ingest_bundle(
         read_manifest = _read_json(read_manifest_path)
         read_artifacts: dict[str, Any] = {}
         for name, metadata in (read_manifest.get("artifacts") or {}).items():
-            if not re.fullmatch(r"[a-z_]+", str(name)):
+            if not re.fullmatch(
+                r"(bootstrap|overview|radar|rotation|national|connect|margin|stock_search|stock_[0-7])",
+                str(name),
+            ):
                 raise ValueError(f"Invalid read-model name: {name!r}")
             path = read_model_dir / f"{name}.json"
             if not path.is_file():

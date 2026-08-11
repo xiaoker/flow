@@ -153,6 +153,44 @@ export interface EtfStockFlowData {
   warnings: string[];
 }
 
+export interface StockSearchItem {
+  listingMarket: string;
+  listingMarketName?: string;
+  code: string;
+  name: string;
+  shard: string;
+  available: boolean;
+}
+
+export interface StockFlowDetailContributor {
+  etfMarket?: string;
+  etfCode: string;
+  etfName: string;
+  shareDelta: number;
+  quantity: number;
+  creationUnit: number;
+  stockFlowShares: number;
+  currentPenetratedShares?: number;
+  cashSubstitution?: boolean;
+  estimated: boolean;
+}
+
+export interface StockFlowDetail {
+  listingMarket: string;
+  listingMarketName: string;
+  stockCode: string;
+  stockName: string;
+  netShares: number;
+  inflowShares: number;
+  outflowShares: number;
+  etfCount: number;
+  contributorCount: number;
+  shownContributorCount: number;
+  contributorsLimited: boolean;
+  contributors: StockFlowDetailContributor[];
+  estimated?: boolean;
+}
+
 export interface DashboardSnapshot {
   asOf: string;
   observedAt: string;

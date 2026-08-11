@@ -182,6 +182,28 @@ test("gives every ETF Radar detail view an official-share line chart", async () 
   assert.match(source, /不是现金净流入/);
 });
 
+test("exposes a versioned ETF-to-stock search and detail contract", async () => {
+  const [dashboard, bootstrap, detail, releaseStore, searchRoute, shardRoute] = await Promise.all([
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/dashboard-bootstrap.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/stock-detail-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/release-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v2/stock-search/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v2/stocks/[shard]/route.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(dashboard, /搜索 ETF \/ 个股 \/ 代码/);
+  assert.match(dashboard, /openStockDetail/);
+  assert.match(dashboard, /点击个股查看完整贡献拆解/);
+  assert.match(bootstrap, /params\.get\("view"\) === "stock"/);
+  assert.match(detail, /只读取已通过 QA 的同一发布版本/);
+  assert.match(detail, /ETF 份额变化 ÷ 最小申赎单位 × PCF 成分数量/);
+  assert.match(detail, /历史节点积累中/);
+  assert.match(releaseStore, /getReleaseManifestForDate/);
+  assert.match(releaseStore, /readPublishedArtifact/);
+  assert.match(searchRoute, /readPublishedArtifact\("stock_search"/);
+  assert.match(shardRoute, /stock_\[0-7\]/);
+});
+
 test("requires explicit confirmation before opening a historical date", async () => {
   const source = await readFile(
     new URL("../app/dashboard.tsx", import.meta.url),
@@ -681,6 +703,73 @@ test("routes an explicit active date to the complete active release", async () =
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-flow-historical"), "false");
   assert.deepEqual((await response.json()).etfTerminal.availablePeriods, ["1d", "3d", "1w"]);
+});
+
+test("streams the stock search artifact from the requested immutable release", async () => {
+  const worker = await loadWorker();
+  const activeReleaseId = "release:2026-08-07:0123456789abcdef";
+  const datedReleaseId = "release:2026-08-06:fedcba9876543210";
+  const stockKey = `market-data/releases/2026-08-06/${datedReleaseId}/stock_search.json`;
+  const manifest = {
+    schemaVersion: 2,
+    releaseId: datedReleaseId,
+    asOf: "2026-08-06",
+    artifacts: { stock_search: { key: stockKey } },
+  };
+  const payload = { schemaVersion: 1, asOf: "2026-08-06", items: [] };
+  const db = {
+    prepare(sql) {
+      return {
+        bind() { return this; },
+        async first() {
+          if (sql.includes("active_release")) {
+            return {
+              release_id: activeReleaseId,
+              as_of: "2026-08-07",
+              manifest_sha256: "a".repeat(64),
+              activated_at: "2026-08-07T09:00:00+08:00",
+              manifest_json: JSON.stringify({
+                schemaVersion: 2,
+                releaseId: activeReleaseId,
+                asOf: "2026-08-07",
+                artifacts: {},
+              }),
+            };
+          }
+          if (sql.includes("FROM release_manifest")) {
+            return {
+              release_id: datedReleaseId,
+              as_of: "2026-08-06",
+              manifest_sha256: "b".repeat(64),
+              created_at: "2026-08-06T09:00:00+08:00",
+              manifest_json: JSON.stringify(manifest),
+            };
+          }
+          return null;
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.equal(key, stockKey);
+      return {
+        body: new Response(JSON.stringify(payload)).body,
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        httpEtag: '"stock-search"',
+        customMetadata: { asOf: "2026-08-06", releaseId: datedReleaseId },
+      };
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v2/stock-search?date=2026-08-06"),
+    { ...env, DB: db, RAW_BUCKET: bucket },
+    context,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-flow-release-id"), datedReleaseId);
+  assert.equal(response.headers.get("x-flow-artifact"), "stock_search");
+  assert.deepEqual(await response.json(), payload);
 });
 
 test("fails closed when the active release object is missing", async () => {

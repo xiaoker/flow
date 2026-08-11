@@ -82,6 +82,63 @@ export async function getActiveReleaseManifest(): Promise<ActiveReleaseManifest 
   return db ? readActiveReleaseManifest(db) : null;
 }
 
+/**
+ * Resolve the immutable manifest for one published trading date. Historical
+ * manifests may be SUPERSEDED in D1, but their R2 objects remain immutable and
+ * must be selected by the requested date rather than falling back to today.
+ */
+export async function getReleaseManifestForDate(
+  requestedDate?: string,
+): Promise<ActiveReleaseManifest | null> {
+  const db = (await runtimeEnv()).DB;
+  if (!db) return null;
+  if (requestedDate === undefined) return readActiveReleaseManifest(db);
+  if (!ISO_DATE.test(requestedDate)) return null;
+  const active = await readActiveReleaseManifest(db);
+  if (active?.asOf === requestedDate) return active;
+  try {
+    const row = await db
+      .prepare(
+        `SELECT release_id,
+                as_of,
+                manifest_sha256,
+                created_at,
+                manifest_json
+         FROM release_manifest
+         WHERE as_of = ?
+           AND status IN ('ACTIVE', 'SUPERSEDED')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(requestedDate)
+      .first<{
+        release_id: string;
+        as_of: string;
+        manifest_sha256: string;
+        created_at: string;
+        manifest_json: string;
+      }>();
+    if (!row) return null;
+    const manifest: unknown = JSON.parse(row.manifest_json);
+    if (
+      !manifest ||
+      typeof manifest !== "object" ||
+      Array.isArray(manifest) ||
+      (manifest as Record<string, unknown>).releaseId !== row.release_id ||
+      (manifest as Record<string, unknown>).asOf !== row.as_of
+    ) return null;
+    return {
+      releaseId: row.release_id,
+      asOf: row.as_of,
+      manifestSha256: row.manifest_sha256,
+      activatedAt: row.created_at,
+      manifest: manifest as Record<string, unknown>,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function bootstrapKeyFromManifest(active: ActiveReleaseManifest): string | null {
   const bootstrap = active.manifest?.artifacts;
   const bootstrapArtifact =
@@ -95,9 +152,23 @@ function bootstrapKeyFromManifest(active: ActiveReleaseManifest): string | null 
   return typeof bootstrapKey === "string" ? bootstrapKey : null;
 }
 
+function artifactKeyFromManifest(active: ActiveReleaseManifest, name: string): string | null {
+  const artifacts = active.manifest?.artifacts;
+  const artifact =
+    artifacts && typeof artifacts === "object" && !Array.isArray(artifacts)
+      ? (artifacts as Record<string, unknown>)[name]
+      : null;
+  const key =
+    artifact && typeof artifact === "object" && !Array.isArray(artifact)
+      ? (artifact as Record<string, unknown>).key
+      : null;
+  return typeof key === "string" ? key : null;
+}
+
 async function readActivePublishedObject(
   runtime: Runtime,
   active: ActiveReleaseManifest,
+  historical = false,
 ): Promise<PublishedObject | null> {
   if (!runtime.RAW_BUCKET) return null;
   const bootstrapKey = bootstrapKeyFromManifest(active);
@@ -118,7 +189,37 @@ async function readActivePublishedObject(
     object,
     asOf: active.asOf,
     releaseId: active.releaseId,
-    historical: false,
+    historical,
+  };
+}
+
+/**
+ * Read one immutable release artifact without parsing it in the Worker. This
+ * is used by stock search/detail routes so the browser, not the Worker, does
+ * the small catalog lookup.
+ */
+export async function readPublishedArtifact(
+  name: string,
+  requestedDate?: string,
+): Promise<PublishedObject | null> {
+  const runtime = await runtimeEnv();
+  if (!runtime.DB || !runtime.RAW_BUCKET) return null;
+  const active = await getReleaseManifestForDate(requestedDate);
+  if (!active) return null;
+  const key = artifactKeyFromManifest(active, name);
+  const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
+  if (!key || !key.startsWith(releasePrefix)) return null;
+  const object = await runtime.RAW_BUCKET.get(key);
+  if (
+    !object ||
+    object.customMetadata?.asOf !== active.asOf ||
+    object.customMetadata?.releaseId !== active.releaseId
+  ) return null;
+  return {
+    object,
+    asOf: active.asOf,
+    releaseId: active.releaseId,
+    historical: requestedDate !== undefined && requestedDate !== active.asOf,
   };
 }
 
@@ -147,16 +248,24 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
     }
 
     if (requestedDate) {
+      // Prefer the immutable full release manifest. The compact historical
+      // snapshot is retained only as a compatibility fallback for dates
+      // published before release manifests were introduced.
+      const dated = await getReleaseManifestForDate(requestedDate);
+      if (dated) {
+        const published = await readActivePublishedObject(runtime, dated, dated.asOf !== active?.asOf);
+        if (published) return published;
+      }
       historical = true;
       row = await runtime.DB
-        .prepare(
-          `SELECT as_of, r2_object_key
-           FROM historical_snapshot
-           WHERE as_of = ? AND quality_fail = 0
-           LIMIT 1`,
-        )
-        .bind(requestedDate)
-        .first<HistoricalReleaseRow>();
+          .prepare(
+            `SELECT as_of, r2_object_key
+             FROM historical_snapshot
+             WHERE as_of = ? AND quality_fail = 0
+             LIMIT 1`,
+          )
+          .bind(requestedDate)
+          .first<HistoricalReleaseRow>();
     } else {
       if (active) return await readActivePublishedObject(runtime, active);
       row = await runtime.DB

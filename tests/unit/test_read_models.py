@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from trading_desk.etf_flow_state import materialize_etf_terminal
-from trading_desk.read_models import ReadModelError, build_read_models, write_read_models
+from trading_desk.read_models import ReadModelError, build_read_models, stock_shard_name, write_read_models
 
 
 def _state() -> dict:
@@ -57,6 +57,52 @@ def _snapshot() -> dict:
     }
 
 
+def _stock_catalog() -> dict:
+    return {
+        "schemaVersion": 1,
+        "asOf": "2026-08-06",
+        "basis": {
+            "shareDate": "2026-08-06",
+            "previousShareDate": "2026-08-05",
+            "pcfDate": "2026-08-06",
+            "pcfAlignment": "same_trading_day",
+            "calculation": "ETF份额变化 ÷ 最小申赎单位 × PCF成分数量",
+            "source": "test",
+        },
+        "coverage": {"stockCount": 1, "matchedEtfCount": 1},
+        "items": [
+            {
+                "listingMarket": "101",
+                "listingMarketName": "上交所",
+                "stockCode": "600000",
+                "stockName": "浦发银行",
+                "netShares": 123.0,
+                "inflowShares": 123.0,
+                "outflowShares": 0.0,
+                "etfCount": 1,
+                "contributorCount": 1,
+                "shownContributorCount": 1,
+                "contributorsLimited": False,
+                "contributors": [
+                    {
+                        "etfMarket": "SSE",
+                        "etfCode": "510300",
+                        "etfName": "沪深300ETF",
+                        "shareDelta": 1.0,
+                        "quantity": 100,
+                        "creationUnit": 1000000,
+                        "stockFlowShares": 123.0,
+                        "currentPenetratedShares": 1234.0,
+                        "cashSubstitution": False,
+                        "estimated": True,
+                    }
+                ],
+            }
+        ],
+        "warnings": [],
+    }
+
+
 def test_materializer_builds_periods_groups_and_coverage() -> None:
     terminal = materialize_etf_terminal(_state(), base_terminal={})
 
@@ -85,6 +131,31 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
     assert "etfTerminal" not in payloads_a["overview"]["data"]
     assert payloads_a["radar"]["data"]["etfTerminal"]["historyCoverage"]["tradingDays"] == 4
     assert manifest_a["releaseId"].startswith("release:2026-08-06:")
+
+
+def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
+    catalog = _stock_catalog()
+    payloads_a, manifest_a = build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
+    payloads_b, manifest_b = build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
+
+    assert manifest_a == manifest_b
+    assert "stock_search" in payloads_a
+    assert {f"stock_{index}" for index in range(8)} <= set(payloads_a)
+    search_item = payloads_a["stock_search"]["items"][0]
+    assert search_item["shard"] == stock_shard_name("101", "600000")
+    assert payloads_a[search_item["shard"]]["items"][0]["stockCode"] == "600000"
+    assert all(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < 5_000_000 for payload in payloads_a.values())
+    assert set(manifest_a["artifacts"]) == {
+        "bootstrap", "overview", "radar", "rotation", "national", "connect", "margin",
+        "stock_search", *{f"stock_{index}" for index in range(8)},
+    }
+
+
+def test_stock_catalog_rejects_duplicate_identity() -> None:
+    catalog = _stock_catalog()
+    catalog["items"].append(dict(catalog["items"][0]))
+    with pytest.raises(ReadModelError, match="stock_catalog_duplicate_identity"):
+        build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
 
 
 def test_materialized_contract_rejects_legacy_runtime_hydration_snapshot() -> None:

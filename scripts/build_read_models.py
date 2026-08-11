@@ -13,6 +13,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("read-models"))
     parser.add_argument("--object-prefix")
     parser.add_argument("--require-materialized", action="store_true")
+    parser.add_argument(
+        "--stock-catalog",
+        type=Path,
+        help="Optional complete ETF-to-stock catalog sidecar generated offline",
+    )
     args = parser.parse_args()
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
     result = write_read_models(
@@ -20,6 +25,7 @@ def main() -> None:
         args.output_dir,
         require_materialized=args.require_materialized,
         object_prefix=args.object_prefix,
+        stock_catalog_path=args.stock_catalog,
     )
     print(json.dumps(result["manifest"], ensure_ascii=False, indent=2))
 

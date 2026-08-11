@@ -148,3 +148,26 @@ def test_positive_and_negative_etf_flows_aggregate_on_the_same_stock() -> None:
     assert stock["inflowShares"] == 100
     assert stock["outflowShares"] == 100
     assert stock["etfCount"] == 2
+
+
+def test_same_stock_across_etf_markets_uses_one_listing_identity() -> None:
+    shares = pd.DataFrame(
+        [
+            {"trade_date": "2026-07-01", "market": "SSE", "instrument_code": "588000", "shares": 3_000_000},
+            {"trade_date": "2026-07-02", "market": "SSE", "instrument_code": "588000", "shares": 6_000_000},
+            {"trade_date": "2026-07-01", "market": "SZSE", "instrument_code": "159900", "shares": 3_000_000},
+            {"trade_date": "2026-07-02", "market": "SZSE", "instrument_code": "159900", "shares": 6_000_000},
+        ]
+    )
+    pcf = pd.DataFrame(
+        [
+            {**_pcf().iloc[0].to_dict(), "market": "SSE", "etf_code": "588000", "stock_code": "000883", "listing_market": "102"},
+            {**_pcf().iloc[0].to_dict(), "market": "SZSE", "etf_code": "159900", "stock_code": "000883", "listing_market": "102"},
+        ]
+    )
+
+    result = build_stock_flow(shares, pcf, as_of="2026-07-02", previous_date="2026-07-01")
+
+    assert result["coverage"]["stockCount"] == 1
+    assert {(row["listingMarket"], row["stockCode"]) for row in result["stocks"]} == {("102", "000883")}
+    assert result["stocks"][0]["etfCount"] == 2

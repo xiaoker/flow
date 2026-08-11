@@ -17,12 +17,18 @@ def main() -> None:
         type=Path,
         help="Optional verified rolling ETF state to materialize after the base snapshot",
     )
+    parser.add_argument(
+        "--stock-catalog-output",
+        type=Path,
+        help="Optional complete ETF-to-stock catalog sidecar for sharded read models",
+    )
     parser.add_argument("--output", type=Path, default=Path("dashboard-snapshot.json"))
     args = parser.parse_args()
     snapshot = build_dashboard_snapshot(
         manifest_path=args.manifest,
         quality_path=args.quality,
         workspace_root=Path.cwd(),
+        stock_catalog_path=args.stock_catalog_output,
     )
     if args.state:
         state = json.loads(args.state.read_text(encoding="utf-8"))

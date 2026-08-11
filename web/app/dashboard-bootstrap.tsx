@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Dashboard } from "./dashboard";
+import { StockDetailView } from "./stock-detail-view";
 import { enrichSnapshotWithMarketHistory } from "./lib/market-history";
 import type { DashboardSnapshot } from "./lib/dashboard-data";
 
-type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin";
+type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "stock";
 
 type HistoryResponse = {
   dates?: string[];
@@ -28,13 +29,14 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const REFRESH_ERROR_THRESHOLD = 3;
 
 function requestedView(value: string | null): DeskView | undefined {
-  return value === "rotation" || value === "radar" || value === "national" || value === "connect" || value === "margin"
+  return value === "rotation" || value === "radar" || value === "national" || value === "connect" || value === "margin" || value === "stock"
     ? value
     : undefined;
 }
 
 export function DashboardBootstrap() {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
+  const [releaseId, setReleaseId] = useState<string | null>(null);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -76,7 +78,7 @@ export function DashboardBootstrap() {
         fetch(snapshotUrl, { cache: "no-store", signal: controller.signal }),
         fetch("/api/v2/history/dates", { cache: "no-store", signal: controller.signal }),
         fetch(historyUrl, { cache: "no-store", signal: controller.signal }),
-        view && !date
+        view && view !== "stock" && !date
           ? fetch(`/api/v2/views/${view}`, { cache: "no-store", signal: controller.signal })
           : Promise.resolve(null),
       ]);
@@ -116,6 +118,7 @@ export function DashboardBootstrap() {
       if (mountedRef.current) {
         snapshotRef.current = enrichedSnapshot;
         releaseIdRef.current = nextReleaseId ?? (date ? null : releaseIdRef.current);
+        setReleaseId(nextReleaseId ?? (date ? null : releaseIdRef.current));
         setAvailableDates(dates);
         setSnapshot(enrichedSnapshot);
         setError(null);
@@ -234,6 +237,16 @@ export function DashboardBootstrap() {
 
   const params = new URLSearchParams(window.location.search);
   const requestedDateValue = params.get("date");
+  if (params.get("view") === "stock") {
+    return (
+      <StockDetailView
+        asOf={snapshot.asOf}
+        code={params.get("code")}
+        releaseId={releaseId}
+        venue={params.get("venue")}
+      />
+    );
+  }
   return (
     <Dashboard
       snapshot={snapshot}

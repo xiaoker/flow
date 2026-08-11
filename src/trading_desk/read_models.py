@@ -18,6 +18,10 @@ from typing import Any
 
 SCHEMA_VERSION = 2
 VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin")
+STOCK_SEARCH_NAME = "stock_search"
+STOCK_SHARD_COUNT = 8
+STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
+MAX_READ_MODEL_BYTES = 5_000_000
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -127,6 +131,95 @@ def _with_release_meta(snapshot: dict[str, Any], payload: dict[str, Any]) -> dic
     }
 
 
+def stock_shard_name(listing_market: Any, stock_code: Any) -> str:
+    """Return the deterministic R2 shard for one listing-market/code key."""
+
+    identity = f"{str(listing_market).strip()}:{str(stock_code).strip()}"
+    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16)
+    return f"stock_{bucket % STOCK_SHARD_COUNT}"
+
+
+def _build_stock_artifacts(
+    stock_catalog: dict[str, Any],
+    *,
+    as_of: str,
+) -> dict[str, dict[str, Any]]:
+    """Build one compact search object and deterministic stock detail shards."""
+
+    if not _is_record(stock_catalog):
+        raise ReadModelError("stock_catalog_not_object")
+    if stock_catalog.get("schemaVersion") != 1:
+        raise ReadModelError("stock_catalog_schema_invalid")
+    if stock_catalog.get("asOf") != as_of:
+        raise ReadModelError("stock_catalog_as_of_mismatch")
+    items = stock_catalog.get("items")
+    if not isinstance(items, list):
+        raise ReadModelError("stock_catalog_items_missing")
+    basis = stock_catalog.get("basis")
+    if not _is_record(basis):
+        raise ReadModelError("stock_catalog_basis_missing")
+
+    search_items: list[dict[str, Any]] = []
+    shards: dict[str, list[dict[str, Any]]] = {name: [] for name in STOCK_SHARD_NAMES}
+    identities: set[str] = set()
+    for item in items:
+        if not _is_record(item):
+            raise ReadModelError("stock_catalog_item_not_object")
+        listing_market = str(item.get("listingMarket", "")).strip()
+        stock_code = str(item.get("stockCode", "")).strip()
+        stock_name = str(item.get("stockName", "")).strip()
+        if not listing_market or not stock_code or not stock_name:
+            raise ReadModelError("stock_catalog_identity_missing")
+        identity = f"{listing_market}:{stock_code}"
+        if identity in identities:
+            raise ReadModelError("stock_catalog_duplicate_identity")
+        identities.add(identity)
+        shard = stock_shard_name(listing_market, stock_code)
+        detail = dict(item)
+        detail["shard"] = shard
+        detail["estimated"] = True
+        shards[shard].append(detail)
+        search_items.append(
+            {
+                "listingMarket": listing_market,
+                "listingMarketName": str(item.get("listingMarketName", "未知市场")),
+                "code": stock_code,
+                "name": stock_name,
+                "shard": shard,
+                "available": True,
+            }
+        )
+
+    search_items.sort(key=lambda item: (item["name"], item["code"], item["listingMarket"]))
+    search_payload = {
+        "schemaVersion": 1,
+        "asOf": as_of,
+        "basis": basis,
+        "coverage": stock_catalog.get("coverage", {}),
+        "items": search_items,
+        "warnings": stock_catalog.get("warnings", []),
+    }
+    artifacts: dict[str, dict[str, Any]] = {STOCK_SEARCH_NAME: search_payload}
+    for shard_name in STOCK_SHARD_NAMES:
+        shards[shard_name].sort(
+            key=lambda item: (str(item.get("listingMarket", "")), str(item.get("stockCode", "")))
+        )
+        artifacts[shard_name] = {
+            "schemaVersion": 1,
+            "asOf": as_of,
+            "basis": basis,
+            "coverage": stock_catalog.get("coverage", {}),
+            "items": shards[shard_name],
+            "warnings": stock_catalog.get("warnings", []),
+        }
+    for name, payload in artifacts.items():
+        encoded = canonical_json_bytes(payload)
+        if len(encoded) > MAX_READ_MODEL_BYTES:
+            raise ReadModelError(f"stock_artifact_too_large:{name}")
+        _assert_finite(payload)
+    return artifacts
+
+
 def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Split one validated snapshot into bounded, view-specific payloads."""
 
@@ -187,13 +280,22 @@ def build_read_models(
     *,
     require_materialized: bool = False,
     object_prefix: str | None = None,
+    stock_catalog: dict[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Return view payloads and a release manifest without touching storage."""
 
     validate_snapshot(snapshot, require_materialized=require_materialized)
     payloads = build_view_payloads(snapshot)
+    if stock_catalog is not None:
+        payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
-    digest_material = b"".join(encoded[name] for name in VIEW_NAMES)
+    artifact_names = list(VIEW_NAMES) + [
+        name for name in (STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES) if name in encoded
+    ]
+    for name, content in encoded.items():
+        if len(content) > MAX_READ_MODEL_BYTES:
+            raise ReadModelError(f"read_model_too_large:{name}")
+    digest_material = b"".join(encoded[name] for name in artifact_names)
     release_hash = sha256_bytes(digest_material)
     release_id = f"release:{snapshot['asOf']}:{release_hash[:16]}"
     prefix = object_prefix or f"market-data/releases/{snapshot['asOf']}/{release_id}"
@@ -204,7 +306,7 @@ def build_read_models(
             "bytes": len(encoded[name]),
             "contentType": "application/json; charset=utf-8",
         }
-        for name in VIEW_NAMES
+        for name in artifact_names
     }
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
@@ -229,11 +331,16 @@ def write_read_models(
     *,
     require_materialized: bool = False,
     object_prefix: str | None = None,
+    stock_catalog_path: Path | None = None,
 ) -> dict[str, Any]:
+    stock_catalog = None
+    if stock_catalog_path is not None:
+        stock_catalog = json.loads(stock_catalog_path.read_text(encoding="utf-8"))
     payloads, manifest = build_read_models(
         snapshot,
         require_materialized=require_materialized,
         object_prefix=object_prefix,
+        stock_catalog=stock_catalog,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():

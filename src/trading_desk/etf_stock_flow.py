@@ -37,6 +37,9 @@ class StockFlowLimits:
     max_etf_stocks: int = 12
 
 
+STOCK_CATALOG_SCHEMA_VERSION = 1
+
+
 REQUIRED_SHARE_COLUMNS = {"trade_date", "market", "instrument_code", "shares"}
 REQUIRED_PCF_COLUMNS = {
     "trade_date",
@@ -83,12 +86,33 @@ def normalise_underlying_code(value: Any, listing_market: Any = "") -> str:
     return text
 
 
+def infer_listing_market(listing_market: Any, stock_code: Any) -> str:
+    """Fill only unambiguous domestic market codes; keep other rows explicit."""
+
+    market = str(listing_market or "").strip()
+    if market:
+        return market
+    code = str(stock_code or "").strip().upper()
+    # Six-digit A-share prefixes are deterministic.  Do not infer five-digit
+    # HKEX symbols or non-numeric identifiers from their text alone.
+    if len(code) == 6 and code.isdigit():
+        if code.startswith(("6",)):
+            return "101"
+        if code.startswith(("0", "3")):
+            return "102"
+        if code.startswith(("4", "8")):
+            return "104"
+    return "UNKNOWN"
+
+
 def underlying_market_name(listing_market: Any) -> str:
     return {
         "101": "上交所",
         "102": "深交所",
         "103": "港交所",
+        "104": "北交所",
         "9999": "境外市场",
+        "UNKNOWN": "待核验市场",
     }.get(str(listing_market or "").strip(), str(listing_market or "").strip() or "未知市场")
 
 
@@ -177,6 +201,10 @@ def _normalise_pcf_frame(frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
     value["stock_code"] = [
         normalise_underlying_code(code, listing_market)
         for code, listing_market in zip(value["stock_code"], value["listing_market"])
+    ]
+    value["listing_market"] = [
+        infer_listing_market(listing_market, code)
+        for listing_market, code in zip(value["listing_market"], value["stock_code"])
     ]
     value["quantity"] = pd.to_numeric(value["quantity"], errors="coerce")
     value["creation_unit"] = pd.to_numeric(value["creation_unit"], errors="coerce")
@@ -346,13 +374,18 @@ def build_stock_flow(
         warnings.append("PCF含现金替代标记；个股数量是申赎篮子等价估算，不等同实际交收")
 
     stock_groups: list[dict[str, Any]] = []
-    stock_key = ["market", "listing_market", "stock_code"]
-    for (market, listing_market, stock_code), rows in joined.groupby(stock_key, sort=False):
+    # A stock is identified by its listing market and code.  The ETF market is
+    # a contributor attribute, not part of the stock identity; otherwise an
+    # SSE and SZSE ETF holding the same stock would create duplicate search
+    # rows and double-count the stock in the catalog.
+    stock_key = ["listing_market", "stock_code"]
+    for (listing_market, stock_code), rows in joined.groupby(stock_key, sort=False):
         contributions = []
         for row in rows.sort_values("stock_flow_shares", key=lambda series: series.abs(), ascending=False).head(limits.max_contributors).itertuples():
             contribution = float(row.stock_flow_shares)
             contributions.append(
                 {
+                    "etfMarket": str(row.market),
                     "etfCode": str(row.etf_code),
                     "etfName": str(row.etf_name),
                     "shareDelta": round(float(row.share_delta), 2),
@@ -360,13 +393,14 @@ def build_stock_flow(
                     "creationUnit": int(round(float(row.creation_unit))),
                     "stockFlowShares": round(contribution, 2),
                     "currentPenetratedShares": round(float(row.current_penetrated_shares), 2),
+                    "cashSubstitution": bool(str(row.substitution_flag).strip()),
                     "estimated": True,
                 }
             )
         total = float(rows["stock_flow_shares"].sum())
         stock_groups.append(
             {
-                "market": str(market),
+                "market": str(listing_market),
                 "listingMarket": str(listing_market),
                 "listingMarketName": underlying_market_name(listing_market),
                 "stockCode": str(stock_code),
@@ -445,4 +479,70 @@ def build_stock_flow(
         "stocks": shown_stocks,
         "etfs": etf_rows,
         "warnings": warnings,
+    }
+
+
+def build_stock_flow_catalog(
+    share_frame: pd.DataFrame,
+    pcf_frame: pd.DataFrame,
+    *,
+    as_of: str,
+    previous_date: str | None = None,
+    pcf_date: str | None = None,
+    max_contributors: int = 8,
+) -> dict[str, Any]:
+    """Build the complete, bounded stock-centric catalog for read-model shards.
+
+    The regular radar payload intentionally keeps only the global top 500
+    stocks and the top 12 components per ETF.  This sidecar is calculated from
+    the same normalized inputs with a larger stock limit, then compacted to
+    stock-centric rows.  It must be generated offline; it is never embedded in
+    the dashboard snapshot or calculated by the Worker.
+    """
+
+    if max_contributors <= 0:
+        raise StockFlowInputError("invalid_catalog_contributor_limit")
+    result = build_stock_flow(
+        share_frame,
+        pcf_frame,
+        as_of=as_of,
+        previous_date=previous_date,
+        pcf_date=pcf_date,
+        limits=StockFlowLimits(
+            max_stocks=100_000,
+            max_contributors=max_contributors,
+            max_etf_stocks=1,
+        ),
+    )
+    items: list[dict[str, Any]] = []
+    for stock in result.get("stocks", []):
+        contributors = list(stock.get("contributors") or [])
+        items.append(
+            {
+                "listingMarket": stock.get("listingMarket", ""),
+                "listingMarketName": stock.get("listingMarketName", "未知市场"),
+                "stockCode": stock["stockCode"],
+                "stockName": stock["stockName"],
+                "netShares": stock["netShares"],
+                "inflowShares": stock["inflowShares"],
+                "outflowShares": stock["outflowShares"],
+                "etfCount": stock["etfCount"],
+                "contributorCount": stock["etfCount"],
+                "shownContributorCount": len(contributors),
+                "contributorsLimited": len(contributors) < stock["etfCount"],
+                "contributors": contributors,
+            }
+        )
+    items.sort(key=lambda item: (str(item["listingMarket"]), str(item["stockCode"])))
+    coverage = dict(result.get("coverage") or {})
+    coverage["stockCount"] = len(items)
+    coverage["shownStockCount"] = len(items)
+    coverage["limited"] = False
+    return {
+        "schemaVersion": STOCK_CATALOG_SCHEMA_VERSION,
+        "asOf": result["asOf"],
+        "basis": result["basis"],
+        "coverage": coverage,
+        "items": items,
+        "warnings": result.get("warnings", []),
     }
