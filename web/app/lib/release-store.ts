@@ -34,9 +34,17 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
   try {
     const row = await db
       .prepare(
-        `SELECT release_id, as_of, manifest_sha256, activated_at, manifest_json
+        `SELECT active_release.release_id,
+                active_release.as_of,
+                active_release.manifest_sha256,
+                active_release.activated_at,
+                release_manifest.manifest_json
          FROM active_release
-         WHERE slot = 'dashboard'
+         JOIN release_manifest
+           ON release_manifest.release_id = active_release.release_id
+          AND release_manifest.as_of = active_release.as_of
+          AND release_manifest.status = 'ACTIVE'
+         WHERE active_release.slot = 'dashboard'
          LIMIT 1`,
       )
       .first<{
