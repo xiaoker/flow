@@ -59,6 +59,36 @@ def _code(value: Any) -> str:
     return text.zfill(6)
 
 
+def normalise_underlying_code(value: Any, listing_market: Any = "") -> str:
+    """Keep source security codes unambiguous across listing markets.
+
+    SSE PCF rows use the same ``INSTRUMENT_ID`` field for A shares, HK
+    securities and overseas symbols. Padding every value to six characters
+    turns SZSE ``000883`` and HKEX ``00883`` into the same key. Domestic
+    A-share codes remain six digits, HKEX codes remain five digits, and other
+    identifiers retain the source symbol.
+    """
+
+    text = str(value).strip().upper()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    market = str(listing_market or "").strip()
+    if market in {"101", "102"} and text.isdigit():
+        return text.zfill(6)
+    if market == "103" and text.isdigit():
+        return text.zfill(5)
+    return text
+
+
+def underlying_market_name(listing_market: Any) -> str:
+    return {
+        "101": "上交所",
+        "102": "深交所",
+        "103": "港交所",
+        "9999": "境外市场",
+    }.get(str(listing_market or "").strip(), str(listing_market or "").strip() or "未知市场")
+
+
 def _empty_result(
     *,
     as_of: str,
@@ -138,7 +168,13 @@ def _normalise_pcf_frame(frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
         value["pcf_previous_date"] = _date_series(value, "pcf_previous_date")
     value["market"] = value["market"].astype(str).str.upper().str.strip()
     value["etf_code"] = value["etf_code"].map(_code)
-    value["stock_code"] = value["stock_code"].map(_code)
+    if "listing_market" not in value.columns:
+        value["listing_market"] = ""
+    value["listing_market"] = value["listing_market"].fillna("").astype(str).str.strip()
+    value["stock_code"] = [
+        normalise_underlying_code(code, listing_market)
+        for code, listing_market in zip(value["stock_code"], value["listing_market"])
+    ]
     value["quantity"] = pd.to_numeric(value["quantity"], errors="coerce")
     value["creation_unit"] = pd.to_numeric(value["creation_unit"], errors="coerce")
     if value["quantity"].isna().any() or value["quantity"].le(0).any():
@@ -148,7 +184,7 @@ def _normalise_pcf_frame(frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
     value = value[value["trade_date"].eq(as_of)].copy()
     if value.empty:
         return value
-    key = ["trade_date", "market", "etf_code", "stock_code"]
+    key = ["trade_date", "market", "etf_code", "listing_market", "stock_code"]
     if value.duplicated(key).any():
         raise StockFlowInputError("duplicate_pcf_component_key")
     # A fund's creation unit is an ETF-level field repeated on each component.
@@ -284,7 +320,11 @@ def build_stock_flow(
     ).drop(columns=["instrument_code"])
     joined["stock_flow_shares"] = joined["share_delta"] / joined["creation_unit"] * joined["quantity"]
     joined["current_penetrated_shares"] = joined["current_shares"] / joined["creation_unit"] * joined["quantity"]
-    joined["stock_code"] = joined["stock_code"].map(_code)
+    joined["listing_market"] = joined.get("listing_market", "").fillna("").astype(str).str.strip()
+    joined["stock_code"] = [
+        normalise_underlying_code(code, listing_market)
+        for code, listing_market in zip(joined["stock_code"], joined["listing_market"])
+    ]
     stock_names = joined["stock_name"] if "stock_name" in joined.columns else joined["stock_code"]
     etf_names = joined["etf_name"] if "etf_name" in joined.columns else joined["etf_code"]
     substitution_flags = joined["substitution_flag"] if "substitution_flag" in joined.columns else pd.Series("", index=joined.index)
@@ -303,7 +343,8 @@ def build_stock_flow(
         warnings.append("PCF含现金替代标记；个股数量是申赎篮子等价估算，不等同实际交收")
 
     stock_groups: list[dict[str, Any]] = []
-    for (market, stock_code), rows in joined.groupby(["market", "stock_code"], sort=False):
+    stock_key = ["market", "listing_market", "stock_code"]
+    for (market, listing_market, stock_code), rows in joined.groupby(stock_key, sort=False):
         contributions = []
         for row in rows.sort_values("stock_flow_shares", key=lambda series: series.abs(), ascending=False).head(limits.max_contributors).itertuples():
             contribution = float(row.stock_flow_shares)
@@ -323,6 +364,8 @@ def build_stock_flow(
         stock_groups.append(
             {
                 "market": str(market),
+                "listingMarket": str(listing_market),
+                "listingMarketName": underlying_market_name(listing_market),
                 "stockCode": str(stock_code),
                 "stockName": str(rows.iloc[0]["stock_name"]),
                 "netShares": round(total, 2),
@@ -345,7 +388,7 @@ def build_stock_flow(
                 "name": str(row["etf_name"]),
                 "shareDelta": round(float(row["share_delta"]), 2),
                 "creationUnit": int(round(float(row["creation_unit"]))),
-                "stockCount": int(rows["stock_code"].nunique()),
+                "stockCount": int(rows[["listing_market", "stock_code"]].drop_duplicates().shape[0]),
                 "estimated": True,
             }
         )

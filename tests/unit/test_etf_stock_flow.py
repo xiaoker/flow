@@ -77,6 +77,40 @@ def test_duplicate_component_key_is_a_hard_quality_failure() -> None:
         build_stock_flow(_shares(), duplicate, as_of="2026-07-02", previous_date="2026-07-01")
 
 
+def test_same_numeric_code_on_two_listing_markets_is_not_merged() -> None:
+    pcf = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-02",
+                "market": "SSE",
+                "etf_code": "588000",
+                "etf_name": "科创50ETF",
+                "stock_code": "000883",
+                "stock_name": "湖北能源",
+                "listing_market": "102",
+                "quantity": 300,
+                "creation_unit": 3_000_000,
+            },
+            {
+                "trade_date": "2026-07-02",
+                "market": "SSE",
+                "etf_code": "588000",
+                "etf_name": "科创50ETF",
+                "stock_code": "00883",
+                "stock_name": "中海油",
+                "listing_market": "103",
+                "quantity": 1397,
+                "creation_unit": 3_000_000,
+            },
+        ]
+    )
+    result = build_stock_flow(_shares(), pcf, as_of="2026-07-02", previous_date="2026-07-01")
+
+    assert result["available"] is True
+    identities = {(row["listingMarket"], row["stockCode"]) for row in result["stocks"]}
+    assert identities == {("102", "000883"), ("103", "00883")}
+
+
 def test_cash_substitution_is_visible_as_an_estimate_caveat() -> None:
     result = build_stock_flow(
         _shares(), _pcf(flag="1"), as_of="2026-07-02", previous_date="2026-07-01"

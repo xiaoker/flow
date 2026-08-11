@@ -246,6 +246,51 @@ def test_sse_etf_pcf_aligns_next_day_publication_to_pre_trading_day(
     assert "pcf_previous_day_alignment_count:1" in artifact.warnings
 
 
+def test_sse_etf_pcf_preserves_hk_code_width_and_listing_market(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    responses = iter(
+        [
+            FakeResponse(
+                {
+                    "result": [
+                        {
+                            "TRADING_DAY": "20260715",
+                            "FUNDID2": "517180",
+                            "FUND_NAME": "国企开放共赢ETF",
+                            "CREATION_REDEMPTION_UNIT": "1000000",
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "result": [
+                        {
+                            "INSTRUMENT_ID": "000883",
+                            "INSTRUMENT_NAME": "湖北能源",
+                            "UNDERLYION_SECURITY_ID": "102",
+                            "QUANTITY": "300",
+                        },
+                        {
+                            "INSTRUMENT_ID": "00883",
+                            "INSTRUMENT_NAME": "中海油",
+                            "UNDERLYION_SECURITY_ID": "103",
+                            "QUANTITY": "1397",
+                        },
+                    ]
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: next(responses))
+
+    frame, _ = adapters.fetch_sse_etf_pcf(["517180"], "2026-07-15")
+
+    assert set(frame["stock_code"]) == {"000883", "00883"}
+    assert set(frame["listing_market"]) == {"102", "103"}
+
+
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

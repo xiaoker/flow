@@ -16,6 +16,7 @@ import pandas as pd
 from .adapters.official import parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
 from .etf_flow_state import materialize_dashboard_snapshot
+from .etf_stock_flow import normalise_underlying_code
 from .instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from .models import QualityFinding
 from .quality import summarize_findings
@@ -216,14 +217,26 @@ def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
         for component in response.get("components") or []:
             if not isinstance(component, dict):
                 continue
-            stock_code = str(
-                component.get("INSTRUMENT_ID")
-                or component.get("STOCK_CODE")
+            listing_market = str(
+                component.get("UNDERLYION_SECURITY_ID")
                 or component.get("UNDERLYING_SECURITY_ID")
                 or ""
-            ).strip().zfill(6)
+            ).strip()
+            stock_code = normalise_underlying_code(
+                str(
+                    component.get("INSTRUMENT_ID")
+                    or component.get("STOCK_CODE")
+                    or component.get("UNDERLYING_SECURITY_ID")
+                    or ""
+                ).strip(),
+                listing_market,
+            )
             quantity = _number(component.get("QUANTITY"))
-            if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
+            if (
+                not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{0,19}", stock_code)
+                or quantity is None
+                or quantity <= 0
+            ):
                 continue
             expected_row = {
                 "trade_date": requested_date,
@@ -236,9 +249,7 @@ def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
                 "quantity": quantity,
                 "creation_unit": creation_unit,
                 "substitution_flag": component.get("SUBSTITUTION_FLAG") or "",
-                "listing_market": component.get("UNDERLYION_SECURITY_ID")
-                or component.get("UNDERLYING_SECURITY_ID")
-                or "",
+                "listing_market": listing_market,
                 "source_id": "sse",
                 "source_grade": "A",
                 "date_basis": date_basis,
@@ -442,13 +453,22 @@ def validate_raw_to_normalized_mapping(
                     [_read_csv(path) for path in normalized_paths],
                     ignore_index=True,
                 )
+                expected = _expected_sse_etf_pcf(content, requested_date)
+                for frame in (expected, actual):
+                    if "listing_market" in frame.columns:
+                        frame["listing_market"] = frame["listing_market"].fillna("").astype(str).str.strip()
+                pcf_keys = ["trade_date", "market", "etf_code"]
+                if "listing_market" in expected.columns or "listing_market" in actual.columns:
+                    pcf_keys.append("listing_market")
+                pcf_keys.append("stock_code")
                 result = _compare_frames(
-                    _expected_sse_etf_pcf(content, requested_date),
+                    expected,
                     actual,
-                    keys=["trade_date", "market", "etf_code", "stock_code"],
+                    keys=pcf_keys,
                     text_columns=[
                         "etf_name",
                         "stock_name",
+                        "listing_market",
                         "substitution_flag",
                         "source_id",
                         "source_grade",

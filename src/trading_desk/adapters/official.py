@@ -14,6 +14,7 @@ import requests
 from ..http import get
 from ..instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from ..models import FetchArtifact, SourceSpec
+from ..etf_stock_flow import normalise_underlying_code
 from ..storage import write_normalized_csv, write_raw_response
 
 
@@ -568,14 +569,26 @@ class OfficialMarketAdapters:
             for row in result["components"]:
                 if not isinstance(row, dict):
                     continue
-                stock_code = str(
-                    row.get("INSTRUMENT_ID")
-                    or row.get("STOCK_CODE")
+                listing_market = str(
+                    row.get("UNDERLYION_SECURITY_ID")
                     or row.get("UNDERLYING_SECURITY_ID")
                     or ""
-                ).strip().zfill(6)
+                ).strip()
+                stock_code = normalise_underlying_code(
+                    str(
+                        row.get("INSTRUMENT_ID")
+                        or row.get("STOCK_CODE")
+                        or row.get("UNDERLYING_SECURITY_ID")
+                        or ""
+                    ).strip(),
+                    listing_market,
+                )
                 quantity = _integer(row.get("QUANTITY"))
-                if not re.fullmatch(r"\d{6}", stock_code) or quantity is None or quantity <= 0:
+                if (
+                    not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{0,19}", stock_code)
+                    or quantity is None
+                    or quantity <= 0
+                ):
                     continue
                 normalized_row = {
                     "trade_date": trade_date,
@@ -588,7 +601,7 @@ class OfficialMarketAdapters:
                     "quantity": quantity,
                     "creation_unit": creation_unit,
                     "substitution_flag": row.get("SUBSTITUTION_FLAG") or "",
-                    "listing_market": row.get("UNDERLYION_SECURITY_ID") or row.get("UNDERLYING_SECURITY_ID") or "",
+                    "listing_market": listing_market,
                     "source_id": SSE_ETF_PCF.source_id,
                     "source_grade": SSE_ETF_PCF.source_grade,
                     "date_basis": date_basis,

@@ -274,7 +274,11 @@ def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[
         )
         return findings
     findings += check_required_columns(frame, dataset, required)
-    findings += check_unique(frame, dataset, ["trade_date", "market", "etf_code", "stock_code"])
+    pcf_key = ["trade_date", "market", "etf_code"]
+    if "listing_market" in frame.columns:
+        pcf_key.append("listing_market")
+    pcf_key.append("stock_code")
+    findings += check_unique(frame, dataset, pcf_key)
     findings += check_nonnegative(frame, dataset, ["quantity", "creation_unit"])
     if "trade_date" in frame.columns:
         parsed = pd.to_datetime(frame["trade_date"], errors="coerce")

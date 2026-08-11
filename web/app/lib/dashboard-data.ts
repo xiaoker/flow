@@ -92,6 +92,8 @@ export interface EtfStockFlowContributor {
 
 export interface EtfStockFlowStock {
   market: "SSE" | "SZSE" | string;
+  listingMarket?: string;
+  listingMarketName?: string;
   stockCode: string;
   stockName: string;
   netShares: number;
