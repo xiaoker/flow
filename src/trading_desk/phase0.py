@@ -62,6 +62,19 @@ def _coverage_finding(
     )
 
 
+def _required_coverage_dates(dataset: str, requested_dates: list[str]) -> list[str]:
+    """Return the dates that must be present before a dataset is publishable.
+
+    The SZSE ETF endpoint is a current snapshot, not a historical endpoint. It
+    cannot be required to return every date in the three-day collection window;
+    those rows are accumulated from prior runs. The current target, however,
+    is mandatory so an old HTTP 200 response cannot be mistaken for readiness.
+    """
+    if dataset == "szse_etf":
+        return [requested_dates[-1]]
+    return requested_dates
+
+
 def collect_phase0(
     *,
     dates: list[str],
@@ -247,9 +260,17 @@ def collect_phase0(
         _coverage_finding(
             "szse_etf",
             profiles.get("szse_etf", {}).get("distinct_trade_dates", []),
-            dates,
-            warn_only=True,
-            remediation="深交所只提供当前快照；从正式上线日起每日留存，不宣称可官方回填。",
+            # SZSE exposes a current snapshot rather than a historical time
+            # series.  Historical coverage is therefore expected to be
+            # accumulated in our archive, but the current requested trading
+            # day must be present before a run can be considered ready.  The
+            # previous warn-only check allowed a stale HTTP 200 response to
+            # pass the gate and left the dashboard on an older day.
+            _required_coverage_dates("szse_etf", dates),
+            remediation=(
+                "深交所只提供当前快照；确认页面日期已推进到目标交易日后再发布。"
+                "旧日期响应必须保留原始证据，但不能替换 ACTIVE 版本。"
+            ),
         )
     )
     findings.append(

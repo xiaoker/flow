@@ -32,12 +32,17 @@ permissions:
 
 concurrency:
   group: daily-market-data
-  cancel-in-progress: false
+  # A newer release-window run supersedes an older readiness poll.  Without
+  # cancellation, the 07:45/08:10/08:25 jobs can queue behind one another and
+  # publish an older snapshot long after the source has become available.
+  cancel-in-progress: true
 
 jobs:
   collect-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The morning run may wait for an official source to advance its published
+    # date.  The wait is date-aware and bounded; it is not a blind retry loop.
+    timeout-minutes: 50
     env:
       INPUT_DATES: ${{ inputs.dates }}
       INPUT_COLLECTION_WINDOW: ${{ inputs.collection_window || 'auto' }}
@@ -95,8 +100,11 @@ jobs:
         shell: bash
         run: |
           read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
+          COLLECTION_WINDOW="${{ steps.window.outputs.collection_window }}"
           MAX_ATTEMPTS=3
-          for (( attempt=1; attempt<=MAX_ATTEMPTS; attempt++ )); do
+          SOURCE_READINESS_ATTEMPTS=18
+          attempt=1
+          while (( attempt <= SOURCE_READINESS_ATTEMPTS )); do
             trading-desk collect-phase0 \
               --dates "${DATES[@]}" \
               --window "${{ steps.window.outputs.collection_window }}"
@@ -104,13 +112,36 @@ jobs:
               reports/phase0/latest-quality-summary.json >/dev/null; then
               break
             fi
-            if [[ "$attempt" -eq "$MAX_ATTEMPTS" ]] || \
-              ! jq -e '.errors | length > 0 and all(.[]; .error_type == "ConnectionError" or .error_type == "HTTPError")' \
+
+            # A stale but valid HTTP response is a source-readiness condition,
+            # not a transport failure.  Poll only while the SZSE target date is
+            # explicitly missing, preserving every raw response and the active
+            # dashboard until the source catches up.
+            if [[ "$COLLECTION_WINDOW" != "evening" ]] && jq -e '
+              (.errors | length == 0) and
+              any(.findings[]?;
+                (.dataset == "szse_etf" and
+                 .check_id == "timeliness.requested_date_coverage" and
+                 .status == "fail"))
+            ' reports/phase0/latest-quality-summary.json >/dev/null; then
+              if (( attempt == SOURCE_READINESS_ATTEMPTS )); then
+                echo "SZSE source did not publish the requested trading date before the bounded readiness deadline." >&2
+                break
+              fi
+              echo "SZSE source date is not ready; polling again in 120 seconds (attempt $((attempt + 1))/$SOURCE_READINESS_ATTEMPTS)." >&2
+              sleep 120
+              attempt=$((attempt + 1))
+              continue
+            fi
+
+            if (( attempt >= MAX_ATTEMPTS )) || \
+              ! jq -e '(.errors | length > 0) and all(.errors[]; .error_type == "ConnectionError" or .error_type == "HTTPError")' \
                 reports/phase0/latest-quality-summary.json >/dev/null; then
               break
             fi
             echo "Transient official-source failure; retrying collection attempt $((attempt + 1))/$MAX_ATTEMPTS." >&2
             sleep $((attempt * 30))
+            attempt=$((attempt + 1))
           done
 
       - name: Build dashboard snapshot
@@ -221,7 +252,24 @@ jobs:
         run: |
           errors="$(jq '.errors | length' reports/phase0/latest-quality-summary.json)"
           gate="$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)"
+          collection_window="${{ steps.window.outputs.collection_window }}"
           if [[ "$errors" -gt 0 || "$gate" == "blocked" ]]; then
+            # Evening collection intentionally runs before the SZSE current
+            # snapshot is published.  It may archive that raw response and
+            # keep the prior complete dashboard, but it must not be marked as
+            # a failed run when the only failure is the expected SZSE date
+            # coverage gap.  Morning/reconcile runs remain fail-closed after
+            # their bounded readiness deadline.
+            if [[ "$errors" -eq 0 && "$gate" == "blocked" && "$collection_window" == "evening" ]] && \
+              jq -e '
+                ([.findings[] | select(.status == "fail")] | length > 0) and
+                all(.findings[] | select(.status == "fail");
+                  (.dataset == "szse_etf" and
+                   .check_id == "timeliness.requested_date_coverage"))
+              ' reports/phase0/latest-quality-summary.json >/dev/null; then
+              echo "Evening window archived sources; SZSE current snapshot is expected to arrive in the morning."
+              exit 0
+            fi
             echo "Collection archived partial evidence but still has unresolved source errors." >&2
             jq '{phase0_gate_status, errors, findings: [.findings[] | select(.status != "pass")]}' \
               reports/phase0/latest-quality-summary.json >&2

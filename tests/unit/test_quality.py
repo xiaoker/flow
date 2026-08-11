@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from trading_desk.phase0 import _coverage_finding, _required_coverage_dates
 from trading_desk.quality import (
     summarize_findings,
     validate_connect_summary,
@@ -9,6 +10,28 @@ from trading_desk.quality import (
     validate_etf_nav,
     validate_margin,
 )
+
+
+def test_szse_coverage_requires_current_target_but_not_snapshot_history() -> None:
+    requested = ["2026-08-05", "2026-08-06", "2026-08-07"]
+
+    assert _required_coverage_dates("szse_etf", requested) == ["2026-08-07"]
+    ready = _coverage_finding(
+        "szse_etf",
+        ["2026-08-07"],
+        _required_coverage_dates("szse_etf", requested),
+        remediation="source not ready",
+    )
+    stale = _coverage_finding(
+        "szse_etf",
+        ["2026-08-06"],
+        _required_coverage_dates("szse_etf", requested),
+        remediation="source not ready",
+    )
+
+    assert ready.status == "pass"
+    assert stale.status == "fail"
+    assert stale.evidence["missing_dates"] == ["2026-08-07"]
 
 
 def test_margin_total_consistency_passes_with_szse_rounding() -> None:

@@ -16,6 +16,7 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert '- cron: "0 0 * * 1-5"' in workflow
     assert '- cron: "25 0 * * 1-5"' in workflow
     assert "workflow_dispatch:" in workflow
+    assert "cancel-in-progress: true" in workflow
     assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "10 0 * * mon-fri"]' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
@@ -44,6 +45,9 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     ).read_text(encoding="utf-8")
 
     assert "MAX_ATTEMPTS=3" in workflow
+    assert "SOURCE_READINESS_ATTEMPTS=18" in workflow
+    assert "SZSE source date is not ready" in workflow
+    assert 'timeliness.requested_date_coverage' in workflow
     assert '.error_type == "ConnectionError"' in workflow
     assert '.error_type == "HTTPError"' in workflow
     assert workflow.index("Build dashboard snapshot") < workflow.index(
