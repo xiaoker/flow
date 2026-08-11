@@ -212,13 +212,10 @@ jobs:
 
       - name: Build verified archive and publish bundle
         run: |
-          if [[ -d read-models ]]; then
-            python scripts/build_ingest_bundle.py \
-              --output ingest-bundle.json \
-              --read-model-dir read-models
-          else
-            python scripts/build_ingest_bundle.py --output ingest-bundle.json
-          fi
+          # The dashboard snapshot is published separately from read models.
+          # Keeping this request limited to the core snapshot avoids making a
+          # free Worker parse and hash every large view model in one request.
+          python scripts/build_ingest_bundle.py --output ingest-bundle.json
 
       - name: Archive raw evidence and publish normalized data
         env:
@@ -245,6 +242,18 @@ jobs:
              .readModelActivation == "staged_older_than_active")
           ' publish-response.json >/dev/null
           jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
+
+      - name: Publish immutable read models
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            python scripts/publish_read_models.py --read-model-dir read-models
+          else
+            echo "Pending snapshot has no active read models; preserving raw evidence only."
+          fi
 
       - name: Fail loudly on unresolved source errors
         if: always()

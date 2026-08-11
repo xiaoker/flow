@@ -76,6 +76,8 @@ type ReadModelBundle = {
   artifacts: Record<string, ReadModelArtifact>;
 };
 
+export type ReadModelManifest = ReadModelBundle["manifest"];
+
 function secureEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   let difference = 0;
@@ -555,10 +557,10 @@ async function archiveReadModels(
   };
 }
 
-async function activateReadModels(
+export async function activateReadModels(
   db: D1Database,
   release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
-  manifest: ReadModelBundle["manifest"],
+  manifest: ReadModelManifest,
   activatedAt: string,
 ): Promise<"activated" | "staged_older_than_active"> {
   // A delayed/retried collection can finish after a newer trading date has
