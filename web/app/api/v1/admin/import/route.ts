@@ -13,7 +13,7 @@ const RETENTION_DAYS = 365;
 const DASHBOARD_RETENTION_DAYS = 30;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const READ_MODEL_NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|stock_search|stock_[0-7])$/;
+const READ_MODEL_NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
 
 type EtfRow = {
   code: string;

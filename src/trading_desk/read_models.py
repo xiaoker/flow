@@ -15,9 +15,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .stock_pressure import build_stock_pressure
+
 
 SCHEMA_VERSION = 2
-VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin")
+VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin", "pressure")
 STOCK_SEARCH_NAME = "stock_search"
 STOCK_SHARD_COUNT = 8
 STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
@@ -129,6 +131,32 @@ def _with_release_meta(snapshot: dict[str, Any], payload: dict[str, Any]) -> dic
         "releaseStatus": (snapshot.get("publication") or {}).get("status", "confirmed"),
         "data": payload,
     }
+
+
+def _market_financing_balance(snapshot: dict[str, Any]) -> float | None:
+    """Return the latest official market financing balance in yuan.
+
+    ``dashboard.marginSeries.balance`` is a presentation value in 100-million
+    yuan.  Pressure keeps the canonical unit as yuan and never derives a
+    stock-level value from this market aggregate.
+    """
+
+    series = snapshot.get("marginSeries")
+    if not isinstance(series, list) or not series:
+        return None
+    latest = series[-1]
+    if not isinstance(latest, dict):
+        return None
+    value = latest.get("balance")
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return round(number * 100_000_000, 2)
 
 
 def stock_shard_name(listing_market: Any, stock_code: Any) -> str:
@@ -295,8 +323,17 @@ def build_read_models(
     payloads = build_view_payloads(snapshot)
     if stock_catalog is not None:
         payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
+        # Keep the pressure page as a compact projection.  Full contributor
+        # lists stay in the existing stock shards and are fetched only after a
+        # user selects one stock.
+        pressure = build_stock_pressure(
+            stock_catalog,
+            market_financing_balance_yuan=_market_financing_balance(snapshot),
+            margin_as_of=snapshot["asOf"],
+        )
+        payloads["pressure"] = _with_release_meta(snapshot, {"pressure": pressure})
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
-    artifact_names = list(VIEW_NAMES) + [
+    artifact_names = [name for name in VIEW_NAMES if name in encoded] + [
         name for name in (STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES) if name in encoded
     ]
     for name, content in encoded.items():

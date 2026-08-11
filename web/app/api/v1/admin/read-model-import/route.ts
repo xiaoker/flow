@@ -12,7 +12,7 @@ const MAX_ARTIFACTS = 20;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const RELEASE_ID = /^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/;
-const NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|stock_search|stock_[0-7])$/;
+const NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
 
 type ReadModelArtifactUpload = {
   name: string;

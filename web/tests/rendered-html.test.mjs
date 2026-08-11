@@ -210,6 +210,29 @@ test("exposes a versioned ETF-to-stock search and detail contract", async () => 
   assert.match(readModels, /stock_catalog_required_for_available_flow/);
 });
 
+test("exposes the ETF pressure workbench without fabricating stock facts", async () => {
+  const [source, bootstrap, route, pressure, types] = await Promise.all([
+    readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/dashboard-bootstrap.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v2/views/[view]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/etf-pressure-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/trading_desk/stock_pressure.py", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /id: "pressure", label: "ETF β压强"/);
+  assert.match(source, /<EtfPressureView data=\{snapshot\.pressure\}/);
+  assert.match(bootstrap, /requestedView\(params\.get\("view"\)\)/);
+  assert.match(bootstrap, /\/api\/v2\/views\/\$\{view\}/);
+  assert.match(route, /"pressure"/);
+  assert.match(route, /getReleaseManifestForDate/);
+  assert.match(pressure, /ETF → 个股 · 申赎篮子等价/);
+  assert.match(pressure, /市场融资余额/);
+  assert.match(pressure, /历史节点不足/);
+  assert.match(pressure, /window\.history\.replaceState/);
+  assert.match(pressure, /ETF 申赎篮子穿透是估算等价/);
+  assert.match(types, /marketFinancingBalanceYuan/);
+  assert.match(types, /pressure_flow_identity_mismatch/);
+});
+
 test("requires explicit confirmation before opening a historical date", async () => {
   const source = await readFile(
     new URL("../app/dashboard.tsx", import.meta.url),

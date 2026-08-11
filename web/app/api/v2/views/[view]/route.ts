@@ -1,5 +1,5 @@
 import {
-  getActiveReleaseManifest,
+  getReleaseManifestForDate,
   responseFromPublishedObject,
 } from "@/app/lib/release-store";
 import { runtimeEnv } from "@/app/lib/dashboard-store";
@@ -14,6 +14,7 @@ const ALLOWED_VIEWS = new Set([
   "national",
   "connect",
   "margin",
+  "pressure",
 ]);
 
 export async function GET(
@@ -24,7 +25,11 @@ export async function GET(
   if (!ALLOWED_VIEWS.has(view)) {
     return Response.json({ error: "unknown_view" }, { status: 404 });
   }
-  const active = await getActiveReleaseManifest();
+  const requestedDate = new URL(request.url).searchParams.get("date") ?? undefined;
+  if (requestedDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
+    return Response.json({ error: "invalid_date" }, { status: 400 });
+  }
+  const active = await getReleaseManifestForDate(requestedDate);
   const runtime = await runtimeEnv();
   if (!active || !runtime.RAW_BUCKET) {
     return Response.json({ error: "active_release_unavailable" }, { status: 503 });
@@ -47,7 +52,7 @@ export async function GET(
     object.customMetadata?.releaseId !== active.releaseId
   ) return Response.json({ error: "view_not_found" }, { status: 503 });
   const response = responseFromPublishedObject(
-    { object, asOf: active.asOf, releaseId: active.releaseId, historical: false },
+    { object, asOf: active.asOf, releaseId: active.releaseId, historical: requestedDate !== undefined && requestedDate !== active.asOf },
     request,
   );
   response.headers.set("X-Flow-View", view);

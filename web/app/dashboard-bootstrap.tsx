@@ -6,7 +6,7 @@ import { StockDetailView } from "./stock-detail-view";
 import { enrichSnapshotWithMarketHistory } from "./lib/market-history";
 import type { DashboardSnapshot } from "./lib/dashboard-data";
 
-type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "stock";
+type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "pressure" | "stock";
 
 type HistoryResponse = {
   dates?: string[];
@@ -29,7 +29,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const REFRESH_ERROR_THRESHOLD = 3;
 
 function requestedView(value: string | null): DeskView | undefined {
-  return value === "rotation" || value === "radar" || value === "national" || value === "connect" || value === "margin" || value === "stock"
+  return value === "rotation" || value === "radar" || value === "national" || value === "connect" || value === "margin" || value === "pressure" || value === "stock"
     ? value
     : undefined;
 }
@@ -78,8 +78,8 @@ export function DashboardBootstrap() {
         fetch(snapshotUrl, { cache: "no-store", signal: controller.signal }),
         fetch("/api/v2/history/dates", { cache: "no-store", signal: controller.signal }),
         fetch(historyUrl, { cache: "no-store", signal: controller.signal }),
-        view && view !== "stock" && !date
-          ? fetch(`/api/v2/views/${view}`, { cache: "no-store", signal: controller.signal })
+        view && view !== "stock"
+          ? fetch(`/api/v2/views/${view}${date ? `?date=${encodeURIComponent(date)}` : ""}`, { cache: "no-store", signal: controller.signal })
           : Promise.resolve(null),
       ]);
       if (!snapshotResponse.ok) {

@@ -206,6 +206,14 @@ def _normalise_pcf_frame(frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
         infer_listing_market(listing_market, code)
         for listing_market, code in zip(value["listing_market"], value["stock_code"])
     ]
+    # A PCF can contain cash-substitution labels, indexes or overseas
+    # identifiers without a confirmed listing market.  They are retained in
+    # the raw evidence, but cannot enter the stock workbench until an official
+    # security master confirms that they are stocks.  Never infer a stock from
+    # an opaque code/name alone.
+    value = value[value["listing_market"].ne("UNKNOWN")].copy()
+    if value.empty:
+        return value
     value["quantity"] = pd.to_numeric(value["quantity"], errors="coerce")
     value["creation_unit"] = pd.to_numeric(value["creation_unit"], errors="coerce")
     if value["quantity"].isna().any() or value["quantity"].le(0).any():
@@ -397,7 +405,8 @@ def build_stock_flow(
                     "estimated": True,
                 }
             )
-        total = float(rows["stock_flow_shares"].sum())
+        inflow = round(float(rows.loc[rows["stock_flow_shares"] > 0, "stock_flow_shares"].sum()), 2)
+        outflow = round(float(-rows.loc[rows["stock_flow_shares"] < 0, "stock_flow_shares"].sum()), 2)
         stock_groups.append(
             {
                 "market": str(listing_market),
@@ -405,10 +414,15 @@ def build_stock_flow(
                 "listingMarketName": underlying_market_name(listing_market),
                 "stockCode": str(stock_code),
                 "stockName": str(rows.iloc[0]["stock_name"]),
-                "netShares": round(total, 2),
-                "inflowShares": round(float(rows.loc[rows["stock_flow_shares"] > 0, "stock_flow_shares"].sum()), 2),
-                "outflowShares": round(float(-rows.loc[rows["stock_flow_shares"] < 0, "stock_flow_shares"].sum()), 2),
-                "etfCount": int(rows["etf_code"].nunique()),
+                "netShares": round(inflow - outflow, 2),
+                "inflowShares": inflow,
+                "outflowShares": outflow,
+                "penetratedShares": round(float(rows["current_penetrated_shares"].sum()), 2),
+                # An ETF identity includes its listing market.  The same
+                # numeric code can legally exist on two venues, so counting
+                # only ``etf_code`` would under-report coverage and could
+                # make the contributor truncation look complete.
+                "etfCount": int(rows[["market", "etf_code"]].drop_duplicates().shape[0]),
                 "contributors": contributions,
             }
         )
@@ -526,6 +540,7 @@ def build_stock_flow_catalog(
                 "netShares": stock["netShares"],
                 "inflowShares": stock["inflowShares"],
                 "outflowShares": stock["outflowShares"],
+                "penetratedShares": stock.get("penetratedShares"),
                 "etfCount": stock["etfCount"],
                 "contributorCount": stock["etfCount"],
                 "shownContributorCount": len(contributors),

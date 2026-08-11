@@ -99,6 +99,7 @@ export interface EtfStockFlowStock {
   netShares: number;
   inflowShares: number;
   outflowShares: number;
+  penetratedShares?: number | null;
   etfCount: number;
   contributors: EtfStockFlowContributor[];
 }
@@ -150,6 +151,91 @@ export interface EtfStockFlowData {
     }>;
     estimated: boolean;
   }>;
+  warnings: string[];
+}
+
+export interface StockPressureHistoryPoint {
+  date: string;
+  netShares: number;
+  inflowShares: number;
+  outflowShares: number;
+  etfCount: number;
+  penetratedShares?: number | null;
+}
+
+export interface StockPressureContributor {
+  etfMarket?: string;
+  etfCode: string;
+  etfName: string;
+  shareDelta: number;
+  quantity: number;
+  creationUnit: number;
+  stockFlowShares: number;
+  currentPenetratedShares?: number;
+  cashSubstitution?: boolean;
+  estimated: boolean;
+}
+
+export interface StockPressureRow {
+  identity: string;
+  listingMarket: string;
+  listingMarketName: string;
+  stockCode: string;
+  stockName: string;
+  netShares: number;
+  inflowShares: number;
+  outflowShares: number;
+  penetratedShares?: number | null;
+  etfCount: number;
+  historyCoverage: number;
+  history: StockPressureHistoryPoint[];
+  rolling20: {
+    from: string;
+    to: string;
+    coverage: number;
+    netShares: number;
+    inflowShares: number;
+    outflowShares: number;
+  } | null;
+  contributors?: StockPressureContributor[];
+  closePriceYuan: number | null;
+  floatShares: number | null;
+  floatMarketCapYuan: number | null;
+  marginBalanceYuan: number | null;
+  shortBalanceYuan: number | null;
+  priceAsOf?: string | null;
+  marginAsOf?: string | null;
+}
+
+export interface EtfPressureData {
+  schemaVersion: number;
+  asOf: string;
+  basis: {
+    unit: string;
+    calculation: string;
+    identity: string;
+    interpretation: string;
+    source: string;
+    priceSource: string;
+  };
+  summary: {
+    netShares: number;
+    inflowShares: number;
+    outflowShares: number;
+    grossShares: number;
+    marketFinancingBalanceYuan: number | null;
+  };
+  coverage: {
+    stockCount: number;
+    matchedEtfCount: number;
+    history20StockCount: number;
+    history20Coverage: number;
+    priceCount: number;
+    marginCount: number;
+  };
+  availableDates: string[];
+  marginAsOf?: string | null;
+  stocks: StockPressureRow[];
   warnings: string[];
 }
 
@@ -263,6 +349,7 @@ export interface DashboardSnapshot {
   }>;
   etfTerminal?: EtfTerminalData;
   etfStockFlow?: EtfStockFlowData;
+  pressure?: EtfPressureData;
 }
 
 export const dashboardSnapshot: DashboardSnapshot = {
