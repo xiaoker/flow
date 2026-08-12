@@ -39,7 +39,7 @@ export async function GET(request: Request) {
       maxArtifacts: 20,
       maxArtifactBytes: 5_000_000,
       features: observedAtColumnsReady
-        ? ["requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease"]
+        ? ["requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease", "radarFlowView"]
         : [],
       deploymentCommit: "unknown",
       migration: {

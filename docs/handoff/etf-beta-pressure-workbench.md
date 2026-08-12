@@ -427,13 +427,13 @@ PCF 仅允许：
 
 ### 6.2 工件设计
 
-当前 release 有 16 个工件：
+当前 release 有 18 个工件：
 
 ```text
-7 个核心视图
+9 个核心视图（含按需读取的 `radar_flow`）
 + stock_search
 + stock_0 ... stock_7
-= 16
+= 18
 ```
 
 本任务只新增 1 个全市场紧凑工件：
@@ -442,11 +442,7 @@ PCF 仅允许：
 pressure.json
 ```
 
-总数：
-
-```text
-17 <= 当前 MAX_ARTIFACTS 20
-```
+总数仍低于 `MAX_ARTIFACTS=20`，不会增加 ETF 详情分片。
 
 不要新增另一组 `pressure_0..7`。选中个股详情继续复用 `stock_0..7`。
 
@@ -1019,7 +1015,7 @@ ETF 篮子映射量（估）
 
 扩展 `tests/unit/test_read_models.py`：
 
-1. manifest 包含 `pressure`，总工件数为 17。
+1. manifest 包含 `pressure` 与 `radar_flow`，总工件数为 18。
 2. `pressure` 与 8 个 stock shard 确定性生成。
 3. `pressure.rows` 和 `stock_search.items` 的 `stock_key` 集合一致。
 4. `pressure.summary.netShares` 等于完整个股 `netShares` 求和。
@@ -1118,7 +1114,7 @@ curl "https://flow.xiaoker.com/api/v2/stocks/stock_0?date=<asOf>"
 | 上一 release 分片读取中断 | 是 | 构建失败，不切 active release | 旧完整版本继续服务 |
 | `pressure` 超过 5 MB | 是 | CI 失败 | 旧 release 继续服务 |
 | 上传体超过 1.5 MB | 是 | CI 失败 | 旧 release 继续服务 |
-| 17 个工件未全部到齐 | 是 | 不切 active release | 旧 release 继续服务 |
+| 18 个工件未全部到齐 | 是 | 不切 active release | 旧 release 继续服务 |
 | Worker 请求中解析大 JSON | 静态与生产检查 | 禁止合并 | 避免 1102 |
 | 浏览器一次渲染 6000 行 | 前端测试 | 分页 50/100 | 页面保持响应 |
 
@@ -1170,7 +1166,7 @@ curl "https://flow.xiaoker.com/api/v2/stocks/stock_0?date=<asOf>"
 3. 本地构建 read models，核对尺寸。
 4. 推送代码。
 5. 运行一次 `daily-data.yml`。
-6. 确认 release 包含 17 个工件。
+6. 确认 release 包含 18 个工件（`radar_flow` 需与其他核心视图同日、同 releaseId）。
 7. 生产冒烟和截图对照验收。
 
 建议分成小提交，不要把数据公式、采集、发布和视觉全部塞进一个不可审查的大提交。
@@ -1217,7 +1213,7 @@ curl "https://flow.xiaoker.com/api/v2/stocks/stock_0?date=<asOf>"
 
 ### 架构与成本
 
-- [ ] 总工件数 17，不超过 20。
+- [ ] 总工件数 18，不超过 20。
 - [ ] 每个 read model < 5 MB。
 - [ ] 每个上传请求 < 1.5 MB。
 - [ ] Worker 不解析或聚合全市场 read model。

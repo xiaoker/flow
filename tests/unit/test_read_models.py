@@ -134,9 +134,17 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
     assert manifest_a["pressureSchemaVersion"] == 2
     assert manifest_a["stockShardCount"] == 8
     assert manifest_a["requiredArtifacts"] == list(manifest_a["artifacts"])
-    assert set(payloads_a) == {"bootstrap", "overview", "radar", "rotation", "national", "connect", "margin", "pressure", "stock_search", *{f"stock_{index}" for index in range(8)}}
+    assert set(payloads_a) == {"bootstrap", "overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure", "stock_search", *{f"stock_{index}" for index in range(8)}}
     assert "etfTerminal" not in payloads_a["overview"]["data"]
     assert payloads_a["radar"]["data"]["etfTerminal"]["historyCoverage"]["tradingDays"] == 4
+    assert "etfStockFlow" not in payloads_a["radar"]["data"]
+    assert "etfStockFlow" in payloads_a["radar_flow"]["data"]
+    bootstrap_terminal = payloads_a["bootstrap"]["etfTerminal"]
+    assert bootstrap_terminal["instruments"] == []
+    assert bootstrap_terminal["reconciliation"]["1d"]["shares"]["instrumentTotal"] == 2.5
+    assert bootstrap_terminal["reconciliation"]["1d"]["shares"]["comparable"] == 2
+    assert len(payloads_a["bootstrap"]["etfSearch"]) == 2
+    assert {item["code"] for item in payloads_a["national"]["data"]["etfTerminal"]["instruments"]} <= {"510300", "510310", "510330", "510500", "159915", "159919", "512100", "510050", "588080", "510180", "159845", "512500"}
     assert manifest_a["releaseId"].startswith("release:2026-08-06:")
 
 
@@ -167,7 +175,7 @@ def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
     assert payloads_a[search_item["shard"]]["items"][0]["stockCode"] == "600000"
     assert all(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < 5_000_000 for payload in payloads_a.values())
     assert set(manifest_a["artifacts"]) == {
-        "bootstrap", "overview", "radar", "rotation", "national", "connect", "margin",
+        "bootstrap", "overview", "radar", "radar_flow", "rotation", "national", "connect", "margin",
         "pressure",
         "stock_search", *{f"stock_{index}" for index in range(8)},
     }

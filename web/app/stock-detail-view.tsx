@@ -190,9 +190,7 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
       let fallbackFlow: EtfStockFlowData | null = null;
       const loadRadarFallback = async (): Promise<EtfStockFlowData | null> => {
         if (fallbackFlow) return fallbackFlow;
-        const fallbackUrl = historicalRequest
-          ? `/api/v2/dashboard?date=${encodeURIComponent(date)}`
-          : "/api/v2/views/radar";
+        const fallbackUrl = `/api/v2/views/radar_flow${historicalRequest ? `?date=${encodeURIComponent(date)}` : ""}`;
         const fallbackResponse = await fetch(fallbackUrl, {
           cache: "no-store",
           signal: controller.signal,

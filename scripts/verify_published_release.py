@@ -10,7 +10,7 @@ from typing import Any
 import requests
 
 
-VIEWS = ("overview", "radar", "rotation", "national", "connect", "margin", "pressure")
+VIEWS = ("overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure")
 
 
 def _headers() -> dict[str, str]:

@@ -20,13 +20,41 @@ from .stock_pressure import PRESSURE_SCHEMA_VERSION, build_stock_pressure, stock
 
 
 SCHEMA_VERSION = 3
-VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin", "pressure")
+VIEW_NAMES = (
+    "bootstrap",
+    "overview",
+    "radar",
+    "radar_flow",
+    "rotation",
+    "national",
+    "connect",
+    "margin",
+    "pressure",
+)
 STOCK_SEARCH_NAME = "stock_search"
 STOCK_SHARD_COUNT = 8
 STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
 REQUIRED_ARTIFACT_NAMES = (*VIEW_NAMES, STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES)
 MAX_READ_MODEL_BYTES = 5_000_000
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# This is the same code-based observation pool shown by the National Team
+# page.  The page is intentionally a projection of ETF Radar, not a second
+# source or an independent collection universe.
+NATIONAL_TEAM_CODES = (
+    "510300",
+    "510310",
+    "510330",
+    "510500",
+    "159915",
+    "159919",
+    "512100",
+    "510050",
+    "588080",
+    "510180",
+    "159845",
+    "512500",
+)
 
 
 class ReadModelError(ValueError):
@@ -229,6 +257,156 @@ def _with_release_meta(snapshot: dict[str, Any], payload: dict[str, Any]) -> dic
     }
 
 
+def _bootstrap_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
+    """Return only terminal fields used by the default overview.
+
+    Keeping this allowlist explicit prevents a newly-added analytics field (or
+    a future embedded graph) from silently turning ``bootstrap.json`` back
+    into a full snapshot.  Radar receives the same ETF universe separately;
+    the expensive ETF-to-stock graph is never part of either payload.
+    """
+
+    allowed = (
+        "scope",
+        "dailySeries",
+        "instruments",
+        "groupPeriods",
+        "availablePeriods",
+        "classification",
+        "classificationVersion",
+        "calculation",
+        "cashFlow",
+        "historyCoverage",
+        "universe",
+    )
+    result = {key: terminal[key] for key in allowed if key in terminal}
+    # The default page does not need the Radar period matrix. Keep an empty
+    # stable array for consumers that expect the terminal shape; the searchable
+    # ETF identity index is published as the sibling ``etfSearch`` field.
+    result["instruments"] = []
+    result["reconciliation"] = _overview_reconciliation(terminal)
+    result["cashAvailablePeriods"] = [
+        period
+        for period in terminal.get("availablePeriods", [])
+        if any(
+            isinstance(item, dict)
+            and isinstance(item.get("estimatedCashPeriods"), dict)
+            and isinstance(item["estimatedCashPeriods"].get(period), (int, float))
+            for item in terminal.get("instruments", [])
+        )
+    ]
+    return result
+
+
+def _etf_search_index(terminal: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a small ETF name/code index for the default global search."""
+
+    items = []
+    for item in terminal.get("instruments", []):
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not code or not name:
+            continue
+        items.append({
+            "code": code,
+            "name": name,
+            "market": item.get("market"),
+            "category": item.get("category"),
+        })
+    return sorted(items, key=lambda item: (str(item["name"]), str(item["code"])))
+
+
+def _overview_reconciliation(terminal: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Precompute overview counters while the producer still has full rows."""
+
+    instruments = [item for item in terminal.get("instruments", []) if isinstance(item, dict)]
+    groups = [item for item in terminal.get("groupPeriods", []) if isinstance(item, dict)]
+    result: dict[str, dict[str, Any]] = {}
+    for period in terminal.get("availablePeriods", []):
+        period_result: dict[str, Any] = {}
+        for metric, instrument_key, group_key in (
+            ("shares", "periods", "periods"),
+            ("cash", "estimatedCashPeriods", "estimatedCashPeriods"),
+        ):
+            comparable = [
+                item for item in instruments
+                if isinstance(item.get(instrument_key), dict)
+                and isinstance(item[instrument_key].get(period), (int, float))
+            ]
+            values = [float(item[instrument_key][period]) for item in comparable]
+            group_values = [
+                float(item[group_key][period]) for item in groups
+                if isinstance(item.get(group_key), dict)
+                and isinstance(item[group_key].get(period), (int, float))
+            ]
+            period_result[metric] = {
+                "comparable": len(comparable),
+                "increased": sum(value > 0 for value in values),
+                "decreased": sum(value < 0 for value in values),
+                "unchanged": sum(value == 0 for value in values),
+                "classified": sum(item.get("category") != "未归类" for item in instruments),
+                "unclassified": sum(item.get("category") == "未归类" for item in instruments),
+                "instrumentTotal": round(sum(values), 2),
+                "groupTotal": round(sum(group_values), 2),
+                "delta": round(sum(group_values) - sum(values), 2),
+            }
+        result[str(period)] = period_result
+    return result
+
+
+def _national_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
+    """Build the code-based National Team projection from ETF Radar rows."""
+
+    instruments = [
+        item
+        for item in terminal.get("instruments", [])
+        if isinstance(item, dict) and str(item.get("code", "")) in NATIONAL_TEAM_CODES
+    ]
+    universe = terminal.get("universe") if isinstance(terminal.get("universe"), dict) else {}
+    market_counts = {
+        "SSE": sum(item.get("market") == "SSE" for item in instruments),
+        "SZSE": sum(item.get("market") == "SZSE" for item in instruments),
+    }
+    category_counts: dict[str, int] = {}
+    for item in instruments:
+        category = str(item.get("category", "未归类"))
+        category_counts[category] = category_counts.get(category, 0) + 1
+    projected_universe = {
+        "total": len(instruments),
+        "excluded": 0,
+        "exclusionCounts": {},
+        "marketCounts": market_counts,
+        "categoryCounts": category_counts,
+        "classified": sum(item.get("category") != "未归类" for item in instruments),
+        "unclassified": sum(item.get("category") == "未归类" for item in instruments),
+        "periodComparable": sum(item.get("periods", {}).get("1d") is not None for item in instruments),
+        "cashFlowEligible": sum(
+            item.get("estimatedCashPeriods", {}).get("1d") is not None for item in instruments
+        ),
+    }
+    # Preserve future terminal metadata only when it is scalar/structural and
+    # cannot re-introduce the full ETF universe or daily history.
+    projected = {
+        "scope": terminal.get("scope"),
+        "dailySeries": [],
+        "instruments": instruments,
+        "groupPeriods": [],
+        "availablePeriods": terminal.get("availablePeriods", []),
+        "classification": terminal.get("classification"),
+        "classificationVersion": terminal.get("classificationVersion"),
+        "calculation": terminal.get("calculation"),
+        "cashFlow": terminal.get("cashFlow"),
+        "historyCoverage": terminal.get("historyCoverage"),
+        "universe": projected_universe,
+    }
+    # ``universe`` is deliberately recomputed above; do not copy unrelated
+    # fields from the full terminal into this child view.
+    _ = universe
+    return projected
+
+
 def _market_financing_balance(snapshot: dict[str, Any]) -> float | None:
     """Return the latest official market financing balance in yuan.
 
@@ -340,9 +518,17 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Split one validated snapshot into bounded, view-specific payloads."""
 
     terminal = snapshot["etfTerminal"]
-    # The penetration model is only needed by ETF Radar detail drawers.  Keep
-    # it out of the overview payload so the default page does not download a
-    # potentially wide stock-contribution graph.
+    bootstrap = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"etfStockFlow", "pressure"}
+    }
+    bootstrap["etfTerminal"] = _bootstrap_terminal(terminal)
+    bootstrap["etfSearch"] = _etf_search_index(terminal)
+
+    # The penetration model is only needed by ETF Radar detail drawers. Keep
+    # it out of both the default payload and the list view; the dedicated
+    # radar_flow object is fetched only after a drawer is opened.
     overview = {
         key: value
         for key, value in snapshot.items()
@@ -350,6 +536,9 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
     radar = {
         "etfTerminal": terminal,
+        "classificationVersion": terminal.get("classificationVersion"),
+    }
+    radar_flow = {
         "etfStockFlow": snapshot.get("etfStockFlow"),
         "classificationVersion": terminal.get("classificationVersion"),
     }
@@ -376,14 +565,15 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "dataStatus": [row for row in snapshot.get("dataStatus", []) if "融资" in str(row.get("name", ""))],
     }
     national = {
-        "etfTerminal": terminal,
+        "etfTerminal": _national_terminal(terminal),
         "asOf": snapshot["asOf"],
         "classificationVersion": terminal.get("classificationVersion"),
     }
     return {
-        "bootstrap": snapshot,
+        "bootstrap": bootstrap,
         "overview": _with_release_meta(snapshot, overview),
         "radar": _with_release_meta(snapshot, radar),
+        "radar_flow": _with_release_meta(snapshot, radar_flow),
         "rotation": _with_release_meta(snapshot, rotation),
         "national": _with_release_meta(snapshot, national),
         "connect": _with_release_meta(snapshot, connect),

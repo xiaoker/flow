@@ -216,8 +216,8 @@ test("exposes a versioned ETF-to-stock search and detail contract", async () => 
   ]);
   assert.match(dashboard, /搜索 ETF \/ 个股 \/ 代码/);
   assert.match(dashboard, /openStockDetail/);
-  assert.match(dashboard, /collectEmbeddedStockSearchItems/);
-  assert.match(dashboard, /api\/v2\/views\/radar/);
+  assert.match(bootstrap, /api\/v2\/views\/\$\{view\}/);
+  assert.match(dashboard, /onLoadRadarFlow/);
   assert.match(dashboard, /点击个股查看完整贡献拆解/);
   assert.match(bootstrap, /params\.get\("view"\) === "stock"/);
   assert.match(detail, /只读取已通过 QA 的同一发布版本/);

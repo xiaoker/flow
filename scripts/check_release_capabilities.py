@@ -41,7 +41,7 @@ def check(url: str, *, timeout: float = 20.0) -> dict:
     if payload.get("maxArtifacts", 0) < 20 or payload.get("maxArtifactBytes", 0) < 5_000_000:
         raise RuntimeError(f"deployed artifact budget is too small: {payload}")
     features = set(payload.get("features") or [])
-    required_features = {"requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease"}
+    required_features = {"requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease", "radarFlowView"}
     if not required_features.issubset(features):
         raise RuntimeError(f"deployed release features are incomplete: {payload}")
     migration = payload.get("migration")

@@ -66,6 +66,8 @@ export interface EtfTerminalData {
     tradingDays: number;
     stateVersion: number;
   };
+  /** Periods with at least one official NAV observation for cash estimates. */
+  cashAvailablePeriods?: FlowPeriod[];
   universe?: {
     total: number;
     excluded?: number;
@@ -77,6 +79,30 @@ export interface EtfTerminalData {
     periodComparable: number;
     cashFlowEligible?: number;
   };
+  reconciliation?: Record<string, {
+    shares?: {
+      comparable: number;
+      increased: number;
+      decreased: number;
+      unchanged: number;
+      classified: number;
+      unclassified: number;
+      instrumentTotal: number;
+      groupTotal: number;
+      delta: number;
+    };
+    cash?: {
+      comparable: number;
+      increased: number;
+      decreased: number;
+      unchanged: number;
+      classified: number;
+      unclassified: number;
+      instrumentTotal: number;
+      groupTotal: number;
+      delta: number;
+    };
+  }>;
 }
 
 export interface EtfStockFlowContributor {
@@ -349,6 +375,12 @@ export interface DashboardSnapshot {
     basis?: "official" | "inferred_date" | "mixed";
   }>;
   etfTerminal?: EtfTerminalData;
+  etfSearch?: Array<{
+    code: string;
+    name: string;
+    market?: string;
+    category?: string;
+  }>;
   etfStockFlow?: EtfStockFlowData;
   pressure?: EtfPressureData;
 }

@@ -10,6 +10,7 @@ const ALLOWED_VIEWS = new Set([
   "bootstrap",
   "overview",
   "radar",
+  "radar_flow",
   "rotation",
   "national",
   "connect",

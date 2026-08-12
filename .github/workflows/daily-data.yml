@@ -276,6 +276,13 @@ jobs:
               --output-dir read-models \
               --stock-catalog stock-pressure-catalog.json \
               --require-materialized
+            python scripts/report_read_model_sizes.py \
+              --read-model-dir read-models \
+              --output artifact-size-report.json
+            if jq -e '.softWarnings | length > 0' artifact-size-report.json >/dev/null; then
+              echo '::warning::One or more read-model artifacts exceed the PR2 soft budget.'
+              jq -r '.softWarnings[]' artifact-size-report.json
+            fi
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
           fi
@@ -354,6 +361,7 @@ jobs:
             etf-flow-state.json
             stock-flow-catalog.json
             stock-pressure-catalog.json
+            artifact-size-report.json
             capabilities.json
             read-model-publish.json
             release-canary.json

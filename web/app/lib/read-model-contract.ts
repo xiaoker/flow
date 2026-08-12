@@ -6,7 +6,7 @@
 
 export const MAX_READ_MODEL_ARTIFACTS = 20;
 export const MAX_READ_MODEL_BYTES = 5_000_000;
-export const READ_MODEL_NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
+export const READ_MODEL_NAME = /^(bootstrap|overview|radar|radar_flow|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
 export const RELEASE_ID = /^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/;
 export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 export const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -17,6 +17,7 @@ export const COMPLETE_READ_MODEL_NAMES = [
   "bootstrap",
   "overview",
   "radar",
+  "radar_flow",
   "rotation",
   "national",
   "connect",
@@ -36,6 +37,7 @@ export const READ_MODEL_ORDER = [
   "bootstrap",
   "overview",
   "radar",
+  "radar_flow",
   "rotation",
   "national",
   "connect",

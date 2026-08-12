@@ -4,7 +4,7 @@
 > 编写日期：2026-08-12
 > 仓库：`xiaoker/flow`
 > 生产地址：`https://flow.xiaoker.com`
-> 状态：已完成工程评审，等待按本文分阶段实施
+> 状态：PR 1A/1B 已在当前分支完成；PR 2 已实施并完成本地验证，待生产部署与 5 个交易日观测；PR 3 尚未实施
 > 优先级：P0 发布正确性，P1 请求资源，P1 采集调度
 
 ## 0. 执行指令
@@ -175,7 +175,7 @@ sourceDate(domain) == expectedTradingDate(domain, asOf, releaseWindow)
   "pressureSchemaVersion": 2,
   "stockShardCount": 8,
   "requiredArtifacts": [
-    "bootstrap", "overview", "radar", "rotation", "national",
+    "bootstrap", "overview", "radar", "radar_flow", "rotation", "national",
     "connect", "margin", "pressure", "stock_search",
     "stock_0", "stock_1", "stock_2", "stock_3",
     "stock_4", "stock_5", "stock_6", "stock_7"

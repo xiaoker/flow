@@ -7,6 +7,7 @@ import { enrichSnapshotWithMarketHistory } from "./lib/market-history";
 import type { DashboardSnapshot } from "./lib/dashboard-data";
 
 type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "pressure" | "stock";
+type ReadModelView = Exclude<DeskView, "overview" | "stock"> | "radar_flow";
 
 type HistoryResponse = {
   dates?: string[];
@@ -41,9 +42,14 @@ export function DashboardBootstrap() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [viewLoadError, setViewLoadError] = useState<string | null>(null);
+  const [viewLoading, setViewLoading] = useState(false);
   const snapshotRef = useRef<DashboardSnapshot | null>(null);
+  const baseSnapshotRef = useRef<DashboardSnapshot | null>(null);
   const releaseIdRef = useRef<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+  const viewRequestRef = useRef<AbortController | null>(null);
+  const viewCacheRef = useRef(new Map<string, Record<string, unknown>>());
   const refreshInFlightRef = useRef(false);
   const refreshFailureCountRef = useRef(0);
   const mountedRef = useRef(true);
@@ -52,6 +58,39 @@ export function DashboardBootstrap() {
     if (typeof window === "undefined") return null;
     return new URLSearchParams(window.location.search).get("date");
   }, []);
+
+  const viewCacheKey = useCallback((id: string | null, date: string | null, view: ReadModelView) => `${id ?? "date:" + (date ?? "latest")}:${view}`, []);
+
+  const readView = useCallback(async (
+    view: ReadModelView,
+    base: DashboardSnapshot,
+    id: string | null,
+    date: string | null,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> => {
+    const key = viewCacheKey(id, date, view);
+    const cached = viewCacheRef.current.get(key);
+    if (cached) return cached;
+    const response = await fetch(`/api/v2/views/${view}${date ? `?date=${encodeURIComponent(date)}` : ""}`, {
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) throw new Error(`view_${view}_${response.status}`);
+    const viewReleaseId = response.headers.get("x-flow-release-id");
+    if (!viewReleaseId || (id && viewReleaseId !== id)) throw new Error("release_pending");
+    const envelope = await response.json() as ReadModelEnvelope;
+    if (envelope.asOf !== base.asOf) throw new Error("release_pending");
+    const data = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+      ? envelope.data
+      : {};
+    viewCacheRef.current.set(key, data);
+    while (viewCacheRef.current.size > 32) {
+      const oldest = viewCacheRef.current.keys().next().value;
+      if (oldest) viewCacheRef.current.delete(oldest);
+      else break;
+    }
+    return data;
+  }, [viewCacheKey]);
 
   const loadSnapshot = useCallback(async (expectedReleaseId?: string) => {
     const date = getRequestedDate();
@@ -65,6 +104,10 @@ export function DashboardBootstrap() {
       ? `/api/v2/market-history?asOf=${encodeURIComponent(date)}`
       : "/api/v2/market-history";
     requestRef.current?.abort();
+    viewRequestRef.current?.abort();
+    viewRequestRef.current = null;
+    viewCacheRef.current.clear();
+    if (mountedRef.current) setViewLoading(false);
     const controller = new AbortController();
     requestRef.current = controller;
     let timedOut = false;
@@ -74,56 +117,51 @@ export function DashboardBootstrap() {
     }, REQUEST_TIMEOUT_MS);
 
     try {
-      const [snapshotResponse, datesResponse, marketResponse, viewResponse] = await Promise.all([
+      const [snapshotResponse, datesResponse, marketResponse] = await Promise.all([
         fetch(snapshotUrl, { cache: "no-store", signal: controller.signal }),
         fetch("/api/v2/history/dates", { cache: "no-store", signal: controller.signal }),
         fetch(historyUrl, { cache: "no-store", signal: controller.signal }),
-        view && view !== "stock"
-          ? fetch(`/api/v2/views/${view}${date ? `?date=${encodeURIComponent(date)}` : ""}`, { cache: "no-store", signal: controller.signal })
-          : Promise.resolve(null),
       ]);
       if (!snapshotResponse.ok) {
         throw new Error(snapshotResponse.status === 404 ? "该日期尚未形成完整发布版本" : `dashboard_${snapshotResponse.status}`);
       }
       if (!datesResponse.ok || !marketResponse.ok) throw new Error("history_unavailable");
-      const [baseSnapshot, datesPayload, marketPayload, viewPayload] = await Promise.all([
+      const [rawSnapshot, datesPayload, marketPayload] = await Promise.all([
         snapshotResponse.json() as Promise<DashboardSnapshot>,
         datesResponse.json() as Promise<HistoryResponse>,
         marketResponse.json() as Promise<{ rows?: Parameters<typeof enrichSnapshotWithMarketHistory>[1] }>,
-        viewResponse?.ok
-          ? viewResponse.json() as Promise<ReadModelEnvelope>
-          : Promise.resolve(null),
       ]);
       const nextReleaseId = snapshotResponse.headers.get("x-flow-release-id");
-      const viewReleaseId = viewResponse?.headers.get("x-flow-release-id");
       if (expectedReleaseId && nextReleaseId !== expectedReleaseId) {
         throw new Error("release_pending");
       }
-      if (viewPayload?.asOf && viewPayload.asOf !== baseSnapshot.asOf) {
-        throw new Error("release_pending");
-      }
-      if (nextReleaseId && viewReleaseId && nextReleaseId !== viewReleaseId) {
-        throw new Error("release_pending");
-      }
-      const nextSnapshot: DashboardSnapshot = viewPayload?.data
-        ? { ...baseSnapshot, ...viewPayload.data } as DashboardSnapshot
-        : baseSnapshot;
       const dates = Array.isArray(datesPayload.dates) ? [...datesPayload.dates] : [];
-      if (!dates.includes(nextSnapshot.asOf)) dates.push(nextSnapshot.asOf);
+      if (!dates.includes(rawSnapshot.asOf)) dates.push(rawSnapshot.asOf);
       dates.sort();
-      const enrichedSnapshot = enrichSnapshotWithMarketHistory(
-        nextSnapshot,
+      const enrichedBase = enrichSnapshotWithMarketHistory(
+        rawSnapshot,
         Array.isArray(marketPayload.rows) ? marketPayload.rows : [],
       );
+      baseSnapshotRef.current = enrichedBase;
+      let nextSnapshot = enrichedBase;
+      setViewLoadError(null);
+      if (view && view !== "overview" && view !== "stock") {
+        try {
+          const data = await readView(view, enrichedBase, nextReleaseId, date, controller.signal);
+          nextSnapshot = { ...enrichedBase, ...data } as DashboardSnapshot;
+        } catch (cause: unknown) {
+          setViewLoadError(cause instanceof Error ? cause.message : "视图数据加载失败");
+        }
+      }
       if (mountedRef.current) {
-        snapshotRef.current = enrichedSnapshot;
+        snapshotRef.current = nextSnapshot;
         releaseIdRef.current = nextReleaseId ?? (date ? null : releaseIdRef.current);
         setReleaseId(nextReleaseId ?? (date ? null : releaseIdRef.current));
         setAvailableDates(dates);
-        setSnapshot(enrichedSnapshot);
+        setSnapshot(nextSnapshot);
         setError(null);
       }
-      return enrichedSnapshot;
+      return nextSnapshot;
     } catch (cause: unknown) {
       if (timedOut) throw new Error("request_timeout");
       throw cause;
@@ -131,7 +169,58 @@ export function DashboardBootstrap() {
       window.clearTimeout(timeoutId);
       if (requestRef.current === controller) requestRef.current = null;
     }
-  }, [getRequestedDate]);
+  }, [getRequestedDate, readView]);
+
+  const loadView = useCallback(async (view: DeskView | "radar_flow") => {
+    const base = baseSnapshotRef.current;
+    if (!base) throw new Error("dashboard_not_ready");
+    if (view === "stock") return;
+    if (view === "overview") {
+      viewRequestRef.current?.abort();
+      viewRequestRef.current = null;
+      if (mountedRef.current) {
+        setViewLoadError(null);
+        setViewLoading(false);
+        snapshotRef.current = base;
+        setSnapshot(base);
+      }
+      return;
+    }
+    const backgroundFlow = view === "radar_flow";
+    if (backgroundFlow && base.etfStockFlow) return;
+    const controller = new AbortController();
+    viewRequestRef.current?.abort();
+    viewRequestRef.current = controller;
+    if (!backgroundFlow) {
+      setViewLoading(true);
+      setViewLoadError(null);
+    }
+    try {
+      const data = await readView(view, base, releaseIdRef.current, getRequestedDate(), controller.signal);
+      const current = snapshotRef.current;
+      const nextSnapshot = view === "radar_flow" && current?.etfTerminal?.instruments?.length
+        ? { ...base, etfTerminal: current.etfTerminal, ...data } as DashboardSnapshot
+        : { ...base, ...data } as DashboardSnapshot;
+      if (mountedRef.current && viewRequestRef.current === controller) {
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
+      }
+    } catch (cause: unknown) {
+      if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+      if (mountedRef.current && viewRequestRef.current === controller && !backgroundFlow) setViewLoadError(cause instanceof Error ? cause.message : "视图数据加载失败");
+      throw cause;
+    } finally {
+      if (viewRequestRef.current === controller) {
+        viewRequestRef.current = null;
+        if (mountedRef.current && !backgroundFlow) setViewLoading(false);
+      }
+    }
+  }, [getRequestedDate, readView]);
+
+  const loadRadarFlow = useCallback(
+    () => loadView("radar_flow").then(() => snapshotRef.current?.etfStockFlow ?? null),
+    [loadView],
+  );
 
   const retryInitialLoad = useCallback(() => {
     setError(null);
@@ -202,6 +291,8 @@ export function DashboardBootstrap() {
 
   useEffect(() => {
     mountedRef.current = true;
+    // The initial request intentionally owns the bootstrap state transition.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadSnapshot().catch((cause: unknown) => {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       if (mountedRef.current) setError(cause instanceof Error ? cause.message : "数据加载失败，请稍后重试");
@@ -209,6 +300,7 @@ export function DashboardBootstrap() {
     return () => {
       mountedRef.current = false;
       requestRef.current?.abort();
+      viewRequestRef.current?.abort();
     };
   }, [loadSnapshot]);
 
@@ -256,7 +348,10 @@ export function DashboardBootstrap() {
       initialView={requestedView(params.get("view"))}
       onRefresh={() => refreshLatest(true)}
       onAutoRefresh={refreshLatest}
-      onViewChange={() => refreshLatest(true)}
+      onViewChange={loadView}
+      onLoadRadarFlow={loadRadarFlow}
+      viewLoadError={viewLoadError}
+      viewLoading={viewLoading}
       refreshing={refreshing}
       refreshError={refreshError}
     />
