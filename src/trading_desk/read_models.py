@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .stock_pressure import build_stock_pressure
+from .stock_pressure import build_stock_pressure, stock_shard_name
 
 
 SCHEMA_VERSION = 2
@@ -157,14 +157,6 @@ def _market_financing_balance(snapshot: dict[str, Any]) -> float | None:
     if not math.isfinite(number) or number < 0:
         return None
     return round(number * 100_000_000, 2)
-
-
-def stock_shard_name(listing_market: Any, stock_code: Any) -> str:
-    """Return the deterministic R2 shard for one listing-market/code key."""
-
-    identity = f"{str(listing_market).strip()}:{str(stock_code).strip()}"
-    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16)
-    return f"stock_{bucket % STOCK_SHARD_COUNT}"
 
 
 def _build_stock_artifacts(

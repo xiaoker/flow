@@ -156,6 +156,54 @@ def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
     }
 
 
+def test_pressure_index_stays_compact_and_details_remain_in_shards() -> None:
+    catalog = _stock_catalog()
+    template = catalog["items"][0]
+    template["history"] = [
+        {
+            "date": f"2026-07-{day:02d}",
+            "netShares": float(day),
+            "inflowShares": float(day),
+            "outflowShares": 0.0,
+            "etfCount": 1,
+        }
+        for day in range(17, 31)
+    ]
+    template["contributors"] = [
+        {
+            "etfMarket": "SSE",
+            "etfCode": f"510{index:03d}",
+            "etfName": "示例 ETF 贡献明细",
+            "shareDelta": 1.0,
+            "quantity": 100,
+            "creationUnit": 1_000_000,
+            "stockFlowShares": 123.0,
+            "estimated": True,
+        }
+        for index in range(5)
+    ]
+    catalog["items"] = []
+    for index in range(6_200):
+        item = dict(template)
+        item["stockCode"] = f"{index:06d}"
+        item["stockName"] = f"测试股票{index}"
+        item["history"] = [dict(point) for point in template["history"]]
+        item["contributors"] = [dict(contributor) for contributor in template["contributors"]]
+        catalog["items"].append(item)
+
+    payloads, _ = build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
+    pressure = payloads["pressure"]["data"]["pressure"]
+    encoded_pressure = json.dumps(payloads["pressure"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(encoded_pressure) < 5_000_000
+    row = pressure["stocks"][0]
+    assert row["shard"].startswith("stock_")
+    assert "history" not in row
+    assert "contributors" not in row
+    shard = payloads[row["shard"]]
+    assert shard["items"][0]["history"]
+    assert shard["items"][0]["contributors"]
+
+
 def test_stock_catalog_rejects_duplicate_identity() -> None:
     catalog = _stock_catalog()
     catalog["items"].append(dict(catalog["items"][0]))

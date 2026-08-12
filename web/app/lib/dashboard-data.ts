@@ -182,13 +182,14 @@ export interface StockPressureRow {
   listingMarketName: string;
   stockCode: string;
   stockName: string;
+  shard: string;
   netShares: number;
   inflowShares: number;
   outflowShares: number;
   penetratedShares?: number | null;
   etfCount: number;
   historyCoverage: number;
-  history: StockPressureHistoryPoint[];
+  history?: StockPressureHistoryPoint[];
   rolling20: {
     from: string;
     to: string;
@@ -198,11 +199,11 @@ export interface StockPressureRow {
     outflowShares: number;
   } | null;
   contributors?: StockPressureContributor[];
-  closePriceYuan: number | null;
-  floatShares: number | null;
-  floatMarketCapYuan: number | null;
-  marginBalanceYuan: number | null;
-  shortBalanceYuan: number | null;
+  closePriceYuan?: number | null;
+  floatShares?: number | null;
+  floatMarketCapYuan?: number | null;
+  marginBalanceYuan?: number | null;
+  shortBalanceYuan?: number | null;
   priceAsOf?: string | null;
   marginAsOf?: string | null;
 }
