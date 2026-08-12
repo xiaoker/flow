@@ -238,6 +238,10 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .pressure-no-results strong, .pressure-chart-empty strong, .pressure-empty h2 { color: var(--muted-strong); }
 .pressure-no-results span, .pressure-chart-empty span, .pressure-empty p { max-width: 360px; color: var(--muted); font-size: 12px; }
 .pressure-detail-panel { min-height: 500px; }
+.pressure-detail-loading, .pressure-detail-error { display: flex; align-items: center; gap: 8px; margin: 10px 15px 0; padding: 9px 11px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--muted); font-size: 12px; }
+.pressure-detail-loading svg { color: var(--cyan); animation: flow-spin 1.2s linear infinite; }
+.pressure-detail-error { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 30%, transparent); }
+.pressure-detail-error svg { flex: 0 0 auto; }
 .pressure-detail-heading { min-height: 102px; }
 .pressure-detail-heading h3 { display: flex; align-items: baseline; gap: 8px; }
 .pressure-detail-heading h3 em { color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 12px; font-style: normal; font-weight: 500; }

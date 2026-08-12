@@ -11,15 +11,19 @@ payload.
 from __future__ import annotations
 
 import math
+import hashlib
 from copy import deepcopy
 from datetime import date
 import re
 from typing import Any, Iterable
 
 
-PRESSURE_SCHEMA_VERSION = 1
+# v2 separates the bounded pressure index from the full per-stock history and
+# contributor details stored in stock_* shards.
+PRESSURE_SCHEMA_VERSION = 2
 HISTORY_NODE_LIMIT = 21
 ROLLING_WINDOW = 20
+STOCK_SHARD_COUNT = 8
 
 
 class StockPressureError(ValueError):
@@ -52,6 +56,19 @@ def stock_identity(item: dict[str, Any]) -> str:
     if not market or not code:
         raise StockPressureError("pressure_stock_identity_missing")
     return f"{market}:{code}"
+
+
+def stock_shard_name(listing_market: Any, stock_code: Any) -> str:
+    """Return the stable read-model shard for one listing-market/code key.
+
+    The pressure index and the detailed stock artifacts must agree on this
+    mapping.  Keeping the hash here avoids duplicating a subtly different
+    bucket rule in the offline projection and the web client.
+    """
+
+    identity = f"{str(listing_market).strip()}:{str(stock_code).strip()}"
+    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16)
+    return f"stock_{bucket % STOCK_SHARD_COUNT}"
 
 
 def _number(value: Any) -> float | None:
@@ -252,15 +269,18 @@ def build_stock_pressure(
                 "listingMarketName": str(item.get("listingMarketName", "未知市场")),
                 "stockCode": str(item.get("stockCode", "")),
                 "stockName": str(item.get("stockName", "")),
+                # Full history and contributor lists live in the immutable
+                # stock shard.  The pressure index only needs this pointer
+                # to resolve the selected row without inflating the page
+                # payload beyond the R2/Worker object limit.
+                "shard": stock_shard_name(item.get("listingMarket"), item.get("stockCode")),
                 "netShares": _rounded(item.get("netShares")) or 0.0,
                 "inflowShares": _rounded(item.get("inflowShares")) or 0.0,
                 "outflowShares": _rounded(item.get("outflowShares")) or 0.0,
                 "penetratedShares": _rounded(item.get("penetratedShares")),
                 "etfCount": int(item.get("etfCount") or 0),
                 "historyCoverage": len(history),
-                "history": history,
                 "rolling20": rolling,
-                "contributors": list(item.get("contributors") or [])[:5],
                 # Optional fields are passed through only when an official
                 # source adapter has supplied them.  Missing values stay null.
                 "closePriceYuan": _rounded(item.get("closePriceYuan"), 4),

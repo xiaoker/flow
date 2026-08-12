@@ -2,8 +2,13 @@
 
 import { ArrowUpRight, Database, Info, MagnifyingGlass, Table } from "@phosphor-icons/react";
 import ReactECharts from "echarts-for-react";
-import { useMemo, useState } from "react";
-import type { EtfPressureData, StockPressureRow } from "./lib/dashboard-data";
+import { useEffect, useMemo, useState } from "react";
+import type {
+  EtfPressureData,
+  StockPressureContributor,
+  StockPressureHistoryPoint,
+  StockPressureRow,
+} from "./lib/dashboard-data";
 
 type Props = {
   data?: EtfPressureData;
@@ -51,9 +56,87 @@ function tone(value: number | null | undefined) {
 function filterRow(row: StockPressureRow, filter: Filter) {
   if (filter === "inflow") return row.inflowShares > 0;
   if (filter === "outflow") return row.outflowShares > 0;
-  if (filter === "financing") return row.marginBalanceYuan !== null;
-  if (filter === "lending") return row.shortBalanceYuan !== null;
+  if (filter === "financing") return row.marginBalanceYuan != null;
+  if (filter === "lending") return row.shortBalanceYuan != null;
   return true;
+}
+
+function finiteNumber(value: unknown, fallback = 0) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function nullableNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeHistory(value: unknown): StockPressureHistoryPoint[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((point) => {
+    if (!point || typeof point !== "object") return [];
+    const item = point as Record<string, unknown>;
+    const date = typeof item.date === "string" ? item.date : "";
+    if (!date) return [];
+    return [{
+      date,
+      netShares: finiteNumber(item.netShares),
+      inflowShares: finiteNumber(item.inflowShares),
+      outflowShares: finiteNumber(item.outflowShares),
+      etfCount: Math.max(0, Math.trunc(finiteNumber(item.etfCount))),
+      penetratedShares: nullableNumber(item.penetratedShares),
+    }];
+  });
+}
+
+function rolling20FromHistory(history: StockPressureHistoryPoint[]) {
+  if (history.length < 20) return null;
+  const window = history.slice(-20);
+  return {
+    from: window[0].date,
+    to: window[window.length - 1].date,
+    coverage: window.length,
+    netShares: window.reduce((sum, item) => sum + item.netShares, 0),
+    inflowShares: window.reduce((sum, item) => sum + item.inflowShares, 0),
+    outflowShares: window.reduce((sum, item) => sum + item.outflowShares, 0),
+  };
+}
+
+function normalizeContributors(value: unknown): StockPressureContributor[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is StockPressureContributor => Boolean(
+    item && typeof item === "object" &&
+    typeof (item as Record<string, unknown>).etfCode === "string" &&
+    typeof (item as Record<string, unknown>).etfName === "string",
+  ));
+}
+
+function normalizeStockDetail(item: Record<string, unknown>, fallback: StockPressureRow): StockPressureRow {
+  const history = normalizeHistory(item.history);
+  return {
+    ...fallback,
+    listingMarket: typeof item.listingMarket === "string" ? item.listingMarket : fallback.listingMarket,
+    listingMarketName: typeof item.listingMarketName === "string" ? item.listingMarketName : fallback.listingMarketName,
+    stockCode: typeof item.stockCode === "string" ? item.stockCode : fallback.stockCode,
+    stockName: typeof item.stockName === "string" ? item.stockName : fallback.stockName,
+    netShares: finiteNumber(item.netShares, fallback.netShares),
+    inflowShares: finiteNumber(item.inflowShares, fallback.inflowShares),
+    outflowShares: finiteNumber(item.outflowShares, fallback.outflowShares),
+    penetratedShares: nullableNumber(item.penetratedShares) ?? fallback.penetratedShares,
+    etfCount: Math.max(0, Math.trunc(finiteNumber(item.etfCount, fallback.etfCount))),
+    historyCoverage: history.length || fallback.historyCoverage,
+    history,
+    rolling20: rolling20FromHistory(history) ?? fallback.rolling20,
+    contributors: normalizeContributors(item.contributors),
+    closePriceYuan: nullableNumber(item.closePriceYuan),
+    floatShares: nullableNumber(item.floatShares),
+    floatMarketCapYuan: nullableNumber(item.floatMarketCapYuan),
+    marginBalanceYuan: nullableNumber(item.marginBalanceYuan),
+    shortBalanceYuan: nullableNumber(item.shortBalanceYuan),
+    priceAsOf: typeof item.priceAsOf === "string" ? item.priceAsOf : fallback.priceAsOf,
+    marginAsOf: typeof item.marginAsOf === "string" ? item.marginAsOf : fallback.marginAsOf,
+  };
 }
 
 function rowSortValue(row: StockPressureRow, sort: Sort) {
@@ -68,6 +151,9 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
   const [filter, setFilter] = useState<Filter>("all");
   const [sort, setSort] = useState<Sort>("net");
   const [query, setQuery] = useState("");
+  const [selectedDetail, setSelectedDetail] = useState<StockPressureRow | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [selectedIdentity, setSelectedIdentity] = useState<string | null>(() => {
     if (typeof window === "undefined" || !data?.stocks) return null;
     const params = new URLSearchParams(window.location.search);
@@ -91,6 +177,64 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
   const visibleRows = filteredRows.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const selected = rows.find((row) => row.identity === selectedIdentity) ?? visibleRows[0] ?? rows[0] ?? null;
 
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    void (async () => {
+      // Defer state transitions until the effect has yielded.  This keeps the
+      // selection change cheap and avoids a synchronous cascading render.
+      await Promise.resolve();
+      if (!active) return;
+      if (!data || !selected) {
+        setSelectedDetail(null);
+        setDetailLoading(false);
+        return;
+      }
+      // Releases created before the compact index already contain the details;
+      // keep them usable while the new shard-backed releases roll out.
+      if (selected.history && selected.history.length > 0 && selected.contributors) {
+        setSelectedDetail(selected);
+        setDetailLoading(false);
+        setDetailError(null);
+        return;
+      }
+      if (!selected.shard) {
+        setSelectedDetail(null);
+        setDetailLoading(false);
+        setDetailError("当前发布版本缺少个股详情分片");
+        return;
+      }
+      setSelectedDetail(null);
+      setDetailLoading(true);
+      setDetailError(null);
+      try {
+        const response = await fetch(`/api/v2/stocks/${encodeURIComponent(selected.shard)}?date=${encodeURIComponent(data.asOf)}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`stock_shard_${response.status}`);
+        const payload = await response.json() as { items?: unknown };
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const item = items.find((value) => {
+          if (!value || typeof value !== "object") return false;
+          const candidate = value as Record<string, unknown>;
+          return `${candidate.listingMarket ?? ""}:${candidate.stockCode ?? ""}` === selected.identity;
+        });
+        if (!item || typeof item !== "object") throw new Error("stock_detail_not_found");
+        if (active) setSelectedDetail(normalizeStockDetail(item as Record<string, unknown>, selected));
+      } catch (cause: unknown) {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        if (active) setDetailError(cause instanceof Error ? cause.message : "个股详情读取失败");
+      } finally {
+        if (active && !controller.signal.aborted) setDetailLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [data, selected]);
+
   const selectRow = (row: StockPressureRow) => {
     setSelectedIdentity(row.identity);
     if (typeof window === "undefined") return;
@@ -104,7 +248,7 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
   };
 
   const chartOption = (() => {
-    const history = selected?.history ?? [];
+    const history = selectedDetail?.history ?? [];
     return {
       animation: false,
       grid: { left: 46, right: 18, top: 24, bottom: 28 },
@@ -173,11 +317,13 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
         <aside className="terminal-panel pressure-detail-panel">
           {selected ? <>
             <div className="pressure-detail-heading"><div><span className="eyebrow">选中个股</span><h3>{selected.stockName} <em>{selected.stockCode}</em></h3><p>{selected.listingMarketName} · 关联 {selected.etfCount} 只 ETF</p></div><button className="link-button" onClick={() => onOpenStock(selected)} type="button">打开个股页<ArrowUpRight size={16} /></button></div>
-            <div className="pressure-detail-kpis"><div><span>当日净变化</span><strong className={tone(selected.netShares)}>{signedShares(selected.netShares)}</strong></div><div><span>20日累计</span><strong className={tone(selected.rolling20?.netShares)}>{signedShares(selected.rolling20?.netShares)}</strong></div></div>
-            <div className="pressure-chart-title"><strong>ETF 穿透历史</strong><span>{selected.historyCoverage}/21 个真实节点</span></div>
-            {selected.history.length >= 2 ? <ReactECharts className="pressure-chart" option={chartOption} notMerge lazyUpdate /> : <div className="pressure-chart-empty"><Database size={24} /><strong>历史节点不足</strong><span>至少需要两个发布日；当前只展示已确认数据。</span></div>}
-            <div className="pressure-factor-list"><div><span>穿透持仓等价</span><strong>{signedShares(selected.penetratedShares)}</strong></div><div><span>ETF 净增贡献</span><strong className="text-in">{signedShares(selected.inflowShares)}</strong></div><div><span>ETF 净减抵消</span><strong className="text-out">−{signedShares(selected.outflowShares).replace("−", "")}</strong></div><div><span>当前收盘价</span><strong>{selected.closePriceYuan === null ? "—" : "¥" + numberValue(selected.closePriceYuan, 4)}</strong></div><div><span>融资 / 融券余额</span><strong>{selected.marginBalanceYuan === null && selected.shortBalanceYuan === null ? "—" : numberValue(selected.marginBalanceYuan, 2) + " / " + numberValue(selected.shortBalanceYuan, 2)}</strong></div></div>
-            <div className="pressure-contributors"><header><strong>主要 ETF 贡献</strong><span>{selected.contributors?.length ?? 0} 条</span></header>{selected.contributors?.length ? selected.contributors.map((item) => <div key={item.etfMarket + ":" + item.etfCode}><span><b>{item.etfName}</b><small>{item.etfCode}</small></span><strong className={tone(item.stockFlowShares)}>{signedShares(item.stockFlowShares)}</strong></div>) : <p>当前发布版本没有附带贡献明细。</p>}</div>
+            {detailLoading && <div className="pressure-detail-loading"><Database size={20} /><span>读取个股历史与 ETF 贡献明细…</span></div>}
+            {detailError && <div className="pressure-detail-error"><Info size={17} /><span>{detailError}</span></div>}
+            <div className="pressure-detail-kpis"><div><span>当日净变化</span><strong className={tone(selected.netShares)}>{signedShares(selected.netShares)}</strong></div><div><span>20日累计</span><strong className={tone(selectedDetail?.rolling20?.netShares ?? selected.rolling20?.netShares)}>{signedShares(selectedDetail?.rolling20?.netShares ?? selected.rolling20?.netShares)}</strong></div></div>
+            <div className="pressure-chart-title"><strong>ETF 穿透历史</strong><span>{selectedDetail?.historyCoverage ?? selected.historyCoverage}/21 个真实节点</span></div>
+            {selectedDetail && selectedDetail.history && selectedDetail.history.length >= 2 ? <ReactECharts className="pressure-chart" option={chartOption} notMerge lazyUpdate /> : <div className="pressure-chart-empty"><Database size={24} /><strong>{detailLoading ? "正在读取历史节点" : "历史节点不足或暂不可用"}</strong><span>{detailLoading ? "详情来自同一发布版本的个股分片。" : "至少需要两个发布日；当前只展示已确认数据。"}</span></div>}
+            <div className="pressure-factor-list"><div><span>穿透持仓等价</span><strong>{signedShares(selectedDetail?.penetratedShares ?? selected.penetratedShares)}</strong></div><div><span>ETF 净增贡献</span><strong className="text-in">{signedShares(selectedDetail?.inflowShares ?? selected.inflowShares)}</strong></div><div><span>ETF 净减抵消</span><strong className="text-out">−{signedShares(selectedDetail?.outflowShares ?? selected.outflowShares).replace("−", "")}</strong></div><div><span>当前收盘价</span><strong>{(selectedDetail?.closePriceYuan ?? selected.closePriceYuan) == null ? "—" : "¥" + numberValue(selectedDetail?.closePriceYuan ?? selected.closePriceYuan, 4)}</strong></div><div><span>融资 / 融券余额</span><strong>{(selectedDetail?.marginBalanceYuan ?? selected.marginBalanceYuan) == null && (selectedDetail?.shortBalanceYuan ?? selected.shortBalanceYuan) == null ? "—" : numberValue(selectedDetail?.marginBalanceYuan ?? selected.marginBalanceYuan, 2) + " / " + numberValue(selectedDetail?.shortBalanceYuan ?? selected.shortBalanceYuan, 2)}</strong></div></div>
+            <div className="pressure-contributors"><header><strong>主要 ETF 贡献</strong><span>{selectedDetail?.contributors?.length ?? 0} 条</span></header>{selectedDetail?.contributors?.length ? selectedDetail.contributors.map((item) => <div key={item.etfMarket + ":" + item.etfCode}><span><b>{item.etfName}</b><small>{item.etfCode}</small></span><strong className={tone(item.stockFlowShares)}>{signedShares(item.stockFlowShares)}</strong></div>) : <p>{detailLoading ? "正在读取同一发布版本的贡献明细。" : "当前发布版本没有附带贡献明细。"}</p>}</div>
             <p className="pressure-disclaimer"><Info size={16} />ETF 申赎篮子穿透是估算等价。现金替代、PCF 日期错位或未披露行情/两融数据不会被补成 0。</p>
           </> : <div className="pressure-chart-empty"><Database size={28} /><strong>当前发布版本没有可用个股</strong><span>等待 ETF 份额与 PCF 同日/明确次日对齐。</span></div>}
         </aside>
