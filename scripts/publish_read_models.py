@@ -76,6 +76,7 @@ def main() -> None:
     parser.add_argument("--read-model-dir", type=Path, default=Path("read-models"))
     parser.add_argument("--url", default="https://flow.xiaoker.com/api/v1/admin/read-model-import")
     parser.add_argument("--capabilities-url", default="https://flow.xiaoker.com/api/v1/admin/capabilities")
+    parser.add_argument("--result-output", type=Path)
     args = parser.parse_args()
 
     manifest = json.loads((args.read_model_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -91,6 +92,7 @@ def main() -> None:
     names = list(manifest["artifacts"])
     if not names:
         raise ValueError("read-model manifest has no artifacts")
+    final_result: dict[str, Any] | None = None
     for index, name in enumerate(names):
         declared = manifest["artifacts"][name]
         content = (args.read_model_dir / f"{name}.json").read_bytes()
@@ -129,12 +131,19 @@ def main() -> None:
             )
         result = post(args.url, body, headers)
         print(json.dumps({"name": name, **result}, ensure_ascii=False))
+        if index == len(names) - 1:
+            final_result = result
         if index == len(names) - 1 and result.get("status") not in {
             "activated",
             "staged_older_than_active",
             "staged_stale_revision",
         }:
             raise RuntimeError(f"read model release was not activated: {result}")
+    if args.result_output and final_result is not None:
+        args.result_output.write_text(
+            json.dumps(final_result, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

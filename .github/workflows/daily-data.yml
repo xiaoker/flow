@@ -287,7 +287,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
-            python scripts/publish_read_models.py --read-model-dir read-models
+            python scripts/publish_read_models.py \
+              --read-model-dir read-models \
+              --result-output read-model-publish.json
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
           fi
@@ -298,14 +300,15 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if [[ -s "read-models/manifest.json" ]]; then
+          if [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
+            jq -e '.status == "activated"' read-model-publish.json >/dev/null; then
             RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
             AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
             python scripts/verify_published_release.py \
               --release-id "$RELEASE_ID" \
               --as-of "$AS_OF" > release-canary.json
           else
-            echo "Pending snapshot has no immutable release to verify."
+            echo "Read-model release was staged or snapshot is pending; active release was not changed, so canary is not applicable."
           fi
 
       - name: Fail loudly on unresolved source errors
@@ -352,6 +355,7 @@ jobs:
             stock-flow-catalog.json
             stock-pressure-catalog.json
             capabilities.json
+            read-model-publish.json
             release-canary.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
