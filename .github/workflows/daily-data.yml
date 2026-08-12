@@ -201,12 +201,41 @@ jobs:
           fi
 
       - name: Build immutable read models offline
+        env:
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            # Carry forward only the previous release's eight stock shards.
+            # This keeps the 20-day pressure history in the offline build and
+            # prevents the Worker from reading or aggregating full-market data.
+            if [[ -s "stock-flow-catalog.json" ]]; then
+              read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
+              AS_OF="$(jq -r '.asOf' stock-flow-catalog.json)"
+              PREVIOUS_DATE=""
+              for candidate in "${DATES[@]}"; do
+                if [[ "$candidate" < "$AS_OF" ]]; then PREVIOUS_DATE="$candidate"; fi
+              done
+              if [[ -n "$PREVIOUS_DATE" ]]; then
+                python scripts/build_stock_pressure_state.py \
+                  --catalog stock-flow-catalog.json \
+                  --output stock-pressure-catalog.json \
+                  --previous-date "$PREVIOUS_DATE"
+              else
+                cp stock-flow-catalog.json stock-pressure-catalog.json
+              fi
+            else
+              echo "stock-flow-catalog.json is unavailable; cannot publish a pressure-consistent release." >&2
+              exit 1
+            fi
+            if [[ ! -s "stock-pressure-catalog.json" ]]; then
+              echo "stock-pressure-catalog.json was not produced." >&2
+              exit 1
+            fi
             python scripts/build_read_models.py \
               --snapshot dashboard-snapshot.json \
               --output-dir read-models \
-              --stock-catalog stock-flow-catalog.json \
+              --stock-catalog stock-pressure-catalog.json \
               --require-materialized
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."

@@ -183,7 +183,7 @@ def build_ingest_bundle(
         read_artifacts: dict[str, Any] = {}
         for name, metadata in (read_manifest.get("artifacts") or {}).items():
             if not re.fullmatch(
-                r"(bootstrap|overview|radar|rotation|national|connect|margin|stock_search|stock_[0-7])",
+                r"(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])",
                 str(name),
             ):
                 raise ValueError(f"Invalid read-model name: {name!r}")

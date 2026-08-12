@@ -124,6 +124,20 @@ def test_cash_substitution_is_visible_as_an_estimate_caveat() -> None:
     assert result["stocks"][0]["contributors"][0]["estimated"] is True
 
 
+def test_unconfirmed_pcf_security_is_not_counted_as_a_stock() -> None:
+    pcf = pd.concat(
+        [
+            _pcf(),
+            _pcf().assign(stock_code="CASH", stock_name="现金替代", quantity=1),
+        ],
+        ignore_index=True,
+    )
+    result = build_stock_flow(_shares(), pcf, as_of="2026-07-02", previous_date="2026-07-01")
+
+    assert result["available"] is True
+    assert [(row["listingMarket"], row["stockCode"]) for row in result["stocks"]] == [("101", "688008")]
+
+
 def test_positive_and_negative_etf_flows_aggregate_on_the_same_stock() -> None:
     shares = pd.DataFrame(
         [
@@ -171,3 +185,25 @@ def test_same_stock_across_etf_markets_uses_one_listing_identity() -> None:
     assert result["coverage"]["stockCount"] == 1
     assert {(row["listingMarket"], row["stockCode"]) for row in result["stocks"]} == {("102", "000883")}
     assert result["stocks"][0]["etfCount"] == 2
+
+
+def test_same_etf_code_on_two_markets_is_counted_twice() -> None:
+    shares = pd.DataFrame(
+        [
+            {"trade_date": "2026-07-01", "market": "SSE", "instrument_code": "588000", "shares": 3_000_000},
+            {"trade_date": "2026-07-02", "market": "SSE", "instrument_code": "588000", "shares": 6_000_000},
+            {"trade_date": "2026-07-01", "market": "SZSE", "instrument_code": "588000", "shares": 3_000_000},
+            {"trade_date": "2026-07-02", "market": "SZSE", "instrument_code": "588000", "shares": 6_000_000},
+        ]
+    )
+    pcf = pd.DataFrame(
+        [
+            {**_pcf().iloc[0].to_dict(), "market": "SSE", "etf_code": "588000", "listing_market": "101"},
+            {**_pcf().iloc[0].to_dict(), "market": "SZSE", "etf_code": "588000", "listing_market": "101"},
+        ]
+    )
+
+    result = build_stock_flow(shares, pcf, as_of="2026-07-02", previous_date="2026-07-01")
+
+    assert result["stocks"][0]["etfCount"] == 2
+    assert {(row["market"], row["code"]) for row in result["etfs"]} == {("SSE", "588000"), ("SZSE", "588000")}

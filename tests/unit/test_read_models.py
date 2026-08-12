@@ -135,11 +135,15 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
 
 def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
     catalog = _stock_catalog()
-    payloads_a, manifest_a = build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
-    payloads_b, manifest_b = build_read_models(_snapshot(), require_materialized=True, stock_catalog=catalog)
+    snapshot = _snapshot()
+    snapshot["marginSeries"] = [{"date": "08-06", "balance": 22400.0}]
+    payloads_a, manifest_a = build_read_models(snapshot, require_materialized=True, stock_catalog=catalog)
+    payloads_b, manifest_b = build_read_models(snapshot, require_materialized=True, stock_catalog=catalog)
 
     assert manifest_a == manifest_b
     assert "stock_search" in payloads_a
+    assert "pressure" in payloads_a
+    assert payloads_a["pressure"]["data"]["pressure"]["summary"]["marketFinancingBalanceYuan"] == 2_240_000_000_000.0
     assert {f"stock_{index}" for index in range(8)} <= set(payloads_a)
     search_item = payloads_a["stock_search"]["items"][0]
     assert search_item["shard"] == stock_shard_name("101", "600000")
@@ -147,6 +151,7 @@ def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
     assert all(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < 5_000_000 for payload in payloads_a.values())
     assert set(manifest_a["artifacts"]) == {
         "bootstrap", "overview", "radar", "rotation", "national", "connect", "margin",
+        "pressure",
         "stock_search", *{f"stock_{index}" for index in range(8)},
     }
 

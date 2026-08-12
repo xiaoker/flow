@@ -43,6 +43,7 @@ import {
   nationalTeamEtfs,
   NationalTeamView,
 } from "./national-team-view";
+import { EtfPressureView } from "./etf-pressure-view";
 import { SectorRotationView } from "./sector-rotation-view";
 
 type DashboardProps = {
@@ -57,7 +58,7 @@ type DashboardProps = {
   refreshing?: boolean;
   refreshError?: string | null;
 };
-type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin";
+type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "pressure";
 type DirectionFilter = "all" | "inflow" | "outflow";
 type MarketFilter = "all" | "SSE" | "SZSE";
 type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
@@ -136,6 +137,7 @@ const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> 
   { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "rotation", label: "板块轮动", icon: ArrowsClockwise },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
+  { id: "pressure", label: "ETF β压强", icon: ChartLineUp },
   { id: "national", label: "国家队持仓", icon: Buildings },
   { id: "connect", label: "南北互通", icon: ArrowsLeftRight },
   { id: "margin", label: "融资融券", icon: Pulse },
@@ -875,6 +877,7 @@ export function Dashboard({
     overview: "市场数据全景",
     rotation: "板块资金轮动",
     radar: "ETF 份额雷达",
+    pressure: "ETF β压强",
     national: "国家队持仓",
     connect: "互联互通",
     margin: "融资融券",
@@ -1187,6 +1190,10 @@ export function Dashboard({
               </article>
             </section>
           </>
+        )}
+
+        {view === "pressure" && (
+          <EtfPressureView data={snapshot.pressure} onOpenStock={openStockFromFlow} />
         )}
 
         {view === "rotation" && (

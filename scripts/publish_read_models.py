@@ -13,6 +13,9 @@ from typing import Any
 import requests
 
 
+MAX_REQUEST_BYTES = 1_500_000
+
+
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -80,6 +83,22 @@ def main() -> None:
             },
             "finalize": index == len(names) - 1,
         }
+        request_bytes = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        print(
+            json.dumps(
+                {
+                    "name": name,
+                    "rawBytes": len(content),
+                    "gzipBytes": len(wire_content),
+                    "requestBytes": request_bytes,
+                },
+                ensure_ascii=False,
+            )
+        )
+        if request_bytes >= MAX_REQUEST_BYTES:
+            raise RuntimeError(
+                f"read model upload exceeds free Worker request budget: {name} {request_bytes} >= {MAX_REQUEST_BYTES}"
+            )
         result = post(args.url, body, headers)
         print(json.dumps({"name": name, **result}, ensure_ascii=False))
         if index == len(names) - 1 and result.get("status") not in {"activated", "staged_older_than_active"}:
