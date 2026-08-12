@@ -57,5 +57,6 @@ Cloudflare Cron 仍是主调度器，按晚间、早间和 reconciliation 三个
 ```bash
 PYTHONPATH=. .venv/bin/pytest -q
 cd web && npm test && npm run lint
-python scripts/build_read_models.py --snapshot dashboard-snapshot.json --output-dir read-models --require-materialized
+python scripts/build_stock_pressure_state.py --catalog stock-flow-catalog.json --output stock-pressure-catalog.json --before-date "$(jq -r '.asOf' stock-flow-catalog.json)"
+python scripts/build_read_models.py --snapshot dashboard-snapshot.json --output-dir read-models --stock-catalog stock-pressure-catalog.json --require-materialized
 ```
