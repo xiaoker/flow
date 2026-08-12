@@ -53,9 +53,22 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert workflow.index("Build dashboard snapshot") < workflow.index(
         "Build verified archive and publish bundle"
     )
+    assert workflow.index("Archive raw evidence and publish normalized data") < workflow.index(
+        "Verify deployed read-model capabilities before building release"
+    )
+    assert workflow.index("Verify deployed read-model capabilities before building release") < workflow.index(
+        "Build immutable read models offline"
+    )
+    assert workflow.index("Publish immutable read models") < workflow.index(
+        "Verify published read-model release"
+    )
+    assert "build_stock_pressure_state.py" in workflow
+    assert "--before-date \"$AS_OF\"" in workflow
     assert "Build immutable read models offline" in workflow
     assert "--require-materialized" in workflow
     assert "--read-model-dir read-models" in workflow
+    assert "check_release_capabilities.py" in workflow
+    assert "verify_published_release.py" in workflow
     assert '"Snapshot is pending source confirmation' in workflow
     assert "Fail loudly on unresolved source errors" in workflow
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow

@@ -32,6 +32,25 @@ export const COMPLETE_READ_MODEL_NAMES = [
   "stock_6",
   "stock_7",
 ] as const;
+export const READ_MODEL_ORDER = [
+  "bootstrap",
+  "overview",
+  "radar",
+  "rotation",
+  "national",
+  "connect",
+  "margin",
+  "pressure",
+  "stock_search",
+  "stock_0",
+  "stock_1",
+  "stock_2",
+  "stock_3",
+  "stock_4",
+  "stock_5",
+  "stock_6",
+  "stock_7",
+] as const;
 
 export type ReadModelArtifactDescriptor = {
   key: string;
@@ -124,13 +143,15 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
     if (!isSourceDates(value.sourceDates)) return false;
     const pressureSchemaVersion = value.pressureSchemaVersion;
     const stockShardCount = value.stockShardCount;
-    if (!Number.isSafeInteger(pressureSchemaVersion) || (pressureSchemaVersion as number) < 1) return false;
-    if (!Number.isSafeInteger(stockShardCount) || (stockShardCount as number) < 1 || (stockShardCount as number) > 8) return false;
+    if (pressureSchemaVersion !== 2) return false;
+    if (stockShardCount !== 8) return false;
     if (
       !Array.isArray(value.requiredArtifacts) ||
-      value.requiredArtifacts.length !== names.length ||
+      value.requiredArtifacts.length !== READ_MODEL_ORDER.length ||
       new Set(value.requiredArtifacts).size !== names.length ||
-      value.requiredArtifacts.some((name) => typeof name !== "string" || !names.includes(name))
+      value.requiredArtifacts.some((name) => typeof name !== "string" || !names.includes(name)) ||
+      JSON.stringify(value.requiredArtifacts) !==
+        JSON.stringify(READ_MODEL_ORDER)
     ) {
       return false;
     }

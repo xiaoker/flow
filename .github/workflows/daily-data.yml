@@ -200,47 +200,6 @@ jobs:
             echo "Pending snapshot has no ETF state materialization; active dashboard remains unchanged."
           fi
 
-      - name: Build immutable read models offline
-        env:
-          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
-          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
-        run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
-            # Carry forward only the previous release's eight stock shards.
-            # This keeps the 20-day pressure history in the offline build and
-            # prevents the Worker from reading or aggregating full-market data.
-            if [[ -s "stock-flow-catalog.json" ]]; then
-              read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
-              AS_OF="$(jq -r '.asOf' stock-flow-catalog.json)"
-              PREVIOUS_DATE=""
-              for candidate in "${DATES[@]}"; do
-                if [[ "$candidate" < "$AS_OF" ]]; then PREVIOUS_DATE="$candidate"; fi
-              done
-              if [[ -n "$PREVIOUS_DATE" ]]; then
-                python scripts/build_stock_pressure_state.py \
-                  --catalog stock-flow-catalog.json \
-                  --output stock-pressure-catalog.json \
-                  --previous-date "$PREVIOUS_DATE"
-              else
-                cp stock-flow-catalog.json stock-pressure-catalog.json
-              fi
-            else
-              echo "stock-flow-catalog.json is unavailable; cannot publish a pressure-consistent release." >&2
-              exit 1
-            fi
-            if [[ ! -s "stock-pressure-catalog.json" ]]; then
-              echo "stock-pressure-catalog.json was not produced." >&2
-              exit 1
-            fi
-            python scripts/build_read_models.py \
-              --snapshot dashboard-snapshot.json \
-              --output-dir read-models \
-              --stock-catalog stock-pressure-catalog.json \
-              --require-materialized
-          else
-            echo "Pending snapshot has no active read models; preserving raw evidence only."
-          fi
-
       - name: Build verified archive and publish bundle
         run: |
           # The dashboard snapshot is published separately from read models.
@@ -275,6 +234,52 @@ jobs:
           ' publish-response.json >/dev/null
           jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
 
+      - name: Verify deployed read-model capabilities before building release
+        if: ${{ success() }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            python scripts/check_release_capabilities.py --output capabilities.json
+          else
+            echo "Pending snapshot has no immutable release; skipping read-model capability preflight."
+          fi
+
+      - name: Build immutable read models offline
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            # Carry forward only the previous release's eight stock shards.
+            # This keeps the 20-day pressure history in the offline build and
+            # prevents the Worker from reading or aggregating full-market data.
+            if [[ -s "stock-flow-catalog.json" ]]; then
+              AS_OF="$(jq -r '.asOf' stock-flow-catalog.json)"
+              python scripts/build_stock_pressure_state.py \
+                --catalog stock-flow-catalog.json \
+                --output stock-pressure-catalog.json \
+                --before-date "$AS_OF"
+            else
+              echo "stock-flow-catalog.json is unavailable; cannot publish a pressure-consistent release." >&2
+              exit 1
+            fi
+            if [[ ! -s "stock-pressure-catalog.json" ]]; then
+              echo "stock-pressure-catalog.json was not produced." >&2
+              exit 1
+            fi
+            python scripts/build_read_models.py \
+              --snapshot dashboard-snapshot.json \
+              --output-dir read-models \
+              --stock-catalog stock-pressure-catalog.json \
+              --require-materialized
+          else
+            echo "Pending snapshot has no active read models; preserving raw evidence only."
+          fi
+
       - name: Publish immutable read models
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
@@ -285,6 +290,22 @@ jobs:
             python scripts/publish_read_models.py --read-model-dir read-models
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
+          fi
+
+      - name: Verify published read-model release
+        if: ${{ success() }}
+        env:
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -s "read-models/manifest.json" ]]; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
+            python scripts/verify_published_release.py \
+              --release-id "$RELEASE_ID" \
+              --as-of "$AS_OF" > release-canary.json
+          else
+            echo "Pending snapshot has no immutable release to verify."
           fi
 
       - name: Fail loudly on unresolved source errors
@@ -329,6 +350,9 @@ jobs:
             dashboard-snapshot-base.json
             etf-flow-state.json
             stock-flow-catalog.json
+            stock-pressure-catalog.json
+            capabilities.json
+            release-canary.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json

@@ -45,10 +45,37 @@ def post(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, A
     raise RuntimeError(f"read model import failed after retries: {last_error}")
 
 
+def check_capabilities(url: str, headers: dict[str, str]) -> None:
+    response = requests.get(
+        url,
+        headers={key: value for key, value in headers.items() if key != "Content-Type"},
+        timeout=(10, 20),
+        allow_redirects=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("capabilities response is not an object")
+    required = {
+        "readModelManifestSchemas": 3,
+        "schemaVersions": 3,
+        "pressureSchemaVersions": 2,
+        "stockShardCounts": 8,
+    }
+    for field, version in required.items():
+        values = payload.get(field)
+        if not isinstance(values, list) or version not in values:
+            raise RuntimeError(f"deployed capability missing {field}={version}")
+    features = set(payload.get("features") or [])
+    if not {"requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease"}.issubset(features):
+        raise RuntimeError("deployed capability lacks v3 release features")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish read models one artifact per Worker request")
     parser.add_argument("--read-model-dir", type=Path, default=Path("read-models"))
     parser.add_argument("--url", default="https://flow.xiaoker.com/api/v1/admin/read-model-import")
+    parser.add_argument("--capabilities-url", default="https://flow.xiaoker.com/api/v1/admin/capabilities")
     args = parser.parse_args()
 
     manifest = json.loads((args.read_model_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -60,6 +87,7 @@ def main() -> None:
         "CF-Access-Client-Secret": required_env("FLOW_CF_ACCESS_CLIENT_SECRET"),
         "Content-Type": "application/json",
     }
+    check_capabilities(args.capabilities_url, headers)
     names = list(manifest["artifacts"])
     if not names:
         raise ValueError("read-model manifest has no artifacts")

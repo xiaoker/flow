@@ -12,17 +12,19 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .stock_pressure import build_stock_pressure, stock_shard_name
+from .stock_pressure import PRESSURE_SCHEMA_VERSION, build_stock_pressure, stock_shard_name
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 VIEW_NAMES = ("bootstrap", "overview", "radar", "rotation", "national", "connect", "margin", "pressure")
 STOCK_SEARCH_NAME = "stock_search"
 STOCK_SHARD_COUNT = 8
 STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
+REQUIRED_ARTIFACT_NAMES = (*VIEW_NAMES, STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES)
 MAX_READ_MODEL_BYTES = 5_000_000
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -45,6 +47,100 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _observed_at_utc(snapshot: dict[str, Any]) -> str:
+    """Normalize the collection timestamp to an unambiguous UTC instant.
+
+    The dashboard snapshot is produced in Asia/Shanghai, while the release
+    ordering contract deliberately compares timestamps lexically.  Emitting
+    one canonical ``Z`` representation prevents ``+08:00`` and ``Z`` values
+    for the same instant from sorting differently.
+    """
+
+    raw = snapshot.get("observedAt")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ReadModelError("observed_at_missing")
+    value = raw.strip()
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ReadModelError("observed_at_invalid") from exc
+    if parsed.tzinfo is None:
+        raise ReadModelError("observed_at_timezone_missing")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _source_date(value: Any, *, year: int) -> str | None:
+    """Turn a full or MM-DD source date into a validated ISO date."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if ISO_DATE.fullmatch(text):
+        return text
+    if re.fullmatch(r"\d{2}-\d{2}", text):
+        candidate = f"{year:04d}-{text}"
+        try:
+            datetime.strptime(candidate, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return candidate
+    return None
+
+
+def _source_dates(snapshot: dict[str, Any]) -> dict[str, str | None]:
+    """Expose dataset source dates without pretending they share one clock.
+
+    ``asOf`` is the release's decision date.  The entries below retain the
+    source-date semantics used by the collectors (ETF share date, margin
+    trade date, connect trade date, and PCF date) so a consumer can explain
+    why an otherwise complete release may contain a next-day publication.
+    """
+
+    as_of = str(snapshot["asOf"])
+    year = int(as_of[:4])
+    dates: dict[str, str | None] = {
+        "snapshot": as_of,
+        "sseEtfAsOf": None,
+        "szseEtfAsOf": None,
+        "marginAsOf": None,
+        "connectAsOf": None,
+    }
+    for key, series_key in (("marginAsOf", "marginSeries"), ("connectAsOf", "connectSeries")):
+        series = snapshot.get(series_key)
+        if isinstance(series, list):
+            candidates = [
+                _source_date(item.get("date"), year=year)
+                for item in series
+                if isinstance(item, dict)
+            ]
+            dates[key] = next((item for item in reversed(candidates) if item), None)
+        else:
+            dates[key] = None
+    stock_flow = snapshot.get("etfStockFlow")
+    basis = stock_flow.get("basis") if isinstance(stock_flow, dict) else None
+    if isinstance(basis, dict):
+        dates["pcfEffectiveAsOf"] = _source_date(basis.get("shareDate"), year=year)
+        dates["pcfAsOf"] = _source_date(basis.get("pcfDate"), year=year)
+    else:
+        dates["pcfEffectiveAsOf"] = as_of
+        dates["pcfAsOf"] = None
+    for row in snapshot.get("dataStatus") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if name == "上交所 ETF":
+            dates["sseEtfAsOf"] = _source_date(row.get("asOf"), year=year)
+        elif name == "深交所 ETF":
+            dates["szseEtfAsOf"] = _source_date(row.get("asOf"), year=year)
+        elif name == "融资融券":
+            dates["marginAsOf"] = _source_date(row.get("asOf"), year=year)
+        elif name == "互联互通":
+            dates["connectAsOf"] = _source_date(row.get("asOf"), year=year)
+    return dates
 
 
 def _is_record(value: Any) -> bool:
@@ -312,26 +408,46 @@ def build_read_models(
         # search/shard sidecars creates a release that can show clickable
         # stocks but cannot resolve them on the detail page.
         raise ReadModelError("stock_catalog_required_for_available_flow")
+    if stock_catalog is None:
+        # A v3 release is the serving contract for the complete application,
+        # not a partial dashboard snapshot.  Publishing a seven-view manifest
+        # would pass local hashing but be rejected by the Worker/history
+        # picker after the raw evidence had already been archived.
+        raise ReadModelError("stock_catalog_required_for_v3")
     payloads = build_view_payloads(snapshot)
-    if stock_catalog is not None:
-        payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
-        # Keep the pressure page as a compact projection.  Full contributor
-        # lists stay in the existing stock shards and are fetched only after a
-        # user selects one stock.
-        pressure = build_stock_pressure(
-            stock_catalog,
-            market_financing_balance_yuan=_market_financing_balance(snapshot),
-            margin_as_of=snapshot["asOf"],
-        )
-        payloads["pressure"] = _with_release_meta(snapshot, {"pressure": pressure})
+    payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
+    # Keep the pressure page as a compact projection. Full contributor lists
+    # stay in the existing stock shards and are fetched only after a user
+    # selects one stock.
+    pressure = build_stock_pressure(
+        stock_catalog,
+        market_financing_balance_yuan=_market_financing_balance(snapshot),
+        margin_as_of=snapshot["asOf"],
+    )
+    payloads["pressure"] = _with_release_meta(snapshot, {"pressure": pressure})
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
-    artifact_names = [name for name in VIEW_NAMES if name in encoded] + [
-        name for name in (STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES) if name in encoded
-    ]
+    artifact_names = list(REQUIRED_ARTIFACT_NAMES)
+    if set(encoded) != set(artifact_names):
+        raise ReadModelError("read_model_artifact_set_incomplete")
     for name, content in encoded.items():
         if len(content) > MAX_READ_MODEL_BYTES:
             raise ReadModelError(f"read_model_too_large:{name}")
-    digest_material = b"".join(encoded[name] for name in artifact_names)
+    observed_at = _observed_at_utc(snapshot)
+    source_dates = _source_dates(snapshot)
+    release_contract = {
+        "asOf": snapshot["asOf"],
+        "observedAt": observed_at,
+        "sourceDates": source_dates,
+        "pressureSchemaVersion": PRESSURE_SCHEMA_VERSION,
+        "stockShardCount": STOCK_SHARD_COUNT,
+        "requiredArtifacts": artifact_names,
+    }
+    # Include release semantics in the identity, not only the payload bytes.
+    # A corrected source timestamp or source-date mapping must therefore get a
+    # new immutable release even when the visible JSON happens to be equal.
+    digest_material = canonical_json_bytes(release_contract) + b"\n" + b"".join(
+        encoded[name] for name in artifact_names
+    )
     release_hash = sha256_bytes(digest_material)
     release_id = f"release:{snapshot['asOf']}:{release_hash[:16]}"
     prefix = object_prefix or f"market-data/releases/{snapshot['asOf']}/{release_id}"
@@ -348,7 +464,14 @@ def build_read_models(
         "schemaVersion": SCHEMA_VERSION,
         "releaseId": release_id,
         "asOf": snapshot["asOf"],
-        "observedAt": snapshot.get("observedAt"),
+        "observedAt": observed_at,
+        "sourceDates": source_dates,
+        # These are fixed contract declarations.  A release without the
+        # stock sidecars is still useful to unit-test the view splitter, but
+        # the importer/history picker will reject it as incomplete.
+        "pressureSchemaVersion": PRESSURE_SCHEMA_VERSION,
+        "stockShardCount": STOCK_SHARD_COUNT,
+        "requiredArtifacts": artifact_names,
         "classificationVersion": (snapshot.get("etfTerminal") or {}).get("classificationVersion"),
         "calculationVersion": (snapshot.get("etfTerminal") or {}).get("calculation"),
         "artifacts": artifacts,
