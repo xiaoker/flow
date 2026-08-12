@@ -55,8 +55,11 @@ type DashboardProps = {
   onRefresh?: () => void | Promise<void>;
   onAutoRefresh?: () => void | Promise<void>;
   onViewChange?: (view: DeskView) => void | Promise<void>;
+  onLoadRadarFlow?: () => Promise<EtfStockFlowData | null>;
   refreshing?: boolean;
   refreshError?: string | null;
+  viewLoadError?: string | null;
+  viewLoading?: boolean;
 };
 type DeskView = "overview" | "rotation" | "radar" | "national" | "connect" | "margin" | "pressure";
 type DirectionFilter = "all" | "inflow" | "outflow";
@@ -65,38 +68,6 @@ type MarginDisplayMetric = "balance" | "financingBuy" | "lendingBalance";
 type EtfDisplayMetric = "shares" | "cash";
 type EtfDetailHistoryPoint = { date: string; shares: number; delta: number | null };
 type EtfHistoryBasis = "official_daily_change_replay" | "official_daily_share_snapshots";
-
-function inferEmbeddedListingMarket(code: string, listingMarket?: string): string {
-  if (listingMarket?.trim()) return listingMarket.trim();
-  if (/^6\d{5}$/.test(code)) return "101";
-  if (/^[03]\d{5}$/.test(code)) return "102";
-  if (/^[48]\d{5}$/.test(code)) return "104";
-  return "UNKNOWN";
-}
-
-function collectEmbeddedStockSearchItems(flow: EtfStockFlowData | undefined): StockSearchItem[] {
-  if (!flow) return [];
-  const items = new Map<string, StockSearchItem>();
-  const add = (stock: { stockCode: string; stockName: string; listingMarket?: string; listingMarketName?: string }) => {
-    const code = String(stock.stockCode ?? "").trim();
-    const name = String(stock.stockName ?? "").trim();
-    if (!code || !name) return;
-    const listingMarket = inferEmbeddedListingMarket(code, stock.listingMarket);
-    const identity = `${listingMarket}:${code}`;
-    if (items.has(identity)) return;
-    items.set(identity, {
-      listingMarket,
-      listingMarketName: stock.listingMarketName ?? (listingMarket === "101" ? "上交所" : listingMarket === "102" ? "深交所" : listingMarket === "104" ? "北交所" : "待核验市场"),
-      code,
-      name,
-      shard: "",
-      available: false,
-    });
-  };
-  flow.stocks.forEach(add);
-  flow.etfs.forEach((etf) => etf.stocks?.forEach(add));
-  return [...items.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
-}
 
 const periods: Array<{ id: FlowPeriod; label: string }> = [
   { id: "1d", label: "最近1日" },
@@ -271,8 +242,11 @@ export function Dashboard({
   onRefresh,
   onAutoRefresh,
   onViewChange,
+  onLoadRadarFlow,
   refreshing = false,
   refreshError = null,
+  viewLoadError = null,
+  viewLoading = false,
 }: DashboardProps) {
   const [view, setView] = useState<DeskView>(initialView);
   const [period, setPeriod] = useState<FlowPeriod>("1d");
@@ -286,35 +260,50 @@ export function Dashboard({
   const [stockSearchItems, setStockSearchItems] = useState<StockSearchItem[]>([]);
   const [stockSearchLoading, setStockSearchLoading] = useState(false);
   const [stockSearchLoadedFor, setStockSearchLoadedFor] = useState<string | null>(null);
-  const [stockSearchFallback, setStockSearchFallback] = useState(false);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
   const [selected, setSelected] = useState<EtfTerminalInstrument | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<EtfDetailHistoryPoint[]>([]);
   const [selectedHistoryBasis, setSelectedHistoryBasis] = useState<EtfHistoryBasis | null>(null);
   const [selectedHistoryLoading, setSelectedHistoryLoading] = useState(false);
+  const [radarFlowLoading, setRadarFlowLoading] = useState(false);
+  const [radarFlowError, setRadarFlowError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [notice, setNotice] = useState("");
   const [draftDate, setDraftDate] = useState(snapshot.asOf);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const lastFocusedElement = useRef<HTMLElement | null>(null);
+  const radarFlowAttemptedFor = useRef<string | null>(null);
   const terminal = useMemo(() => snapshot.etfTerminal ?? fallbackTerminal(snapshot), [snapshot]);
+  const searchableEtfs = useMemo(() => snapshot.etfSearch?.length
+    ? snapshot.etfSearch.map((item) => ({
+        ...item,
+        market: item.market === "SZSE" ? "SZSE" as const : "SSE" as const,
+        category: item.category ?? "未归类",
+        shares: null,
+        periods: {},
+        coverage: 0,
+      }))
+    : terminal.instruments,
+    [snapshot.etfSearch, terminal.instruments]);
   const categories = useMemo(() => Array.from(new Set(terminal.instruments.map((item) => item.category))).sort(), [terminal.instruments]);
   const shareAvailablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
   const cashAvailable = Boolean(
-    terminal.cashFlow?.available ??
+    terminal.cashFlow?.available ||
+      (terminal.cashAvailablePeriods?.length ?? 0) > 0 ||
       terminal.instruments.some((item) => typeof item.estimatedCashPeriods?.["1d"] === "number"),
   );
   const metricLabel = etfDisplayMetric === "cash" ? "金额估算" : "份额变化";
   const metricUnit = etfDisplayMetric === "cash" ? "亿元" : "亿份";
   const metricAvailablePeriods = useMemo(() => {
     if (etfDisplayMetric === "shares") return shareAvailablePeriods;
+    if (terminal.cashAvailablePeriods?.length) return new Set(terminal.cashAvailablePeriods);
     return new Set(
       periods
         .map((item) => item.id)
         .filter((id) => terminal.instruments.some((item) => typeof item.estimatedCashPeriods?.[id] === "number")),
     );
-  }, [etfDisplayMetric, shareAvailablePeriods, terminal.instruments]);
+  }, [etfDisplayMetric, shareAvailablePeriods, terminal.cashAvailablePeriods, terminal.instruments]);
   const nationalAvailablePeriods = useMemo(
     () => getNationalAvailablePeriods(terminal),
     [terminal],
@@ -337,20 +326,6 @@ export function Dashboard({
     const controller = new AbortController();
     setStockSearchLoading(true);
     setStockSearchItems([]);
-    setStockSearchFallback(false);
-    const loadRadarFallback = async (): Promise<EtfStockFlowData | undefined> => {
-      if (snapshot.etfStockFlow) return snapshot.etfStockFlow;
-      const fallbackUrl = requestedDate
-        ? `/api/v2/dashboard?date=${encodeURIComponent(snapshot.asOf)}`
-        : "/api/v2/views/radar";
-      const fallbackResponse = await fetch(fallbackUrl, {
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      if (!fallbackResponse.ok) return undefined;
-      const payload = await fallbackResponse.json() as DashboardSnapshot | { data?: DashboardSnapshot };
-      return "data" in payload ? payload.data?.etfStockFlow : payload.etfStockFlow;
-    };
     fetch(`/api/v2/stock-search?date=${encodeURIComponent(snapshot.asOf)}`, {
       cache: "no-store",
       signal: controller.signal,
@@ -369,11 +344,7 @@ export function Dashboard({
           setStockSearchLoadedFor(snapshot.asOf);
           return;
         }
-        const fallbackItems = collectEmbeddedStockSearchItems(await loadRadarFallback());
-        const identities = new Set(publishedItems.map((item) => `${item.listingMarket}:${item.code}`));
-        const mergedItems = [...publishedItems, ...fallbackItems.filter((item) => !identities.has(`${item.listingMarket}:${item.code}`))];
-        setStockSearchItems(mergedItems);
-        setStockSearchFallback(fallbackItems.length > 0);
+        setStockSearchItems(publishedItems);
         setStockSearchLoadedFor(snapshot.asOf);
       })
       .catch((cause: unknown) => {
@@ -385,7 +356,44 @@ export function Dashboard({
         if (!controller.signal.aborted) setStockSearchLoading(false);
       });
     return () => controller.abort();
-  }, [globalQuery, requestedDate, snapshot.asOf, snapshot.etfStockFlow, stockSearchLoadedFor]);
+  }, [globalQuery, snapshot.asOf, stockSearchLoadedFor]);
+
+  useEffect(() => {
+    if (!selected) return;
+    const refreshed = terminal.instruments.find(
+      (item) => item.code === selected.code && item.market === selected.market,
+    );
+    if (refreshed && refreshed !== selected) setSelected(refreshed);
+  }, [selected, terminal.instruments]);
+
+  useEffect(() => {
+    const attemptKey = selected ? `${snapshot.asOf}:${selected.market ?? "SSE"}:${selected.code}` : null;
+    const selectedIsHydrated = Boolean(selected && terminal.instruments.some(
+      (item) => item.code === selected.code && item.market === selected.market,
+    ));
+    if (!selected) radarFlowAttemptedFor.current = null;
+    if (!selected || !selectedIsHydrated || snapshot.etfStockFlow || !onLoadRadarFlow || view !== "radar" || radarFlowAttemptedFor.current === attemptKey) {
+      setRadarFlowLoading(false);
+      return;
+    }
+    let active = true;
+    radarFlowAttemptedFor.current = attemptKey;
+    setRadarFlowLoading(true);
+    setRadarFlowError(null);
+    void onLoadRadarFlow()
+      .catch((cause: unknown) => {
+        if (active) setRadarFlowError(cause instanceof Error ? cause.message : "ETF 穿透数据加载失败");
+      })
+      .finally(() => {
+        if (active) setRadarFlowLoading(false);
+      });
+    return () => {
+      active = false;
+      if (radarFlowAttemptedFor.current === attemptKey && !snapshot.etfStockFlow) {
+        radarFlowAttemptedFor.current = null;
+      }
+    };
+  }, [onLoadRadarFlow, selected, snapshot.asOf, snapshot.etfStockFlow, terminal.instruments, view]);
 
   const globalSearchResults = useMemo(() => {
     const normalized = globalQuery.trim().toLowerCase();
@@ -397,9 +405,9 @@ export function Dashboard({
       .slice(0, 6);
     return {
       stocks: byMatch(stockSearchItems.filter((item) => item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized))),
-      etfs: byMatch(terminal.instruments.filter((item) => item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized))),
+      etfs: byMatch(searchableEtfs.filter((item) => item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized))),
     };
-  }, [globalQuery, stockSearchItems, terminal.instruments]);
+  }, [globalQuery, searchableEtfs, stockSearchItems]);
 
   useEffect(() => {
     if (etfDisplayMetric === "cash" && !cashAvailable) {
@@ -538,6 +546,15 @@ export function Dashboard({
   const totalGroupFlow = groupRows.reduce((sum, item) => sum + item.value, 0);
   const filteredTotalFlow = filteredInstruments.reduce((sum, item) => sum + (metricValueFor(item, period) ?? 0), 0);
   const reconciliation = useMemo(() => {
+    const precomputed = terminal.reconciliation?.[period]?.[etfDisplayMetric];
+    if (precomputed) {
+      return {
+        ...precomputed,
+        classifiedTotal: precomputed.classified,
+        unclassifiedTotal: precomputed.unclassified,
+        unclassifiedComparable: precomputed.unclassified,
+      };
+    }
     const instrumentTotal = terminal.instruments.reduce((sum, item) => {
       const value = metricValueFor(item, period);
       return typeof value === "number" ? sum + value : sum;
@@ -566,7 +583,7 @@ export function Dashboard({
       unclassifiedTotal,
       unclassifiedComparable: comparable.filter((item) => item.category === "未归类").length,
     };
-  }, [etfDisplayMetric, metricValueFor, period, terminal.groupPeriods, terminal.instruments]);
+  }, [etfDisplayMetric, metricValueFor, period, terminal.groupPeriods, terminal.instruments, terminal.reconciliation]);
   const positiveGroups = groupRows.filter((item) => item.value > 0);
   const crowding = positiveGroups.length
     ? Math.round((positiveGroups.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / positiveGroups.reduce((sum, item) => sum + item.value, 0)) * 100)
@@ -858,9 +875,10 @@ export function Dashboard({
   const latestCashValue = terminal.dailySeries.at(-1)?.cashValue ?? (
     latestCashValues.length
       ? latestCashValues.reduce((sum, value) => sum + value, 0)
-      : null
+      : terminal.reconciliation?.["1d"]?.cash?.instrumentTotal ?? null
   );
-  const latestCashCoverage = terminal.dailySeries.at(-1)?.cashCoverage ?? latestCashValues.length;
+  const latestCashCoverage = terminal.dailySeries.at(-1)?.cashCoverage
+    ?? (latestCashValues.length || terminal.reconciliation?.["1d"]?.cash?.comparable || 0);
   const latestDisplayValue = etfDisplayMetric === "cash"
     ? latestCashValue
     : Number.isFinite(latestShareValue) ? latestShareValue : null;
@@ -889,7 +907,8 @@ export function Dashboard({
     if (nextView === "overview") url.searchParams.delete("view");
     else url.searchParams.set("view", nextView);
     window.history.replaceState({}, "", `${url.pathname}${url.search}`);
-    void onViewChange?.(nextView);
+    const result = onViewChange?.(nextView);
+    if (result instanceof Promise) void result.catch(() => undefined);
   };
   const openStockCode = (code: string, listingMarket?: string) => {
     const url = new URL(window.location.href);
@@ -917,7 +936,10 @@ export function Dashboard({
   const openEtfFromSearch = (item: EtfTerminalInstrument) => {
     setGlobalQuery("");
     setQuery(item.name);
-    setSelected(item);
+    const full = terminal.instruments.find((candidate) =>
+      candidate.code === item.code && candidate.market === item.market,
+    );
+    setSelected(full ?? item);
     if (view !== "radar") navigateView("radar");
   };
   const handleGlobalSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -1050,7 +1072,7 @@ export function Dashboard({
               <div className="global-search-results" role="listbox" aria-label="搜索结果">
                 {globalSearchResults.stocks.length ? <section><header>个股</header>{globalSearchResults.stocks.map((item, index) => <button aria-selected={searchActiveIndex === index} className={searchActiveIndex === index ? "is-active" : ""} key={`${item.listingMarket}:${item.code}`} onClick={() => openStockDetail(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>{item.available ? "个股" : "雷达兼容"}</em></button>)}</section> : null}
                 {globalSearchResults.etfs.length ? <section><header>ETF</header>{globalSearchResults.etfs.map((item, index) => { const optionIndex = globalSearchResults.stocks.length + index; return <button aria-selected={searchActiveIndex === optionIndex} className={searchActiveIndex === optionIndex ? "is-active" : ""} key={`${item.market}:${item.code}`} onClick={() => openEtfFromSearch(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.market === "SZSE" ? "深市" : "沪市"}</small></span><em>ETF</em></button>; })}</section> : null}
-                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取个股索引…" : stockSearchFallback ? "当前雷达快照没有匹配的个股" : "没有找到匹配的 ETF 或个股"}</span>}
+                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取个股索引…" : "没有找到匹配的 ETF 或个股"}</span>}
               </div>
             )}
           </div>
@@ -1064,6 +1086,12 @@ export function Dashboard({
         <div className="refresh-status is-error" role="status" aria-live="polite">
           <ArrowsClockwise size={15} />
           <span>{refreshError}</span>
+        </div>
+      )}
+      {viewLoadError && (
+        <div className="refresh-status is-error" role="status" aria-live="polite">
+          <Database size={15} />
+          <span>当前视图数据暂时不可用，已保留已显示的完整版本（{viewLoadError}）</span>
         </div>
       )}
 
@@ -1147,6 +1175,7 @@ export function Dashboard({
       {notice && <div className="toast" role="status"><Info size={17} />{notice}</div>}
 
       <div className="desk-content">
+        {viewLoading && <div className="view-loading" aria-busy="true" role="status"><ArrowsClockwise className="is-refreshing" size={18} />正在读取当前视图数据…</div>}
         {view === "overview" && (
           <>
             <section className="overview-grid">
@@ -1302,6 +1331,8 @@ export function Dashboard({
             </div>
             <div className="drawer-periods">{selectedAvailablePeriods.map((item) => <div className={item.id === period ? "active" : ""} key={item.id}><span>{item.label}</span><strong className={(item.value ?? 0) > 0 ? "text-in" : (item.value ?? 0) < 0 ? "text-out" : ""}>{formatFlow(item.value)}</strong><small>{metricUnit}</small></div>)}</div>
             {selectedPendingPeriods.length ? <details className="drawer-periods-more"><summary>历史周期积累中 · {selectedPendingPeriods.length} 项</summary><div className="drawer-pending-periods">{selectedPendingPeriods.map((item) => <span key={item.id}>{item.label}<small>待积累</small></span>)}</div></details> : null}
+            {radarFlowLoading && !selectedStockFlow ? <section className="drawer-stock-flow" aria-busy="true"><Database size={18} /><span>正在读取 ETF→个股穿透数据…</span></section> : null}
+            {radarFlowError && !selectedStockFlow ? <section className="drawer-stock-flow drawer-stock-flow-empty" role="alert"><Database size={18} /><span>ETF→个股穿透数据暂时不可用，未影响 ETF 份额数据。</span></section> : null}
             {selectedStockFlow ? <section className="drawer-stock-flow" aria-label="ETF个股穿透估算"><header><div><span className="eyebrow">ETF → 个股</span><strong>申赎篮子等价变化</strong></div><span className={`evidence-badge ${selectedStockFlow.flow.available && selectedStockFlow.flow.basis.pcfAlignment !== "next_day_previous_trade_date" ? "evidence-calculated" : "evidence-inferred"}`}>{selectedStockFlow.flow.available ? (selectedStockFlow.flow.basis.pcfAlignment === "next_day_previous_trade_date" ? "次日 PCF" : "同日 PCF") : "暂不可用"}</span></header>{selectedStockFlow.flow.available ? <><p className="drawer-stock-flow-basis">份额日 {selectedStockFlow.flow.basis.shareDate} · PCF 发布日 {selectedStockFlow.flow.basis.pcfDate ?? "—"} · {selectedStockFlow.flow.basis.pcfAlignment === "next_day_previous_trade_date" ? "按 PRE_TRADING_DAY 对齐" : "同日对齐"} · 仅估算申赎篮子，不等同二级市场现金流。</p>{!selectedStockFlow.covered ? <div className="drawer-stock-flow-empty"><Database size={18} /><span>{selected.market === "SZSE" ? "当前只归档上交所 PCF，深交所 ETF 暂不估算。" : "该 ETF 未进入 PCF 覆盖，暂不估算。"}</span></div> : selectedStockFlow.rows.length ? <div className="drawer-stock-flow-list">{selectedStockFlow.rows.slice(0, 8).map((row) => <button className="drawer-stock-flow-row" key={`${row.market}:${row.stockCode}`} onClick={() => openStockFromFlow(row)} type="button"><span><b>{row.stockName}</b><small>{row.stockCode} · {row.listingMarketName ?? row.market}</small></span><strong className={row.value >= 0 ? "text-in" : "text-out"}>{formatShares(row.value)}</strong><CaretRight size={14} /></button>)}</div> : <div className="drawer-stock-flow-empty"><Database size={18} /><span>该 ETF 当日没有可展示的个股贡献。</span></div>}<small className="drawer-stock-flow-foot">点击个股查看完整贡献拆解 · 覆盖 {selectedStockFlow.flow.coverage.matchedEtfCount} 只 ETF · {selectedStockFlow.flow.coverage.stockCount} 只个股{selectedStockFlow.flow.coverage.limited ? " · 已按上限截取" : ""}</small>{selectedStockFlow.flow.coverage.captureWarnings?.length && selectedStockFlow.flow.basis.pcfAlignment !== "next_day_previous_trade_date" ? <small className="drawer-stock-flow-foot">PCF 覆盖提示：当前结果存在部分采集告警，未将缺失数据用其他日期补齐。</small> : null}</> : <><p className="drawer-stock-flow-basis">{selectedStockFlow.flow.warnings[0] === "pcf_date_mismatch" ? "交易所 PCF 与份额日期不一致，系统不会用其他日期替代。" : "官方 PCF 尚未归档，暂不估算个股穿透。"}</p><small className="drawer-stock-flow-foot">需同时具备官方 ETF 份额快照与 PCF；PCF 可按 PRE_TRADING_DAY 与份额日对齐。</small></>}</section> : null}
             <div className="drawer-note"><Info size={18} /><p><strong>分类与口径</strong>{classificationRuleLabels[selected.classificationRule ?? ""] ?? "未记录规则"} · 置信度 {confidenceLabels[selected.classificationConfidence ?? ""] ?? "未知"}。{etfDisplayMetric === "cash" ? "金额估算按每日官方份额变化乘对应交易日官方单位净值后累加；缺少净值的日期不补造。" : "当前指标是 ETF 份额变化；长周期为每日官方份额变化逐日累计，缺少历史覆盖时保持为空，不补造。"}</p></div>
           </aside>

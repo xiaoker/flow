@@ -5,6 +5,10 @@ import {
   type MarketHistoryRow,
 } from "./market-history";
 import { isPublishableSnapshot } from "./snapshot-policy.mjs";
+import {
+  hasCompleteReadModelManifest,
+  isReadModelManifest,
+} from "./read-model-contract";
 
 type RuntimeEnv = {
   DB?: D1Database;
@@ -196,6 +200,71 @@ async function readHistoricalSnapshot(
     return null;
   }
   try {
+    // Complete read-model releases are the authoritative historical source.
+    // Prefer their immutable bootstrap artifact so a date that appears in the
+    // release picker cannot silently fall back to an unrelated latest row in
+    // the bounded legacy snapshot table.
+    let release: { release_id: string; as_of: string; manifest_json: string } | null = null;
+    try {
+      release = await runtime.DB
+        .prepare(
+          `SELECT release_id, as_of, manifest_json
+           FROM release_manifest
+           WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+           ORDER BY COALESCE(observed_at, json_extract(manifest_json, '$.observedAt'), '') DESC,
+                    created_at DESC
+           LIMIT 1`,
+        )
+        .bind(requestedDate)
+        .first<{ release_id: string; as_of: string; manifest_json: string }>();
+    } catch {
+      // The release manifest migration is optional during the rolling deploy.
+      try {
+        release = await runtime.DB
+          .prepare(
+            `SELECT release_id, as_of, manifest_json
+             FROM release_manifest
+             WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+             ORDER BY created_at DESC
+             LIMIT 1`,
+          )
+          .bind(requestedDate)
+          .first<{ release_id: string; as_of: string; manifest_json: string }>();
+      } catch {
+        release = null;
+      }
+    }
+    if (release) {
+      const manifest: unknown = JSON.parse(release.manifest_json);
+      if (isReadModelManifest(manifest) && hasCompleteReadModelManifest(manifest)) {
+        const descriptor = manifest.artifacts.bootstrap;
+        const prefix = `market-data/releases/${release.as_of}/${release.release_id}/`;
+        if (descriptor.key.startsWith(prefix)) {
+          const object = await runtime.RAW_BUCKET.get(descriptor.key);
+          if (
+            object &&
+            object.customMetadata?.asOf === release.as_of &&
+            object.customMetadata?.releaseId === release.release_id
+          ) {
+            const parsed: unknown = JSON.parse(await object.text());
+            if (isDashboardSnapshot(parsed) && isPublishableSnapshot(parsed)) {
+              return {
+                snapshot: enrichSnapshotWithMarketHistory(
+                  parsed,
+                  await loadMarketHistoryRows(runtime.DB, parsed.asOf),
+                ),
+                exact: true,
+              };
+            }
+          }
+        }
+      }
+      // An explicit release row is authoritative. Do not silently replace a
+      // broken or incomplete immutable release with a legacy snapshot from a
+      // different publication path.
+      return null;
+    }
+
     let row = await runtime.DB
       .prepare(
         `SELECT as_of, r2_object_key
@@ -263,6 +332,35 @@ export async function getAvailableHistoryDates(): Promise<string[]> {
 }
 
 async function readAvailableHistoryDates(db: D1Database): Promise<string[]> {
+  // A date is selectable only when the immutable release contains every
+  // serving artifact.  The old historical_snapshot table can contain a raw
+  // snapshot without the radar/pressure/stock views, which used to create a
+  // date-picker entry that rendered an empty page.
+  try {
+    const result = await db
+      .prepare(
+        `SELECT as_of, manifest_json
+         FROM release_manifest
+         WHERE status IN ('ACTIVE', 'SUPERSEDED')
+         ORDER BY as_of ASC, created_at ASC`,
+      )
+      .all<{ as_of: string; manifest_json: string }>();
+    const dates = new Set<string>();
+    for (const row of result.results ?? []) {
+      try {
+        const manifest: unknown = JSON.parse(row.manifest_json);
+        if (isReadModelManifest(manifest) && hasCompleteReadModelManifest(manifest)) {
+          dates.add(row.as_of);
+        }
+      } catch {
+        // A malformed staged/superseded manifest must never make a date
+        // selectable; the next valid release for that date still can.
+      }
+    }
+    return [...dates].sort();
+  } catch {
+    // Pre-release-manifest deployments retain the bounded legacy table.
+  }
   try {
     const result = await db
       .prepare(
@@ -283,7 +381,6 @@ export async function getDashboardViewData(
 ): Promise<DashboardViewData> {
   const latest = await getDashboardSnapshot();
   const availableDates = await getAvailableHistoryDates();
-  if (!availableDates.includes(latest.asOf)) availableDates.push(latest.asOf);
   availableDates.sort();
   const requested = requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
     ? requestedDate

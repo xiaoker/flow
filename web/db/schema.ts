@@ -69,6 +69,9 @@ export const releaseManifests = sqliteTable("release_manifest", {
   schemaVersion: integer("schema_version").notNull(),
   manifestSha256: text("manifest_sha256").notNull(),
   manifestJson: text("manifest_json").notNull(),
+  // Nullable during the rolling migration: v2 manifests did not carry an
+  // observation timestamp, while v3 uses it to order same-day corrections.
+  observedAt: text("observed_at"),
   status: text("status").notNull().default("STAGED"),
   createdAt: text("created_at").notNull(),
 }, (table) => [
@@ -80,6 +83,7 @@ export const activeReleases = sqliteTable("active_release", {
   releaseId: text("release_id").notNull(),
   asOf: text("as_of").notNull(),
   manifestSha256: text("manifest_sha256").notNull(),
+  observedAt: text("observed_at"),
   activatedAt: text("activated_at").notNull(),
 });
 

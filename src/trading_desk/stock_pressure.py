@@ -326,6 +326,8 @@ def build_stock_pressure(
             "marginCount": sum(row["marginBalanceYuan"] is not None for row in rows),
         },
         "marginAsOf": margin_as_of,
+        "historyStatus": value.get("historyStatus", "unknown"),
+        "historyContinuity": value.get("historyContinuity"),
         "availableDates": sorted(all_dates),
         "stocks": rows,
         "warnings": list(value.get("warnings", [])),

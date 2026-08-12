@@ -26,34 +26,56 @@ export type ActiveReleaseManifest = {
   releaseId: string;
   asOf: string;
   manifestSha256: string;
+  observedAt: string | null;
   activatedAt: string;
   manifest: Record<string, unknown>;
 };
 
 async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseManifest | null> {
+  const read = async (withObservedAt: boolean) => db
+    .prepare(
+      withObservedAt
+        ? `SELECT active_release.release_id,
+                  active_release.as_of,
+                  active_release.manifest_sha256,
+                  active_release.observed_at,
+                  active_release.activated_at,
+                  release_manifest.manifest_json
+           FROM active_release
+           JOIN release_manifest
+             ON release_manifest.release_id = active_release.release_id
+            AND release_manifest.as_of = active_release.as_of
+            AND release_manifest.status = 'ACTIVE'
+           WHERE active_release.slot = 'dashboard'
+           LIMIT 1`
+        : `SELECT active_release.release_id,
+                  active_release.as_of,
+                  active_release.manifest_sha256,
+                  active_release.activated_at,
+                  release_manifest.manifest_json
+           FROM active_release
+           JOIN release_manifest
+             ON release_manifest.release_id = active_release.release_id
+            AND release_manifest.as_of = active_release.as_of
+            AND release_manifest.status = 'ACTIVE'
+           WHERE active_release.slot = 'dashboard'
+           LIMIT 1`,
+    )
+    .first<{
+      release_id: string;
+      as_of: string;
+      manifest_sha256: string;
+      observed_at?: string | null;
+      activated_at: string;
+      manifest_json: string;
+    }>();
   try {
-    const row = await db
-      .prepare(
-        `SELECT active_release.release_id,
-                active_release.as_of,
-                active_release.manifest_sha256,
-                active_release.activated_at,
-                release_manifest.manifest_json
-         FROM active_release
-         JOIN release_manifest
-           ON release_manifest.release_id = active_release.release_id
-          AND release_manifest.as_of = active_release.as_of
-          AND release_manifest.status = 'ACTIVE'
-         WHERE active_release.slot = 'dashboard'
-         LIMIT 1`,
-      )
-      .first<{
-        release_id: string;
-        as_of: string;
-        manifest_sha256: string;
-        activated_at: string;
-        manifest_json: string;
-      }>();
+    let row: Awaited<ReturnType<typeof read>>;
+    try {
+      row = await read(true);
+    } catch {
+      row = await read(false);
+    }
     if (!row) return null;
     const manifest: unknown = JSON.parse(row.manifest_json);
     if (
@@ -67,6 +89,10 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
       releaseId: row.release_id,
       asOf: row.as_of,
       manifestSha256: row.manifest_sha256,
+      observedAt: row.observed_at ??
+        (typeof (manifest as Record<string, unknown>).observedAt === "string"
+          ? (manifest as Record<string, unknown>).observedAt as string
+          : null),
       activatedAt: row.activated_at,
       manifest: manifest as Record<string, unknown>,
     };
@@ -97,27 +123,36 @@ export async function getReleaseManifestForDate(
   const active = await readActiveReleaseManifest(db);
   if (active?.asOf === requestedDate) return active;
   try {
-    const row = await db
+    const read = async (withObservedAt: boolean) => db
       .prepare(
-        `SELECT release_id,
-                as_of,
-                manifest_sha256,
-                created_at,
-                manifest_json
-         FROM release_manifest
-         WHERE as_of = ?
-           AND status IN ('ACTIVE', 'SUPERSEDED')
-         ORDER BY created_at DESC
-         LIMIT 1`,
+        withObservedAt
+          ? `SELECT release_id, as_of, manifest_sha256, observed_at, created_at, manifest_json
+             FROM release_manifest
+             WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+             ORDER BY COALESCE(observed_at, json_extract(manifest_json, '$.observedAt'), '') DESC,
+                      created_at DESC
+             LIMIT 1`
+          : `SELECT release_id, as_of, manifest_sha256, created_at, manifest_json
+             FROM release_manifest
+             WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+             ORDER BY created_at DESC
+             LIMIT 1`,
       )
       .bind(requestedDate)
       .first<{
         release_id: string;
         as_of: string;
         manifest_sha256: string;
+        observed_at?: string | null;
         created_at: string;
         manifest_json: string;
       }>();
+    let row: Awaited<ReturnType<typeof read>>;
+    try {
+      row = await read(true);
+    } catch {
+      row = await read(false);
+    }
     if (!row) return null;
     const manifest: unknown = JSON.parse(row.manifest_json);
     if (
@@ -131,6 +166,10 @@ export async function getReleaseManifestForDate(
       releaseId: row.release_id,
       asOf: row.as_of,
       manifestSha256: row.manifest_sha256,
+      observedAt: row.observed_at ??
+        (typeof (manifest as Record<string, unknown>).observedAt === "string"
+          ? (manifest as Record<string, unknown>).observedAt as string
+          : null),
       activatedAt: row.created_at,
       manifest: manifest as Record<string, unknown>,
     };

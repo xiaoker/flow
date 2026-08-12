@@ -123,14 +123,39 @@ def test_materializer_builds_periods_groups_and_coverage() -> None:
 
 
 def test_read_model_manifest_is_deterministic_and_split() -> None:
-    payloads_a, manifest_a = build_read_models(_snapshot(), require_materialized=True)
-    payloads_b, manifest_b = build_read_models(_snapshot(), require_materialized=True)
+    payloads_a, manifest_a = build_read_models(_snapshot(), require_materialized=True, stock_catalog=_stock_catalog())
+    payloads_b, manifest_b = build_read_models(_snapshot(), require_materialized=True, stock_catalog=_stock_catalog())
 
     assert manifest_a == manifest_b
-    assert set(payloads_a) == {"bootstrap", "overview", "radar", "rotation", "national", "connect", "margin"}
+    assert manifest_a["schemaVersion"] == 3
+    assert manifest_a["observedAt"] == "2026-08-06T01:00:00.000Z"
+    assert manifest_a["sourceDates"]["snapshot"] == "2026-08-06"
+    assert manifest_a["sourceDates"]["sseEtfAsOf"] is None
+    assert manifest_a["pressureSchemaVersion"] == 2
+    assert manifest_a["stockShardCount"] == 8
+    assert manifest_a["requiredArtifacts"] == list(manifest_a["artifacts"])
+    assert set(payloads_a) == {"bootstrap", "overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure", "stock_search", *{f"stock_{index}" for index in range(8)}}
     assert "etfTerminal" not in payloads_a["overview"]["data"]
     assert payloads_a["radar"]["data"]["etfTerminal"]["historyCoverage"]["tradingDays"] == 4
+    assert "etfStockFlow" not in payloads_a["radar"]["data"]
+    assert "etfStockFlow" in payloads_a["radar_flow"]["data"]
+    bootstrap_terminal = payloads_a["bootstrap"]["etfTerminal"]
+    assert bootstrap_terminal["instruments"] == []
+    assert bootstrap_terminal["reconciliation"]["1d"]["shares"]["instrumentTotal"] == 2.5
+    assert bootstrap_terminal["reconciliation"]["1d"]["shares"]["comparable"] == 2
+    assert len(payloads_a["bootstrap"]["etfSearch"]) == 2
+    assert {item["code"] for item in payloads_a["national"]["data"]["etfTerminal"]["instruments"]} <= {"510300", "510310", "510330", "510500", "159915", "159919", "512100", "510050", "588080", "510180", "159845", "512500"}
     assert manifest_a["releaseId"].startswith("release:2026-08-06:")
+
+
+def test_release_identity_includes_observed_at_and_source_dates() -> None:
+    first = _snapshot()
+    second = _snapshot()
+    second["observedAt"] = "2026-08-06T09:01:00+08:00"
+    _, manifest_a = build_read_models(first, require_materialized=True, stock_catalog=_stock_catalog())
+    _, manifest_b = build_read_models(second, require_materialized=True, stock_catalog=_stock_catalog())
+    assert manifest_a["observedAt"] != manifest_b["observedAt"]
+    assert manifest_a["releaseId"] != manifest_b["releaseId"]
 
 
 def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
@@ -150,7 +175,7 @@ def test_stock_catalog_is_split_into_deterministic_search_and_shards() -> None:
     assert payloads_a[search_item["shard"]]["items"][0]["stockCode"] == "600000"
     assert all(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < 5_000_000 for payload in payloads_a.values())
     assert set(manifest_a["artifacts"]) == {
-        "bootstrap", "overview", "radar", "rotation", "national", "connect", "margin",
+        "bootstrap", "overview", "radar", "radar_flow", "rotation", "national", "connect", "margin",
         "pressure",
         "stock_search", *{f"stock_{index}" for index in range(8)},
     }
@@ -252,7 +277,9 @@ def test_available_stock_flow_requires_complete_stock_sidecars() -> None:
 
 
 def test_write_read_models_uses_canonical_json(tmp_path: Path) -> None:
-    result = write_read_models(_snapshot(), tmp_path, require_materialized=True)
-    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    catalog_path = tmp_path / "stock-catalog.json"
+    catalog_path.write_text(json.dumps(_stock_catalog()), encoding="utf-8")
+    result = write_read_models(_snapshot(), tmp_path / "read-models", require_materialized=True, stock_catalog_path=catalog_path)
+    manifest = json.loads((tmp_path / "read-models" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifestSha256"] == result["manifest"]["manifestSha256"]
-    assert (tmp_path / "radar.json").read_bytes() == (tmp_path / "radar.json").read_bytes()
+    assert (tmp_path / "read-models" / "radar.json").read_bytes() == (tmp_path / "read-models" / "radar.json").read_bytes()

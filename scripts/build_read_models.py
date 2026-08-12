@@ -16,7 +16,8 @@ def main() -> None:
     parser.add_argument(
         "--stock-catalog",
         type=Path,
-        help="Optional complete ETF-to-stock catalog sidecar generated offline",
+        required=True,
+        help="Complete ETF-to-stock catalog sidecar generated offline",
     )
     args = parser.parse_args()
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))

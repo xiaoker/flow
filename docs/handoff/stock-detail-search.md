@@ -123,12 +123,12 @@ Worker 请求路径不得读取全量 ETF 滚动状态、现场计算 ETF→个�
 - 单个解压后工件不超过 `5_000_000` 字节。
 - 单次上传请求体不超过 `1_500_000` 字节。
 - manifest 最多 20 个工件。
-- 工件名只接受固定白名单：7 个核心视图、`stock_search` 和 `stock_[0-7]`。
+- 工件名只接受固定白名单：9 个核心视图（含按需读取的 `radar_flow`）、`stock_search` 和 `stock_[0-7]`。
 
-现有核心发布有 7 个工件；启用个股穿透后增加 9 个只读工件：
+现有核心发布有 9 个工件；启用个股穿透后共 18 个只读工件：
 
 ```text
-bootstrap / overview / radar / rotation / national / connect / margin
+bootstrap / overview / radar / radar_flow / rotation / national / connect / margin / pressure
 ```
 
 ```text
