@@ -52,7 +52,7 @@ jobs:
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1, Node 24
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30af803 # v6.0.1, Node 24
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0, Node 24
         with:
@@ -200,6 +200,24 @@ jobs:
             echo "Pending snapshot has no ETF state materialization; active dashboard remains unchanged."
           fi
 
+      - name: Check ETF stock-flow read-model readiness
+        id: stock-flow
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          if jq -e '
+            .publication.status == "confirmed" and
+            .etfStockFlow.available == true and
+            ((.etfStockFlow.coverage.stockCount // 0) > 0)
+          ' dashboard-snapshot.json >/dev/null; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            jq '{asOf, available: .etfStockFlow.available, stockCount: .etfStockFlow.coverage.stockCount, matchedEtfCount: .etfStockFlow.coverage.matchedEtfCount}' dashboard-snapshot.json
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "ETF-to-stock PCF is not ready; preserving the previous immutable stock read models." >&2
+            jq '{asOf, publication, etfStockFlow: {available: .etfStockFlow.available, coverage: .etfStockFlow.coverage, warnings: .etfStockFlow.warnings}}' dashboard-snapshot.json >&2
+          fi
+
       - name: Build verified archive and publish bundle
         run: |
           # The dashboard snapshot is published separately from read models.
@@ -241,7 +259,8 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             python scripts/check_release_capabilities.py --output capabilities.json
           else
             echo "Pending snapshot has no immutable release; skipping read-model capability preflight."
@@ -253,7 +272,8 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             # Carry forward only the previous release's eight stock shards.
             # This keeps the 20-day pressure history in the offline build and
             # prevents the Worker from reading or aggregating full-market data.
@@ -293,7 +313,8 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             python scripts/publish_read_models.py \
               --read-model-dir read-models \
               --result-output read-model-publish.json
@@ -307,7 +328,8 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
+          if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
+            [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
             jq -e '.status == "activated"' read-model-publish.json >/dev/null; then
             RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
             AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
