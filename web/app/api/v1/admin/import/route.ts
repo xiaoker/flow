@@ -1,19 +1,24 @@
 import { NextResponse } from "next/server";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
 import { validateEtfTerminalCoverage } from "@/app/lib/etf-flow-state";
+import {
+  isReadModelManifest,
+  MAX_READ_MODEL_ARTIFACTS,
+  MAX_READ_MODEL_BYTES,
+  READ_MODEL_NAME,
+  SHA256,
+  type ReadModelManifest,
+} from "@/app/lib/read-model-contract";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
 
 export const dynamic = "force-dynamic";
 
 const MAX_BODY_BYTES = 8_500_000;
 const MAX_ARTIFACTS = 8;
-const MAX_READ_MODEL_ARTIFACTS = 20;
 const MAX_ETF_ROWS = 10_000;
 const RETENTION_DAYS = 365;
 const DASHBOARD_RETENTION_DAYS = 30;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
-const READ_MODEL_NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
 
 type EtfRow = {
   code: string;
@@ -67,18 +72,16 @@ type ReadModelBundle = {
     schemaVersion: number;
     releaseId: string;
     asOf: string;
+    observedAt?: string | null;
+    sourceDates?: Record<string, string | null>;
+    pressureSchemaVersion?: number;
+    stockShardCount?: number;
+    requiredArtifacts?: string[];
     manifestSha256?: string;
-    artifacts: Record<string, {
-      key: string;
-      sha256: string;
-      bytes: number;
-      contentType?: string;
-    }>;
+    artifacts: ReadModelManifest["artifacts"];
   };
   artifacts: Record<string, ReadModelArtifact>;
 };
-
-export type ReadModelManifest = ReadModelBundle["manifest"];
 
 function secureEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
@@ -189,24 +192,11 @@ function isReadModelBundle(value: unknown): value is ReadModelBundle {
   if (!isRecord(value) || !isRecord(value.manifest) || !isRecord(value.artifacts)) {
     return false;
   }
-  const manifest = value.manifest;
-  if (
-    manifest.schemaVersion !== 2 ||
-    typeof manifest.releaseId !== "string" ||
-    !/^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/.test(manifest.releaseId) ||
-    typeof manifest.asOf !== "string" ||
-    !ISO_DATE.test(manifest.asOf) ||
-    (manifest.manifestSha256 !== undefined &&
-      (typeof manifest.manifestSha256 !== "string" || !SHA256.test(manifest.manifestSha256))) ||
-    !isRecord(manifest.artifacts)
-  ) {
-    return false;
-  }
+  const manifest = value.manifest as ReadModelManifest;
+  if (!isReadModelManifest(manifest)) return false;
   const names = Object.keys(manifest.artifacts);
   const provided = Object.keys(value.artifacts);
-  if (!names.length || names.length > MAX_READ_MODEL_ARTIFACTS || names.some((name) => !READ_MODEL_NAME.test(name))) {
-    return false;
-  }
+  if (!names.length || names.length > MAX_READ_MODEL_ARTIFACTS || names.some((name) => !READ_MODEL_NAME.test(name))) return false;
   if (names.some((name) => !provided.includes(name)) || provided.some((name) => !names.includes(name))) {
     return false;
   }
@@ -223,7 +213,7 @@ function isReadModelBundle(value: unknown): value is ReadModelBundle {
         SHA256.test(declared.sha256) &&
         Number.isSafeInteger(declared.bytes) &&
         declared.bytes > 0 &&
-        declared.bytes <= 5_000_000 &&
+        declared.bytes <= MAX_READ_MODEL_BYTES &&
         artifact.key === declared.key &&
         artifact.sha256 === declared.sha256 &&
         artifact.bytes === declared.bytes &&
@@ -564,79 +554,173 @@ export async function activateReadModels(
   release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
   manifest: ReadModelManifest,
   activatedAt: string,
-): Promise<"activated" | "staged_older_than_active"> {
+): Promise<"activated" | "staged_older_than_active" | "staged_stale_revision"> {
   // A delayed/retried collection can finish after a newer trading date has
   // already been published. The release pointer is a monotonic cursor: a
   // newer date may replace an older one, and a release for the same date may
   // correct it, but an older date must remain staged. Keep the guard in SQL
   // so concurrent imports cannot regress the pointer between a preflight read
   // and write.
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO release_manifest (
-           release_id, as_of, schema_version, manifest_sha256, manifest_json, status, created_at
-         ) VALUES (?, ?, ?, ?, ?, 'STAGED', ?)
-         ON CONFLICT(release_id) DO UPDATE SET
-           as_of = excluded.as_of,
-           schema_version = excluded.schema_version,
-           manifest_sha256 = excluded.manifest_sha256,
-           manifest_json = excluded.manifest_json,
-           status = CASE
-             WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
-             ELSE 'STAGED'
-           END`,
-      )
-      .bind(
-        release.releaseId,
-        release.asOf,
-        manifest.schemaVersion,
-        release.manifestSha256,
-        JSON.stringify(manifest),
-        activatedAt,
-      ),
-    db
-      .prepare(
-        `UPDATE release_manifest
-         SET status = 'SUPERSEDED'
-         WHERE status = 'ACTIVE'
-           AND release_id <> ?
-           AND (
-             NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
-             OR EXISTS (
-               SELECT 1 FROM active_release
-               WHERE slot = 'dashboard' AND as_of <= ?
-             )
-           )`,
-      )
-      .bind(release.releaseId, release.asOf),
-    db
-      .prepare(
-        `UPDATE release_manifest
-         SET status = 'ACTIVE'
-         WHERE release_id = ?
-           AND (
-             NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
-             OR EXISTS (
-               SELECT 1 FROM active_release
-               WHERE slot = 'dashboard' AND as_of <= ?
-             )
-           )`,
-      )
-      .bind(release.releaseId, release.asOf),
-    db
-      .prepare(
-        `INSERT INTO active_release (slot, release_id, as_of, manifest_sha256, activated_at)
-         VALUES ('dashboard', ?, ?, ?, ?)
-         ON CONFLICT(slot) DO UPDATE SET
-           release_id = excluded.release_id,
-           as_of = excluded.as_of,
-           manifest_sha256 = excluded.manifest_sha256,
-           activated_at = excluded.activated_at
-         WHERE excluded.as_of >= active_release.as_of`,
-      )
-      .bind(release.releaseId, release.asOf, release.manifestSha256, activatedAt),
-  ]);
+  const observedAt = manifest.observedAt ?? null;
+  let observedAtColumnsReady = false;
+  try {
+    await db.prepare("SELECT observed_at FROM release_manifest LIMIT 1").first();
+    await db.prepare("SELECT observed_at FROM active_release LIMIT 1").first();
+    observedAtColumnsReady = true;
+  } catch {
+    // The release pointer migration is deliberately deployable after the
+    // Worker. Keep the v2 SQL path alive until both nullable columns exist.
+  }
+
+  if (!observedAtColumnsReady) {
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO release_manifest (
+             release_id, as_of, schema_version, manifest_sha256, manifest_json, status, created_at
+           ) VALUES (?, ?, ?, ?, ?, 'STAGED', ?)
+           ON CONFLICT(release_id) DO UPDATE SET
+             as_of = excluded.as_of,
+             schema_version = excluded.schema_version,
+             manifest_sha256 = excluded.manifest_sha256,
+             manifest_json = excluded.manifest_json,
+             status = CASE
+               WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
+               ELSE 'STAGED'
+             END`,
+        )
+        .bind(
+          release.releaseId,
+          release.asOf,
+          manifest.schemaVersion,
+          release.manifestSha256,
+          JSON.stringify(manifest),
+          activatedAt,
+        ),
+      db
+        .prepare(
+          `UPDATE release_manifest
+           SET status = 'SUPERSEDED'
+           WHERE status = 'ACTIVE'
+             AND release_id <> ?
+             AND (
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               OR EXISTS (
+                 SELECT 1 FROM active_release
+                 WHERE slot = 'dashboard' AND as_of <= ?
+               )
+             )`,
+        )
+        .bind(release.releaseId, release.asOf),
+      db
+        .prepare(
+          `UPDATE release_manifest
+           SET status = 'ACTIVE'
+           WHERE release_id = ?
+             AND (
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               OR EXISTS (
+                 SELECT 1 FROM active_release
+                 WHERE slot = 'dashboard' AND as_of <= ?
+               )
+             )`,
+        )
+        .bind(release.releaseId, release.asOf),
+      db
+        .prepare(
+          `INSERT INTO active_release (slot, release_id, as_of, manifest_sha256, activated_at)
+           VALUES ('dashboard', ?, ?, ?, ?)
+           ON CONFLICT(slot) DO UPDATE SET
+             release_id = excluded.release_id,
+             as_of = excluded.as_of,
+             manifest_sha256 = excluded.manifest_sha256,
+             activated_at = excluded.activated_at
+           WHERE excluded.as_of >= active_release.as_of`,
+        )
+        .bind(release.releaseId, release.asOf, release.manifestSha256, activatedAt),
+    ]);
+  } else {
+    // v3 makes same-day ordering explicit. A missing observation timestamp
+    // (v2) is treated as older than any observed v3 release, never as "now".
+    const newerOrSame = `
+      active_release.as_of < ? OR (
+        active_release.as_of = ? AND (
+          COALESCE(active_release.observed_at, '') < COALESCE(?, '') OR
+          (COALESCE(active_release.observed_at, '') = COALESCE(?, '') AND active_release.release_id = ?)
+        )
+      )`;
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO release_manifest (
+             release_id, as_of, schema_version, manifest_sha256, manifest_json,
+             observed_at, status, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'STAGED', ?)
+           ON CONFLICT(release_id) DO UPDATE SET
+             as_of = excluded.as_of,
+             schema_version = excluded.schema_version,
+             manifest_sha256 = excluded.manifest_sha256,
+             manifest_json = excluded.manifest_json,
+             observed_at = excluded.observed_at,
+             status = CASE
+               WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
+               ELSE 'STAGED'
+             END`,
+        )
+        .bind(
+          release.releaseId,
+          release.asOf,
+          manifest.schemaVersion,
+          release.manifestSha256,
+          JSON.stringify(manifest),
+          observedAt,
+          activatedAt,
+        ),
+      db
+        .prepare(
+          `UPDATE release_manifest
+           SET status = 'SUPERSEDED'
+           WHERE status = 'ACTIVE'
+             AND release_id <> ?
+             AND (
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               OR EXISTS (
+                 SELECT 1 FROM active_release
+                 WHERE slot = 'dashboard' AND ${newerOrSame}
+               )
+             )`,
+        )
+        .bind(release.releaseId, release.asOf, release.asOf, observedAt, observedAt, release.releaseId),
+      db
+        .prepare(
+          `UPDATE release_manifest
+           SET status = 'ACTIVE'
+           WHERE release_id = ?
+             AND (
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               OR EXISTS (
+                 SELECT 1 FROM active_release
+                 WHERE slot = 'dashboard' AND ${newerOrSame}
+               )
+             )`,
+        )
+        .bind(release.releaseId, release.asOf, release.asOf, observedAt, observedAt, release.releaseId),
+      db
+        .prepare(
+          `INSERT INTO active_release (
+             slot, release_id, as_of, manifest_sha256, observed_at, activated_at
+           ) VALUES ('dashboard', ?, ?, ?, ?, ?)
+           ON CONFLICT(slot) DO UPDATE SET
+             release_id = excluded.release_id,
+             as_of = excluded.as_of,
+             manifest_sha256 = excluded.manifest_sha256,
+             observed_at = excluded.observed_at,
+             activated_at = excluded.activated_at
+           WHERE ${newerOrSame}`,
+        )
+        .bind(release.releaseId, release.asOf, release.manifestSha256, observedAt, activatedAt, release.asOf, release.asOf, observedAt, observedAt, release.releaseId),
+    ]);
+  }
 
   const active = await db
     .prepare(
@@ -648,7 +732,7 @@ export async function activateReadModels(
     .first<{ release_id: string }>();
   return active?.release_id === release.releaseId
     ? "activated"
-    : "staged_older_than_active";
+    : observedAtColumnsReady ? "staged_stale_revision" : "staged_older_than_active";
 }
 
 export async function POST(request: Request) {
@@ -815,7 +899,7 @@ export async function POST(request: Request) {
       )
       .bind(publishedAt, archiveResult.manifestKey, payload.archive.runId)
       .run();
-    let readModelActivation: "activated" | "staged_older_than_active" | "unavailable" | null = null;
+    let readModelActivation: "activated" | "staged_older_than_active" | "staged_stale_revision" | "unavailable" | null = null;
     if (readModelResult && payload.readModels) {
       try {
         readModelActivation = await activateReadModels(

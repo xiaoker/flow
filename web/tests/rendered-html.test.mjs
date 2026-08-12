@@ -91,6 +91,28 @@ test("refreshes the latest dashboard and schedules collection through source rel
   ]);
 });
 
+test("keeps release history and rollback reads exact and migration-compatible", async () => {
+  const [contract, capabilities, candidates, artifact, dates, importer] = await Promise.all([
+    readFile(new URL("../app/lib/read-model-contract.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/capabilities/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/releases/previous-candidates/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/releases/artifact/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/dashboard-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/import/route.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(contract, /schemaVersion !== 2 && value\.schemaVersion !== 3/);
+  assert.match(contract, /requiredArtifacts/);
+  assert.match(capabilities, /readModelManifestSchemas/);
+  assert.match(capabilities, /sameDateObservedAtOrder/);
+  assert.match(candidates, /MAX_CANDIDATES = 30/);
+  assert.match(candidates, /status: candidates\.length \? "found" : "not_found"/);
+  assert.match(artifact, /releaseId = url\.searchParams\.get\("releaseId"\)/);
+  assert.match(artifact, /WHERE release_id = \?/);
+  assert.match(dates, /FROM release_manifest/);
+  assert.match(importer, /observed_at/);
+  assert.match(importer, /staged_stale_revision/);
+});
+
 test("replaces repetitive margin day cards with derived diagnostics", async () => {
   const source = await readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8");
   assert.match(source, /最新完整数据日/);

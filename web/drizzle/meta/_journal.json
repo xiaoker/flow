@@ -43,6 +43,13 @@
       "when": 1786296546757,
       "tag": "0005_release_manifest",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786524789670,
+      "tag": "0006_release_observed_at",
+      "breakpoints": true
     }
   ]
 }

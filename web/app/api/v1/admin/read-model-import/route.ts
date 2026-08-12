@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { runtimeEnv } from "@/app/lib/dashboard-store";
-import { activateReadModels, type ReadModelManifest } from "../import/route";
+import {
+  isReadModelManifest,
+  isRecord,
+  READ_MODEL_NAME,
+  type ReadModelManifest,
+} from "@/app/lib/read-model-contract";
+import { activateReadModels } from "../import/route";
 
 export const dynamic = "force-dynamic";
 
@@ -8,11 +14,7 @@ export const dynamic = "force-dynamic";
 // intentionally small avoids making the free Worker parse the full dashboard
 // plus every view model in one invocation.
 const MAX_BODY_BYTES = 1_500_000;
-const MAX_ARTIFACTS = 20;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
-const RELEASE_ID = /^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/;
-const NAME = /^(bootstrap|overview|radar|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
+const NAME = READ_MODEL_NAME;
 
 type ReadModelArtifactUpload = {
   name: string;
@@ -39,36 +41,8 @@ function secureEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
 function isManifest(value: unknown): value is ReadModelManifest {
-  if (!isRecord(value)) return false;
-  if (
-    value.schemaVersion !== 2 ||
-    typeof value.releaseId !== "string" ||
-    !RELEASE_ID.test(value.releaseId) ||
-    typeof value.asOf !== "string" ||
-    !ISO_DATE.test(value.asOf) ||
-    !isRecord(value.artifacts)
-  ) return false;
-  const names = Object.keys(value.artifacts);
-  if (!names.length || names.length > MAX_ARTIFACTS || names.some((name) => !NAME.test(name))) return false;
-  return names.every((name) => {
-    const declared = value.artifacts[name];
-    return Boolean(
-      isRecord(declared) &&
-        typeof declared.key === "string" &&
-        declared.key.startsWith("market-data/releases/") &&
-        !declared.key.includes("..") &&
-        typeof declared.sha256 === "string" &&
-        SHA256.test(declared.sha256) &&
-        Number.isSafeInteger(declared.bytes) &&
-        declared.bytes > 0 &&
-        declared.bytes <= 5_000_000,
-    );
-  });
+  return isReadModelManifest(value);
 }
 
 function isUpload(value: unknown): value is ReadModelUpload {

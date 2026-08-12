@@ -30,6 +30,8 @@ Cloudflare Worker
 - ETF `historyCoverage` 必须在离线构建阶段生成；请求时不得回退到 R2 rolling state。
 - 视图对象使用内容哈希和固定 key，重复运行不会覆盖原始对象。
 - `active_release` 只保存当前指针；切换前先把所有对象和清单写完。
+- manifest v2 与 v3 在迁移期并存；v3 使用 `observedAt` 对同一 `asOf` 的修订做单调排序，旧 v2 缺少该字段时按保守的较旧版本处理。
+- `/api/v2/history/dates` 只返回包含完整 read-model 工件集合的发布日期，不把只有原始归档的日期暴露给主日期选择器。
 
 ## 采集触发
 
@@ -41,6 +43,9 @@ Cloudflare Cron 仍是主调度器，按晚间、早间和 reconciliation 三个
 - `/api/v2/views/{view}`：按视图读取已发布对象，允许 `overview / radar / rotation / national / connect / margin`。
 - `/api/v2/releases/latest`：返回 D1 active release 清单。
 - `/api/v2/history/dates`、`/api/v2/market-history`：只读有限历史索引，不读取 R2 ETF 状态。
+- `/api/v1/admin/capabilities`：受保护的发布契约探测；只有 D1 `observed_at` 两列都存在时才声明 v3。
+- `/api/v1/admin/releases/previous-candidates`：返回有上限的完整历史 read-model 候选元数据。
+- `/api/v1/admin/releases/artifact`：按 `releaseId + name` 精确流式读取历史工件，避免同日多版本按日期误选。
 
 ## 本地验证
 

@@ -101,7 +101,11 @@ def main() -> None:
             )
         result = post(args.url, body, headers)
         print(json.dumps({"name": name, **result}, ensure_ascii=False))
-        if index == len(names) - 1 and result.get("status") not in {"activated", "staged_older_than_active"}:
+        if index == len(names) - 1 and result.get("status") not in {
+            "activated",
+            "staged_older_than_active",
+            "staged_stale_revision",
+        }:
             raise RuntimeError(f"read model release was not activated: {result}")
 
 

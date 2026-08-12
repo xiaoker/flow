@@ -270,7 +270,8 @@ jobs:
             (.status == "published" or .status == "already_published") and
             (.readModelActivation == null or
              .readModelActivation == "activated" or
-             .readModelActivation == "staged_older_than_active")
+             .readModelActivation == "staged_older_than_active" or
+             .readModelActivation == "staged_stale_revision")
           ' publish-response.json >/dev/null
           jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
 
