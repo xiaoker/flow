@@ -17,6 +17,7 @@ from typing import Any
 import requests
 
 from trading_desk.stock_pressure import merge_stock_catalog_history
+from trading_desk.stock_flow_history import StockFlowHistoryError, merge_catalog_with_history
 
 
 SHARDS = tuple(f"stock_{index}" for index in range(8))
@@ -28,6 +29,13 @@ def _read_items(path: Path) -> list[dict[str, Any]]:
         raise RuntimeError(f"invalid stock shard: {path}")
     as_of = str(payload.get("asOf", ""))
     return [dict(item, asOf=as_of) for item in payload["items"] if isinstance(item, dict)]
+
+
+def _read_partition_index(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("stock-flow history index is not an object")
+    return payload
 
 
 def _fetch_previous_items(
@@ -54,6 +62,7 @@ def _fetch_previous_items(
     rows = candidate_payload.get("candidates") if isinstance(candidate_payload, dict) else None
     if not isinstance(rows, list):
         raise RuntimeError("previous release candidates response is invalid")
+    incompatible: dict[str, Any] | None = None
     for candidate in rows:
         if not isinstance(candidate, dict):
             continue
@@ -83,8 +92,17 @@ def _fetch_previous_items(
         pressure_data = pressure.get("data", {}).get("pressure") if isinstance(pressure.get("data"), dict) else None
         pressure_schema = pressure_data.get("pressureSchemaVersion", pressure_data.get("schemaVersion", 0)) if isinstance(pressure_data, dict) else 0
         if int(pressure_schema) == 1:
-            # A valid legacy pressure v1 release is incompatible, but it is
-            # not evidence that a later v2 release is damaged.
+            # A legacy pressure v1 release cannot seed a v2 history.  Do not
+            # silently skip it and bootstrap the current catalog from one
+            # point: that would make the UI look healthy while destroying the
+            # historical coverage contract.  Keep the reason so the caller
+            # can fail closed and leave the active release untouched.
+            incompatible = {
+                "historyStatus": "incompatible_previous_release",
+                "previousReleaseId": release_id,
+                "previousAsOf": candidate_date,
+                "reason": "pressure_schema_v1",
+            }
             continue
         if not isinstance(pressure_schema, (int, float)) or int(pressure_schema) != 2:
             raise RuntimeError("previous pressure artifact schema is unsupported")
@@ -106,6 +124,8 @@ def _fetch_previous_items(
             "previousReleaseId": release_id,
             "previousAsOf": candidate_date,
         }
+    if incompatible is not None:
+        return [], incompatible
     return [], {"historyStatus": "bootstrapped", "previousReleaseId": None}
 
 
@@ -120,6 +140,11 @@ def main() -> None:
         help="Optional local directory containing stock_0.json through stock_7.json",
     )
     parser.add_argument(
+        "--daily-partitions",
+        type=Path,
+        help="PR3 history index built from real ETF share/PCF daily partitions",
+    )
+    parser.add_argument(
         "--base-url",
         default=os.environ.get("FLOW_PUBLIC_URL", "https://flow.xiaoker.com"),
         help="Public Flow URL used only by the offline build",
@@ -130,6 +155,33 @@ def main() -> None:
     catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
     previous_items: list[dict[str, Any]] = []
     continuity: dict[str, Any] = {"historyStatus": "bootstrapped", "previousReleaseId": None}
+    if args.daily_partitions:
+        if not args.daily_partitions.is_file():
+            raise RuntimeError(f"stock-flow history index does not exist: {args.daily_partitions}")
+        history_index = _read_partition_index(args.daily_partitions)
+        try:
+            enriched = merge_catalog_with_history(catalog, history_index)
+        except StockFlowHistoryError as exc:
+            raise RuntimeError(f"stock-flow history index is invalid: {exc}") from exc
+        continuity = {
+            "historyStatus": enriched.get("historyStatus", "partitioned"),
+            "historyContinuity": enriched.get("historyContinuity"),
+            "availableDates": enriched.get("availableDates", []),
+        }
+        enriched.update(continuity)
+        args.output.write_text(json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            json.dumps(
+                {
+                    "output": str(args.output),
+                    "asOf": enriched.get("asOf"),
+                    "stocks": len(enriched.get("items") or []),
+                    "availableDates": len(enriched.get("availableDates") or []),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
     if args.before_date:
         if args.previous_shard_dir:
             for shard in SHARDS:
@@ -162,6 +214,11 @@ def main() -> None:
                 headers=access_headers,
                 before_date=args.before_date,
             )
+    if continuity.get("historyStatus") == "incompatible_previous_release":
+        raise RuntimeError(
+            "previous pressure release is incompatible; refusing to bootstrap "
+            "a one-node history"
+        )
     enriched = merge_stock_catalog_history(catalog, previous_items)
     if continuity.get("historyStatus") == "continued":
         previous_ids = {

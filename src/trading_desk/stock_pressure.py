@@ -241,6 +241,12 @@ def build_stock_pressure(
     rows: list[dict[str, Any]] = []
     all_dates: set[str] = set()
     history20_count = 0
+    declared_dates: list[str] = []
+    if isinstance(value.get("availableDates"), list):
+        parsed_declared_dates = [
+            _date(candidate, field="available_date") for candidate in value["availableDates"]
+        ]
+        declared_dates = sorted({candidate for candidate in parsed_declared_dates if candidate <= as_of})
     for raw in items:
         item = _record(raw)
         _validate_flow_fields(item)
@@ -251,8 +257,14 @@ def build_stock_pressure(
         history = [by_date[key] for key in sorted(by_date)[-HISTORY_NODE_LIMIT:]]
         all_dates.update(node["date"] for node in history)
         rolling = None
-        if len(history) >= ROLLING_WINDOW:
+        if declared_dates:
+            window_dates = declared_dates[-ROLLING_WINDOW:]
+            window = [by_date[date] for date in window_dates if date in by_date]
+            has_complete_window = len(window_dates) == ROLLING_WINDOW and len(window) == ROLLING_WINDOW
+        else:
             window = history[-ROLLING_WINDOW:]
+            has_complete_window = len(window) == ROLLING_WINDOW
+        if has_complete_window:
             rolling = {
                 "from": window[0]["date"],
                 "to": window[-1]["date"],
@@ -327,8 +339,9 @@ def build_stock_pressure(
         },
         "marginAsOf": margin_as_of,
         "historyStatus": value.get("historyStatus", "unknown"),
+        "historyCalculationVersion": value.get("historyCalculationVersion"),
         "historyContinuity": value.get("historyContinuity"),
-        "availableDates": sorted(all_dates),
+        "availableDates": declared_dates or sorted(all_dates),
         "stocks": rows,
         "warnings": list(value.get("warnings", [])),
     }

@@ -149,7 +149,6 @@ def test_market_history_read_model_is_not_truncated_to_recent_60_points(tmp_path
     assert manifest["marketHistory"]["connect"]["points"] == len(dates)
 
 
-@pytest.mark.xfail(strict=True, reason="PR3 must block incompatible pressure history instead of silently bootstrapping")
 def test_incompatible_previous_pressure_release_is_not_silent_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("scripts.build_stock_pressure_state")
 
