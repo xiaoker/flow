@@ -1,4 +1,5 @@
 import { runtimeEnv } from "./dashboard-store";
+import { flowBuildHeaders } from "./build-info";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -345,6 +346,7 @@ export function responseFromPublishedObject(
         ETag: etag,
         "X-Flow-As-Of": published.asOf,
         "X-Flow-Release-Id": published.releaseId,
+        ...flowBuildHeaders(),
       },
     });
   }
@@ -359,6 +361,7 @@ export function responseFromPublishedObject(
       "X-Flow-As-Of": published.asOf,
       "X-Flow-Release-Id": published.releaseId,
       "X-Flow-Historical": String(published.historical),
+      ...flowBuildHeaders(),
     },
   });
 }

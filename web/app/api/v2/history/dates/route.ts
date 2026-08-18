@@ -1,4 +1,5 @@
 import { getAvailableHistoryDates } from "@/app/lib/dashboard-store";
+import { flowBuildHeaders } from "@/app/lib/build-info";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,6 @@ export async function GET() {
       first: dates.at(0) ?? null,
       latest: dates.at(-1) ?? null,
     },
-    { headers: { "Cache-Control": "private, max-age=300, must-revalidate" } },
+    { headers: { "Cache-Control": "private, max-age=300, must-revalidate", ...flowBuildHeaders() } },
   );
 }
