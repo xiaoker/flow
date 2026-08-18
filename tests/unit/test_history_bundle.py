@@ -11,6 +11,7 @@ import pandas as pd
 from trading_desk.history_bundle import (
     HISTORY_RETENTION_DAYS,
     build_history_bundle_from_files,
+    serialize_history_artifact,
 )
 
 
@@ -143,3 +144,45 @@ def test_history_bundle_compresses_wide_pcf_in_transit(tmp_path: Path) -> None:
     assert normalized["contentEncoding"] == "gzip"
     assert hashlib.sha256(decoded).hexdigest() == normalized["sha256"]
     assert b"588000" in decoded
+
+
+def test_history_bundle_accepts_bse_margin_source(tmp_path: Path) -> None:
+    raw_path = tmp_path / "data/raw/bse/margin_market_daily/2026-08-17/run.json"
+    metadata_path = raw_path.with_name("run.metadata.json")
+    normalized_path = tmp_path / "data/normalized/bse_margin/2026-08-17/run.csv"
+    raw_path.parent.mkdir(parents=True)
+    normalized_path.parent.mkdir(parents=True)
+    raw = b"null([], '2026-08-17')"
+    digest = hashlib.sha256(raw).hexdigest()
+    raw_path.write_bytes(raw)
+    metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+    pd.DataFrame(
+        [{
+            "trade_date": "2026-08-17",
+            "market": "BSE",
+            "financing_balance_yuan": 8_210_630_112,
+        }]
+    ).to_csv(normalized_path, index=False)
+
+    artifact = serialize_history_artifact(
+        {
+            "source": {
+                "source_id": "bse",
+                "dataset": "margin_market_daily",
+                "url": "https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+                "date_semantics": "bse_official_summary_trade_date",
+            },
+            "requested_date": "2026-08-17",
+            "observed_at": "2026-08-18T09:00:00+08:00",
+            "content_type": "application/json",
+            "raw_path": str(raw_path.relative_to(tmp_path)),
+            "metadata_path": str(metadata_path.relative_to(tmp_path)),
+            "normalized_path": str(normalized_path.relative_to(tmp_path)),
+            "sha256": digest,
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert artifact["releaseId"].startswith("margin_market_daily:bse:2026-08-17:")
+    assert artifact["tradeDates"] == ["2026-08-17"]
+    assert artifact["normalized"][0]["rowCount"] == 1
