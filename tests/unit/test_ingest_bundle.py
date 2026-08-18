@@ -121,3 +121,16 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
     assert artifact["bytes"] == len(read_model_content)
     assert artifact["sha256"] == read_model_digest
     assert gzip.decompress(base64.b64decode(artifact["contentBase64"])) == read_model_content
+
+    first_run_id = bundle["archive"]["runId"]
+    assert first_run_id.startswith("bundle:2026-07-15:")
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_payload["run_id"] = "a-different-wall-clock-run"
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    repeated = build_ingest_bundle(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+        workspace_root=tmp_path,
+        read_model_dir=read_model_dir,
+    )
+    assert repeated["archive"]["runId"] == first_run_id

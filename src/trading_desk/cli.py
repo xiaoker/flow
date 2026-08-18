@@ -52,6 +52,7 @@ def main() -> None:
             "counts": result["quality"]["counts"],
             "phase0_gate_status": result["quality"]["phase0_gate_status"],
             "phase0_gate_passed": result["quality"]["phase0_gate_passed"],
+            "pending_domains": result["quality"].get("pending_domains", []),
             "errors": len(result["quality"]["errors"]),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))

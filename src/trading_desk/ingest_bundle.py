@@ -45,6 +45,45 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _stable_ingest_run_id(
+    snapshot: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+    read_manifest: dict[str, Any] | None = None,
+    read_artifacts: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Build an idempotency key from immutable evidence, not wall-clock time.
+
+    Cloudflare Cron and the GitHub failover schedule can collect the same
+    source release.  The key stays identical for byte-identical evidence, but
+    changes whenever an official source or read-model artifact is revised.
+    """
+    basis = {
+        "asOf": str(snapshot.get("asOf", "")),
+        "artifacts": sorted(
+            [
+                {
+                    "releaseId": str(artifact.get("releaseId", "")),
+                    "sha256": str(artifact.get("sha256", "")),
+                }
+                for artifact in artifacts
+            ],
+            key=lambda item: (item["releaseId"], item["sha256"]),
+        ),
+        "readModelReleaseId": str((read_manifest or {}).get("releaseId", "")),
+        "readModels": sorted(
+            [
+                {"name": str(name), "sha256": str(metadata.get("sha256", ""))}
+                for name, metadata in (read_artifacts or {}).items()
+            ],
+            key=lambda item: item["name"],
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return f"bundle:{basis['asOf']}:{digest}"
+
+
 def _etf_artifact(
     artifact: dict[str, Any],
     workspace_root: Path,
@@ -168,7 +207,7 @@ def build_ingest_bundle(
         "version": 1,
         "snapshot": snapshot,
         "archive": {
-            "runId": str(manifest.get("run_id", "")),
+            "runId": "",
             "startedAt": str(manifest.get("started_at", "")),
             "finishedAt": str(manifest.get("finished_at", "")),
             "retentionDays": RETENTION_DAYS,
@@ -209,4 +248,10 @@ def build_ingest_bundle(
                 "contentEncoding": "gzip",
             }
         result["readModels"] = {"manifest": read_manifest, "artifacts": read_artifacts}
+    result["archive"]["runId"] = _stable_ingest_run_id(
+        snapshot,
+        artifacts,
+        (result.get("readModels") or {}).get("manifest"),
+        (result.get("readModels") or {}).get("artifacts"),
+    )
     return result
