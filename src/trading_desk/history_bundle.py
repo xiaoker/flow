@@ -95,7 +95,7 @@ def serialize_history_artifact(
     source_id = str(source.get("source_id") or "")
     dataset = str(source.get("dataset") or "")
     requested_date = str(payload.get("requested_date") or "current")
-    if source_id not in {"sse", "szse", "hkex"}:
+    if source_id not in {"sse", "szse", "bse", "hkex"}:
         raise ValueError(f"Unsupported history source: {source_id!r}")
     if dataset not in {"etf_scale", "etf_nav", "etf_pcf", "margin_market_daily", "stock_connect_daily"}:
         raise ValueError(f"Unsupported history dataset: {dataset!r}")
