@@ -142,3 +142,28 @@ def test_falls_back_to_authenticated_cloudflare_bse_relay_for_waf_html(
         "CF-Access-Client-Id": "access-id",
         "CF-Access-Client-Secret": "access-secret",
     }
+
+
+def test_preserves_direct_bse_waf_evidence_when_relay_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_proxy_environment(monkeypatch)
+    session = FakeSession(
+        [],
+        responses=[
+            FakeResponse(200, content=b"<html>challenge</html>", content_type="text/html"),
+            FakeResponse(500, content=b"relay failed", content_type="text/html"),
+        ],
+    )
+    params = {"callback": "cb", "transDate": "2026-08-17", "page": "0"}
+
+    response = get(
+        session,
+        "https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+        params=params,
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"<html>challenge</html>"
+    assert params["_flow_transport"] == "direct_waf"
+    assert len(session.calls) == 2
