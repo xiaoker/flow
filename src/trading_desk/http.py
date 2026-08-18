@@ -89,6 +89,7 @@ def get(session: requests.Session, url: str, **kwargs: object) -> requests.Respo
         return response
 
     proxy_url, proxy_headers = proxy
+    direct_response = response
     proxy_params: dict[str, object] = {
         "path": parsed.path,
         **dict(parse_qsl(parsed.query, keep_blank_values=True)),
@@ -102,13 +103,23 @@ def get(session: requests.Session, url: str, **kwargs: object) -> requests.Respo
                 if not str(key).startswith("_flow_")
             }
         )
-    response = session.get(
-        proxy_url,
-        params=proxy_params,
-        headers=proxy_headers,
-        timeout=timeout,
-    )
-    response.raise_for_status()
+    try:
+        response = session.get(
+            proxy_url,
+            params=proxy_params,
+            headers=proxy_headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        if not (is_bse_source and direct_response is not None):
+            raise
+        # Keep the original official response as evidence when the relay
+        # itself is unavailable.  The BSE adapter will archive it as pending
+        # instead of turning a transport fallback outage into a fabricated
+        # empty observation or an unrelated hard failure.
+        _record_transport(kwargs, "direct_waf")
+        return direct_response
     _record_transport(
         kwargs,
         "cloudflare_bse_relay" if is_bse_source else "cloudflare_sse_relay",
