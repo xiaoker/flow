@@ -16,6 +16,7 @@ type HistoryResponse = {
 type ReleasePointer = {
   releaseId?: string;
   asOf?: string;
+  buildSha?: string;
 };
 
 type ReadModelEnvelope = {
@@ -77,7 +78,8 @@ export function DashboardBootstrap() {
     });
     if (!response.ok) throw new Error(`view_${view}_${response.status}`);
     const viewReleaseId = response.headers.get("x-flow-release-id");
-    if (!viewReleaseId || (id && viewReleaseId !== id)) throw new Error("release_pending");
+    const viewAsOf = response.headers.get("x-flow-as-of");
+    if (!viewReleaseId || !viewAsOf || (id && viewReleaseId !== id) || viewAsOf !== base.asOf) throw new Error("release_pending");
     const envelope = await response.json() as ReadModelEnvelope;
     if (envelope.asOf !== base.asOf) throw new Error("release_pending");
     const data = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
@@ -135,6 +137,8 @@ export function DashboardBootstrap() {
       if (expectedReleaseId && nextReleaseId !== expectedReleaseId) {
         throw new Error("release_pending");
       }
+      const snapshotAsOf = snapshotResponse.headers.get("x-flow-as-of");
+      if (!snapshotAsOf || snapshotAsOf !== rawSnapshot.asOf) throw new Error("release_pending");
       const dates = Array.isArray(datesPayload.dates) ? [...datesPayload.dates] : [];
       if (!dates.includes(rawSnapshot.asOf)) dates.push(rawSnapshot.asOf);
       dates.sort();
@@ -343,6 +347,7 @@ export function DashboardBootstrap() {
     <Dashboard
       snapshot={snapshot}
       availableDates={availableDates}
+      releaseId={releaseId}
       requestedDate={requestedDateValue && requestedDateValue !== snapshot.asOf ? requestedDateValue : null}
       exactDateMatch
       initialView={requestedView(params.get("view"))}

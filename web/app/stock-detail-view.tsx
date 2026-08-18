@@ -8,6 +8,7 @@ import type {
   StockFlowDetailContributor,
   StockSearchItem,
 } from "./lib/dashboard-data";
+import { searchTextMatches } from "./lib/search-utils";
 
 type StockSearchPayload = {
   asOf?: string;
@@ -275,10 +276,9 @@ export function StockDetailView({ asOf, releaseId, venue, code }: Props) {
   const isLoading = loading || loadedKey !== requestKey;
 
   const searchResults = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return [];
+    if (!query.trim()) return [];
     return searchItems
-      .filter((item) => item.code.includes(normalized) || item.name.toLowerCase().includes(normalized))
+      .filter((item) => searchTextMatches(query, item.code, item.name))
       .slice(0, 8);
   }, [query, searchItems]);
 

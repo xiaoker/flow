@@ -14,6 +14,7 @@ import type {
   EtfTerminalInstrument,
   FlowPeriod,
 } from "./lib/dashboard-data";
+import { searchTextMatches } from "./lib/search-utils";
 
 // The observation pool is still a code-based subset of ETF Radar. Fund short
 // names are display metadata; every share and period value continues to come
@@ -114,12 +115,9 @@ export function NationalTeamView({
   const [selectedCode, setSelectedCode] = useState(nationalTeamEtfs[0].code);
   const [chartMode, setChartMode] = useState<NationalChartMode>("relative");
   const selected = rows.find((item) => item.code === selectedCode) ?? rows[0];
-  const normalizedQuery = query.trim().toLowerCase();
   const filteredRows = rows.filter(
     (item) =>
-      !normalizedQuery ||
-      item.code.includes(normalizedQuery) ||
-      item.fundShortName.toLowerCase().includes(normalizedQuery),
+      searchTextMatches(query, item.code, item.fundShortName),
   );
   const matchedRows = rows.filter((item) => item.instrument);
   const rowsWithShares = matchedRows.filter(

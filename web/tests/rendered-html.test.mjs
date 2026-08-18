@@ -205,7 +205,7 @@ test("gives every ETF Radar detail view an official-share line chart", async () 
 });
 
 test("exposes a versioned ETF-to-stock search and detail contract", async () => {
-  const [dashboard, bootstrap, detail, releaseStore, searchRoute, shardRoute, readModels] = await Promise.all([
+  const [dashboard, bootstrap, detail, releaseStore, searchRoute, shardRoute, readModels, searchUtils] = await Promise.all([
     readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/dashboard-bootstrap.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/stock-detail-view.tsx", import.meta.url), "utf8"),
@@ -213,13 +213,18 @@ test("exposes a versioned ETF-to-stock search and detail contract", async () => 
     readFile(new URL("../app/api/v2/stock-search/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v2/stocks/[shard]/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../../src/trading_desk/read_models.py", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/search-utils.ts", import.meta.url), "utf8"),
   ]);
   assert.match(dashboard, /搜索 ETF \/ 个股 \/ 代码/);
   assert.match(dashboard, /openStockDetail/);
   assert.match(bootstrap, /api\/v2\/views\/\$\{view\}/);
   assert.match(dashboard, /onLoadRadarFlow/);
   assert.match(dashboard, /点击个股查看完整贡献拆解/);
+  assert.match(dashboard, /x-flow-release-id/);
+  assert.match(dashboard, /url\.searchParams\.set\("date", snapshot\.asOf\)/);
+  assert.match(dashboard, /disabled=\{!activeAvailablePeriods\.has\(item\.id\)\}/);
   assert.match(bootstrap, /params\.get\("view"\) === "stock"/);
+  assert.match(bootstrap, /viewAsOf/);
   assert.match(detail, /只读取已通过 QA 的同一发布版本/);
   assert.match(detail, /legacy_radar_embedded_stock_flow/);
   assert.match(detail, /embeddedStockDetail/);
@@ -230,6 +235,7 @@ test("exposes a versioned ETF-to-stock search and detail contract", async () => 
   assert.match(searchRoute, /readPublishedArtifact\("stock_search"/);
   assert.match(shardRoute, /stock_\[0-7\]/);
   assert.match(readModels, /stock_catalog_required_for_available_flow/);
+  assert.match(searchUtils, /replace\(\/\\s\+\/g, ""\)/);
 });
 
 test("exposes the ETF pressure workbench without fabricating stock facts", async () => {
@@ -267,6 +273,9 @@ test("requires explicit confirmation before opening a historical date", async ()
   assert.match(source, /const latest = availableDates\.at\(-1\)/);
   assert.match(source, /if \(date === latest\) url\.searchParams\.delete\("date"\)/);
   assert.doesNotMatch(source, /onChange=\{\(event\) => event\.target\.value && openDate/);
+  assert.match(source, /data-status-strip/);
+  assert.match(source, /等待完整发布/);
+  assert.match(source, /完整发布已确认/);
 
   const importSource = await readFile(
     new URL("../app/api/v1/admin/import/route.ts", import.meta.url),
