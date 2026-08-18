@@ -34,9 +34,11 @@ def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
     assert "actions/checkout@v4" not in workflow_text
     assert "actions/setup-python@v5" not in workflow_text
     assert "actions/upload-artifact@v4" not in workflow_text
+    assert "actions/setup-node@v4" not in workflow_text
     assert "actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8" in workflow_text
     assert "actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c" in workflow_text
     assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow_text
+    assert "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38" in workflow_text
 
 
 def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
