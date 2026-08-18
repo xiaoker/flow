@@ -64,6 +64,7 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "SOURCE_READINESS_ATTEMPTS" not in workflow
     assert "sleep 120" not in workflow
     assert "pending_domains" in workflow
+    assert '.status == "archived_pending"' in workflow
     assert '.error_type == "ConnectionError"' in workflow
     assert '.error_type == "HTTPError"' in workflow
     assert workflow.index("Build dashboard snapshot") < workflow.index(
