@@ -48,7 +48,14 @@ def _candidate_headers() -> dict[str, str]:
     return {**_headers(), "Authorization": f"Bearer {ingest_key}"}
 
 
-def verify(base_url: str, *, expected_release_id: str, expected_as_of: str, timeout: float = 20.0) -> dict[str, Any]:
+def verify(
+    base_url: str,
+    *,
+    expected_release_id: str,
+    expected_as_of: str,
+    expected_build_sha: str | None = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
     root = base_url.rstrip("/")
     headers = _headers()
 
@@ -72,6 +79,8 @@ def verify(base_url: str, *, expected_release_id: str, expected_as_of: str, time
         raise RuntimeError(f"latest release mismatch: {latest}")
     if latest.get("asOf") != expected_as_of or latest.get("observedAt") is None:
         raise RuntimeError(f"latest asOf mismatch: {latest}")
+    if expected_build_sha and latest.get("buildSha") != expected_build_sha:
+        raise RuntimeError(f"latest build SHA mismatch: {latest.get('buildSha')} != {expected_build_sha}")
     for path in ("/api/v2/dashboard", "/api/v2/history/dates"):
         get(path)
     # A stale CDN/proxy response must not be mistaken for a successful canary.
@@ -106,7 +115,12 @@ def verify(base_url: str, *, expected_release_id: str, expected_as_of: str, time
         )
         if not_modified.status_code not in {200, 304}:
             not_modified.raise_for_status()
-    return {"releaseId": expected_release_id, "asOf": expected_as_of, "checkedViews": len(VIEWS)}
+    return {
+        "releaseId": expected_release_id,
+        "asOf": expected_as_of,
+        "buildSha": latest.get("buildSha"),
+        "checkedViews": len(VIEWS),
+    }
 
 
 def verify_candidate(
@@ -114,6 +128,7 @@ def verify_candidate(
     *,
     expected_release_id: str,
     expected_as_of: str,
+    expected_build_sha: str | None = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
     """Verify a staged release by explicit release ID without reading active routes."""
@@ -133,6 +148,8 @@ def verify_candidate(
             raise RuntimeError(f"candidate artifact {name} selected another release")
         if response.headers.get("x-flow-as-of") != expected_as_of:
             raise RuntimeError(f"candidate artifact {name} has an unexpected asOf")
+        if expected_build_sha and response.headers.get("x-flow-build-sha") != expected_build_sha:
+            raise RuntimeError(f"candidate artifact {name} has an unexpected build SHA")
         if response.headers.get("x-flow-release-status") != "STAGED":
             raise RuntimeError(f"candidate artifact {name} is not STAGED")
         payload = response.json()
@@ -142,6 +159,7 @@ def verify_candidate(
         "releaseId": expected_release_id,
         "asOf": expected_as_of,
         "mode": "candidate",
+        "buildSha": expected_build_sha,
         "checkedArtifacts": len(CANDIDATE_ARTIFACTS),
     }
 
@@ -152,6 +170,7 @@ def main() -> None:
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--build-sha", default=os.environ.get("FLOW_EXPECTED_BUILD_SHA"))
     parser.add_argument(
         "--candidate",
         action="store_true",
@@ -165,6 +184,7 @@ def main() -> None:
                 args.base_url,
                 expected_release_id=args.release_id,
                 expected_as_of=args.as_of,
+                expected_build_sha=args.build_sha,
                 timeout=args.timeout,
             )
         )

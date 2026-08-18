@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { flowBuildHeaders } from "../app/lib/build-info";
 
 interface Env {
   ASSETS: Fetcher;
@@ -87,7 +88,10 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    const response = await handler.fetch(request, env, ctx);
+    const headers = new Headers(response.headers);
+    for (const [name, value] of Object.entries(flowBuildHeaders())) headers.set(name, value);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
   async scheduled(
     controller: ScheduledController,

@@ -2,6 +2,7 @@ import {
   readPublishedArtifact,
   responseFromPublishedObject,
 } from "@/app/lib/release-store";
+import { flowBuildHeaders } from "@/app/lib/build-info";
 
 export const dynamic = "force-dynamic";
 
@@ -11,13 +12,13 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const requestedDate = url.searchParams.get("date") ?? undefined;
   if (requestedDate !== undefined && !ISO_DATE.test(requestedDate)) {
-    return Response.json({ error: "invalid_date" }, { status: 400 });
+    return Response.json({ error: "invalid_date" }, { status: 400, headers: flowBuildHeaders() });
   }
   const published = await readPublishedArtifact("stock_search", requestedDate);
   if (!published) {
     return Response.json(
       { error: requestedDate ? "stock_model_not_published_for_date" : "active_release_unavailable" },
-      { status: requestedDate ? 404 : 503 },
+      { status: requestedDate ? 404 : 503, headers: flowBuildHeaders() },
     );
   }
   const response = responseFromPublishedObject(published, request);

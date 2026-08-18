@@ -25,6 +25,9 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FLOW_PUBLIC_URL: https://flow.xiaoker.com
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
 
     steps:
       - name: Checkout
@@ -53,5 +56,32 @@ jobs:
       - name: Apply pending D1 migrations
         run: npx wrangler d1 migrations apply flow --remote
 
+      - name: Set build metadata
+        run: |
+          echo "FLOW_BUILD_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "FLOW_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Deploy Worker and static assets
         run: npm run deploy
+
+      - name: Verify deployed build identity
+        shell: bash
+        run: |
+          test -n "$FLOW_CF_ACCESS_CLIENT_ID" || { echo "Missing FLOW_CF_ACCESS_CLIENT_ID" >&2; exit 1; }
+          test -n "$FLOW_CF_ACCESS_CLIENT_SECRET" || { echo "Missing FLOW_CF_ACCESS_CLIENT_SECRET" >&2; exit 1; }
+          headers_file="$(mktemp)"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --retry 3 --retry-all-errors \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \
+            "$FLOW_PUBLIC_URL/api/v2/releases/latest")"
+          test "$status" = "200" || { echo "Expected 200 from latest release, got $status" >&2; cat "$body_file" >&2; exit 1; }
+          grep -Fqi "x-flow-build-sha: $GITHUB_SHA" "$headers_file" || {
+            echo "Deployed Worker build SHA header does not match $GITHUB_SHA" >&2
+            cat "$headers_file" >&2
+            exit 1
+          }
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.buildSha == $sha and (.releaseId | type == "string") and (.asOf | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
+            "$body_file" >/dev/null

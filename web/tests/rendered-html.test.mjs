@@ -695,6 +695,8 @@ test("streams the active release through the D1 pointer without parsing it", asy
   );
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-flow-release-id"), manifest.releaseId);
+  assert.match(response.headers.get("x-flow-build-sha") ?? "", /^(local|[0-9a-f]{40})$/);
+  assert.match(response.headers.get("x-flow-deployed-at") ?? "", /^(local|\d{4}-\d{2}-\d{2}T)/);
   assert.deepEqual(await response.json(), snapshot);
 });
 

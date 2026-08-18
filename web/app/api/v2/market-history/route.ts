@@ -1,4 +1,5 @@
 import { getMarketHistoryRows } from "@/app/lib/dashboard-store";
+import { flowBuildHeaders } from "@/app/lib/build-info";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,6 @@ export async function GET(request: Request) {
   const rows = await getMarketHistoryRows(asOf);
   return Response.json(
     { asOf: asOf ?? null, rows },
-    { headers: { "Cache-Control": "private, max-age=300, must-revalidate" } },
+    { headers: { "Cache-Control": "private, max-age=300, must-revalidate", ...flowBuildHeaders() } },
   );
 }
