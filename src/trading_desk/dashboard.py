@@ -382,6 +382,7 @@ def _pending_publication_domains(
     sse_margin: pd.DataFrame,
     szse_margin: pd.DataFrame,
     connect: pd.DataFrame,
+    bse_margin: pd.DataFrame | None = None,
 ) -> list[str]:
     """Return domains that have not supplied the target trading day yet.
 
@@ -406,6 +407,11 @@ def _pending_publication_domains(
         pending.append("上交所融资融券")
     if not has_date(szse_margin, target_date):
         pending.append("深交所融资融券")
+    # New releases carry the BSE path and therefore require a real BSE row;
+    # legacy releases without that path remain readable under the explicitly
+    # labelled two-market scope.
+    if bse_margin is not None and not has_date(bse_margin, target_date):
+        pending.append("北交所融资融券")
     required_channels = {
         ("SSE", "southbound"),
         ("SZSE", "southbound"),
@@ -434,6 +440,7 @@ def _latest_complete_snapshot_date(
     sse_margin: pd.DataFrame,
     szse_margin: pd.DataFrame,
     connect: pd.DataFrame,
+    bse_margin: pd.DataFrame | None = None,
 ) -> tuple[str | None, list[str]]:
     """Select the newest fully reconcilable day, not merely the newest request.
 
@@ -453,6 +460,7 @@ def _latest_complete_snapshot_date(
             sse_margin=sse_margin,
             szse_margin=szse_margin,
             connect=connect,
+            bse_margin=bse_margin,
         )
         if index == len(requested_dates) - 1:
             target_pending = pending
@@ -559,6 +567,11 @@ def build_dashboard_snapshot(
     )
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
+    bse_margin = (
+        _read_csv(workspace_root, paths["bse_margin"])
+        if "bse_margin" in paths and paths.get("bse_margin")
+        else None
+    )
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
     pcf = (
         _read_csv(workspace_root, paths["sse_etf_pcf"])
@@ -572,6 +585,8 @@ def build_dashboard_snapshot(
         "深交所融资融券": szse_margin,
         "港交所互联互通": connect,
     }
+    if bse_margin is not None:
+        required_frames["北交所融资融券"] = bse_margin
     missing_frames = [name for name, frame in required_frames.items() if frame.empty]
     if missing_frames:
         return _pending_snapshot(
@@ -588,6 +603,7 @@ def build_dashboard_snapshot(
         sse_margin=sse_margin,
         szse_margin=szse_margin,
         connect=connect,
+        bse_margin=bse_margin,
     )
     as_of = complete_as_of or target_as_of
     dates = [trade_date for trade_date in requested_dates if trade_date <= as_of]
@@ -688,7 +704,13 @@ def build_dashboard_snapshot(
         sse_margin = sse_margin.assign(market="SSE")
     if "market" not in szse_margin.columns:
         szse_margin = szse_margin.assign(market="SZSE")
-    margin = pd.concat([sse_margin, szse_margin], ignore_index=True)
+    if bse_margin is not None and "market" not in bse_margin.columns:
+        bse_margin = bse_margin.assign(market="BSE")
+    margin_frames = [sse_margin, szse_margin]
+    if bse_margin is not None:
+        margin_frames.append(bse_margin)
+    margin = pd.concat(margin_frames, ignore_index=True)
+    margin_scope_version = "sse_szse_bse_v2" if bse_margin is not None else "sse_szse_v1"
     # A newer SSE release may arrive before its SZSE counterpart.  Once the
     # snapshot selector falls back to the latest complete date, no later,
     # partial margin row may leak into the headline or chart.
@@ -812,6 +834,12 @@ def build_dashboard_snapshot(
                 "totalBalance": round(float(row.margin_total_balance_yuan) / 100_000_000, 2),
                 "sseBalance": round(float(split.get("SSE", 0)) / 100_000_000, 2),
                 "szseBalance": round(float(split.get("SZSE", 0)) / 100_000_000, 2),
+                **(
+                    {"bseBalance": round(float(split.get("BSE", 0)) / 100_000_000, 2)}
+                    if bse_margin is not None
+                    else {}
+                ),
+                "marginScopeVersion": margin_scope_version,
             }
         )
         previous_balance = balance
@@ -832,6 +860,7 @@ def build_dashboard_snapshot(
         "asOf": as_of,
         "observedAt": manifest["finished_at"],
         "mode": "官方数据快照",
+        "marginScopeVersion": margin_scope_version,
         "gate": "conditional_pass" if publication_status == "confirmed" else "blocked",
         "quality": {"pass": counts["pass"], "warn": counts["warn"], "fail": counts["fail"]},
         "publication": {
@@ -887,16 +916,20 @@ def build_dashboard_snapshot(
             },
             {
                 "id": "margin",
-                "eyebrow": "沪深融资余额",
+                "eyebrow": "沪深北融资余额" if bse_margin is not None else "沪深融资余额",
                 "value": f"{latest_margin / 1_000_000_000_000:.4f}",
                 "unit": "万亿元",
                 "delta": f"较前日 {_signed((latest_margin - previous_margin) / 100_000_000)} 亿元",
                 "tone": "positive" if latest_margin >= previous_margin else "negative",
-                "note": "沪深两市合计",
+                "note": "沪深北三市场合计" if bse_margin is not None else "沪深两市合计",
                 "basis": {
                     "kind": "official",
                     "label": "官方汇总",
-                    "detail": "上交所与深交所融资余额合计",
+                    "detail": (
+                        "上交所、深交所与北交所融资余额合计"
+                        if bse_margin is not None
+                        else "上交所与深交所融资余额合计"
+                    ),
                 },
             },
             {
@@ -933,7 +966,13 @@ def build_dashboard_snapshot(
                 ),
                 "basis": "official",
             },
-            {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深汇总", "basis": "official"},
+            {
+                "name": "融资融券",
+                "status": "ready",
+                "asOf": as_of[5:],
+                "detail": "官方沪深北三市场汇总" if bse_margin is not None else "官方沪深汇总（历史版本）",
+                "basis": "official",
+            },
             {
                 "name": "互联互通",
                 "status": "warning" if connect_latest.empty else "ready",

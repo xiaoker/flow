@@ -977,8 +977,9 @@ export async function POST(request: Request) {
            szse_balance, southbound_net, southbound_turnover,
            southbound_sse_net, southbound_szse_net, northbound_turnover,
            northbound_etf_turnover, northbound_trade_count, margin_available,
-           connect_available, source_snapshot_sha256, observed_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           connect_available, source_snapshot_sha256, observed_at, created_at,
+           bse_balance, margin_scope_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(trade_date) DO UPDATE SET
            margin_balance = excluded.margin_balance,
            margin_change = excluded.margin_change,
@@ -999,7 +1000,9 @@ export async function POST(request: Request) {
            connect_available = excluded.connect_available,
            source_snapshot_sha256 = excluded.source_snapshot_sha256,
            observed_at = excluded.observed_at,
-           created_at = excluded.created_at`,
+           created_at = excluded.created_at,
+           bse_balance = excluded.bse_balance,
+           margin_scope_version = excluded.margin_scope_version`,
       )
       .bind(
         marketPoint.trade_date,
@@ -1023,6 +1026,8 @@ export async function POST(request: Request) {
         snapshotSha256,
         history.snapshot.observedAt,
         createdAt,
+        marketPoint.bse_balance,
+        marketPoint.margin_scope_version,
       )
       .run();
 

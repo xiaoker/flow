@@ -194,8 +194,29 @@ _MARKET_HISTORY_FIELDS = (
     "connect_available",
     "source_snapshot_sha256",
     "observed_at",
+    "bse_balance",
+    "margin_scope_version",
 )
-_MARKET_HISTORY_NUMERIC_FIELDS = set(_MARKET_HISTORY_FIELDS[1:16])
+_MARKET_HISTORY_NUMERIC_FIELDS = {
+    "margin_balance",
+    "margin_change",
+    "financing_buy",
+    "lending_balance",
+    "lending_sell_volume",
+    "total_balance",
+    "sse_balance",
+    "szse_balance",
+    "bse_balance",
+    "southbound_net",
+    "southbound_turnover",
+    "southbound_sse_net",
+    "southbound_szse_net",
+    "northbound_turnover",
+    "northbound_etf_turnover",
+    "northbound_trade_count",
+}
+MARGIN_SCOPE_V1 = "sse_szse_v1"
+MARGIN_SCOPE_V2 = "sse_szse_bse_v2"
 
 
 def _is_valid_iso_date(value: Any) -> bool:
@@ -295,6 +316,12 @@ def _normalize_market_history(
             raise ReadModelError(f"market_history_observed_at_invalid:{trade_date}")
         row["source_snapshot_sha256"] = source_hash
         row["observed_at"] = observed_at
+        scope = raw.get("margin_scope_version", MARGIN_SCOPE_V1)
+        if scope not in (MARGIN_SCOPE_V1, MARGIN_SCOPE_V2):
+            raise ReadModelError(f"market_history_margin_scope_invalid:{trade_date}")
+        if scope == MARGIN_SCOPE_V2 and row["margin_available"] == 1 and row["bse_balance"] is None:
+            raise ReadModelError(f"market_history_bse_balance_missing:{trade_date}")
+        row["margin_scope_version"] = scope
         normalized.append(row)
 
     normalized.sort(key=lambda item: item["trade_date"])
@@ -316,9 +343,11 @@ def _normalize_market_history(
             ("total_balance", "totalBalance"),
             ("sse_balance", "sseBalance"),
             ("szse_balance", "szseBalance"),
+            ("bse_balance", "bseBalance"),
         ):
             if row[source] is not None:
                 point[target] = row[source]
+        point["marginScopeVersion"] = row["margin_scope_version"]
         return point
 
     def connect_point(row: dict[str, Any]) -> dict[str, Any] | None:

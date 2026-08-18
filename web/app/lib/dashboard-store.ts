@@ -94,7 +94,8 @@ async function loadMarketHistoryRows(
            szse_balance, southbound_net, southbound_turnover,
            southbound_sse_net, southbound_szse_net, northbound_turnover,
            northbound_etf_turnover, northbound_trade_count, margin_available,
-           connect_available, source_snapshot_sha256, observed_at
+           connect_available, source_snapshot_sha256, observed_at,
+           bse_balance, margin_scope_version
          FROM market_history_daily
          WHERE trade_date <= ?
          ORDER BY trade_date DESC

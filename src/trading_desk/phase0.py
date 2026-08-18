@@ -18,6 +18,7 @@ from .quality import (
     validate_etf,
     validate_etf_nav,
     validate_etf_pcf,
+    validate_bse_margin,
     validate_margin,
 )
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
@@ -209,6 +210,16 @@ def collect_phase0(
 
     for trade_date in dates:
         result = run_step(
+            f"bse_margin:{trade_date}",
+            lambda date=trade_date: adapters.fetch_bse_margin(date),
+        )
+        if result:
+            frame, artifact = result
+            frames["bse_margin"].append(frame)
+            artifacts.append(artifact)
+
+    for trade_date in dates:
+        result = run_step(
             f"hkex_connect:{trade_date}",
             lambda date=trade_date: adapters.fetch_hkex_connect(date),
         )
@@ -282,6 +293,7 @@ def collect_phase0(
         "sse_etf_pcf": validate_etf_pcf,
         "sse_margin": validate_margin,
         "szse_margin": validate_margin,
+        "bse_margin": validate_bse_margin,
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),
         "stock_connect_top": lambda frame, _: validate_connect_top(frame),
     }
@@ -292,7 +304,7 @@ def collect_phase0(
         profiles[dataset] = profile(frame)
         findings.extend(validators[dataset](frame, dataset))
 
-    for dataset in ("sse_etf", "sse_margin", "szse_margin", "stock_connect_summary"):
+    for dataset in ("sse_etf", "sse_margin", "szse_margin", "bse_margin", "stock_connect_summary"):
         observed_dates = profiles.get(dataset, {}).get("distinct_trade_dates", [])
         findings.append(
             _coverage_finding(

@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from .adapters.official import parse_hkex_tab_data
+from .adapters.official import parse_bse_margin_summary, parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
 from .etf_flow_state import materialize_dashboard_snapshot
 from .etf_facts import build_canonical_etf_daily_fact
@@ -28,6 +28,7 @@ from .storage import now_iso, write_json
 APPROVED_SOURCE_HOSTS = {
     "sse": {"query.sse.com.cn", "www.sse.com.cn"},
     "szse": {"fund.szse.cn", "www.szse.cn"},
+    "bse": {"www.bse.cn"},
     "hkex": {"www.hkex.com.hk"},
 }
 
@@ -36,6 +37,7 @@ COMBINED_DATASET_KEYS = {
     ("szse", "etf_scale"): ("szse_etf",),
     ("sse", "margin_market_daily"): ("sse_margin",),
     ("szse", "margin_market_daily"): ("szse_margin",),
+    ("bse", "margin_market_daily"): ("bse_margin",),
     ("hkex", "stock_connect_daily"): (
         "stock_connect_summary",
         "stock_connect_top",
@@ -348,6 +350,32 @@ def _expected_szse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
     )
 
 
+def _expected_bse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
+    rows, selected_date = parse_bse_margin_summary(content.decode("utf-8"))
+    if selected_date != requested_date:
+        return pd.DataFrame()
+    summary = next(
+        (row for row in rows if str(row.get("zqdm") or "").strip() == "999999"),
+        None,
+    )
+    if summary is None:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [
+            {
+                "trade_date": requested_date,
+                "market": "BSE",
+                "financing_balance_yuan": _number(summary.get("rzye")),
+                "financing_buy_yuan": _number(summary.get("rzmre")),
+                "securities_lending_balance_yuan": _number(summary.get("rqye")),
+                "securities_lending_volume_shares": _number(summary.get("rqyl")),
+                "securities_lending_sell_volume_shares": _number(summary.get("rqmcl")),
+                "margin_total_balance_yuan": _number(summary.get("rzrqye")),
+            }
+        ]
+    )
+
+
 def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     text = content.decode("utf-8").lstrip("\ufeff").strip()
     summary_rows: list[dict[str, Any]] = []
@@ -497,6 +525,14 @@ def validate_raw_to_normalized_mapping(
             elif (source_id, dataset) == ("szse", "margin_market_daily"):
                 result = _compare_frames(
                     _expected_szse_margin(content, requested_date),
+                    _read_csv(normalized_paths[0]),
+                    keys=["trade_date", "market"],
+                    text_columns=[],
+                    numeric_columns=["financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan"],
+                )
+            elif (source_id, dataset) == ("bse", "margin_market_daily"):
+                result = _compare_frames(
+                    _expected_bse_margin(content, requested_date),
                     _read_csv(normalized_paths[0]),
                     keys=["trade_date", "market"],
                     text_columns=[],
@@ -696,13 +732,16 @@ def validate_artifact_lineage(
             remediation="将 source_id 纳入规范化文件目录，并重新采集。",
         )
     )
-    missing_sources = sorted(set(APPROVED_SOURCE_HOSTS) - observed_sources)
+    required_sources = {"sse", "szse", "hkex"}
+    if "bse" in observed_sources or "bse_margin" in (manifest.get("combined_paths") or {}):
+        required_sources.add("bse")
+    missing_sources = sorted(required_sources - observed_sources)
     findings.append(
         _finding(
             "provenance.required_publishers",
             "manifest",
             not missing_sources,
-            message="三家交易所来源齐全" if not missing_sources else "缺少交易所来源",
+            message=("四家交易所来源齐全" if "bse" in required_sources else "三家交易所来源齐全") if not missing_sources else "缺少交易所来源",
             evidence={"observed": sorted(observed_sources), "missing": missing_sources},
             remediation="ETF、两融和互联互通任一官方来源缺失时不发布。",
         )
@@ -715,7 +754,10 @@ def _load_combined_frames(
 ) -> tuple[dict[str, pd.DataFrame], list[str]]:
     frames: dict[str, pd.DataFrame] = {}
     missing: list[str] = []
-    for name in EXPECTED_CONTEXT:
+    expected_context = dict(EXPECTED_CONTEXT)
+    if "bse_margin" in (manifest.get("combined_paths") or {}):
+        expected_context["bse_margin"] = ("bse", {"BSE"})
+    for name in expected_context:
         relative_path = (manifest.get("combined_paths") or {}).get(name)
         if not relative_path or not (workspace_root / relative_path).is_file():
             missing.append(name)
@@ -759,6 +801,7 @@ def validate_combined_data(
         "szse_etf": ["trade_date", "market", "instrument_code", "instrument_name", "shares", "source_id", "source_grade"],
         "sse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
         "szse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
+        "bse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
         "stock_connect_summary": ["trade_date", "market", "direction", "currency", "total_turnover", "total_trade_count", "etf_turnover", "source_id"],
         "stock_connect_top": ["trade_date", "market", "direction", "rank", "instrument_code", "instrument_name", "total_turnover", "source_id"],
     }
@@ -777,7 +820,10 @@ def validate_combined_data(
             "source_id",
         ],
     }
-    for name, (source_id, markets) in EXPECTED_CONTEXT.items():
+    expected_context = dict(EXPECTED_CONTEXT)
+    if "bse_margin" in frames:
+        expected_context["bse_margin"] = ("bse", {"BSE"})
+    for name, (source_id, markets) in expected_context.items():
         frame = frames.get(name, pd.DataFrame())
         missing_columns = sorted(set(required_columns[name]) - set(frame.columns))
         null_rows = 0 if missing_columns else int(frame[required_values[name]].isna().any(axis=1).sum())
@@ -1394,7 +1440,10 @@ def validate_snapshot_values(
         )
         etf_expected = round(etf_expected, 2)
 
-        margin = pd.concat([frames["sse_margin"], frames["szse_margin"]], ignore_index=True)
+        margin_frames = [frames["sse_margin"], frames["szse_margin"]]
+        if "bse_margin" in frames and not frames["bse_margin"].empty:
+            margin_frames.append(frames["bse_margin"])
+        margin = pd.concat(margin_frames, ignore_index=True)
         margin_expected = round(float(margin[margin["trade_date"].astype(str).eq(as_of)]["financing_balance_yuan"].sum()) / 1_000_000_000_000, 4)
         connect = frames["stock_connect_summary"]
         current = connect[connect["trade_date"].astype(str).eq(as_of)]

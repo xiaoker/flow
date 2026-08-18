@@ -8,6 +8,7 @@ from trading_desk.quality import (
     validate_connect_summary,
     validate_etf,
     validate_etf_nav,
+    validate_bse_margin,
     validate_margin,
 )
 
@@ -57,6 +58,30 @@ def test_margin_total_consistency_passes_with_szse_rounding() -> None:
         item for item in summary["findings"] if item["check_id"] == "consistency.margin_total"
     )
     assert consistency["evidence"]["max_abs_delta_yuan"] == 0
+
+
+def test_bse_margin_requires_market_and_source_date_alignment() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-30",
+                "source_trade_date": "2026-07-30",
+                "market": "BSE",
+                "financing_balance_yuan": 8_210_630_112,
+                "financing_buy_yuan": 433_272_098,
+                "securities_lending_balance_yuan": 454_583,
+                "securities_lending_volume_shares": 61_368,
+                "securities_lending_sell_volume_shares": 24_200,
+                "margin_total_balance_yuan": 8_211_084_695,
+            }
+        ]
+    )
+
+    summary = summarize_findings(validate_bse_margin(frame))
+
+    assert summary["counts"]["fail"] == 0
+    assert any(item["check_id"] == "validity.bse_margin_market" for item in summary["findings"])
+    assert any(item["check_id"] == "timeliness.bse_source_date" for item in summary["findings"])
 
 
 def test_connect_rejects_northbound_buy_sell_after_disclosure_change() -> None:

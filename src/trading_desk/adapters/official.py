@@ -57,6 +57,13 @@ SZSE_MARGIN = SourceSpec(
     dataset="margin_market_daily",
     url="https://www.szse.cn/api/report/ShowReport/data",
 )
+BSE_MARGIN = SourceSpec(
+    source_id="bse",
+    publisher="北京证券交易所",
+    dataset="margin_market_daily",
+    url="https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+    date_semantics="bse_official_summary_trade_date",
+)
 HKEX_CONNECT = SourceSpec(
     source_id="hkex",
     publisher="香港交易所",
@@ -208,6 +215,32 @@ def _szse_etf_dates(
     # trading day.  The date embedded in the column label is display metadata:
     # it can equal the disclosure date, so it must not override that rule.
     return page_date, expected_data_date, scale_header, displayed_data_date
+
+
+def parse_bse_margin_summary(text: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Parse the BSE summary endpoint's JSONP response.
+
+    The public page currently returns ``null([[{...}]], 'YYYY-MM-DD')`` rather
+    than JSON.  Keep the parser deliberately narrow: the selected date is
+    retained as evidence and callers must reject a response whose date does
+    not match the requested trade date.
+    """
+
+    normalized = text.lstrip("\ufeff").strip()
+    match = re.search(
+        r"\(\s*(\[.*\])\s*,\s*['\"]?(20\d{2}-\d{2}-\d{2})['\"]?\s*\)\s*;?\s*$",
+        normalized,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise ValueError("BSE margin response did not match the expected JSONP wrapper")
+    payload = json.loads(match.group(1))
+    selected_date = _iso_date(match.group(2), field="BSE selected date")
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], list):
+        payload = payload[0]
+    if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+        raise ValueError("BSE margin summary payload was not an array of rows")
+    return payload, selected_date
 
 
 class OfficialMarketAdapters:
@@ -868,6 +901,101 @@ class OfficialMarketAdapters:
         )
         if normalized.empty:
             artifact.warnings.append(f"深交所尚未返回 {trade_date} 的两融汇总数据。")
+        return self._persist(normalized, artifact, trade_date)
+
+    def fetch_bse_margin(self, trade_date: str) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Fetch the official BSE aggregate margin snapshot for one date.
+
+        The endpoint returns raw amount fields in RMB and quantity fields in
+        shares, despite the page rendering them in 万元/万股.  We retain those
+        canonical units in the normalized frame and record the display-unit
+        mapping in request metadata.  A JSONP response for another date is
+        evidence of a stale source and is never assigned to the requested
+        snapshot.
+        """
+
+        params = {
+            "transDate": trade_date,
+            "page": "0",
+        }
+        response = get(
+            self.session,
+            BSE_MARGIN.url,
+            params=params,
+            headers=self._headers("https://www.bse.cn/disclosure/rzrq_trans_list.html"),
+        )
+        artifact = write_raw_response(
+            root=self.data_root,
+            source=BSE_MARGIN,
+            requested_date=trade_date,
+            run_id=self.run_id,
+            content=response.content,
+            extension="jsonp",
+            status_code=response.status_code,
+            content_type=response.headers.get("Content-Type", "application/javascript"),
+            request_params={
+                **params,
+                "page_url": "https://www.bse.cn/disclosure/rzrq_trans_list.html",
+                "raw_amount_unit": "yuan",
+                "raw_quantity_unit": "shares",
+                "display_amount_unit": "万元",
+                "display_quantity_unit": "万股",
+            },
+        )
+        try:
+            rows, selected_date = parse_bse_margin_summary(response.text)
+        except (TypeError, ValueError) as exc:
+            artifact.warnings.append(f"北交所两融 JSONP 解析失败：{type(exc).__name__}")
+            rows, selected_date = [], None
+        if selected_date != trade_date:
+            artifact.warnings.append(
+                f"北交所两融返回日期 {selected_date or '缺失'} 与请求日期 {trade_date} 不一致；未归属该日。"
+            )
+            rows = []
+
+        # zqdm=999999 is the official aggregate row.  Do not sum the detail
+        # endpoint here: the summary explicitly includes positions from
+        # securities that may have left the current margin target universe.
+        summary = next(
+            (
+                row
+                for row in rows
+                if str(row.get("zqdm") or "").strip() == "999999"
+            ),
+            None,
+        )
+        if summary is None:
+            normalized = pd.DataFrame(
+                columns=[
+                    "trade_date", "market", "financing_balance_yuan",
+                    "financing_buy_yuan", "securities_lending_balance_yuan",
+                    "securities_lending_volume_shares",
+                    "securities_lending_sell_volume_shares",
+                    "margin_total_balance_yuan", "source_id", "source_grade",
+                    "date_basis", "source_trade_date", "observed_at",
+                ]
+            )
+            artifact.warnings.append(f"北交所尚未返回 {trade_date} 的两融汇总数据。")
+        else:
+            normalized = pd.DataFrame(
+                [
+                    {
+                        "trade_date": trade_date,
+                        "market": "BSE",
+                        "financing_balance_yuan": _number(summary.get("rzye")),
+                        "financing_buy_yuan": _number(summary.get("rzmre")),
+                        "securities_lending_balance_yuan": _number(summary.get("rqye")),
+                        "securities_lending_volume_shares": _number(summary.get("rqyl")),
+                        "securities_lending_sell_volume_shares": _number(summary.get("rqmcl")),
+                        "margin_total_balance_yuan": _number(summary.get("rzrqye")),
+                        "source_id": BSE_MARGIN.source_id,
+                        "source_grade": BSE_MARGIN.source_grade,
+                        "date_basis": BSE_MARGIN.date_semantics,
+                        "source_trade_date": selected_date,
+                        "observed_at": artifact.observed_at,
+                    }
+                ]
+            )
         return self._persist(normalized, artifact, trade_date)
 
     def fetch_hkex_connect(

@@ -135,6 +135,8 @@ def _record(path: Path, metadata: dict[str, str]) -> tuple[list[Any], bool, bool
         metadata["snapshot_sha256"],
         str(snapshot.get("observedAt") or ""),
         str(snapshot.get("observedAt") or ""),
+        _finite((margin or {}).get("bseBalance")),
+        str((margin or {}).get("marginScopeVersion") or "sse_szse_v1"),
     ]
     return values, bool(margin), bool(connect)
 
@@ -153,7 +155,8 @@ def _write_sql(
       szse_balance, southbound_net, southbound_turnover,
       southbound_sse_net, southbound_szse_net, northbound_turnover,
       northbound_etf_turnover, northbound_trade_count, margin_available,
-      connect_available, source_snapshot_sha256, observed_at, created_at
+      connect_available, source_snapshot_sha256, observed_at, created_at,
+      bse_balance, margin_scope_version
     """.strip()
     upsert = """ON CONFLICT(trade_date) DO UPDATE SET
           margin_balance=excluded.margin_balance,
@@ -164,6 +167,8 @@ def _write_sql(
           total_balance=excluded.total_balance,
           sse_balance=excluded.sse_balance,
           szse_balance=excluded.szse_balance,
+          bse_balance=excluded.bse_balance,
+          margin_scope_version=excluded.margin_scope_version,
           southbound_net=excluded.southbound_net,
           southbound_turnover=excluded.southbound_turnover,
           southbound_sse_net=excluded.southbound_sse_net,
@@ -178,7 +183,14 @@ def _write_sql(
           created_at=excluded.created_at;"""
     statements = []
     for offset in range(0, len(records), batch_size):
-        batch = records[offset : offset + batch_size]
+        batch = []
+        for record in records[offset : offset + batch_size]:
+            normalized = list(record)
+            if len(normalized) == 21:
+                normalized.extend([None, "sse_szse_v1"])
+            if len(normalized) != 23:
+                raise ValueError(f"market history record has {len(normalized)} values; expected 23")
+            batch.append(normalized)
         statements.append(
             "\n".join(
                 [
@@ -196,8 +208,10 @@ def _write_sql(
 
 def _compact_row(values: list[Any]) -> dict[str, Any]:
     """Convert the SQL value tuple into the portable build-time row shape."""
-
-    return dict(zip(_MARKET_HISTORY_ROW_FIELDS, values[: len(_MARKET_HISTORY_ROW_FIELDS)]))
+    row = dict(zip(_MARKET_HISTORY_ROW_FIELDS, values[: len(_MARKET_HISTORY_ROW_FIELDS)]))
+    row["bse_balance"] = values[21] if len(values) > 21 else None
+    row["margin_scope_version"] = values[22] if len(values) > 22 else "sse_szse_v1"
+    return row
 
 
 _MARKET_HISTORY_ROW_FIELDS = (

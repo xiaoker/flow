@@ -342,6 +342,8 @@ export interface DashboardSnapshot {
     totalBalance?: number;
     sseBalance?: number;
     szseBalance?: number;
+    bseBalance?: number;
+    marginScopeVersion?: "sse_szse_v1" | "sse_szse_bse_v2" | string;
   }>;
   connect: Array<{
     name: string;
