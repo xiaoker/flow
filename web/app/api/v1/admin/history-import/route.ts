@@ -33,7 +33,7 @@ type NormalizedFile = {
 
 type HistoryArtifact = {
   releaseId: string;
-  sourceId: "sse" | "szse" | "hkex";
+  sourceId: "sse" | "szse" | "bse" | "hkex";
   dataset: "etf_scale" | "etf_nav" | "etf_pcf" | "margin_market_daily" | "stock_connect_daily";
   requestedDate: string;
   tradeDates: string[];
@@ -93,6 +93,7 @@ function isOfficialSource(
       return dataset === "stock_connect_daily" && hostname === "www.hkex.com.hk";
     }
     if (sourceId === "sse") return hostname === "query.sse.com.cn";
+    if (sourceId === "bse") return hostname === "www.bse.cn";
     return hostname === "www.szse.cn" || hostname === "fund.szse.cn";
   } catch {
     return false;
@@ -122,7 +123,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
   const sourceId = value.sourceId;
   const dataset = value.dataset;
   if (
-    (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "hkex") ||
+    (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "bse" && sourceId !== "hkex") ||
     (dataset !== "etf_scale" &&
       dataset !== "etf_nav" &&
       dataset !== "etf_pcf" &&
@@ -134,7 +135,8 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
     (dataset === "etf_scale" && (sourceId === "sse" || sourceId === "szse")) ||
     (dataset === "etf_nav" && sourceId === "sse") ||
     (dataset === "etf_pcf" && sourceId === "sse") ||
-    (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse"));
+    (dataset === "margin_market_daily" &&
+      (sourceId === "sse" || sourceId === "szse" || sourceId === "bse"));
   if (!expectedPair) return false;
   return Boolean(
     typeof value.requestedDate === "string" &&
@@ -552,7 +554,7 @@ async function persistStandardRows(
     if (rows.length !== normalized.file.rowCount) throw new Error("margin_row_count_mismatch");
     const values = rows.map((row) => {
       validateStandardRow(artifact, row);
-      if (!["SSE", "SZSE"].includes(row.market)) throw new Error("invalid_margin_market");
+      if (!["SSE", "SZSE", "BSE"].includes(row.market)) throw new Error("invalid_margin_market");
       return {
         tradeDate: row.trade_date,
         market: row.market,
