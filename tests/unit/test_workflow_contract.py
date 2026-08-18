@@ -34,9 +34,9 @@ def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
     assert "actions/checkout@v4" not in workflow_text
     assert "actions/setup-python@v5" not in workflow_text
     assert "actions/upload-artifact@v4" not in workflow_text
-    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in workflow_text
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow_text
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow_text
+    assert "actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8" in workflow_text
+    assert "actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c" in workflow_text
+    assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow_text
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
