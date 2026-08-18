@@ -596,6 +596,20 @@ test("keeps the official-source relay private and allowlisted", async () => {
     error: "invalid_source_request",
     detail: "path is not allowlisted",
   });
+
+  const invalidBse = await worker.fetch(
+    new Request(
+      "http://localhost/api/v1/admin/source-proxy?path=/rzrqjyyexxController/summaryInfoResult.do&callback=cb&transDate=2026-08-17&page=1",
+      { headers: { authorization: "Bearer test-key" } },
+    ),
+    { ...env, INGEST_API_KEY: "test-key" },
+    context,
+  );
+  assert.equal(invalidBse.status, 400);
+  assert.deepEqual(await invalidBse.json(), {
+    error: "invalid_source_request",
+    detail: "page must be 0",
+  });
 });
 
 test("streams an archived dashboard for an explicitly selected date", async () => {

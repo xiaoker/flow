@@ -4,6 +4,7 @@ import { runtimeEnv } from "@/app/lib/dashboard-store";
 export const dynamic = "force-dynamic";
 
 const UPSTREAM_ORIGIN = "https://query.sse.com.cn";
+const BSE_UPSTREAM_ORIGIN = "https://www.bse.cn";
 const MAX_RESPONSE_BYTES = 10_000_000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const COMPACT_DATE = /^\d{8}$/;
@@ -14,6 +15,7 @@ const SSE_ETF_SCALE_SQL = "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L";
 const SSE_ETF_NAV_SQL = "COMMON_SSE_PL_ETFGGSGSHQD_L";
 const SSE_ETF_PCF_BASIC_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C";
 const SSE_ETF_PCF_COMPONENT_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C";
+const BSE_MARGIN_PATH = "/rzrqjyyexxController/summaryInfoResult.do";
 
 const COMMON_QUERY_PARAMETERS = new Set([
   "isPagination",
@@ -43,6 +45,7 @@ const MARGIN_QUERY_PARAMETERS = new Set([
   "pageHelp.cacheSize",
   "pageHelp.endPage",
 ]);
+const BSE_MARGIN_QUERY_PARAMETERS = new Set(["callback", "transDate", "page"]);
 
 function secureEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
@@ -69,6 +72,7 @@ function allowedParameters(path: string): Set<string> | null {
   if (path === "/marketdata/tradedata/queryMargin.do") {
     return MARGIN_QUERY_PARAMETERS;
   }
+  if (path === BSE_MARGIN_PATH) return BSE_MARGIN_QUERY_PARAMETERS;
   return null;
 }
 
@@ -120,6 +124,16 @@ function validateQuery(path: string, query: URLSearchParams): string | null {
         return "ETF_VERSION must be XML";
       }
     }
+  } else if (path === BSE_MARGIN_PATH) {
+    if (query.get("callback") !== "cb") {
+      return "callback must be cb";
+    }
+    if (!ISO_DATE.test(query.get("transDate") ?? "")) {
+      return "transDate must be YYYY-MM-DD";
+    }
+    if (query.get("page") !== "0") {
+      return "page must be 0";
+    }
   } else {
     if (!COMPACT_DATE.test(query.get("beginDate") ?? "")) {
       return "beginDate must be YYYYMMDD";
@@ -149,12 +163,17 @@ export async function GET(request: Request) {
   const validationError = validateQuery(path, requestUrl.searchParams);
   if (validationError) return invalidRequest(validationError);
 
-  const upstreamUrl = new URL(path, UPSTREAM_ORIGIN);
+  const isBseMargin = path === BSE_MARGIN_PATH;
+  const upstreamUrl = new URL(
+    path,
+    isBseMargin ? BSE_UPSTREAM_ORIGIN : UPSTREAM_ORIGIN,
+  );
   for (const [key, value] of requestUrl.searchParams) {
     if (key !== "path") upstreamUrl.searchParams.append(key, value);
   }
-  const referer =
-    path === "/commonQuery.do"
+  const referer = isBseMargin
+    ? "https://www.bse.cn/disclosure/rzrq_trans_list.html"
+    : path === "/commonQuery.do"
       ? "https://www.sse.com.cn/assortment/fund/etf/list/scale/"
       : "https://www.sse.com.cn/market/othersdata/margin/sum/";
   const upstream = await fetch(upstreamUrl, {
@@ -168,7 +187,8 @@ export async function GET(request: Request) {
     },
     redirect: "follow",
   });
-  if (upstream.url && new URL(upstream.url).hostname !== "query.sse.com.cn") {
+  const expectedHost = isBseMargin ? "www.bse.cn" : "query.sse.com.cn";
+  if (upstream.url && new URL(upstream.url).hostname !== expectedHost) {
     return NextResponse.json(
       { error: "unexpected_upstream_redirect" },
       { status: 502 },
@@ -188,7 +208,9 @@ export async function GET(request: Request) {
       headers: {
         "Cache-Control": "no-store",
         "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
-        "X-Flow-Source-Transport": "cloudflare-sse-relay",
+        "X-Flow-Source-Transport": isBseMargin
+          ? "cloudflare-bse-relay"
+          : "cloudflare-sse-relay",
       },
     });
   }
@@ -216,7 +238,9 @@ export async function GET(request: Request) {
       "Cache-Control": "no-store",
       "Content-Type":
         upstream.headers.get("Content-Type") ?? "application/json",
-      "X-Flow-Source-Transport": "cloudflare-sse-relay",
+      "X-Flow-Source-Transport": isBseMargin
+        ? "cloudflare-bse-relay"
+        : "cloudflare-sse-relay",
     },
   });
 }
