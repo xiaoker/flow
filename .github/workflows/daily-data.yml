@@ -276,7 +276,13 @@ jobs:
             --output publish-response.json \
             "$PUBLISH_URL"
           jq -e '
-            (.status == "published" or .status == "already_published") and
+            # A source-not-ready run is intentionally archived as pending.  It
+            # must be treated as a successful transport step so the final gate
+            # can preserve the active release without attempting to build
+            # derived read models from incomplete inputs.
+            (.status == "published" or
+             .status == "already_published" or
+             .status == "archived_pending") and
             (.readModelActivation == null or
              .readModelActivation == "activated" or
              .readModelActivation == "staged_older_than_active" or
