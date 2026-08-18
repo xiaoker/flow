@@ -91,6 +91,12 @@ test("refreshes the latest dashboard and schedules collection through source rel
   ]);
 });
 
+test("does not let the outer Worker overwrite an injected build identity", async () => {
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(worker, /const existing = headers\.get\(name\)/);
+  assert.match(worker, /if \(!existing && value !== "local"\) headers\.set\(name, value\)/);
+});
+
 test("keeps release history and rollback reads exact and migration-compatible", async () => {
   const [contract, capabilities, candidates, artifact, dates, importer] = await Promise.all([
     readFile(new URL("../app/lib/read-model-contract.ts", import.meta.url), "utf8"),

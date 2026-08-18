@@ -71,17 +71,30 @@ jobs:
           test -n "$FLOW_CF_ACCESS_CLIENT_SECRET" || { echo "Missing FLOW_CF_ACCESS_CLIENT_SECRET" >&2; exit 1; }
           headers_file="$(mktemp)"
           body_file="$(mktemp)"
-          status="$(curl --silent --show-error --retry 3 --retry-all-errors \
-            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
-            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
-            --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \
-            "$FLOW_PUBLIC_URL/api/v2/releases/latest")"
-          test "$status" = "200" || { echo "Expected 200 from latest release, got $status" >&2; cat "$body_file" >&2; exit 1; }
-          grep -Fqi "x-flow-build-sha: $GITHUB_SHA" "$headers_file" || {
-            echo "Deployed Worker build SHA header does not match $GITHUB_SHA" >&2
-            cat "$headers_file" >&2
+          verified=0
+          for attempt in $(seq 1 20); do
+            : > "$headers_file"
+            : > "$body_file"
+            status="$(curl --silent --show-error --retry 2 --retry-all-errors \
+              --header "Cache-Control: no-cache" \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \
+              "$FLOW_PUBLIC_URL/api/v2/releases/latest?build_check=$GITHUB_SHA&attempt=$attempt")"
+            if [ "$status" = "200" ] \
+              && grep -Fqi "x-flow-build-sha: $GITHUB_SHA" "$headers_file" \
+              && jq -e --arg sha "$GITHUB_SHA" \
+                '.buildSha == $sha and (.releaseId | type == "string") and (.asOf | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
+                "$body_file" >/dev/null; then
+              verified=1
+              echo "Verified deployed Worker build identity on attempt $attempt."
+              break
+            fi
+            if [ "$attempt" -lt 20 ]; then sleep 2; fi
+          done
+          if [ "$verified" -ne 1 ]; then
+            echo "Deployed Worker did not expose build SHA $GITHUB_SHA within the rollout window." >&2
+            grep -FiE '^(HTTP/|x-flow-build-sha:|x-flow-deployed-at:|x-flow-release-id:|cache-control:)' "$headers_file" >&2 || true
+            jq -c '{buildSha, releaseId, asOf}' "$body_file" >&2 || true
             exit 1
-          }
-          jq -e --arg sha "$GITHUB_SHA" \
-            '.buildSha == $sha and (.releaseId | type == "string") and (.asOf | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
-            "$body_file" >/dev/null
+          fi

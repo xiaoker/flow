@@ -90,7 +90,15 @@ const worker = {
 
     const response = await handler.fetch(request, env, ctx);
     const headers = new Headers(response.headers);
-    for (const [name, value] of Object.entries(flowBuildHeaders())) headers.set(name, value);
+    // Route handlers are built by Vite and carry the commit-specific build
+    // identity.  The outer Worker entry is bundled by Wrangler separately and
+    // may only have the local fallback available.  Never let that fallback
+    // overwrite a verified identity from the app bundle, or advertise
+    // `local` as a production identity on a route that has no build header.
+    for (const [name, value] of Object.entries(flowBuildHeaders())) {
+      const existing = headers.get(name);
+      if (!existing && value !== "local") headers.set(name, value);
+    }
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
   async scheduled(
