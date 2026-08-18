@@ -43,6 +43,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set build metadata
+        # vinext deploy publishes the build produced by the preceding build
+        # step. Set the values before the contract test's build so the bundle
+        # that is uploaded cannot fall back to the local identity.
+        run: |
+          echo "FLOW_BUILD_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "FLOW_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Run Web lint and production contract tests
         run: |
           npm run lint
@@ -55,11 +63,6 @@ jobs:
 
       - name: Apply pending D1 migrations
         run: npx wrangler d1 migrations apply flow --remote
-
-      - name: Set build metadata
-        run: |
-          echo "FLOW_BUILD_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "FLOW_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Deploy Worker and static assets
         run: npm run deploy
@@ -94,7 +97,7 @@ jobs:
           done
           if [ "$verified" -ne 1 ]; then
             echo "Deployed Worker did not expose build SHA $GITHUB_SHA within the rollout window." >&2
-            grep -FiE '^(HTTP/|x-flow-build-sha:|x-flow-deployed-at:|x-flow-release-id:|cache-control:)' "$headers_file" >&2 || true
+            grep -iE '^(HTTP/|x-flow-build-sha:|x-flow-deployed-at:|x-flow-release-id:|cache-control:)' "$headers_file" >&2 || true
             jq -c '{buildSha, releaseId, asOf}' "$body_file" >&2 || true
             exit 1
           fi
