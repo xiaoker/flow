@@ -899,6 +899,11 @@ test("archives full-source history with server-side hash verification", async ()
     "trade_date,market,financing_balance_yuan,financing_buy_yuan,securities_lending_balance_yuan,margin_total_balance_yuan,source_id,observed_at\n" +
     "2026-07-14,SSE,1452014000000,120000000000,7898999999.999999,1462014000000,sse,2026-07-22T09:15:20+08:00\n",
   );
+  const bseRaw = Buffer.from("null([], '2026-07-14')");
+  const bseNormalized = Buffer.from(
+    "trade_date,market,financing_balance_yuan,financing_buy_yuan,securities_lending_balance_yuan,margin_total_balance_yuan,source_id,observed_at\n" +
+    "2026-07-14,BSE,8210630112,433272098,454583,8211084695,bse,2026-07-22T09:15:20+08:00\n",
+  );
   const connectRaw = Buffer.from("var daily = {};");
   const connectSummary = Buffer.from(
     "trade_date,market,direction,currency,total_turnover,buy_turnover,sell_turnover,net_buy,etf_turnover,source_id,observed_at\n" +
@@ -910,6 +915,8 @@ test("archives full-source history with server-side hash verification", async ()
   const connectTop = Buffer.from("trade_date,market,direction,rank,instrument_code,instrument_name,total_turnover,source_id,observed_at\n");
   const sha256 = createHash("sha256").update(raw).digest("hex");
   const normalizedSha256 = createHash("sha256").update(normalized).digest("hex");
+  const bseSha256 = createHash("sha256").update(bseRaw).digest("hex");
+  const bseNormalizedSha256 = createHash("sha256").update(bseNormalized).digest("hex");
   const connectSha256 = createHash("sha256").update(connectRaw).digest("hex");
   const connectSummarySha256 = createHash("sha256").update(connectSummary).digest("hex");
   const connectTopSha256 = createHash("sha256").update(connectTop).digest("hex");
@@ -980,6 +987,31 @@ test("archives full-source history with server-side hash verification", async ()
           ],
         },
         {
+          releaseId: `margin_market_daily:bse:2026-07-14:${bseSha256.slice(0, 16)}`,
+          sourceId: "bse",
+          dataset: "margin_market_daily",
+          requestedDate: "2026-07-14",
+          tradeDates: ["2026-07-14"],
+          observedAt: "2026-07-22T09:15:20+08:00",
+          sourceUrl: "https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+          dateBasis: "bse_official_summary_trade_date",
+          sha256: bseSha256,
+          contentType: "application/json",
+          extension: "json",
+          rawContentBase64: bseRaw.toString("base64"),
+          metadata: { sha256: bseSha256 },
+          normalized: [
+            {
+              name: "data",
+              format: "csv",
+              sha256: bseNormalizedSha256,
+              rowCount: 1,
+              tradeDates: ["2026-07-14"],
+              contentBase64: bseNormalized.toString("base64"),
+            },
+          ],
+        },
+        {
           releaseId: `stock_connect_daily:hkex:2026-07-14:${connectSha256.slice(0, 16)}`,
           sourceId: "hkex",
           dataset: "stock_connect_daily",
@@ -1031,9 +1063,11 @@ test("archives full-source history with server-side hash verification", async ()
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.status, "archived");
-  assert.equal(result.standardizedRows, 5);
+  assert.equal(result.standardizedRows, 6);
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/margin_market_daily")));
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/bse/margin_market_daily")));
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/bse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/history/")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO market_history_daily")));
@@ -1042,6 +1076,11 @@ test("archives full-source history with server-side hash verification", async ()
     ({ sql, values }) =>
       sql.includes("INSERT INTO margin_daily") &&
       values.includes(7_899_000_000),
+  ));
+  assert.ok(statements.some(
+    ({ sql, values }) =>
+      sql.includes("INSERT INTO margin_daily") &&
+      values.includes(8_210_630_112),
   ));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
   assert.ok(statements.some(({ sql }) => sql.includes("WITH current_rows AS")));
