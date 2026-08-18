@@ -186,6 +186,51 @@ def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending
     assert snapshot["marginSeries"][-1]["date"] == "07-30"
 
 
+def test_dashboard_keeps_bse_margin_in_three_market_scope(tmp_path: Path) -> None:
+    dates = ["2026-07-29", "2026-07-30"]
+    etf_rows = [
+        {"trade_date": trade_date, "instrument_code": "510300", "instrument_name": "沪深300ETF", "shares": 100 + index}
+        for index, trade_date in enumerate(dates)
+    ]
+    margin_rows = [
+        {"trade_date": trade_date, "financing_balance_yuan": 1000 + index, "market": market}
+        for index, trade_date in enumerate(dates)
+        for market in ("SSE", "SZSE")
+    ]
+    bse_rows = [
+        {"trade_date": trade_date, "market": "BSE", "financing_balance_yuan": 100_000_000 + index,
+         "financing_buy_yuan": 10_000_000, "securities_lending_balance_yuan": 1_000_000,
+         "securities_lending_sell_volume_shares": 1, "margin_total_balance_yuan": 101_000_000 + index,
+         "source_trade_date": trade_date}
+        for index, trade_date in enumerate(dates)
+    ]
+    connect_rows = [
+        {"trade_date": trade_date, "market": market, "direction": direction,
+         "total_turnover": 1000, "net_buy": 100 if direction == "southbound" else None}
+        for trade_date in dates
+        for market in ("SSE", "SZSE")
+        for direction in ("southbound", "northbound")
+    ]
+    paths = {
+        "sse_etf": _write(pd.DataFrame(etf_rows), tmp_path / "sse_etf.csv"),
+        "szse_etf": _write(pd.DataFrame(etf_rows), tmp_path / "szse_etf.csv"),
+        "sse_margin": _write(pd.DataFrame(margin_rows[0::2]), tmp_path / "sse_margin.csv"),
+        "szse_margin": _write(pd.DataFrame(margin_rows[1::2]), tmp_path / "szse_margin.csv"),
+        "bse_margin": _write(pd.DataFrame(bse_rows), tmp_path / "bse_margin.csv"),
+        "stock_connect_summary": _write(pd.DataFrame(connect_rows), tmp_path / "connect.csv"),
+    }
+    manifest_path = tmp_path / "manifest.json"
+    quality_path = tmp_path / "quality.json"
+    manifest_path.write_text(json.dumps({"requested_dates": dates, "finished_at": "2026-07-30T23:00:00+08:00", "combined_paths": paths}), encoding="utf-8")
+    quality_path.write_text(json.dumps({"counts": {"pass": 12, "warn": 0, "fail": 0}, "phase0_gate_status": "pass"}), encoding="utf-8")
+
+    snapshot = build_dashboard_snapshot(manifest_path=manifest_path, quality_path=quality_path, workspace_root=tmp_path)
+
+    assert snapshot["marginScopeVersion"] == "sse_szse_bse_v2"
+    assert snapshot["marginSeries"][-1]["bseBalance"] == 1.0
+    assert snapshot["metrics"][2]["eyebrow"] == "沪深北融资余额"
+
+
 def test_etf_classification_prefers_broad_index_before_theme_keywords() -> None:
     assert _classify_etf("科创50ETF") == "宽基"
     assert _classify_etf("科创半导体ETF") == "科技"

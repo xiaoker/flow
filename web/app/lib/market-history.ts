@@ -12,6 +12,8 @@ export type MarketHistoryRow = {
   total_balance: number | null;
   sse_balance: number | null;
   szse_balance: number | null;
+  bse_balance: number | null;
+  margin_scope_version: "sse_szse_v1" | "sse_szse_bse_v2" | string;
   southbound_net: number | null;
   southbound_turnover: number | null;
   southbound_sse_net: number | null;
@@ -58,6 +60,7 @@ export function extractMarketHistoryPoint(
     total_balance: finite(margin?.totalBalance),
     sse_balance: finite(margin?.sseBalance),
     szse_balance: finite(margin?.szseBalance),
+    bse_balance: finite(margin?.bseBalance),
     southbound_net: finite(connect?.southboundNet),
     southbound_turnover: finite(connect?.southboundTurnover),
     southbound_sse_net: finite(connect?.southboundSseNet),
@@ -67,6 +70,9 @@ export function extractMarketHistoryPoint(
     northbound_trade_count: finite(connect?.northboundTradeCount),
     margin_available: margin ? 1 : 0,
     connect_available: connect ? 1 : 0,
+    margin_scope_version: margin?.marginScopeVersion === "sse_szse_bse_v2"
+      ? "sse_szse_bse_v2"
+      : "sse_szse_v1",
   };
 }
 
@@ -101,6 +107,10 @@ export function enrichSnapshotWithMarketHistory(
           totalBalance: row.total_balance ?? undefined,
           sseBalance: row.sse_balance ?? undefined,
           szseBalance: row.szse_balance ?? undefined,
+          bseBalance: row.margin_scope_version === "sse_szse_bse_v2"
+            ? row.bse_balance ?? undefined
+            : undefined,
+          marginScopeVersion: row.margin_scope_version || "sse_szse_v1",
         }]
       : [],
   );

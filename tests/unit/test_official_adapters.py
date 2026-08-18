@@ -77,6 +77,53 @@ def test_szse_margin_converts_hundred_million_units(
     assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(1_424_700_000_000)
 
 
+def test_bse_margin_parses_official_jsonp_and_keeps_canonical_units(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = (
+        "null([[{\"rqmcl\":24200,\"rqye\":454583,\"rqyl\":61368,"
+        "\"rzmre\":433272098,\"rzrqye\":8211084695,\"rzye\":8210630112,"
+        "\"zqdm\":\"999999\"}]], '2026-07-30')"
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-07-30")
+
+    assert artifact.row_count == 1
+    assert frame.loc[0, "trade_date"] == "2026-07-30"
+    assert frame.loc[0, "market"] == "BSE"
+    assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(8_210_630_112)
+    assert frame.loc[0, "financing_buy_yuan"] == pytest.approx(433_272_098)
+    assert frame.loc[0, "securities_lending_balance_yuan"] == pytest.approx(454_583)
+    assert frame.loc[0, "securities_lending_volume_shares"] == pytest.approx(61_368)
+    assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(8_211_084_695)
+    assert frame.loc[0, "source_trade_date"] == "2026-07-30"
+
+
+def test_bse_margin_rejects_stale_jsonp_date(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = "null([[{\"rzye\":1,\"rzrqye\":1,\"zqdm\":\"999999\"}]], '2026-07-29')"
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-07-30")
+
+    assert frame.empty
+    assert any("返回日期" in warning for warning in artifact.warnings)
+
+
+def test_bse_margin_does_not_promote_detail_row_without_official_aggregate(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = "null([[{\"rzye\":1,\"rzrqye\":1,\"zqdm\":\"000001\"}]], '2026-07-30')"
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-07-30")
+
+    assert frame.empty
+    assert any("汇总数据" in warning for warning in artifact.warnings)
+
+
 def test_sse_etf_matches_code_name_date_and_ten_thousand_share_unit(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

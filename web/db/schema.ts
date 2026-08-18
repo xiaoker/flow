@@ -109,6 +109,8 @@ export const marketHistoryDaily = sqliteTable("market_history_daily", {
   sourceSnapshotSha256: text("source_snapshot_sha256").notNull(),
   observedAt: text("observed_at").notNull(),
   createdAt: text("created_at").notNull(),
+  bseBalance: real("bse_balance"),
+  marginScopeVersion: text("margin_scope_version").notNull().default("sse_szse_v1"),
 }, (table) => [
   index("market_history_daily_date_idx").on(table.tradeDate),
 ]);

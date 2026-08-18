@@ -16,7 +16,7 @@ from .history_bundle import build_history_bundle
 from .history_publish import publish_history_bundle
 from .http import build_session
 from .models import FetchArtifact
-from .quality import validate_connect_summary, validate_etf, validate_margin
+from .quality import validate_bse_margin, validate_connect_summary, validate_etf, validate_margin
 from .storage import new_run_id, now_iso, write_json
 
 
@@ -54,13 +54,16 @@ def _assert_frame_quality(
     sse_margin: pd.DataFrame,
     szse_margin: pd.DataFrame,
     connect: pd.DataFrame,
+    bse_margin: pd.DataFrame | None = None,
 ) -> bool:
+    bse_frame = bse_margin if bse_margin is not None else pd.DataFrame()
     failures = [
         finding
         for finding in (
             validate_etf(sse_etf, "sse_etf")
             + validate_margin(sse_margin, "sse_margin")
             + validate_margin(szse_margin, "szse_margin")
+            + ([] if bse_margin is None else validate_bse_margin(bse_frame, "bse_margin"))
             + ([] if connect.empty else validate_connect_summary(connect))
         )
         if finding.status == "fail"
@@ -72,6 +75,7 @@ def _assert_frame_quality(
         ("sse_etf", sse_etf),
         ("sse_margin", sse_margin),
         ("szse_margin", szse_margin),
+        *( [] if bse_margin is None else [("bse_margin", bse_frame)] ),
     ):
         observed = sorted(frame["trade_date"].dropna().astype(str).unique().tolist())
         if observed != [trade_date]:
@@ -172,6 +176,7 @@ def _snapshot_for_date(
     observed_at: str,
     connect_closed: bool,
     work_root: Path,
+    bse_margin: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     # The GitHub runner invokes the collector with a repository-relative data root.
     # Persist absolute paths in the temporary manifest so dashboard generation and
@@ -186,6 +191,8 @@ def _snapshot_for_date(
         "szse_margin": szse_margin,
         "stock_connect_summary": connect,
     }
+    if bse_margin is not None:
+        frames["bse_margin"] = bse_margin
     for name, frame in frames.items():
         path = combined / f"{name}.csv"
         frame.to_csv(path, index=False, encoding="utf-8")
@@ -275,6 +282,7 @@ def run_history_backfill(
     etf_window: deque[pd.DataFrame] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
     sse_margin_window: deque[pd.DataFrame] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
     szse_margin_window: deque[pd.DataFrame] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
+    bse_margin_window: deque[pd.DataFrame] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
     connect_window: deque[pd.DataFrame] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
     date_window: deque[str] = deque(maxlen=LOOKBACK_TRADING_DAYS + 2)
     published: list[str] = []
@@ -284,12 +292,14 @@ def run_history_backfill(
         sse_etf, etf_artifact = adapters.fetch_sse_etf(trade_date)
         sse_margin, sse_margin_artifact = adapters.fetch_sse_margin(trade_date, trade_date)
         szse_margin, szse_margin_artifact = adapters.fetch_szse_margin(trade_date)
+        bse_margin, bse_margin_artifact = adapters.fetch_bse_margin(trade_date)
         connect, _, connect_artifact = adapters.fetch_hkex_connect(trade_date)
         connect_closed = _assert_frame_quality(
             trade_date=trade_date,
             sse_etf=sse_etf,
             sse_margin=sse_margin,
             szse_margin=szse_margin,
+            bse_margin=bse_margin,
             connect=connect,
         )
         if connect_closed:
@@ -298,6 +308,7 @@ def run_history_backfill(
         etf_window.append(sse_etf)
         sse_margin_window.append(sse_margin)
         szse_margin_window.append(szse_margin)
+        bse_margin_window.append(bse_margin)
         connect_window.append(connect)
         date_window.append(trade_date)
 
@@ -308,6 +319,7 @@ def run_history_backfill(
             sse_etf=_concat(etf_window),
             sse_margin=_concat(sse_margin_window),
             szse_margin=_concat(szse_margin_window),
+            bse_margin=_concat(bse_margin_window),
             connect=_concat(connect_window, EMPTY_CONNECT_COLUMNS),
             observed_at=now_iso(),
             connect_closed=connect_closed,
@@ -317,6 +329,7 @@ def run_history_backfill(
             etf_artifact,
             sse_margin_artifact,
             szse_margin_artifact,
+            bse_margin_artifact,
             connect_artifact,
         ]
         bundle = build_history_bundle(

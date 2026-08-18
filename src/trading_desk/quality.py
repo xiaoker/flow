@@ -359,6 +359,40 @@ def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
     return findings
 
 
+def validate_bse_margin(frame: pd.DataFrame, dataset: str = "bse_margin") -> list[QualityFinding]:
+    """Validate the BSE aggregate row without mixing it with SSE/SZSE data."""
+
+    findings = validate_margin(frame, dataset)
+    findings += check_required_columns(frame, dataset, ["source_trade_date"])
+    if not frame.empty and "market" in frame.columns:
+        invalid_market = int((frame["market"].astype(str) != "BSE").sum())
+        findings.append(
+            _finding(
+                "validity.bse_margin_market",
+                dataset,
+                invalid_market == 0,
+                message="北交所两融市场标记正确" if invalid_market == 0 else "北交所两融混入其他市场",
+                evidence={"invalid_rows": invalid_market},
+                remediation="检查北交所汇总适配器，禁止把沪深数据归入 BSE。",
+            )
+        )
+    if not frame.empty and {"trade_date", "source_trade_date"}.issubset(frame.columns):
+        mismatched = int(
+            frame["trade_date"].astype(str).ne(frame["source_trade_date"].astype(str)).sum()
+        )
+        findings.append(
+            _finding(
+                "timeliness.bse_source_date",
+                dataset,
+                mismatched == 0,
+                message="北交所源站日期与交易日一致" if mismatched == 0 else "北交所源站日期不一致",
+                evidence={"mismatched_rows": mismatched},
+                remediation="保留 JSONP 返回日期；日期不一致时阻断归档。",
+            )
+        )
+    return findings
+
+
 def validate_connect_summary(
     frame: pd.DataFrame, dataset: str = "stock_connect_summary"
 ) -> list[QualityFinding]:

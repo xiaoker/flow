@@ -203,6 +203,23 @@ def test_market_history_is_materialized_and_hashed() -> None:
     assert len(manifest["marketHistory"]["sha256"]) == 64
 
 
+def test_market_history_preserves_bse_scope_and_balance() -> None:
+    history = _market_history(start="2026-07-29", count=2)
+    history["rows"][-1]["bse_balance"] = 123.0
+    history["rows"][-1]["margin_scope_version"] = "sse_szse_bse_v2"
+    catalog = _stock_catalog() | {"asOf": "2026-07-30"}
+
+    payloads, _ = build_read_models(
+        _snapshot() | {"asOf": "2026-07-30"},
+        market_history=history,
+        stock_catalog=catalog,
+    )
+
+    latest = payloads["margin"]["data"]["marginSeries"][-1]
+    assert latest["bseBalance"] == 123.0
+    assert latest["marginScopeVersion"] == "sse_szse_bse_v2"
+
+
 def test_market_history_excludes_future_rows_and_rejects_shorter_previous_release() -> None:
     history = _market_history(start="2026-05-14", count=61)
     future = dict(history["rows"][-1])
