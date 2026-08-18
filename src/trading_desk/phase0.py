@@ -69,12 +69,62 @@ def _required_coverage_dates(dataset: str, requested_dates: list[str]) -> list[s
 
     The SZSE ETF endpoint is a current snapshot, not a historical endpoint. It
     cannot be required to return every date in the three-day collection window;
-    those rows are accumulated from prior runs. The current target, however,
-    is mandatory so an old HTTP 200 response cannot be mistaken for readiness.
+    those rows are accumulated from prior runs. The current target is mandatory
+    for a complete release, but a missing target is represented as pending so
+    the next window can reconcile it.
     """
     if dataset == "szse_etf":
         return [requested_dates[-1]]
     return requested_dates
+
+
+_REQUIRED_COVERAGE_DATASETS = {
+    "sse_etf",
+    "szse_etf",
+    "sse_margin",
+    "szse_margin",
+    "bse_margin",
+    "stock_connect_summary",
+}
+
+
+def _pending_required_coverage_datasets(
+    findings: list[QualityFinding],
+) -> list[str]:
+    """Return official domains that have not published every requested day.
+
+    A date gap is a normal release-window state.  It is only considered
+    pending when the finding is about required date coverage; schema, parser,
+    authentication and transport errors remain hard failures.
+    """
+    pending: set[str] = set()
+    for finding in findings:
+        if (
+            finding.check_id == "timeliness.requested_date_coverage"
+            and finding.dataset in _REQUIRED_COVERAGE_DATASETS
+            and finding.status == "warn"
+            and finding.evidence.get("missing_dates")
+        ):
+            pending.add(finding.dataset)
+    return sorted(pending)
+
+
+def _resolve_phase0_gate(
+    quality: dict[str, Any],
+    errors: list[dict[str, Any]],
+    pending_domains: list[str],
+) -> str:
+    """Resolve collection state without turning source timing into failure."""
+    if quality["counts"]["fail"] or errors:
+        return "blocked"
+    if pending_domains:
+        return "pending"
+    if any(
+        finding["status"] == "warn" and finding["severity"] in {"critical", "high"}
+        for finding in quality["findings"]
+    ):
+        return "conditional_pass"
+    return "pass"
 
 
 def collect_phase0(
@@ -311,6 +361,7 @@ def collect_phase0(
                 dataset,
                 observed_dates,
                 dates,
+                warn_only=True,
                 remediation="确认源站发布时间；若日期本应可用，则保持旧版本并补跑。",
             )
         )
@@ -321,10 +372,10 @@ def collect_phase0(
             # SZSE exposes a current snapshot rather than a historical time
             # series.  Historical coverage is therefore expected to be
             # accumulated in our archive, but the current requested trading
-            # day must be present before a run can be considered ready.  The
-            # previous warn-only check allowed a stale HTTP 200 response to
-            # pass the gate and left the dashboard on an older day.
+            # day must be present before a run can be considered ready. A
+            # stale HTTP 200 response becomes an explicit pending state.
             _required_coverage_dates("szse_etf", dates),
+            warn_only=True,
             remediation=(
                 "深交所只提供当前快照；确认页面日期已推进到目标交易日后再发布。"
                 "旧日期响应必须保留原始证据，但不能替换 ACTIVE 版本。"
@@ -342,23 +393,20 @@ def collect_phase0(
     )
 
     quality = summarize_findings(findings)
-    high_warnings = [
-        finding
-        for finding in quality["findings"]
-        if finding["status"] == "warn" and finding["severity"] in {"critical", "high"}
-    ]
-    if quality["counts"]["fail"] or errors:
-        gate_status = "blocked"
-    elif high_warnings:
-        gate_status = "conditional_pass"
-    else:
-        gate_status = "pass"
+    pending_domains = _pending_required_coverage_datasets(findings)
+    gate_status = _resolve_phase0_gate(quality, errors, pending_domains)
     quality["phase0_gate_status"] = gate_status
     quality["phase0_gate_passed"] = gate_status == "pass"
+    quality["release_eligible"] = gate_status in {"pass", "conditional_pass"}
+    quality["pending_domains"] = pending_domains
     quality["phase1_entry_recommendation"] = (
-        "proceed_with_szse_forward_snapshot_constraint"
-        if gate_status == "conditional_pass"
-        else ("proceed" if gate_status == "pass" else "do_not_proceed")
+        "wait_for_sources"
+        if gate_status == "pending"
+        else (
+            "proceed_with_szse_forward_snapshot_constraint"
+            if gate_status == "conditional_pass"
+            else ("proceed" if gate_status == "pass" else "do_not_proceed")
+        )
     )
     quality["profiles"] = profiles
     quality["errors"] = errors

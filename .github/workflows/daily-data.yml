@@ -32,17 +32,17 @@ permissions:
 
 concurrency:
   group: daily-market-data
-  # A newer release-window run supersedes an older readiness poll.  Without
-  # cancellation, the 07:45/08:45/08:55 jobs can queue behind one another and
-  # publish an older snapshot long after the source has become available.
-  cancel-in-progress: true
+  # Cloudflare Cron is primary and GitHub schedule is failover. Keep runs
+  # serialized, but never cancel an in-flight archive or publish: the ingest
+  # bundle derives a stable evidence key and the server de-duplicates retries.
+  cancel-in-progress: false
 
 jobs:
   collect-and-publish:
     runs-on: ubuntu-latest
-    # The morning run may wait for an official source to advance its published
-    # date.  The wait is date-aware and bounded; it is not a blind retry loop.
-    timeout-minutes: 50
+    # Each window performs one bounded collection. Source timing is represented
+    # as pending and reconciled by the next window, not by a long-running job.
+    timeout-minutes: 20
     env:
       INPUT_DATES: ${{ inputs.dates }}
       INPUT_COLLECTION_WINDOW: ${{ inputs.collection_window || 'auto' }}
@@ -97,41 +97,19 @@ jobs:
           echo "Using collection window: $WINDOW"
 
       - name: Collect and validate official data
+        id: collection
         shell: bash
         run: |
           read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
-          COLLECTION_WINDOW="${{ steps.window.outputs.collection_window }}"
           MAX_ATTEMPTS=3
-          SOURCE_READINESS_ATTEMPTS=18
           attempt=1
-          while (( attempt <= SOURCE_READINESS_ATTEMPTS )); do
+          while (( attempt <= MAX_ATTEMPTS )); do
             trading-desk collect-phase0 \
               --dates "${DATES[@]}" \
               --window "${{ steps.window.outputs.collection_window }}"
-            if jq -e '.counts.fail == 0 and .phase0_gate_status != "blocked"' \
+            if jq -e '.phase0_gate_status != "blocked"' \
               reports/phase0/latest-quality-summary.json >/dev/null; then
               break
-            fi
-
-            # A stale but valid HTTP response is a source-readiness condition,
-            # not a transport failure.  Poll only while the SZSE target date is
-            # explicitly missing, preserving every raw response and the active
-            # dashboard until the source catches up.
-            if [[ "$COLLECTION_WINDOW" != "evening" ]] && jq -e '
-              (.errors | length == 0) and
-              any(.findings[]?;
-                (.dataset == "szse_etf" and
-                 .check_id == "timeliness.requested_date_coverage" and
-                 .status == "fail"))
-            ' reports/phase0/latest-quality-summary.json >/dev/null; then
-              if (( attempt == SOURCE_READINESS_ATTEMPTS )); then
-                echo "SZSE source did not publish the requested trading date before the bounded readiness deadline." >&2
-                break
-              fi
-              echo "SZSE source date is not ready; polling again in 120 seconds (attempt $((attempt + 1))/$SOURCE_READINESS_ATTEMPTS)." >&2
-              sleep 120
-              attempt=$((attempt + 1))
-              continue
             fi
 
             if (( attempt >= MAX_ATTEMPTS )) || \
@@ -139,10 +117,15 @@ jobs:
                 reports/phase0/latest-quality-summary.json >/dev/null; then
               break
             fi
-            echo "Transient official-source failure; retrying collection attempt $((attempt + 1))/$MAX_ATTEMPTS." >&2
-            sleep $((attempt * 30))
+            # Only transport failures get a short retry. A stale but valid
+            # official response is source-not-ready and is already represented
+            # as phase0_gate_status=pending, so it exits this step successfully.
+            echo "Transient official-source failure; retrying once after a short backoff ($((attempt * 20)) seconds), attempt $((attempt + 1))/$MAX_ATTEMPTS." >&2
+            sleep $((attempt * 20))
             attempt=$((attempt + 1))
           done
+          echo "phase0_gate=$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
+          echo "pending_domains=$(jq -c '.pending_domains // []' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
 
       - name: Build dashboard snapshot
         run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json
@@ -150,7 +133,9 @@ jobs:
       - name: Reconcile evidence, mappings and dashboard values
         shell: bash
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
             trading-desk qa-release --snapshot dashboard-snapshot-base.json
           else
             echo "Snapshot is pending source confirmation; raw data will be archived and the active dashboard remains unchanged."
@@ -177,7 +162,9 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot-base.json >/dev/null; then
             if [[ -z "$INGEST_API_KEY" || -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
               echo "FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets must be configured." >&2
               exit 1
@@ -205,7 +192,8 @@ jobs:
         if: ${{ success() }}
         shell: bash
         run: |
-          if jq -e '
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && jq -e '
             .publication.status == "confirmed" and
             .etfStockFlow.available == true and
             ((.etfStockFlow.coverage.stockCount // 0) > 0)
@@ -225,7 +213,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
             if [[ -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
@@ -295,7 +285,7 @@ jobs:
           jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
 
       - name: Build ETF-to-stock daily partitions from archived R2 inputs
-        if: ${{ success() && steps.stock-flow.outputs.ready == 'true' }}
+        if: ${{ success() && steps.collection.outputs.phase0_gate != 'pending' && steps.collection.outputs.phase0_gate != 'blocked' && steps.stock-flow.outputs.ready == 'true' }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -334,7 +324,7 @@ jobs:
           ' stock-flow-history.json >/dev/null
 
       - name: Publish ETF-to-stock daily partitions
-        if: ${{ success() && steps.stock-flow.outputs.ready == 'true' }}
+        if: ${{ success() && steps.collection.outputs.phase0_gate != 'pending' && steps.collection.outputs.phase0_gate != 'blocked' && steps.stock-flow.outputs.ready == 'true' }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -352,7 +342,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             python scripts/check_release_capabilities.py --output capabilities.json
           else
@@ -365,7 +357,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             # Build pressure history from real daily ETF/PCF partitions. The
             # previous release is never treated as the historical source.
@@ -413,7 +407,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             python scripts/publish_read_models.py \
               --read-model-dir read-models \
@@ -428,7 +424,9 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
+          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
+                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" && \
+                "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
             [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
             jq -e '.status == "activated"' read-model-publish.json >/dev/null; then
             RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
@@ -446,24 +444,13 @@ jobs:
         run: |
           errors="$(jq '.errors | length' reports/phase0/latest-quality-summary.json)"
           gate="$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)"
-          collection_window="${{ steps.window.outputs.collection_window }}"
+          if [[ "$gate" == "pending" && "$errors" -eq 0 ]]; then
+            echo "Source-not-ready is pending; raw evidence is archived and the active release is unchanged."
+            jq '{phase0_gate_status, pending_domains, findings: [.findings[] | select(.status == "warn")]}' \
+              reports/phase0/latest-quality-summary.json
+            exit 0
+          fi
           if [[ "$errors" -gt 0 || "$gate" == "blocked" ]]; then
-            # Evening collection intentionally runs before the SZSE current
-            # snapshot is published.  It may archive that raw response and
-            # keep the prior complete dashboard, but it must not be marked as
-            # a failed run when the only failure is the expected SZSE date
-            # coverage gap.  Morning/reconcile runs remain fail-closed after
-            # their bounded readiness deadline.
-            if [[ "$errors" -eq 0 && "$gate" == "blocked" && "$collection_window" == "evening" ]] && \
-              jq -e '
-                ([.findings[] | select(.status == "fail")] | length > 0) and
-                all(.findings[] | select(.status == "fail");
-                  (.dataset == "szse_etf" and
-                   .check_id == "timeliness.requested_date_coverage"))
-              ' reports/phase0/latest-quality-summary.json >/dev/null; then
-              echo "Evening window archived sources; SZSE current snapshot is expected to arrive in the morning."
-              exit 0
-            fi
             echo "Collection archived partial evidence but still has unresolved source errors." >&2
             jq '{phase0_gate_status, errors, findings: [.findings[] | select(.status != "pass")]}' \
               reports/phase0/latest-quality-summary.json >&2
