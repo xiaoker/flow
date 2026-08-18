@@ -85,7 +85,13 @@ def test_bse_margin_parses_official_jsonp_and_keeps_canonical_units(
         "\"rzmre\":433272098,\"rzrqye\":8211084695,\"rzye\":8210630112,"
         "\"zqdm\":\"999999\"}]], '2026-07-30')"
     )
-    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+    captured: dict[str, object] = {}
+
+    def fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        captured.update(kwargs)
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(official, "get", fake_get)
 
     frame, artifact = adapters.fetch_bse_margin("2026-07-30")
 
@@ -98,6 +104,34 @@ def test_bse_margin_parses_official_jsonp_and_keeps_canonical_units(
     assert frame.loc[0, "securities_lending_volume_shares"] == pytest.approx(61_368)
     assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(8_211_084_695)
     assert frame.loc[0, "source_trade_date"] == "2026-07-30"
+    assert captured["params"] == {
+        "callback": "cb",
+        "transDate": "2026-07-30",
+        "page": "0",
+    }
+
+
+def test_bse_margin_accepts_current_round_fields_without_using_display_units(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = (
+        "cb([[{\"rqmcl\":20400,\"rqmclRound\":\"2.04\",\"rqye\":74256,"
+        "\"rqyeRound\":\"7.43\",\"rqyl\":21500,\"rqylRound\":\"2.15\","
+        "\"rzmre\":634607986,\"rzmreRound\":\"63460.80\","
+        "\"rzrqye\":8377084099,\"rzrqyeRound\":\"837708.41\","
+        "\"rzye\":8377009843,\"rzyeRound\":\"837700.98\","
+        "\"zqdm\":\"999999\"}]], '2026-08-17')"
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-08-17")
+
+    assert artifact.row_count == 1
+    assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(8_377_009_843)
+    assert frame.loc[0, "financing_buy_yuan"] == pytest.approx(634_607_986)
+    assert frame.loc[0, "securities_lending_balance_yuan"] == pytest.approx(74_256)
+    assert frame.loc[0, "securities_lending_volume_shares"] == pytest.approx(21_500)
+    assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(8_377_084_099)
 
 
 def test_bse_margin_rejects_stale_jsonp_date(

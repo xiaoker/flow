@@ -915,6 +915,11 @@ class OfficialMarketAdapters:
         """
 
         params = {
+            # The BSE endpoint is JSONP-backed.  It currently returns the
+            # aggregate payload reliably only when a callback name is sent;
+            # omitting it can yield an empty response in the hosted runner
+            # even though the same official date is available on the page.
+            "callback": "cb",
             "transDate": trade_date,
             "page": "0",
         }
