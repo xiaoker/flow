@@ -911,7 +911,7 @@ export function Dashboard({
   const displayMode = snapshot.mode.replace(/GitHub\s*Actions\s*/gi, "").trim() || "官方数据快照";
   const warningDomain = snapshot.dataStatus.find((item) => item.status === "warning");
   const dataStatus = refreshError
-    ? { tone: "error", title: "自动更新未完成", detail: refreshError }
+    ? { tone: "degraded", title: "发布检查暂不可用", detail: `${refreshError} · 当前仍展示 ${releaseId ? `release ${releaseId}` : "当前完整发布版本"}` }
     : viewLoadError
       ? { tone: "degraded", title: "当前视图暂未载入", detail: "已保留当前完整发布版本，未拼接其他日期数据" }
       : snapshot.publication?.status === "pending"
@@ -1015,6 +1015,10 @@ export function Dashboard({
     let lastCheck = Date.now();
     const refresh = () => {
       if (document.visibilityState === "visible") {
+        // Record the check before starting the request.  Otherwise a tab that
+        // regains focus immediately after the interval fires can schedule a
+        // second pointer request for the same check window.
+        lastCheck = Date.now();
         if (onAutoRefresh) void onAutoRefresh();
       }
     };
