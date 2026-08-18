@@ -48,11 +48,18 @@ def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
 
     assert "Set build metadata" in workflow
     assert "FLOW_BUILD_SHA=${GITHUB_SHA}" in workflow
+    assert workflow.index("Set build metadata") < workflow.index(
+        "Run Web lint and production contract tests"
+    )
+    assert workflow.index("Set build metadata") < workflow.index(
+        "Deploy Worker and static assets"
+    )
     assert "for attempt in $(seq 1 20)" in workflow
     assert "build_check=$GITHUB_SHA&attempt=$attempt" in workflow
     assert '"Cache-Control: no-cache"' in workflow
     assert "Verified deployed Worker build identity" in workflow
     assert "did not expose build SHA" in workflow
+    assert "grep -FiE" not in workflow
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
