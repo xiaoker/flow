@@ -3,7 +3,13 @@ import subprocess
 from pathlib import Path
 
 from scripts import rebuild_remote_market_history
-from scripts.rebuild_remote_market_history import _download, _record, _write_sql
+from scripts.rebuild_remote_market_history import (
+    _compact_row,
+    _download,
+    _record,
+    _write_compact_history,
+    _write_sql,
+)
 
 
 def test_download_retries_a_transient_r2_failure(
@@ -102,3 +108,37 @@ def test_rebuild_keeps_expired_hkex_day_missing(tmp_path: Path) -> None:
     sql = sql_path.read_text(encoding="utf-8")
     assert sql.count("INSERT INTO market_history_daily") == 2
     assert "ON CONFLICT(trade_date) DO UPDATE" in sql
+
+
+def test_rebuild_can_write_deterministic_compact_history(tmp_path: Path) -> None:
+    values = [
+        "2026-07-14",
+        101.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        4.0,
+        4.0,
+        10.0,
+        2.0,
+        100,
+        1,
+        1,
+        "a" * 64,
+        "2026-07-15T01:15:00Z",
+        "2026-07-15T01:15:00Z",
+    ]
+    output = tmp_path / "market-history.json"
+    _write_compact_history([values], output)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["schemaVersion"] == 1
+    assert payload["asOf"] == "2026-07-14"
+    assert payload["rows"] == [_compact_row(values)]
+    assert "created_at" not in payload["rows"][0]

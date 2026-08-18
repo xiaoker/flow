@@ -10,6 +10,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from .etf_classification import CLASSIFICATION_VERSION, classify_etf
+from .etf_facts import latest_etf_flows_from_terminal
 
 
 STATE_VERSION = 1
@@ -289,7 +290,7 @@ def materialize_etf_terminal(
             values = [value_at(state_item, "values", index) for index in indices]
             observed = [value for value in values if value is not None]
             period_coverage[period] = len(observed)
-            periods[period] = round(sum(observed), 2) if observed and len(observed) == len(indices) else None
+            periods[period] = round(sum(observed), 6) if observed and len(observed) == len(indices) else None
             cash_values = [value_at(state_item, "cashValues", index) for index in indices]
             cash_observed = [value for value in cash_values if value is not None]
             cash_coverage[period] = len(cash_observed)
@@ -312,7 +313,7 @@ def materialize_etf_terminal(
         cash_observed = [value for value in cash_values if value is not None]
         daily_series.append({
             "date": trade_date[5:],
-            "value": round(sum(share_observed), 2),
+            "value": round(sum(share_observed), 6),
             "coverage": len(share_observed),
             "cashValue": round(sum(cash_observed), 2) if cash_observed else None,
             "cashCoverage": len(cash_observed),
@@ -343,7 +344,7 @@ def materialize_etf_terminal(
         {
             "name": name,
             "groupType": aggregate["groupType"],
-            "periods": {period: round(value, 2) if aggregate["comparableCount"][period] else None for period, value in aggregate["periods"].items()},
+            "periods": {period: round(value, 6) if aggregate["comparableCount"][period] else None for period, value in aggregate["periods"].items()},
             "estimatedCashPeriods": {period: round(value, 2) if aggregate["estimatedCashCoverage"][period] else None for period, value in aggregate["estimatedCashPeriods"].items()},
             "estimatedCashCoverage": aggregate["estimatedCashCoverage"],
             "componentCount": aggregate["componentCount"],
@@ -455,6 +456,23 @@ def materialize_dashboard_snapshot(
         trimmed_state,
         base_terminal=result.get("etfTerminal") or {},
     )
+    # The rolling state is the canonical source for every ETF-facing view.
+    # Re-derive the homepage headline/top-five after materialization so the
+    # state overlay cannot leave an older partial ``etfFlows`` value behind.
+    etf_flows, etf_summary = latest_etf_flows_from_terminal(result["etfTerminal"])
+    result["etfFlows"] = etf_flows
+    for metric in result.get("metrics") or []:
+        if isinstance(metric, dict) and metric.get("id") == "etf":
+            metric["value"] = f"{etf_summary['net']:+,.2f}"
+            metric["delta"] = (
+                f"{etf_summary['increasers']} 只增加 · "
+                f"{etf_summary['decreasers']} 只减少"
+            )
+            metric["tone"] = "positive" if etf_summary["net"] >= 0 else "negative"
+            metric["eyebrow"] = "沪深 ETF 份额变化"
+            basis = metric.get("basis")
+            if isinstance(basis, dict):
+                basis["detail"] = "上交所与深交所当日官方份额 − 前一交易日官方份额"
     for row in result.get("dataStatus") or []:
         if isinstance(row, dict) and row.get("name") in {"上交所 ETF", "深交所 ETF"}:
             row["asOf"] = target[5:]

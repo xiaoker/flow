@@ -28,16 +28,23 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const releaseId = url.searchParams.get("releaseId") ?? "";
   const name = url.searchParams.get("name") ?? "";
+  // Candidate canaries must opt in explicitly. Production readers never use
+  // this admin route, and the default remains limited to active/superseded
+  // releases so staged data cannot leak into the normal read path.
+  const includeStaged = url.searchParams.get("candidate") === "1";
   if (!RELEASE_ID.test(releaseId) || !READ_MODEL_NAME.test(name)) {
     return Response.json({ error: "invalid_artifact_reference" }, { status: 400 });
   }
 
   try {
+    const statusClause = includeStaged
+      ? "status IN ('ACTIVE', 'SUPERSEDED', 'STAGED')"
+      : "status IN ('ACTIVE', 'SUPERSEDED')";
     const row = await runtime.DB
       .prepare(
         `SELECT release_id, as_of, status, manifest_json
          FROM release_manifest
-         WHERE release_id = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+         WHERE release_id = ? AND ${statusClause}
          LIMIT 1`,
       )
       .bind(releaseId)
@@ -69,6 +76,7 @@ export async function GET(request: Request) {
       "X-Flow-Release-Id": releaseId,
       "X-Flow-As-Of": row.as_of,
       "X-Flow-Artifact": name,
+      "X-Flow-Release-Status": row.status,
     });
     if (object.httpEtag) headers.set("ETag", object.httpEtag);
     return new Response(object.body, { headers });

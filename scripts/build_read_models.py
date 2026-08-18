@@ -19,6 +19,16 @@ def main() -> None:
         required=True,
         help="Complete ETF-to-stock catalog sidecar generated offline",
     )
+    parser.add_argument(
+        "--market-history",
+        type=Path,
+        help="Compact market_history_daily JSON bounded to the snapshot asOf",
+    )
+    parser.add_argument(
+        "--previous-manifest",
+        type=Path,
+        help="Optional active-release manifest used for history-length regression gates",
+    )
     args = parser.parse_args()
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
     result = write_read_models(
@@ -27,6 +37,8 @@ def main() -> None:
         require_materialized=args.require_materialized,
         object_prefix=args.object_prefix,
         stock_catalog_path=args.stock_catalog,
+        market_history_path=args.market_history,
+        previous_manifest_path=args.previous_manifest,
     )
     print(json.dumps(result["manifest"], ensure_ascii=False, indent=2))
 

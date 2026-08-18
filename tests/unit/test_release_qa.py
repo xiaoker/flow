@@ -23,6 +23,7 @@ from trading_desk.release_qa import (
     validate_combined_data,
     validate_etf_terminal_data,
     validate_etf_terminal_identity,
+    validate_etf_cross_artifact_reconciliation,
     validate_raw_to_normalized_mapping,
 )
 
@@ -392,3 +393,45 @@ def test_release_qa_blocks_etf_name_or_share_mismatch_against_raw_row() -> None:
 
     assert next(item for item in findings if item.check_id == "derived.etf_identity_matches_raw").status == "fail"
     assert next(item for item in findings if item.check_id == "derived.etf_shares_matches_raw").status == "fail"
+
+
+def test_release_qa_reconciles_canonical_etf_with_all_views() -> None:
+    dates = ["2026-08-13", "2026-08-14"]
+    snapshot = {
+        "asOf": dates[-1],
+        "etfTerminal": {
+            "availablePeriods": ["1d"],
+            "instruments": [
+                {"code": "510300", "market": "SSE", "name": "沪深300ETF", "periods": {"1d": 1.0}},
+                {"code": "159919", "market": "SZSE", "name": "沪深300ETF", "periods": {"1d": -0.5}},
+            ],
+            "groupPeriods": [
+                {"name": "宽基", "periods": {"1d": 0.5}, "comparableCount": {"1d": 2}},
+            ],
+            "universe": {"total": 2, "classified": 2, "unclassified": 0},
+        },
+    }
+    frames = {
+        "sse_etf": pd.DataFrame(
+            [
+                {"trade_date": dates[0], "instrument_code": "510300", "instrument_name": "沪深300ETF", "shares": 100_000_000},
+                {"trade_date": dates[1], "instrument_code": "510300", "instrument_name": "沪深300ETF", "shares": 200_000_000},
+            ]
+        ),
+        "szse_etf": pd.DataFrame(
+            [
+                {"trade_date": dates[0], "instrument_code": "159919", "instrument_name": "沪深300ETF", "shares": 100_000_000},
+                {"trade_date": dates[1], "instrument_code": "159919", "instrument_name": "沪深300ETF", "shares": 50_000_000},
+            ]
+        ),
+    }
+
+    findings = validate_etf_cross_artifact_reconciliation(
+        snapshot,
+        frames,
+        dates=dates,
+        as_of=dates[-1],
+    )
+
+    assert findings[0].check_id == "reconciliation.etf_cross_artifact_identity"
+    assert all(item.status == "pass" for item in findings)

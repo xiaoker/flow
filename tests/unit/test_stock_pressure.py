@@ -72,3 +72,26 @@ def test_pressure_rejects_non_finite_or_inconsistent_flow() -> None:
     catalog["items"][0]["netShares"] = 99
     with pytest.raises(StockPressureError, match="pressure_flow_identity_mismatch"):
         merge_stock_catalog_history(catalog)
+
+
+def test_pressure_does_not_roll_across_missing_global_partition() -> None:
+    catalog = _catalog("2026-01-22")
+    global_dates = [(date(2026, 1, 1) + timedelta(days=index)).isoformat() for index in range(21)]
+    item_dates = [global_dates[0], *global_dates[2:], "2026-01-22"]
+    catalog["availableDates"] = global_dates
+    catalog["items"][0]["history"] = [
+        {
+            "date": item_date,
+            "netShares": 100,
+            "inflowShares": 160,
+            "outflowShares": 60,
+            "penetratedShares": 100,
+            "etfCount": 2,
+        }
+        for item_date in item_dates
+    ]
+
+    pressure = build_stock_pressure(catalog)
+
+    assert pressure["stocks"][0]["historyCoverage"] == 21
+    assert pressure["stocks"][0]["rolling20"] is None

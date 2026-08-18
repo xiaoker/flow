@@ -218,6 +218,48 @@ jobs:
             jq '{asOf, publication, etfStockFlow: {available: .etfStockFlow.available, coverage: .etfStockFlow.coverage, warnings: .etfStockFlow.warnings}}' dashboard-snapshot.json >&2
           fi
 
+      - name: Prepare compact market history and previous manifest
+        if: ${{ success() }}
+        env:
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
+            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
+            AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
+            if [[ -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+              echo "Cloudflare Access headers are required to read the compact market-history endpoint." >&2
+              exit 1
+            fi
+            curl --fail-with-body --retry 3 --retry-all-errors \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              "https://flow.xiaoker.com/api/v2/market-history?asOf=${AS_OF}" \
+              --output market-history.json
+            jq -e --arg asOf "$AS_OF" '
+              (.rows | type == "array") and
+              all(.rows[]?;
+                (.trade_date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
+                (.trade_date <= $asOf)
+              )
+            ' market-history.json >/dev/null
+            # The active manifest is only a read-only regression baseline. If
+            # it cannot be fetched, fail closed rather than silently disabling
+            # the history-length gate for this release.
+            curl --fail-with-body --retry 3 --retry-all-errors \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              "https://flow.xiaoker.com/api/v2/releases/latest" \
+              --output previous-release.json
+            jq '{asOf: .asOf, releaseId: .releaseId, marketHistory: (.manifest.marketHistory // null)}' \
+              previous-release.json
+            jq '{asOf: .asOf, rows: (.rows | length), first: (.rows[0].trade_date // null), last: (.rows[-1].trade_date // null)}' \
+              market-history.json
+          else
+            echo "Snapshot/read-model prerequisites are incomplete; compact market history is not needed."
+          fi
+
       - name: Build verified archive and publish bundle
         run: |
           # The dashboard snapshot is published separately from read models.
@@ -252,6 +294,57 @@ jobs:
           ' publish-response.json >/dev/null
           jq '{status, asOf, readModelReleaseId, readModelActivation}' publish-response.json
 
+      - name: Build ETF-to-stock daily partitions from archived R2 inputs
+        if: ${{ success() && steps.stock-flow.outputs.ready == 'true' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
+          jq -r --arg asOf "$AS_OF" '
+            [.rows[]?.trade_date | select(type == "string" and . <= $asOf)]
+            | unique | .[-22:][]
+          ' market-history.json > stock-flow-dates.txt
+          if ! grep -qx "$AS_OF" stock-flow-dates.txt; then
+            echo "market history does not include the current as-of date; refusing to build stock-flow history." >&2
+            exit 1
+          fi
+          python scripts/fetch_stock_flow_history_inputs.py \
+            --base-url "https://flow.xiaoker.com" \
+            --dates stock-flow-dates.txt \
+            --as-of "$AS_OF" \
+            --output-dir stock-flow-inputs \
+            --report stock-flow-fetch-report.json \
+            --inventory pcf-inventory.json \
+            --require-current
+          python scripts/build_stock_flow_history.py \
+            --shares stock-flow-inputs/shares.csv \
+            --pcf stock-flow-inputs/pcf.csv \
+            --dates stock-flow-dates.txt \
+            --as-of "$AS_OF" \
+            --output-dir stock-flow-partitions \
+            --output stock-flow-history.json \
+            --max-partitions 21 \
+            --lineage-report stock-flow-fetch-report.json
+          jq -e --arg asOf "$AS_OF" '
+            (.availableDates | index($asOf) != null) and
+            (.partitions | length > 0)
+          ' stock-flow-history.json >/dev/null
+
+      - name: Publish ETF-to-stock daily partitions
+        if: ${{ success() && steps.stock-flow.outputs.ready == 'true' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python scripts/publish_stock_flow_history.py \
+            --partition-dir stock-flow-partitions \
+            --index stock-flow-history.json \
+            --url "https://flow.xiaoker.com/api/v1/admin/stock-flow-history"
+
       - name: Verify deployed read-model capabilities before building release
         if: ${{ success() }}
         env:
@@ -274,28 +367,35 @@ jobs:
         run: |
           if jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
-            # Carry forward only the previous release's eight stock shards.
-            # This keeps the 20-day pressure history in the offline build and
-            # prevents the Worker from reading or aggregating full-market data.
-            if [[ -s "stock-flow-catalog.json" ]]; then
-              AS_OF="$(jq -r '.asOf' stock-flow-catalog.json)"
+            # Build pressure history from real daily ETF/PCF partitions. The
+            # previous release is never treated as the historical source.
+            if [[ -s "stock-flow-catalog.json" && -s "stock-flow-history.json" ]]; then
               python scripts/build_stock_pressure_state.py \
                 --catalog stock-flow-catalog.json \
                 --output stock-pressure-catalog.json \
-                --before-date "$AS_OF"
+                --daily-partitions stock-flow-history.json
             else
-              echo "stock-flow-catalog.json is unavailable; cannot publish a pressure-consistent release." >&2
+              echo "stock-flow catalog/history is unavailable; cannot publish a pressure-consistent release." >&2
               exit 1
             fi
             if [[ ! -s "stock-pressure-catalog.json" ]]; then
               echo "stock-pressure-catalog.json was not produced." >&2
               exit 1
             fi
+            if [[ ! -s "market-history.json" ]]; then
+              echo "market-history.json was not produced; refusing to build a truncated release." >&2
+              exit 1
+            fi
+            HISTORY_ARGS=(--market-history market-history.json)
+            if [[ -s "previous-release.json" ]]; then
+              HISTORY_ARGS+=(--previous-manifest previous-release.json)
+            fi
             python scripts/build_read_models.py \
               --snapshot dashboard-snapshot.json \
               --output-dir read-models \
               --stock-catalog stock-pressure-catalog.json \
-              --require-materialized
+              --require-materialized \
+              "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py \
               --read-model-dir read-models \
               --output artifact-size-report.json
@@ -383,6 +483,14 @@ jobs:
             etf-flow-state.json
             stock-flow-catalog.json
             stock-pressure-catalog.json
+            stock-flow-dates.txt
+            stock-flow-inputs/**
+            stock-flow-partitions/**
+            stock-flow-history.json
+            stock-flow-fetch-report.json
+            pcf-inventory.json
+            market-history.json
+            previous-release.json
             artifact-size-report.json
             capabilities.json
             read-model-publish.json

@@ -14,6 +14,7 @@ import requests
 
 
 MAX_REQUEST_BYTES = 1_500_000
+ACTIVATION_MODES = {"active", "stage_only"}
 
 
 def required_env(name: str) -> str:
@@ -71,12 +72,53 @@ def check_capabilities(url: str, headers: dict[str, str]) -> None:
         raise RuntimeError("deployed capability lacks v3 release features")
 
 
+def build_upload_body(
+    manifest: dict[str, Any],
+    name: str,
+    declared: dict[str, Any],
+    content: bytes,
+    *,
+    finalize: bool,
+    activation_mode: str = "active",
+) -> dict[str, Any]:
+    """Build one bounded upload request.
+
+    ``stage_only`` is deliberately explicit on every artifact.  The Worker
+    treats the mode as a candidate import and writes only immutable objects
+    plus a STAGED manifest; it must never move the active pointer.
+    """
+
+    if activation_mode not in ACTIVATION_MODES:
+        raise ValueError(f"unsupported activation mode: {activation_mode}")
+    digest = hashlib.sha256(content).hexdigest()
+    wire_content = gzip.compress(content, compresslevel=6)
+    return {
+        "version": 1,
+        "activationMode": activation_mode,
+        "manifest": manifest,
+        "artifact": {
+            "name": name,
+            "key": declared["key"],
+            "sha256": digest,
+            "bytes": len(content),
+            "contentBase64": base64.b64encode(wire_content).decode("ascii"),
+            "contentEncoding": "gzip",
+        },
+        "finalize": finalize,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish read models one artifact per Worker request")
     parser.add_argument("--read-model-dir", type=Path, default=Path("read-models"))
     parser.add_argument("--url", default="https://flow.xiaoker.com/api/v1/admin/read-model-import")
     parser.add_argument("--capabilities-url", default="https://flow.xiaoker.com/api/v1/admin/capabilities")
     parser.add_argument("--result-output", type=Path)
+    parser.add_argument(
+        "--stage-only",
+        action="store_true",
+        help="Upload immutable candidate artifacts without changing the active release pointer",
+    )
     args = parser.parse_args()
 
     manifest = json.loads((args.read_model_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -93,26 +135,22 @@ def main() -> None:
     if not names:
         raise ValueError("read-model manifest has no artifacts")
     final_result: dict[str, Any] | None = None
+    activation_mode = "stage_only" if args.stage_only else "active"
     for index, name in enumerate(names):
         declared = manifest["artifacts"][name]
         content = (args.read_model_dir / f"{name}.json").read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         if len(content) != int(declared["bytes"]) or digest != declared["sha256"]:
             raise ValueError(f"read-model digest mismatch: {name}")
+        body = build_upload_body(
+            manifest,
+            name,
+            declared,
+            content,
+            finalize=index == len(names) - 1,
+            activation_mode=activation_mode,
+        )
         wire_content = gzip.compress(content, compresslevel=6)
-        body = {
-            "version": 1,
-            "manifest": manifest,
-            "artifact": {
-                "name": name,
-                "key": declared["key"],
-                "sha256": digest,
-                "bytes": len(content),
-                "contentBase64": base64.b64encode(wire_content).decode("ascii"),
-                "contentEncoding": "gzip",
-            },
-            "finalize": index == len(names) - 1,
-        }
         request_bytes = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         print(
             json.dumps(
@@ -133,12 +171,15 @@ def main() -> None:
         print(json.dumps({"name": name, **result}, ensure_ascii=False))
         if index == len(names) - 1:
             final_result = result
-        if index == len(names) - 1 and result.get("status") not in {
-            "activated",
-            "staged_older_than_active",
-            "staged_stale_revision",
-        }:
-            raise RuntimeError(f"read model release was not activated: {result}")
+        if index == len(names) - 1:
+            allowed_statuses = {"staged_candidate"} if args.stage_only else {
+                "activated",
+                "staged_older_than_active",
+                "staged_stale_revision",
+            }
+            if result.get("status") not in allowed_statuses:
+                action = "staged" if args.stage_only else "activated"
+                raise RuntimeError(f"read model release was not {action}: {result}")
     if args.result_output and final_result is not None:
         args.result_output.write_text(
             json.dumps(final_result, ensure_ascii=False, sort_keys=True) + "\n",

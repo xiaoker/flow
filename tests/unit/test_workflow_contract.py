@@ -56,6 +56,9 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert workflow.index("Archive raw evidence and publish normalized data") < workflow.index(
         "Verify deployed read-model capabilities before building release"
     )
+    assert workflow.index("Archive raw evidence and publish normalized data") < workflow.index(
+        "Build ETF-to-stock daily partitions from archived R2 inputs"
+    )
     assert workflow.index("Verify deployed read-model capabilities before building release") < workflow.index(
         "Build immutable read models offline"
     )
@@ -63,7 +66,13 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
         "Verify published read-model release"
     )
     assert "build_stock_pressure_state.py" in workflow
-    assert "--before-date \"$AS_OF\"" in workflow
+    assert "--daily-partitions stock-flow-history.json" in workflow
+    assert "Build ETF-to-stock daily partitions from archived R2 inputs" in workflow
+    assert "fetch_stock_flow_history_inputs.py" in workflow
+    assert "build_stock_flow_history.py" in workflow
+    assert "publish_stock_flow_history.py" in workflow
+    assert "--lineage-report stock-flow-fetch-report.json" in workflow
+    assert "--inventory pcf-inventory.json" in workflow
     assert "Build immutable read models offline" in workflow
     assert "--require-materialized" in workflow
     assert "--read-model-dir read-models" in workflow
@@ -87,6 +96,15 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
     build_index = workflow.index("Build immutable read models offline")
     publish_index = workflow.index("Publish immutable read models")
     assert readiness_index < build_index < publish_index
+
+
+def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+
+    assert "| .[-22:][]" in workflow
+    assert "--require-current" in workflow
+    assert "stock-flow-history.json" in workflow
+    assert "availableDates | index($asOf) != null" in workflow
 
 
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:
