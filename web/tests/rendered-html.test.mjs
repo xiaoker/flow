@@ -79,6 +79,10 @@ test("refreshes the latest dashboard and schedules collection through source rel
   assert.match(bootstrapSource, /release_pending/);
   assert.match(bootstrapSource, /REFRESH_ERROR_THRESHOLD = 3/);
   assert.match(bootstrapSource, /REQUEST_TIMEOUT_MS = 15_000/);
+  assert.match(bootstrapSource, /浏览器读取发布指针连续失败/);
+  assert.match(source, /发布检查暂不可用/);
+  assert.match(source, /当前仍展示.*release/);
+  assert.match(source, /lastCheck = Date\.now\(\);[\s\S]*onAutoRefresh/);
   assert.match(bootstrapSource, /\/api\/v2\/views\/\$\{view\}/);
   assert.match(bootstrapSource, /viewReleaseId/);
   assert.match(source, /onViewChange/);

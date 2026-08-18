@@ -285,7 +285,7 @@ export function DashboardBootstrap() {
       if (mountedRef.current && refreshFailureCountRef.current >= REFRESH_ERROR_THRESHOLD) {
         setRefreshError(cause instanceof Error && cause.message === "release_pending"
           ? "新版本仍在发布，暂时保留当前完整数据"
-          : "自动更新连续失败，已保留上一份完整数据；下次检查会自动重试");
+          : "浏览器读取发布指针连续失败，已保留上一份完整数据；下次检查会自动重试");
       }
     } finally {
       refreshInFlightRef.current = false;
