@@ -1,0 +1,26 @@
+{
+  "releaseId": "release:2026-08-13:ff4b307e291c4534",
+  "asOf": "2026-08-13",
+  "observedAt": "2026-08-14T03:17:42.000Z",
+  "manifestSha256": "76d8e9a427ebea58c647341f917ea950f3eb4e9fc5af0b3b6343c862f7363e16",
+  "artifacts": {
+    "bootstrap": {"bytes": 167268, "sha256": "4252cc66357a4419650bf35a736283e00ff346aad4db2782c63ec6cf9d6d6838"},
+    "connect": {"bytes": 1409, "sha256": "7e209d9ece367c72b9a20d6e9a59dcb00e2a686337cea4d0cae4866341f3ae6a"},
+    "margin": {"bytes": 926, "sha256": "c34c5c5fa0492a9d1c0b027309c59ff31f3275ab9a557c108076d96eb97132d8"},
+    "national": {"bytes": 9779, "sha256": "192284b0b279648c52b6e3d53421ea7ae6467a520cdedc3fe83be9160dae7edf"},
+    "overview": {"bytes": 4555, "sha256": "47cc0e21de3ce93f98fbf66ef243d7700336ffc1ba0b372a3706b55ff9ea4d78"},
+    "pressure": {"bytes": 2675397, "sha256": "f6e17ca0417db1454a518540810d2cb25052108439460ef2b8bf84578d977f17"},
+    "radar": {"bytes": 1180013, "sha256": "7c15e0c0a613c5991536fe89434e912c539ed098b010b043df8c08851a23f8c8"},
+    "radar_flow": {"bytes": 3766884, "sha256": "a1c7e70ab7578b399683386cff43689b235c4c75a75e9e654c2340ee8e4e326e"},
+    "rotation": {"bytes": 29057, "sha256": "e5e1d0dc93695532d3388d45239057986851666b86d1fc00404273abf13cf092"},
+    "stock_0": {"bytes": 1355174, "sha256": "4cc120cd1ea97fe590698772f50185dafacdf4a2d5b64acf9b26f0cd620e4c32"},
+    "stock_1": {"bytes": 1412299, "sha256": "ebc10fca4f5fa7f8b73767a2c762e52f588a36c790ac6dd11660e00ce49cfa5f"},
+    "stock_2": {"bytes": 1390902, "sha256": "a37e8fab6e73391e192f025058b8dcc16a81d982aa9c5e1a75e2da294fb2dd8a"},
+    "stock_3": {"bytes": 1371102, "sha256": "037467fe84fc8b7e7b061a7f0a6b3dc2e5db4c67d9ede293a40938f8b50e19a2"},
+    "stock_4": {"bytes": 1279919, "sha256": "5a87ca5cb3036efcef835ffd163f9cef39b506124f0915788fee52ead87a5fb1"},
+    "stock_5": {"bytes": 1314549, "sha256": "4354a5cd96bbd977da81812c865ae271af3306c0fcb0732315a754494f0b5095"},
+    "stock_6": {"bytes": 1263453, "sha256": "cf6d017e216ded5d1c25988397805eccdb4b4754e28171a99b6a98bb11e3e82b"},
+    "stock_7": {"bytes": 1378182, "sha256": "db11f87406c35449de629cbe17abc52bdc4ead718d3413e5f744f064f623bc1e"},
+    "stock_search": {"bytes": 783637, "sha256": "307fd74c81444907d47e6571a9564a0d3a754fe280f0f6f897e6bc3d38fea927"}
+  }
+}

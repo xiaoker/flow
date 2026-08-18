@@ -133,10 +133,10 @@ export function validateEtfTerminalCoverage(
       const comparable = terminal.instruments.filter(
         (item) => typeof item.periods[period] === "number",
       ).length;
-      // Values are rounded to 2 decimal 亿份 at the terminal boundary, so a
+      // Values retain six decimal 亿份 precision at the terminal boundary, so a
       // small tolerance is expected. A larger difference means a product was
       // silently dropped or counted twice by the sector aggregation.
-      if (comparable > 0 && Math.abs(groupTotal - instrumentTotal) > 0.05) {
+      if (comparable > 0 && Math.abs(groupTotal - instrumentTotal) > 0.01) {
         issues.push(
           `group_reconciliation:${period}:${groupTotal.toFixed(2)}:${instrumentTotal.toFixed(2)}`,
         );
@@ -489,7 +489,7 @@ function sumValues(
     // is present.  Returning a partial sum makes a 3d/1w number look complete
     // and was the root of the repeated cross-gap values in the radar.
     value: observed.length === indexes.length && indexes.length > 0
-      ? Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2))
+      ? Number(observed.reduce((sum, value) => sum + value, 0).toFixed(6))
       : null,
     coverage: observed.length,
   };
@@ -508,6 +508,27 @@ function displayClassification(item: StateInstrument) {
     // improvements; this flag describes the display universe only.
     includeInGroup: true,
     unclassified,
+  };
+}
+
+function deriveEtfFlowHeadline(instruments: EtfTerminalInstrument[]) {
+  const changes = instruments.flatMap((item) => {
+    const value = item.periods["1d"];
+    return typeof value === "number" && Number.isFinite(value) ? [{ item, value }] : [];
+  });
+  const rows = (ascending: boolean) =>
+    [...changes]
+      .sort((left, right) => ascending ? left.value - right.value : right.value - left.value)
+      .slice(0, 5)
+      .map(({ item, value }) => ({ code: item.code, name: item.name, value: Number(value.toFixed(2)) }));
+  const net = changes.reduce((sum, row) => sum + row.value, 0);
+  return {
+    flows: { inflow: rows(false), outflow: rows(true) },
+    summary: {
+      net,
+      increasers: changes.filter((row) => row.value > 0).length,
+      decreasers: changes.filter((row) => row.value < 0).length,
+    },
   };
 }
 
@@ -592,7 +613,7 @@ export function enrichSnapshotWithEtfFlowState(
       const value = item.periods[period];
       if (value !== null && value !== undefined) {
         group.periods[period] = Number(
-          ((group.periods[period] ?? 0) + value).toFixed(2),
+          ((group.periods[period] ?? 0) + value).toFixed(6),
         );
         group.comparableCount![period] =
           (group.comparableCount?.[period] ?? 0) + 1;
@@ -634,7 +655,7 @@ export function enrichSnapshotWithEtfFlowState(
       .filter((value): value is number => value !== null && value !== undefined);
     return {
       date: date.slice(5),
-      value: Number(observed.reduce((sum, value) => sum + value, 0).toFixed(2)),
+      value: Number(observed.reduce((sum, value) => sum + value, 0).toFixed(6)),
       coverage: observed.length,
       cashValue: observedCash.length
         ? Number(observedCash.reduce((sum, value) => sum + value, 0).toFixed(2))
@@ -655,9 +676,26 @@ export function enrichSnapshotWithEtfFlowState(
   const unclassified = instruments.filter(
     (item) => item.category === UNCLASSIFIED_CATEGORY,
   ).length;
+  const etfHeadline = deriveEtfFlowHeadline(instruments);
+  const metrics = snapshot.metrics.map((metric) =>
+    metric.id !== "etf"
+      ? metric
+      : {
+          ...metric,
+          eyebrow: "沪深 ETF 份额变化",
+          value: `${etfHeadline.summary.net >= 0 ? "+" : ""}${etfHeadline.summary.net.toFixed(2)}`,
+          delta: `${etfHeadline.summary.increasers} 只增加 · ${etfHeadline.summary.decreasers} 只减少`,
+          tone: etfHeadline.summary.net >= 0 ? "positive" : "negative",
+          basis: metric.basis
+            ? { ...metric.basis, detail: "上交所与深交所当日官方份额 − 前一交易日官方份额" }
+            : metric.basis,
+        },
+  );
 
   return {
     ...snapshot,
+    etfFlows: etfHeadline.flows,
+    metrics,
     etfTerminal: {
       ...terminal,
       instruments,

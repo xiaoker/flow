@@ -61,12 +61,29 @@ export type ReadModelArtifactDescriptor = {
   contentType?: string;
 };
 
+export type MarketHistoryCoverage = {
+  from: string | null;
+  to: string | null;
+  points: number;
+};
+
+export type MarketHistoryManifest = {
+  schemaVersion: 1;
+  sha256: string | null;
+  archiveFrom: string | null;
+  archiveTo: string | null;
+  archiveDates: number;
+  margin: MarketHistoryCoverage;
+  connect: MarketHistoryCoverage;
+};
+
 export type ReadModelManifest = {
   schemaVersion: number;
   releaseId: string;
   asOf: string;
   observedAt?: string | null;
   sourceDates?: Record<string, string | null>;
+  marketHistory?: MarketHistoryManifest;
   pressureSchemaVersion?: number;
   stockShardCount?: number;
   requiredArtifacts?: string[];
@@ -107,6 +124,30 @@ function isArtifactDescriptor(value: unknown): value is ReadModelArtifactDescrip
   );
 }
 
+function isMarketHistoryCoverage(value: unknown): value is MarketHistoryCoverage {
+  return Boolean(
+    isRecord(value) &&
+      (value.from === null || (typeof value.from === "string" && ISO_DATE.test(value.from))) &&
+      (value.to === null || (typeof value.to === "string" && ISO_DATE.test(value.to))) &&
+      Number.isSafeInteger(value.points) &&
+      (value.points as number) >= 0,
+  );
+}
+
+function isMarketHistoryManifest(value: unknown): value is MarketHistoryManifest {
+  return Boolean(
+    isRecord(value) &&
+      value.schemaVersion === 1 &&
+      (value.sha256 === null || (typeof value.sha256 === "string" && SHA256.test(value.sha256))) &&
+      (value.archiveFrom === null || (typeof value.archiveFrom === "string" && ISO_DATE.test(value.archiveFrom))) &&
+      (value.archiveTo === null || (typeof value.archiveTo === "string" && ISO_DATE.test(value.archiveTo))) &&
+      Number.isSafeInteger(value.archiveDates) &&
+      (value.archiveDates as number) >= 0 &&
+      isMarketHistoryCoverage(value.margin) &&
+      isMarketHistoryCoverage(value.connect),
+  );
+}
+
 /**
  * Accept the deployed v2 producer and the additive v3 contract.  v3 fields
  * are required only when schemaVersion is 3, so an old collector can keep
@@ -122,6 +163,7 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
     !ISO_DATE.test(value.asOf) ||
     (value.observedAt !== undefined && value.observedAt !== null && !isIsoInstant(value.observedAt)) ||
     (value.sourceDates !== undefined && !isSourceDates(value.sourceDates)) ||
+    (value.marketHistory !== undefined && !isMarketHistoryManifest(value.marketHistory)) ||
     (value.manifestSha256 !== undefined &&
       (typeof value.manifestSha256 !== "string" || !SHA256.test(value.manifestSha256))) ||
     !isRecord(value.artifacts)

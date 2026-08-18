@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from trading_desk.etf_flow_state import build_etf_flow_state, materialize_etf_terminal
+from trading_desk.etf_flow_state import (
+    build_etf_flow_state,
+    materialize_dashboard_snapshot,
+    materialize_etf_terminal,
+)
 
 
 def _snapshot(
@@ -116,3 +120,36 @@ def test_materialization_hides_instruments_absent_from_latest_official_day() -> 
     assert [item["code"] for item in terminal["instruments"]] == ["510300"]
     assert terminal["dailySeries"][0]["coverage"] == 2
     assert terminal["dailySeries"][1]["coverage"] == 1
+
+
+def test_dashboard_materialization_rederives_headline_from_both_markets() -> None:
+    state = {
+        "version": 1,
+        "dates": ["2026-08-06", "2026-08-07"],
+        "instruments": [
+            {"code": "510300", "name": "沪深300ETF", "market": "SSE", "category": "宽基", "values": [0.0, 1.0]},
+            {"code": "159919", "name": "沪深300ETF", "market": "SZSE", "category": "宽基", "values": [0.0, 2.0]},
+        ],
+    }
+    snapshot = {
+        "asOf": "2026-08-07",
+        "metrics": [
+            {
+                "id": "etf",
+                "eyebrow": "上交所 ETF 份额变化",
+                "value": "+0.00",
+                "delta": "0 只增加 · 0 只减少",
+                "tone": "neutral",
+                "basis": {"detail": "旧口径"},
+            }
+        ],
+        "etfFlows": {"inflow": [], "outflow": []},
+        "etfTerminal": materialize_etf_terminal(state),
+        "dataStatus": [],
+    }
+
+    materialized = materialize_dashboard_snapshot(snapshot, state)
+
+    assert materialized["metrics"][0]["value"] == "+3.00"
+    assert materialized["metrics"][0]["eyebrow"] == "沪深 ETF 份额变化"
+    assert {row["code"] for row in materialized["etfFlows"]["inflow"]} == {"159919", "510300"}

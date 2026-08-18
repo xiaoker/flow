@@ -76,6 +76,19 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
 
 
+def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_index() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+
+    assert "Check ETF stock-flow read-model readiness" in workflow
+    assert "etfStockFlow.available == true" in workflow
+    assert "((.etfStockFlow.coverage.stockCount // 0) > 0)" in workflow
+    assert 'steps.stock-flow.outputs.ready' in workflow
+    readiness_index = workflow.index("Check ETF stock-flow read-model readiness")
+    build_index = workflow.index("Build immutable read models offline")
+    publish_index = workflow.index("Publish immutable read models")
+    assert readiness_index < build_index < publish_index
+
+
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/access-smoke.yml"

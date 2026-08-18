@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from trading_desk.etf_flow_state import materialize_etf_terminal
@@ -103,6 +104,40 @@ def _stock_catalog() -> dict:
     }
 
 
+def _market_history(start: str = "2026-05-18", count: int = 61) -> dict:
+    dates = pd.bdate_range(start, periods=count).strftime("%Y-%m-%d").tolist()
+    return {
+        "schemaVersion": 1,
+        "asOf": dates[-1],
+        "source": "test-market-history",
+        "rows": [
+            {
+                "trade_date": date,
+                "margin_balance": 20_000.0 + index,
+                "margin_change": float(index),
+                "financing_buy": 100.0,
+                "lending_balance": 20.0,
+                "lending_sell_volume": 10.0,
+                "total_balance": 20_020.0,
+                "sse_balance": 10_000.0,
+                "szse_balance": 10_000.0,
+                "southbound_net": float(index),
+                "southbound_turnover": 500.0,
+                "southbound_sse_net": float(index) / 2,
+                "southbound_szse_net": float(index) / 2,
+                "northbound_turnover": 1_000.0,
+                "northbound_etf_turnover": 100.0,
+                "northbound_trade_count": 10,
+                "margin_available": 1,
+                "connect_available": 1,
+                "source_snapshot_sha256": f"{index:064x}",
+                "observed_at": f"{date}T09:00:00Z",
+            }
+            for index, date in enumerate(dates)
+        ],
+    }
+
+
 def test_materializer_builds_periods_groups_and_coverage() -> None:
     terminal = materialize_etf_terminal(_state(), base_terminal={})
 
@@ -146,6 +181,55 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
     assert len(payloads_a["bootstrap"]["etfSearch"]) == 2
     assert {item["code"] for item in payloads_a["national"]["data"]["etfTerminal"]["instruments"]} <= {"510300", "510310", "510330", "510500", "159915", "159919", "512100", "510050", "588080", "510180", "159845", "512500"}
     assert manifest_a["releaseId"].startswith("release:2026-08-06:")
+
+
+def test_market_history_is_materialized_and_hashed() -> None:
+    history = _market_history(start="2026-05-14", count=61)
+    snapshot = _snapshot()
+    catalog = _stock_catalog()
+    payloads, manifest = build_read_models(
+        snapshot,
+        require_materialized=True,
+        stock_catalog=catalog,
+        market_history=history,
+    )
+
+    assert len(payloads["margin"]["data"]["marginSeries"]) == 61
+    assert len(payloads["connect"]["data"]["connectSeries"]) == 61
+    assert len(payloads["overview"]["data"]["marginSeries"]) == 61
+    assert manifest["marketHistory"]["archiveDates"] == 61
+    assert manifest["marketHistory"]["margin"]["points"] == 61
+    assert manifest["marketHistory"]["connect"]["points"] == 61
+    assert len(manifest["marketHistory"]["sha256"]) == 64
+
+
+def test_market_history_excludes_future_rows_and_rejects_shorter_previous_release() -> None:
+    history = _market_history(start="2026-05-14", count=61)
+    future = dict(history["rows"][-1])
+    future["trade_date"] = "2026-08-07"
+    history["rows"].append(future)
+    snapshot = _snapshot()
+    history["asOf"] = snapshot["asOf"]
+    catalog = _stock_catalog()
+
+    _, manifest = build_read_models(
+        snapshot,
+        require_materialized=True,
+        stock_catalog=catalog,
+        market_history=history,
+    )
+    assert manifest["marketHistory"]["archiveTo"] == snapshot["asOf"]
+    assert manifest["marketHistory"]["archiveDates"] == 61
+
+    shorter = {**history, "rows": history["rows"][:10]}
+    with pytest.raises(ReadModelError, match="market_history_margin_regressed"):
+        build_read_models(
+            snapshot,
+            require_materialized=True,
+            stock_catalog=catalog,
+            market_history=shorter,
+            previous_manifest=manifest,
+        )
 
 
 def test_release_identity_includes_observed_at_and_source_dates() -> None:

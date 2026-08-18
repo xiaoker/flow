@@ -36,6 +36,8 @@ STOCK_SHARD_COUNT = 8
 STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
 REQUIRED_ARTIFACT_NAMES = (*VIEW_NAMES, STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES)
 MAX_READ_MODEL_BYTES = 5_000_000
+MARKET_HISTORY_MAX_DATES = 750
+MARKET_HISTORY_SCHEMA_VERSION = 1
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # This is the same code-based observation pool shown by the National Team
@@ -169,6 +171,244 @@ def _source_dates(snapshot: dict[str, Any]) -> dict[str, str | None]:
         elif name == "互联互通":
             dates["connectAsOf"] = _source_date(row.get("asOf"), year=year)
     return dates
+
+
+_MARKET_HISTORY_FIELDS = (
+    "trade_date",
+    "margin_balance",
+    "margin_change",
+    "financing_buy",
+    "lending_balance",
+    "lending_sell_volume",
+    "total_balance",
+    "sse_balance",
+    "szse_balance",
+    "southbound_net",
+    "southbound_turnover",
+    "southbound_sse_net",
+    "southbound_szse_net",
+    "northbound_turnover",
+    "northbound_etf_turnover",
+    "northbound_trade_count",
+    "margin_available",
+    "connect_available",
+    "source_snapshot_sha256",
+    "observed_at",
+)
+_MARKET_HISTORY_NUMERIC_FIELDS = set(_MARKET_HISTORY_FIELDS[1:16])
+
+
+def _is_valid_iso_date(value: Any) -> bool:
+    if not isinstance(value, str) or not ISO_DATE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def _finite_or_none(value: Any, *, field: str, date: str) -> float | int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ReadModelError(f"market_history_{field}_invalid:{date}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ReadModelError(f"market_history_{field}_non_finite:{date}")
+    # Preserve integer flags and avoid introducing binary floating point noise
+    # into the compact input hash for values that were already integers.
+    return value if isinstance(value, int) else number
+
+
+def _normalize_market_history(
+    market_history: dict[str, Any] | list[dict[str, Any]],
+    *,
+    as_of: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Validate and bound the compact market-history input.
+
+    The collector and the public read-only endpoint use the same row shape.
+    Normalizing it here gives the immutable producer one deterministic input,
+    filters future rows before they can enter a historical release, and keeps
+    the Worker path free from full-snapshot aggregation.
+    """
+
+    if isinstance(market_history, list):
+        raw_rows = market_history
+        metadata: dict[str, Any] = {}
+    elif _is_record(market_history):
+        metadata = dict(market_history)
+        raw_rows = metadata.get("rows")
+        if raw_rows is None:
+            # A compact history may be supplied as a date-keyed map by an
+            # offline migration.  Accept it only when every value is a row;
+            # the persisted producer output remains the canonical rows list.
+            candidate_rows = [value for key, value in metadata.items() if _is_valid_iso_date(key)]
+            raw_rows = candidate_rows if candidate_rows else None
+        declared_as_of = metadata.get("asOf")
+        if declared_as_of not in (None, as_of):
+            raise ReadModelError("market_history_as_of_mismatch")
+        schema_version = metadata.get("schemaVersion")
+        if schema_version not in (None, MARKET_HISTORY_SCHEMA_VERSION):
+            raise ReadModelError("market_history_schema_invalid")
+    else:
+        raise ReadModelError("market_history_not_object")
+    if not isinstance(raw_rows, list):
+        raise ReadModelError("market_history_rows_missing")
+
+    normalized: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+    for raw in raw_rows:
+        if not _is_record(raw):
+            raise ReadModelError("market_history_row_not_object")
+        trade_date = raw.get("trade_date")
+        if not _is_valid_iso_date(trade_date):
+            raise ReadModelError("market_history_trade_date_invalid")
+        # A source endpoint can return a bounded archive that includes rows
+        # newer than a requested historical date.  They are intentionally not
+        # an error: they are excluded from this release, never backfilled.
+        if trade_date > as_of:
+            continue
+        if trade_date in seen_dates:
+            raise ReadModelError(f"market_history_duplicate_trade_date:{trade_date}")
+        seen_dates.add(trade_date)
+        row: dict[str, Any] = {"trade_date": trade_date}
+        for field in _MARKET_HISTORY_NUMERIC_FIELDS:
+            row[field] = _finite_or_none(raw.get(field), field=field, date=trade_date)
+        for field in ("margin_available", "connect_available"):
+            flag = raw.get(field, 0)
+            if isinstance(flag, bool):
+                flag = int(flag)
+            if flag not in (0, 1):
+                raise ReadModelError(f"market_history_{field}_invalid:{trade_date}")
+            row[field] = flag
+        source_hash = raw.get("source_snapshot_sha256", "")
+        if source_hash is None:
+            source_hash = ""
+        if not isinstance(source_hash, str):
+            raise ReadModelError(f"market_history_source_hash_invalid:{trade_date}")
+        observed_at = raw.get("observed_at", "")
+        if observed_at is None:
+            observed_at = ""
+        if not isinstance(observed_at, str):
+            raise ReadModelError(f"market_history_observed_at_invalid:{trade_date}")
+        row["source_snapshot_sha256"] = source_hash
+        row["observed_at"] = observed_at
+        normalized.append(row)
+
+    normalized.sort(key=lambda item: item["trade_date"])
+    normalized = normalized[-MARKET_HISTORY_MAX_DATES:]
+
+    def margin_point(row: dict[str, Any]) -> dict[str, Any] | None:
+        if row["margin_available"] != 1 or row["margin_balance"] is None:
+            return None
+        point = {
+            "date": row["trade_date"],
+            "balance": row["margin_balance"],
+            "label": f"{float(row['margin_balance']) / 10_000:.4f} 万亿",
+            "change": row["margin_change"],
+        }
+        for source, target in (
+            ("financing_buy", "financingBuy"),
+            ("lending_balance", "lendingBalance"),
+            ("lending_sell_volume", "lendingSellVolume"),
+            ("total_balance", "totalBalance"),
+            ("sse_balance", "sseBalance"),
+            ("szse_balance", "szseBalance"),
+        ):
+            if row[source] is not None:
+                point[target] = row[source]
+        return point
+
+    def connect_point(row: dict[str, Any]) -> dict[str, Any] | None:
+        if (
+            row["connect_available"] != 1
+            or row["southbound_net"] is None
+            or row["northbound_turnover"] is None
+        ):
+            return None
+        return {
+            "date": row["trade_date"],
+            "southboundNet": row["southbound_net"],
+            "southboundTurnover": row["southbound_turnover"] or 0,
+            "southboundSseNet": row["southbound_sse_net"] or 0,
+            "southboundSzseNet": row["southbound_szse_net"] or 0,
+            "northboundTurnover": row["northbound_turnover"],
+            "northboundEtfTurnover": row["northbound_etf_turnover"] or 0,
+            "northboundTradeCount": row["northbound_trade_count"] or 0,
+        }
+
+    margin_series = [point for row in normalized if (point := margin_point(row)) is not None]
+    connect_series = [point for row in normalized if (point := connect_point(row)) is not None]
+    coverage = {
+        "archiveFrom": normalized[0]["trade_date"] if normalized else None,
+        "archiveTo": normalized[-1]["trade_date"] if normalized else None,
+        "archiveDates": len(normalized),
+        "margin": {
+            "from": margin_series[0]["date"] if margin_series else None,
+            "to": margin_series[-1]["date"] if margin_series else None,
+            "points": len(margin_series),
+        },
+        "connect": {
+            "from": connect_series[0]["date"] if connect_series else None,
+            "to": connect_series[-1]["date"] if connect_series else None,
+            "points": len(connect_series),
+        },
+    }
+    compact = {
+        "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+        "asOf": as_of,
+        "source": metadata.get("source", "market_history_daily"),
+        "rows": normalized,
+        "coverage": coverage,
+    }
+    return compact, margin_series, connect_series, coverage
+
+
+def _market_history_contract(compact: dict[str, Any] | None) -> dict[str, Any]:
+    if compact is None:
+        return {
+            "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+            "sha256": None,
+            "archiveFrom": None,
+            "archiveTo": None,
+            "archiveDates": 0,
+            "margin": {"from": None, "to": None, "points": 0},
+            "connect": {"from": None, "to": None, "points": 0},
+        }
+    coverage = compact["coverage"]
+    return {
+        "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+        "sha256": sha256_bytes(canonical_json_bytes(compact)),
+        **coverage,
+    }
+
+
+def _assert_history_not_regressed(
+    current: dict[str, Any],
+    previous_manifest: dict[str, Any] | None,
+) -> None:
+    """Fail closed when a new release loses confirmed compact history."""
+
+    if not isinstance(previous_manifest, dict):
+        return
+    nested = previous_manifest.get("manifest")
+    previous = nested if isinstance(nested, dict) else previous_manifest
+    previous_history = previous.get("marketHistory")
+    if not isinstance(previous_history, dict):
+        return
+    for domain in ("margin", "connect"):
+        previous_domain = previous_history.get(domain)
+        current_domain = current.get(domain)
+        if not isinstance(previous_domain, dict) or not isinstance(current_domain, dict):
+            continue
+        previous_points = previous_domain.get("points")
+        current_points = current_domain.get("points")
+        if isinstance(previous_points, int) and isinstance(current_points, int) and current_points < previous_points:
+            raise ReadModelError(
+                f"market_history_{domain}_regressed:{current_points}<{previous_points}"
+            )
 
 
 def _is_record(value: Any) -> bool:
@@ -514,13 +754,31 @@ def _build_stock_artifacts(
     return artifacts
 
 
-def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def build_view_payloads(
+    snapshot: dict[str, Any],
+    *,
+    market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Split one validated snapshot into bounded, view-specific payloads."""
 
-    terminal = snapshot["etfTerminal"]
+    effective_snapshot = snapshot
+    if market_history is not None:
+        _compact, margin_series, connect_series, coverage = _normalize_market_history(
+            market_history,
+            as_of=str(snapshot["asOf"]),
+        )
+        effective_snapshot = dict(snapshot)
+        # An explicit history input is authoritative. Empty domain series are
+        # preserved as empty instead of falling back to the current collector
+        # window and presenting it as long history.
+        effective_snapshot["marginSeries"] = margin_series
+        effective_snapshot["connectSeries"] = connect_series
+        effective_snapshot["marketHistoryCoverage"] = coverage
+
+    terminal = effective_snapshot["etfTerminal"]
     bootstrap = {
         key: value
-        for key, value in snapshot.items()
+        for key, value in effective_snapshot.items()
         if key not in {"etfStockFlow", "pressure"}
     }
     bootstrap["etfTerminal"] = _bootstrap_terminal(terminal)
@@ -531,7 +789,7 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     # radar_flow object is fetched only after a drawer is opened.
     overview = {
         key: value
-        for key, value in snapshot.items()
+        for key, value in effective_snapshot.items()
         if key not in {"etfTerminal", "etfStockFlow"}
     }
     radar = {
@@ -539,7 +797,7 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "classificationVersion": terminal.get("classificationVersion"),
     }
     radar_flow = {
-        "etfStockFlow": snapshot.get("etfStockFlow"),
+        "etfStockFlow": effective_snapshot.get("etfStockFlow"),
         "classificationVersion": terminal.get("classificationVersion"),
     }
     rotation = {
@@ -554,15 +812,15 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "universe": terminal.get("universe"),
     }
     connect = {
-        "connect": snapshot.get("connect", []),
-        "connectSeries": snapshot.get("connectSeries", []),
-        "marketHistoryCoverage": snapshot.get("marketHistoryCoverage"),
-        "dataStatus": [row for row in snapshot.get("dataStatus", []) if "互联" in str(row.get("name", ""))],
+        "connect": effective_snapshot.get("connect", []),
+        "connectSeries": effective_snapshot.get("connectSeries", []),
+        "marketHistoryCoverage": effective_snapshot.get("marketHistoryCoverage"),
+        "dataStatus": [row for row in effective_snapshot.get("dataStatus", []) if "互联" in str(row.get("name", ""))],
     }
     margin = {
-        "marginSeries": snapshot.get("marginSeries", []),
-        "marketHistoryCoverage": snapshot.get("marketHistoryCoverage"),
-        "dataStatus": [row for row in snapshot.get("dataStatus", []) if "融资" in str(row.get("name", ""))],
+        "marginSeries": effective_snapshot.get("marginSeries", []),
+        "marketHistoryCoverage": effective_snapshot.get("marketHistoryCoverage"),
+        "dataStatus": [row for row in effective_snapshot.get("dataStatus", []) if "融资" in str(row.get("name", ""))],
     }
     national = {
         "etfTerminal": _national_terminal(terminal),
@@ -571,13 +829,13 @@ def build_view_payloads(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
     return {
         "bootstrap": bootstrap,
-        "overview": _with_release_meta(snapshot, overview),
-        "radar": _with_release_meta(snapshot, radar),
-        "radar_flow": _with_release_meta(snapshot, radar_flow),
-        "rotation": _with_release_meta(snapshot, rotation),
-        "national": _with_release_meta(snapshot, national),
-        "connect": _with_release_meta(snapshot, connect),
-        "margin": _with_release_meta(snapshot, margin),
+        "overview": _with_release_meta(effective_snapshot, overview),
+        "radar": _with_release_meta(effective_snapshot, radar),
+        "radar_flow": _with_release_meta(effective_snapshot, radar_flow),
+        "rotation": _with_release_meta(effective_snapshot, rotation),
+        "national": _with_release_meta(effective_snapshot, national),
+        "connect": _with_release_meta(effective_snapshot, connect),
+        "margin": _with_release_meta(effective_snapshot, margin),
     }
 
 
@@ -587,6 +845,8 @@ def build_read_models(
     require_materialized: bool = False,
     object_prefix: str | None = None,
     stock_catalog: dict[str, Any] | None = None,
+    market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
+    previous_manifest: dict[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Return view payloads and a release manifest without touching storage."""
 
@@ -604,17 +864,30 @@ def build_read_models(
         # would pass local hashing but be rejected by the Worker/history
         # picker after the raw evidence had already been archived.
         raise ReadModelError("stock_catalog_required_for_v3")
-    payloads = build_view_payloads(snapshot)
+    compact_history = None
+    effective_snapshot = snapshot
+    if market_history is not None:
+        compact_history, margin_series, connect_series, coverage = _normalize_market_history(
+            market_history,
+            as_of=str(snapshot["asOf"]),
+        )
+        effective_snapshot = dict(snapshot)
+        effective_snapshot["marginSeries"] = margin_series
+        effective_snapshot["connectSeries"] = connect_series
+        effective_snapshot["marketHistoryCoverage"] = coverage
+    market_history_contract = _market_history_contract(compact_history)
+    _assert_history_not_regressed(market_history_contract, previous_manifest)
+    payloads = build_view_payloads(effective_snapshot)
     payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
     # Keep the pressure page as a compact projection. Full contributor lists
     # stay in the existing stock shards and are fetched only after a user
     # selects one stock.
     pressure = build_stock_pressure(
         stock_catalog,
-        market_financing_balance_yuan=_market_financing_balance(snapshot),
+        market_financing_balance_yuan=_market_financing_balance(effective_snapshot),
         margin_as_of=snapshot["asOf"],
     )
-    payloads["pressure"] = _with_release_meta(snapshot, {"pressure": pressure})
+    payloads["pressure"] = _with_release_meta(effective_snapshot, {"pressure": pressure})
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
     artifact_names = list(REQUIRED_ARTIFACT_NAMES)
     if set(encoded) != set(artifact_names):
@@ -622,12 +895,13 @@ def build_read_models(
     for name, content in encoded.items():
         if len(content) > MAX_READ_MODEL_BYTES:
             raise ReadModelError(f"read_model_too_large:{name}")
-    observed_at = _observed_at_utc(snapshot)
-    source_dates = _source_dates(snapshot)
+    observed_at = _observed_at_utc(effective_snapshot)
+    source_dates = _source_dates(effective_snapshot)
     release_contract = {
         "asOf": snapshot["asOf"],
         "observedAt": observed_at,
         "sourceDates": source_dates,
+        "marketHistory": market_history_contract,
         "pressureSchemaVersion": PRESSURE_SCHEMA_VERSION,
         "stockShardCount": STOCK_SHARD_COUNT,
         "requiredArtifacts": artifact_names,
@@ -656,6 +930,7 @@ def build_read_models(
         "asOf": snapshot["asOf"],
         "observedAt": observed_at,
         "sourceDates": source_dates,
+        "marketHistory": market_history_contract,
         # These are fixed contract declarations.  A release without the
         # stock sidecars is still useful to unit-test the view splitter, but
         # the importer/history picker will reject it as incomplete.
@@ -681,15 +956,25 @@ def write_read_models(
     require_materialized: bool = False,
     object_prefix: str | None = None,
     stock_catalog_path: Path | None = None,
+    market_history_path: Path | None = None,
+    previous_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     stock_catalog = None
     if stock_catalog_path is not None:
         stock_catalog = json.loads(stock_catalog_path.read_text(encoding="utf-8"))
+    market_history = None
+    if market_history_path is not None:
+        market_history = json.loads(market_history_path.read_text(encoding="utf-8"))
+    previous_manifest = None
+    if previous_manifest_path is not None and previous_manifest_path.is_file():
+        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
     payloads, manifest = build_read_models(
         snapshot,
         require_materialized=require_materialized,
         object_prefix=object_prefix,
         stock_catalog=stock_catalog,
+        market_history=market_history,
+        previous_manifest=previous_manifest,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():

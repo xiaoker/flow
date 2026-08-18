@@ -10,6 +10,10 @@ import pandas as pd
 
 from .adapters import OfficialMarketAdapters
 from .etf_classification import CLASSIFICATION_VERSION, classify_etf
+from .etf_facts import (
+    build_canonical_etf_daily_fact,
+    latest_etf_flows_from_terminal,
+)
 from .etf_stock_flow import StockFlowInputError, build_stock_flow, build_stock_flow_catalog
 from .http import build_session
 from .storage import new_run_id
@@ -40,39 +44,6 @@ def _signed(value: float, decimals: int = 2) -> str:
     return f"{value:+,.{decimals}f}"
 
 
-def _latest_etf_flows(frame: pd.DataFrame, dates: list[str]) -> tuple[dict[str, Any], Any]:
-    latest_date, previous_date = dates[-1], dates[-2]
-    latest = frame.loc[
-        frame["trade_date"].astype(str).eq(latest_date),
-        ["instrument_code", "instrument_name", "shares"],
-    ].rename(columns={"shares": "latest_shares"})
-    previous = frame.loc[
-        frame["trade_date"].astype(str).eq(previous_date),
-        ["instrument_code", "shares"],
-    ].rename(columns={"shares": "previous_shares"})
-    changes = latest.merge(previous, on="instrument_code", how="inner")
-    changes["delta"] = changes["latest_shares"] - changes["previous_shares"]
-
-    def rows(ascending: bool) -> list[dict[str, Any]]:
-        ordered = changes.sort_values("delta", ascending=ascending).head(5)
-        return [
-            {
-                "code": str(row.instrument_code).zfill(6),
-                "name": str(row.instrument_name),
-                "value": round(float(row.delta) / 100_000_000, 2),
-            }
-            for row in ordered.itertuples()
-        ]
-
-    summary = {
-        "net": float(changes["delta"].sum()) / 100_000_000,
-        "increasers": int(changes["delta"].gt(0).sum()),
-        "decreasers": int(changes["delta"].lt(0).sum()),
-        "latest_count": int(latest["instrument_code"].nunique()),
-    }
-    return {"inflow": rows(False), "outflow": rows(True)}, summary
-
-
 def _classify_etf(name: str, investment_type: str | None = None) -> str:
     return classify_etf(name=name, investment_type=investment_type).category
 
@@ -80,40 +51,15 @@ def _classify_etf(name: str, investment_type: str | None = None) -> str:
 def _build_etf_terminal_data(
     frame: pd.DataFrame, szse_frame: pd.DataFrame, dates: list[str]
 ) -> dict[str, Any]:
-    columns = [
-        "trade_date",
-        "instrument_code",
-        "instrument_name",
-        "shares",
-        "nav",
-        "nav_date",
-        "etf_type",
-        "investment_type",
-    ]
+    """Build the ETF terminal through the canonical SSE+SZSE fact table."""
 
-    def normalise(source: pd.DataFrame, market: str) -> pd.DataFrame:
-        if source.empty:
-            return pd.DataFrame(columns=[*columns, "market"])
-        selected = source.reindex(columns=columns).copy()
-        selected["market"] = market
-        selected["trade_date"] = selected["trade_date"].astype(str)
-        selected["instrument_code"] = selected["instrument_code"].astype(str).str.zfill(6)
-        selected["shares"] = pd.to_numeric(selected["shares"], errors="coerce")
-        selected["nav"] = pd.to_numeric(selected["nav"], errors="coerce")
-        selected["nav_date"] = selected["nav_date"].where(
-            selected["nav_date"].notna(), None
-        )
-        return selected.loc[
-            selected["trade_date"].isin([str(item) for item in dates])
-            & selected["instrument_code"].str.fullmatch(r"\d{6}")
-        ]
+    selected = build_canonical_etf_daily_fact(frame, szse_frame, dates)
+    return _build_etf_terminal_from_canonical(selected, dates)
 
-    selected_parts = [part for part in (normalise(frame, "SSE"), normalise(szse_frame, "SZSE")) if not part.empty]
-    selected = (
-        pd.concat(selected_parts, ignore_index=True)
-        if selected_parts
-        else pd.DataFrame(columns=[*columns, "market"])
-    )
+
+def _build_etf_terminal_from_canonical(
+    selected: pd.DataFrame, dates: list[str]
+) -> dict[str, Any]:
     available_dates = [
         str(trade_date)
         for trade_date in dates
@@ -129,9 +75,6 @@ def _build_etf_terminal_data(
         }
 
     selected = selected.loc[selected["trade_date"].isin(available_dates)].copy()
-    selected = selected.drop_duplicates(
-        ["market", "instrument_code", "trade_date"], keep="last"
-    )
     selected["key"] = selected["market"] + ":" + selected["instrument_code"]
     metadata = (
         selected.sort_values("trade_date")
@@ -241,7 +184,7 @@ def _build_etf_terminal_data(
             period_values[period] = (
                 None
                 if len(observed_share) != len(window_dates) or not window_dates
-                else round(float(sum(observed_share)), 2)
+                else round(float(sum(observed_share)), 6)
             )
 
             observed_cash = [daily_cash[key].get(date) for date in window_dates]
@@ -297,7 +240,7 @@ def _build_etf_terminal_data(
         daily_series.append(
             {
                 "date": current[5:],
-                "value": round(float(sum(share_values)), 2),
+                "value": round(float(sum(share_values)), 6),
                 "coverage": len(share_values),
                 "cashValue": None if not cash_values else round(float(sum(cash_values)), 2),
                 "cashCoverage": len(cash_values),
@@ -336,7 +279,7 @@ def _build_etf_terminal_data(
             "name": name,
             "groupType": aggregate["groupType"],
             "periods": {
-                key: round(value, 2) if aggregate["comparableCount"][key] > 0 else None
+                key: round(value, 6) if aggregate["comparableCount"][key] > 0 else None
                 for key, value in aggregate["periods"].items()
             },
             "estimatedCashPeriods": {
@@ -657,8 +600,9 @@ def build_dashboard_snapshot(
     if complete_as_of:
         snapshot_counts["fail"] = 0
 
-    etf_flows, etf_summary = _latest_etf_flows(sse_etf, dates)
-    etf_terminal = _build_etf_terminal_data(sse_etf, szse_etf, dates)
+    canonical_etf = build_canonical_etf_daily_fact(sse_etf, szse_etf, dates)
+    etf_terminal = _build_etf_terminal_from_canonical(canonical_etf, dates)
+    etf_flows, etf_summary = latest_etf_flows_from_terminal(etf_terminal)
     try:
         stock_flow = build_stock_flow(
             pd.concat([sse_etf, szse_etf], ignore_index=True),
@@ -907,7 +851,7 @@ def build_dashboard_snapshot(
         "metrics": [
             {
                 "id": "etf",
-                "eyebrow": "上交所 ETF 份额变化",
+                "eyebrow": "沪深 ETF 份额变化",
                 "value": _signed(etf_summary["net"]),
                 "unit": "亿份",
                 "delta": f"{etf_summary['increasers']} 只增加 · {etf_summary['decreasers']} 只减少",
@@ -916,7 +860,7 @@ def build_dashboard_snapshot(
                 "basis": {
                     "kind": "calculated",
                     "label": "公式计算",
-                    "detail": "当日官方份额 − 前一交易日官方份额",
+                    "detail": "上交所与深交所当日官方份额 − 前一交易日官方份额",
                 },
             },
             {

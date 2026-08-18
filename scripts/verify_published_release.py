@@ -11,6 +11,26 @@ import requests
 
 
 VIEWS = ("overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure")
+CANDIDATE_ARTIFACTS = (
+    "bootstrap",
+    "overview",
+    "radar",
+    "radar_flow",
+    "rotation",
+    "national",
+    "connect",
+    "margin",
+    "pressure",
+    "stock_search",
+    "stock_0",
+    "stock_1",
+    "stock_2",
+    "stock_3",
+    "stock_4",
+    "stock_5",
+    "stock_6",
+    "stock_7",
+)
 
 
 def _headers() -> dict[str, str]:
@@ -19,6 +39,13 @@ def _headers() -> dict[str, str]:
     if not access_id or not access_secret:
         raise RuntimeError("missing Cloudflare Access headers")
     return {"CF-Access-Client-Id": access_id, "CF-Access-Client-Secret": access_secret}
+
+
+def _candidate_headers() -> dict[str, str]:
+    ingest_key = os.environ.get("FLOW_INGEST_API_KEY", "").strip()
+    if not ingest_key:
+        raise RuntimeError("missing FLOW_INGEST_API_KEY for candidate canary")
+    return {**_headers(), "Authorization": f"Bearer {ingest_key}"}
 
 
 def verify(base_url: str, *, expected_release_id: str, expected_as_of: str, timeout: float = 20.0) -> dict[str, Any]:
@@ -82,14 +109,66 @@ def verify(base_url: str, *, expected_release_id: str, expected_as_of: str, time
     return {"releaseId": expected_release_id, "asOf": expected_as_of, "checkedViews": len(VIEWS)}
 
 
+def verify_candidate(
+    base_url: str,
+    *,
+    expected_release_id: str,
+    expected_as_of: str,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    """Verify a staged release by explicit release ID without reading active routes."""
+
+    root = base_url.rstrip("/")
+    headers = _candidate_headers()
+    for name in CANDIDATE_ARTIFACTS:
+        response = requests.get(
+            f"{root}/api/v1/admin/releases/artifact",
+            params={"releaseId": expected_release_id, "name": name, "candidate": "1"},
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        response.raise_for_status()
+        if response.headers.get("x-flow-release-id") != expected_release_id:
+            raise RuntimeError(f"candidate artifact {name} selected another release")
+        if response.headers.get("x-flow-as-of") != expected_as_of:
+            raise RuntimeError(f"candidate artifact {name} has an unexpected asOf")
+        if response.headers.get("x-flow-release-status") != "STAGED":
+            raise RuntimeError(f"candidate artifact {name} is not STAGED")
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("asOf") not in {None, expected_as_of}:
+            raise RuntimeError(f"candidate artifact {name} has an unexpected payload date")
+    return {
+        "releaseId": expected_release_id,
+        "asOf": expected_as_of,
+        "mode": "candidate",
+        "checkedArtifacts": len(CANDIDATE_ARTIFACTS),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify an immutable Flow read-model release")
     parser.add_argument("--base-url", default=os.environ.get("FLOW_PUBLIC_URL", "https://flow.xiaoker.com"))
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="Verify an explicit STAGED candidate via the admin artifact endpoint; never reads active routes",
+    )
     args = parser.parse_args()
-    print(json.dumps(verify(args.base_url, expected_release_id=args.release_id, expected_as_of=args.as_of, timeout=args.timeout)))
+    verifier = verify_candidate if args.candidate else verify
+    print(
+        json.dumps(
+            verifier(
+                args.base_url,
+                expected_release_id=args.release_id,
+                expected_as_of=args.as_of,
+                timeout=args.timeout,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

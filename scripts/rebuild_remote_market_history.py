@@ -194,6 +194,58 @@ def _write_sql(
     path.write_text("\n".join(statements), encoding="utf-8")
 
 
+def _compact_row(values: list[Any]) -> dict[str, Any]:
+    """Convert the SQL value tuple into the portable build-time row shape."""
+
+    return dict(zip(_MARKET_HISTORY_ROW_FIELDS, values[: len(_MARKET_HISTORY_ROW_FIELDS)]))
+
+
+_MARKET_HISTORY_ROW_FIELDS = (
+    "trade_date",
+    "margin_balance",
+    "margin_change",
+    "financing_buy",
+    "lending_balance",
+    "lending_sell_volume",
+    "total_balance",
+    "sse_balance",
+    "szse_balance",
+    "southbound_net",
+    "southbound_turnover",
+    "southbound_sse_net",
+    "southbound_szse_net",
+    "northbound_turnover",
+    "northbound_etf_turnover",
+    "northbound_trade_count",
+    "margin_available",
+    "connect_available",
+    "source_snapshot_sha256",
+    "observed_at",
+)
+
+
+def _write_compact_history(
+    records: list[list[Any]],
+    path: Path,
+    *,
+    source: str = "historical_snapshot",
+) -> None:
+    """Write a deterministic compact history artifact for read-model builds."""
+
+    rows = [_compact_row(record) for record in records]
+    payload = {
+        "schemaVersion": 1,
+        "asOf": rows[-1]["trade_date"] if rows else None,
+        "source": source,
+        "rows": rows,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rebuild compact D1 margin/connect history from immutable R2 snapshots."
@@ -204,6 +256,11 @@ def main() -> None:
         "--cache-dir",
         type=Path,
         help="Optional persistent download cache for safe migration retries.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        help="Optional compact history JSON for the offline read-model builder.",
     )
     args = parser.parse_args()
 
@@ -232,6 +289,8 @@ def main() -> None:
         records = [item[0] for item in parsed]
         sql_path = root / "market-history.sql"
         _write_sql(records, sql_path)
+        if args.output_json:
+            _write_compact_history(records, args.output_json)
         summary = {
             "snapshots": len(records),
             "first": records[0][0],

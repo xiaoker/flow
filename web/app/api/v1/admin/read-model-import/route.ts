@@ -25,8 +25,11 @@ type ReadModelArtifactUpload = {
   contentEncoding?: "gzip";
 };
 
+type ReadModelActivationMode = "active" | "stage_only";
+
 type ReadModelUpload = {
   version: 1;
+  activationMode?: ReadModelActivationMode;
   manifest: ReadModelManifest;
   artifact: ReadModelArtifactUpload;
   finalize?: boolean;
@@ -62,6 +65,7 @@ function isUpload(value: unknown): value is ReadModelUpload {
       typeof artifact.contentBase64 === "string" &&
       artifact.contentBase64.length > 0 &&
       (artifact.contentEncoding === undefined || artifact.contentEncoding === "gzip") &&
+      (value.activationMode === undefined || value.activationMode === "active" || value.activationMode === "stage_only") &&
       (value.finalize === undefined || typeof value.finalize === "boolean"),
   );
 }
@@ -107,6 +111,83 @@ async function allArtifactsPresent(bucket: R2Bucket, manifest: ReadModelManifest
     Object.values(manifest.artifacts).map(async (artifact) => Boolean(await bucket.head(artifact.key))),
   );
   return checks.every(Boolean);
+}
+
+/**
+ * Persist a complete candidate manifest without touching active_release.
+ * This is the PR0 canary path: immutable R2 objects and a STAGED D1 row are
+ * written, while all production readers continue to resolve the old pointer.
+ */
+export async function stageReadModels(
+  db: D1Database,
+  release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
+  manifest: ReadModelManifest,
+  stagedAt: string,
+): Promise<"staged_candidate"> {
+  let observedAtColumnsReady = false;
+  try {
+    await db.prepare("SELECT observed_at FROM release_manifest LIMIT 1").first();
+    await db.prepare("SELECT observed_at FROM active_release LIMIT 1").first();
+    observedAtColumnsReady = true;
+  } catch {
+    // Keep the candidate path compatible with the pre-observed_at schema.
+  }
+
+  if (!observedAtColumnsReady) {
+    await db
+      .prepare(
+        `INSERT INTO release_manifest (
+           release_id, as_of, schema_version, manifest_sha256, manifest_json, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, 'STAGED', ?)
+         ON CONFLICT(release_id) DO UPDATE SET
+           as_of = excluded.as_of,
+           schema_version = excluded.schema_version,
+           manifest_sha256 = excluded.manifest_sha256,
+           manifest_json = excluded.manifest_json,
+           status = CASE
+             WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
+             ELSE 'STAGED'
+           END`,
+      )
+      .bind(
+        release.releaseId,
+        release.asOf,
+        manifest.schemaVersion,
+        release.manifestSha256,
+        JSON.stringify(manifest),
+        stagedAt,
+      )
+      .run();
+  } else {
+    await db
+      .prepare(
+        `INSERT INTO release_manifest (
+           release_id, as_of, schema_version, manifest_sha256, manifest_json,
+           observed_at, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'STAGED', ?)
+         ON CONFLICT(release_id) DO UPDATE SET
+           as_of = excluded.as_of,
+           schema_version = excluded.schema_version,
+           manifest_sha256 = excluded.manifest_sha256,
+           manifest_json = excluded.manifest_json,
+           observed_at = excluded.observed_at,
+           status = CASE
+             WHEN release_manifest.status = 'ACTIVE' THEN 'ACTIVE'
+             ELSE 'STAGED'
+           END`,
+      )
+      .bind(
+        release.releaseId,
+        release.asOf,
+        manifest.schemaVersion,
+        release.manifestSha256,
+        JSON.stringify(manifest),
+        manifest.observedAt ?? null,
+        stagedAt,
+      )
+      .run();
+  }
+  return "staged_candidate";
 }
 
 export async function POST(request: Request) {
@@ -163,17 +244,15 @@ export async function POST(request: Request) {
       },
     });
     const activatedAt = new Date().toISOString();
-    const activation = await activateReadModels(
-      runtime.DB,
-      {
-        releaseId: value.manifest.releaseId,
-        asOf: value.manifest.asOf,
-        manifestKey,
-        manifestSha256: value.manifest.manifestSha256 ?? manifestBodySha256,
-      },
-      value.manifest,
-      activatedAt,
-    );
+    const release = {
+      releaseId: value.manifest.releaseId,
+      asOf: value.manifest.asOf,
+      manifestKey,
+      manifestSha256: value.manifest.manifestSha256 ?? manifestBodySha256,
+    };
+    const activation = value.activationMode === "stage_only"
+      ? await stageReadModels(runtime.DB, release, value.manifest, activatedAt)
+      : await activateReadModels(runtime.DB, release, value.manifest, activatedAt);
     return NextResponse.json({
       status: activation,
       asOf: value.manifest.asOf,

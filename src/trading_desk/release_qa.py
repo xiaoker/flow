@@ -16,10 +16,12 @@ import pandas as pd
 from .adapters.official import parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
 from .etf_flow_state import materialize_dashboard_snapshot
+from .etf_facts import build_canonical_etf_daily_fact
 from .etf_stock_flow import normalise_underlying_code
 from .instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from .models import QualityFinding
 from .quality import summarize_findings
+from .read_models import build_view_payloads
 from .storage import now_iso, write_json
 
 
@@ -1102,6 +1104,171 @@ def validate_etf_terminal_identity(
     ]
 
 
+def _canonical_etf_delta(
+    frames: dict[str, pd.DataFrame],
+    *,
+    dates: list[str],
+    current_date: str,
+    allowed_keys: set[tuple[str, str]] | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Return a raw integer-share delta keyed by market and ETF code."""
+
+    canonical = build_canonical_etf_daily_fact(
+        frames.get("sse_etf", pd.DataFrame()),
+        frames.get("szse_etf", pd.DataFrame()),
+        dates,
+    )
+    requested = sorted({str(value) for value in dates if str(value) <= current_date})
+    available = set(
+        str(value)
+        for value in canonical.get("trade_date", pd.Series(dtype=str)).dropna().unique()
+    )
+    if len(requested) < 2 or current_date not in available or requested[-2] not in available:
+        raise ValueError("canonical_etf_previous_date_missing")
+    previous_date = requested[-2]
+    latest = canonical.loc[
+        canonical["trade_date"].eq(current_date),
+        ["market", "instrument_code", "shares"],
+    ].rename(columns={"shares": "latest_shares"})
+    previous = canonical.loc[
+        canonical["trade_date"].eq(previous_date),
+        ["market", "instrument_code", "shares"],
+    ].rename(columns={"shares": "previous_shares"})
+    comparable = latest.merge(previous, on=["market", "instrument_code"], how="inner")
+    if allowed_keys is not None:
+        comparable = comparable.loc[
+            comparable.apply(
+                lambda row: (str(row["market"]), str(row["instrument_code"])) in allowed_keys,
+                axis=1,
+            )
+        ]
+    comparable["delta"] = comparable["latest_shares"] - comparable["previous_shares"]
+    return (
+        float(comparable["delta"].sum()) / 100_000_000,
+        {
+            "current_date": current_date,
+            "previous_date": previous_date,
+            "comparable_count": int(len(comparable)),
+            "raw_share_delta": int(comparable["delta"].sum()),
+        },
+    )
+
+
+def validate_etf_cross_artifact_reconciliation(
+    snapshot: dict[str, Any],
+    frames: dict[str, pd.DataFrame],
+    *,
+    dates: list[str],
+    as_of: str,
+) -> list[QualityFinding]:
+    """Check canonical raw shares against every ETF-facing read-model view."""
+
+    terminal = snapshot.get("etfTerminal") if isinstance(snapshot.get("etfTerminal"), dict) else {}
+    terminal_items = [item for item in terminal.get("instruments", []) if isinstance(item, dict)]
+    allowed_keys = {
+        (str(item.get("market") or "SSE"), str(item.get("code") or "").zfill(6))
+        for item in terminal_items
+        if isinstance(item.get("periods"), dict)
+        and isinstance(item["periods"].get("1d"), (int, float))
+    }
+    tolerance = 0.01
+    evidence: dict[str, Any] = {"tolerance_100m_shares": tolerance, "as_of": as_of}
+    market_totals: dict[str, float] = {}
+    declared_universe: dict[str, Any] = {}
+    classification_counts: dict[str, int] = {"classified": 0, "unclassified": 0, "total": len(terminal_items)}
+    try:
+        raw_total, raw_meta = _canonical_etf_delta(
+            frames,
+            dates=dates,
+            current_date=as_of,
+            allowed_keys=allowed_keys,
+        )
+        radar_total = sum(
+            float(item["periods"]["1d"])
+            for item in terminal_items
+            if isinstance(item.get("periods"), dict) and isinstance(item["periods"].get("1d"), (int, float))
+        )
+        for item in terminal_items:
+            value = item.get("periods", {}).get("1d") if isinstance(item.get("periods"), dict) else None
+            if isinstance(value, (int, float)):
+                market = str(item.get("market") or "SSE")
+                market_totals[market] = market_totals.get(market, 0.0) + float(value)
+            bucket = "unclassified" if item.get("category") == "未归类" else "classified"
+            classification_counts[bucket] += 1
+        declared_universe = terminal.get("universe") if isinstance(terminal.get("universe"), dict) else {}
+        rotation_total = sum(
+            float(group["periods"]["1d"])
+            for group in terminal.get("groupPeriods", [])
+            if isinstance(group, dict)
+            and isinstance(group.get("periods"), dict)
+            and isinstance(group["periods"].get("1d"), (int, float))
+        )
+        views = build_view_payloads(snapshot)
+        bootstrap_reconciliation = (
+            views["bootstrap"].get("etfTerminal", {}).get("reconciliation", {}).get("1d", {}).get("shares", {})
+        )
+        bootstrap_instrument_total = float(bootstrap_reconciliation.get("instrumentTotal"))
+        bootstrap_group_total = float(bootstrap_reconciliation.get("groupTotal"))
+        actuals = {
+            "canonicalRaw": raw_total,
+            "radarInstrumentTotal": radar_total,
+            "rotationGroupTotal": rotation_total,
+            "bootstrapInstrumentTotal": bootstrap_instrument_total,
+            "bootstrapGroupTotal": bootstrap_group_total,
+        }
+        evidence.update({"raw": raw_meta, "totals": actuals, "marketTotals": market_totals, "classificationCounts": classification_counts})
+        passed = all(abs(value - raw_total) <= tolerance for value in actuals.values())
+    except (KeyError, TypeError, ValueError, ImportError):
+        passed = False
+        evidence["error"] = "canonical ETF cross-artifact reconciliation could not be computed"
+
+    market_passed = (
+        bool(market_totals)
+        and abs(sum(market_totals.values()) - (evidence.get("totals", {}).get("radarInstrumentTotal", 0.0))) <= tolerance
+        and {"SSE", "SZSE"}.issuperset(market_totals.keys())
+    )
+    declared_classified = declared_universe.get("classified")
+    declared_unclassified = declared_universe.get("unclassified")
+    declared_total = declared_universe.get("total")
+    classification_passed = (
+        classification_counts["classified"] + classification_counts["unclassified"] == classification_counts["total"]
+        and declared_total == classification_counts["total"]
+        and declared_classified == classification_counts["classified"]
+        and declared_unclassified == classification_counts["unclassified"]
+    )
+    evidence["declaredUniverse"] = {
+        "total": declared_total,
+        "classified": declared_classified,
+        "unclassified": declared_unclassified,
+    }
+    return [
+        _finding(
+            "reconciliation.etf_cross_artifact_identity",
+            "dashboard_read_models",
+            passed,
+            message="总览、ETF 雷达、板块轮动与 canonical ETF 日事实一致" if passed else "ETF 视图之间存在资金流口径差异",
+            evidence=evidence,
+            remediation="所有 ETF 视图必须从 market+code+trade_date canonical fact 派生；先修复原始键、日期或单位，再发布。",
+        ),
+        _finding(
+            "reconciliation.etf_market_identity",
+            "etfTerminal.instruments",
+            market_passed,
+            message="沪市、深市与全市场 ETF 份额变化可加总" if market_passed else "ETF 市场分项与全市场合计不一致",
+            evidence=evidence,
+            remediation="保留 market 维度，按 market+code 对账；禁止把同代码跨市场产品合并为一行。",
+        ),
+        _finding(
+            "reconciliation.etf_classification_identity",
+            "etfTerminal.universe",
+            classification_passed,
+            message="已归类与未归类 ETF 覆盖全部合资格产品" if classification_passed else "ETF 分类计数与合资格产品总数不一致",
+            evidence=evidence,
+            remediation="每个合资格 ETF 必须恰好进入一个分类桶，低置信度产品进入未归类，不得静默丢弃。",
+        ),
+    ]
+
+
 def _metric_value(snapshot: dict[str, Any], metric_id: str) -> float:
     metric = next(item for item in snapshot.get("metrics", []) if item.get("id") == metric_id)
     return float(str(metric["value"]).replace(",", ""))
@@ -1199,15 +1366,33 @@ def validate_snapshot_values(
     )
     findings.extend(validate_etf_terminal_data(snapshot))
     findings.extend(validate_etf_terminal_identity(snapshot, frames, as_of))
+    findings.extend(
+        validate_etf_cross_artifact_reconciliation(
+            snapshot,
+            frames,
+            dates=published_dates,
+            as_of=as_of,
+        )
+    )
 
     headline_ok = False
     evidence: dict[str, Any] = {}
     try:
-        sse_etf = frames["sse_etf"]
-        latest = sse_etf[sse_etf["trade_date"].astype(str).eq(published_dates[-1])][["instrument_code", "shares"]]
-        previous = sse_etf[sse_etf["trade_date"].astype(str).eq(published_dates[-2])][["instrument_code", "shares"]]
-        comparable = latest.merge(previous, on="instrument_code", suffixes=("_latest", "_previous"))
-        etf_expected = round(float((comparable["shares_latest"] - comparable["shares_previous"]).sum()) / 100_000_000, 2)
+        terminal = snapshot.get("etfTerminal") if isinstance(snapshot.get("etfTerminal"), dict) else {}
+        allowed_keys = {
+            (str(item.get("market") or "SSE"), str(item.get("code") or "").zfill(6))
+            for item in terminal.get("instruments", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("periods"), dict)
+            and isinstance(item["periods"].get("1d"), (int, float))
+        }
+        etf_expected, etf_raw_meta = _canonical_etf_delta(
+            frames,
+            dates=published_dates,
+            current_date=as_of,
+            allowed_keys=allowed_keys,
+        )
+        etf_expected = round(etf_expected, 2)
 
         margin = pd.concat([frames["sse_margin"], frames["szse_margin"]], ignore_index=True)
         margin_expected = round(float(margin[margin["trade_date"].astype(str).eq(as_of)]["financing_balance_yuan"].sum()) / 1_000_000_000_000, 4)
@@ -1229,7 +1414,12 @@ def validate_snapshot_values(
         }
         tolerances = {"etf": 0.01, "southbound": 0.01, "margin": 0.0001, "northbound": 0.01}
         headline_ok = all(abs(actual[key] - expected[key]) <= tolerances[key] for key in expected)
-        evidence = {"expected": expected, "actual": actual, "tolerances": tolerances}
+        evidence = {
+            "expected": expected,
+            "actual": actual,
+            "tolerances": tolerances,
+            "etf_raw": etf_raw_meta,
+        }
     except (KeyError, IndexError, StopIteration, TypeError, ValueError):
         headline_ok = False
         evidence = {"error": "headline reconciliation could not be computed"}

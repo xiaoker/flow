@@ -394,7 +394,7 @@ export const dashboardSnapshot: DashboardSnapshot = {
   metrics: [
     {
       id: "etf",
-      eyebrow: "上交所 ETF 份额变化",
+      eyebrow: "沪深 ETF 份额变化",
       value: "+79.89",
       unit: "亿份",
       delta: "299 只增加 · 229 只减少",

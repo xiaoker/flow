@@ -8,7 +8,7 @@ export async function GET() {
   return NextResponse.json({
     asOf: dashboardSnapshot.asOf,
     unit: "100m shares",
-    scope: "SSE share-change headline; eligible SSE and SZSE ETF terminal universe",
+    scope: "eligible SSE+SZSE ETF share-change headline and terminal universe",
     methodology: "versioned primary classification; adjacent trading-day official share difference; low-confidence ETFs remain in the unclassified reconciliation bucket",
     evidence: {
       kind: "calculated",
@@ -17,7 +17,7 @@ export async function GET() {
       isCashFlow: false,
     },
     limitations: [
-      "The headline metric is SSE-only; the ETF terminal is the combined SSE+SZSE state when the hash-verified history is available",
+      "The headline and terminal both derive from the same market+code+trade_date canonical ETF fact",
       "Equity group assignment remains a conservative name inference until tracked-index metadata is collected",
       "Share change is not cash flow; estimated cash requires both NAV and comparable shares",
     ],
