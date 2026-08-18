@@ -39,6 +39,20 @@ def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
     assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow_text
 
 
+def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/deploy-worker.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Set build metadata" in workflow
+    assert "FLOW_BUILD_SHA=${GITHUB_SHA}" in workflow
+    assert "for attempt in $(seq 1 20)" in workflow
+    assert "build_check=$GITHUB_SHA&attempt=$attempt" in workflow
+    assert '"Cache-Control: no-cache"' in workflow
+    assert "Verified deployed Worker build identity" in workflow
+    assert "did not expose build SHA" in workflow
+
+
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/daily-data.yml"

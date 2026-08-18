@@ -62,7 +62,9 @@ def check_required_columns(
     ]
 
 
-def check_empty(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
+def check_empty(
+    frame: pd.DataFrame, dataset: str, *, warn_only: bool = False
+) -> list[QualityFinding]:
     return [
         _finding(
             "completeness.non_empty",
@@ -71,6 +73,7 @@ def check_empty(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
             message="数据集非空" if not frame.empty else "源站返回空数据集",
             evidence={"rows": int(len(frame))},
             severity="high",
+            warn_only=warn_only,
             remediation="保持上一 ACTIVE 版本并在下次任务重试。",
         )
     ]
@@ -324,8 +327,10 @@ def validate_etf_pcf(frame: pd.DataFrame, dataset: str = "sse_etf_pcf") -> list[
     return findings
 
 
-def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
-    findings = check_empty(frame, dataset)
+def validate_margin(
+    frame: pd.DataFrame, dataset: str, *, empty_warn_only: bool = False
+) -> list[QualityFinding]:
+    findings = check_empty(frame, dataset, warn_only=empty_warn_only)
     required = [
         "trade_date",
         "market",
@@ -362,7 +367,10 @@ def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
 def validate_bse_margin(frame: pd.DataFrame, dataset: str = "bse_margin") -> list[QualityFinding]:
     """Validate the BSE aggregate row without mixing it with SSE/SZSE data."""
 
-    findings = validate_margin(frame, dataset)
+    # BSE publishes its aggregate later than the other margin sources.  An
+    # empty, schema-shaped response is therefore source-not-ready and must be
+    # represented as pending; parser/date/market violations remain hard fails.
+    findings = validate_margin(frame, dataset, empty_warn_only=True)
     findings += check_required_columns(frame, dataset, ["source_trade_date"])
     if not frame.empty and "market" in frame.columns:
         invalid_market = int((frame["market"].astype(str) != "BSE").sum())

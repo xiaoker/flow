@@ -84,6 +84,35 @@ def test_bse_margin_requires_market_and_source_date_alignment() -> None:
     assert any(item["check_id"] == "timeliness.bse_source_date" for item in summary["findings"])
 
 
+def test_empty_bse_margin_is_pending_until_source_publishes() -> None:
+    frame = pd.DataFrame(
+        columns=[
+            "trade_date",
+            "market",
+            "financing_balance_yuan",
+            "financing_buy_yuan",
+            "securities_lending_balance_yuan",
+            "securities_lending_volume_shares",
+            "securities_lending_sell_volume_shares",
+            "margin_total_balance_yuan",
+            "source_id",
+            "source_grade",
+            "date_basis",
+            "source_trade_date",
+            "observed_at",
+        ]
+    )
+
+    summary = summarize_findings(validate_bse_margin(frame))
+
+    assert summary["counts"]["fail"] == 0
+    assert summary["counts"]["warn"] >= 1
+    empty = next(
+        item for item in summary["findings"] if item["check_id"] == "completeness.non_empty"
+    )
+    assert empty["status"] == "warn"
+
+
 def test_connect_rejects_northbound_buy_sell_after_disclosure_change() -> None:
     frame = pd.DataFrame(
         [
