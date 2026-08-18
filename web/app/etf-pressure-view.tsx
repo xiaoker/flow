@@ -9,6 +9,7 @@ import type {
   StockPressureHistoryPoint,
   StockPressureRow,
 } from "./lib/dashboard-data";
+import { searchTextMatches } from "./lib/search-utils";
 
 type Props = {
   data?: EtfPressureData;
@@ -166,10 +167,9 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
 
   const rows = useMemo(() => data?.stocks ?? [], [data]);
   const filteredRows = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase("zh-CN");
     return rows
       .filter((row) => filterRow(row, filter))
-      .filter((row) => !needle || (row.stockName + " " + row.stockCode + " " + row.listingMarketName).toLocaleLowerCase("zh-CN").includes(needle))
+      .filter((row) => searchTextMatches(query, row.stockName, row.stockCode, row.listingMarketName))
       .sort((left, right) => rowSortValue(right, sort) - rowSortValue(left, sort) || left.stockCode.localeCompare(right.stockCode));
   }, [filter, query, rows, sort]);
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));

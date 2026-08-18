@@ -101,6 +101,15 @@ h1, h2, h3 { text-wrap: balance; }
 .refresh-status { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; padding: 5px 18px; border-bottom: 1px solid rgba(80,183,217,.18); background: rgba(80,183,217,.07); color: var(--cyan); font-size: 13px; }
 .refresh-status svg { animation: flow-spin 800ms linear infinite; }
 .refresh-status.is-error { border-bottom-color: rgba(241,174,66,.24); background: rgba(241,174,66,.08); color: var(--amber); }
+.data-status-strip { display: flex; min-height: 34px; align-items: center; gap: 8px; padding: 6px 24px; border-bottom: 1px solid var(--line); background: #080f18; color: var(--muted); font-size: 12px; }
+.data-status-strip strong { color: var(--muted-strong); font-size: 12px; white-space: nowrap; }
+.data-status-strip span:not(.data-status-dot) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.data-status-strip small { margin-left: auto; color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 10px; white-space: nowrap; }
+.data-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 3px rgba(80,183,217,.12); }
+.data-status-strip.is-pending .data-status-dot { background: var(--amber); box-shadow: 0 0 0 3px rgba(241,174,66,.12); }
+.data-status-strip.is-degraded .data-status-dot { background: #f1ae42; box-shadow: 0 0 0 3px rgba(241,174,66,.12); }
+.data-status-strip.is-error .data-status-dot { background: var(--outflow); box-shadow: 0 0 0 3px rgba(227,100,100,.12); }
+.data-status-strip.is-error strong { color: var(--outflow); }
 
 @keyframes flow-spin { to { transform: rotate(360deg); } }
 
@@ -847,6 +856,7 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .command-metrics > span:first-child { border-left: 0; padding-left: 0; }
   .evidence-legend { flex-wrap: wrap; gap: 8px 16px; }
   .evidence-legend > strong { width: 100%; margin-left: 0; }
+  .data-status-strip { padding-inline: 16px; }
   .overview-grid, .signal-grid, .detail-grid, .national-workspace { grid-template-columns: 1fr; }
   .pressure-layout { grid-template-columns: 1fr; }
   .pressure-detail-panel { order: -1; }
@@ -880,6 +890,9 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
   .command-metrics small { align-items: flex-start; flex-direction: column; gap: 4px; }
   .evidence-legend { padding: 10px 12px; }
   .evidence-legend > span { width: 100%; white-space: normal; }
+  .data-status-strip { align-items: flex-start; flex-wrap: wrap; padding: 8px 12px; }
+  .data-status-strip span:not(.data-status-dot) { width: calc(100% - 22px); white-space: normal; }
+  .data-status-strip small { width: 100%; margin-left: 15px; }
   .period-strip { align-items: flex-start; flex-direction: column; gap: 8px; padding: 10px 12px; }
   .metric-switch { width: 100%; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .period-tabs { width: 100%; }

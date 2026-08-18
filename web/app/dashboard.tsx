@@ -45,10 +45,12 @@ import {
 } from "./national-team-view";
 import { EtfPressureView } from "./etf-pressure-view";
 import { SectorRotationView } from "./sector-rotation-view";
+import { normalizeSearchText, searchTextMatches } from "./lib/search-utils";
 
 type DashboardProps = {
   snapshot: DashboardSnapshot;
   availableDates?: string[];
+  releaseId?: string | null;
   requestedDate?: string | null;
   exactDateMatch?: boolean;
   initialView?: DeskView;
@@ -236,6 +238,7 @@ function EvidenceBadge({ kind, label, detail }: { kind: EvidenceKind; label: str
 export function Dashboard({
   snapshot,
   availableDates = [],
+  releaseId = null,
   requestedDate = null,
   exactDateMatch = true,
   initialView = "overview",
@@ -259,6 +262,7 @@ export function Dashboard({
   const [globalQuery, setGlobalQuery] = useState("");
   const [stockSearchItems, setStockSearchItems] = useState<StockSearchItem[]>([]);
   const [stockSearchLoading, setStockSearchLoading] = useState(false);
+  const [stockSearchError, setStockSearchError] = useState<string | null>(null);
   const [stockSearchLoadedFor, setStockSearchLoadedFor] = useState<string | null>(null);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [sorting, setSorting] = useState<SortingState>([{ id: "1d", desc: true }]);
@@ -321,42 +325,40 @@ export function Dashboard({
   const selectedMarket = selected?.market ?? "SSE";
 
   useEffect(() => {
-    const normalized = globalQuery.trim();
-    if (!normalized || stockSearchLoadedFor === snapshot.asOf) return;
+    const normalized = normalizeSearchText(globalQuery);
+    const searchReleaseKey = `${releaseId ?? "date"}:${snapshot.asOf}`;
+    if (!normalized || stockSearchLoadedFor === searchReleaseKey) return;
     const controller = new AbortController();
     setStockSearchLoading(true);
+    setStockSearchError(null);
     setStockSearchItems([]);
     fetch(`/api/v2/stock-search?date=${encodeURIComponent(snapshot.asOf)}`, {
       cache: "no-store",
       signal: controller.signal,
     })
       .then(async (response) => {
-        let publishedItems: StockSearchItem[] = [];
-        if (response.ok) {
-          const payload = await response.json() as { items?: StockSearchItem[] };
-          publishedItems = Array.isArray(payload.items) ? payload.items : [];
+        if (!response.ok) throw new Error(response.status === 404 ? "stock_model_not_published_for_date" : `stock_search_${response.status}`);
+        const responseReleaseId = response.headers.get("x-flow-release-id");
+        const responseAsOf = response.headers.get("x-flow-as-of");
+        if ((releaseId && responseReleaseId !== releaseId) || (responseAsOf && responseAsOf !== snapshot.asOf)) {
+          throw new Error("release_pending");
         }
-        const hasPublishedMatch = publishedItems.some((item) =>
-          item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized),
-        );
-        if (publishedItems.length && hasPublishedMatch) {
-          setStockSearchItems(publishedItems);
-          setStockSearchLoadedFor(snapshot.asOf);
-          return;
-        }
+        const payload = await response.json() as { items?: StockSearchItem[] };
+        const publishedItems = Array.isArray(payload.items) ? payload.items : [];
         setStockSearchItems(publishedItems);
-        setStockSearchLoadedFor(snapshot.asOf);
+        setStockSearchLoadedFor(searchReleaseKey);
       })
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
         setStockSearchItems([]);
-        setStockSearchLoadedFor(snapshot.asOf);
+        setStockSearchError(cause instanceof Error ? cause.message : "stock_search_unavailable");
+        setStockSearchLoadedFor(searchReleaseKey);
       })
       .finally(() => {
         if (!controller.signal.aborted) setStockSearchLoading(false);
       });
     return () => controller.abort();
-  }, [globalQuery, snapshot.asOf, stockSearchLoadedFor]);
+  }, [globalQuery, releaseId, snapshot.asOf, stockSearchLoadedFor]);
 
   useEffect(() => {
     if (!selected) return;
@@ -396,16 +398,16 @@ export function Dashboard({
   }, [onLoadRadarFlow, selected, snapshot.asOf, snapshot.etfStockFlow, terminal.instruments, view]);
 
   const globalSearchResults = useMemo(() => {
-    const normalized = globalQuery.trim().toLowerCase();
+    const normalized = normalizeSearchText(globalQuery);
     if (!normalized) return { stocks: [] as StockSearchItem[], etfs: [] as EtfTerminalInstrument[] };
     const rank = (item: { code: string; name: string }) =>
-      item.code.toLowerCase() === normalized ? 0 : item.name.toLowerCase() === normalized ? 1 : 2;
+      normalizeSearchText(item.code) === normalized ? 0 : normalizeSearchText(item.name) === normalized ? 1 : 2;
     const byMatch = <T extends { code: string; name: string }>(items: T[]) => [...items]
       .sort((left, right) => rank(left) - rank(right) || left.name.localeCompare(right.name, "zh-CN"))
       .slice(0, 6);
     return {
-      stocks: byMatch(stockSearchItems.filter((item) => item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized))),
-      etfs: byMatch(searchableEtfs.filter((item) => item.code.toLowerCase().includes(normalized) || item.name.toLowerCase().includes(normalized))),
+      stocks: byMatch(stockSearchItems.filter((item) => searchTextMatches(globalQuery, item.code, item.name))),
+      etfs: byMatch(searchableEtfs.filter((item) => searchTextMatches(globalQuery, item.code, item.name))),
     };
   }, [globalQuery, searchableEtfs, stockSearchItems]);
 
@@ -907,6 +909,16 @@ export function Dashboard({
     margin: "融资融券",
   };
   const displayMode = snapshot.mode.replace(/GitHub\s*Actions\s*/gi, "").trim() || "官方数据快照";
+  const warningDomain = snapshot.dataStatus.find((item) => item.status === "warning");
+  const dataStatus = refreshError
+    ? { tone: "error", title: "自动更新未完成", detail: refreshError }
+    : viewLoadError
+      ? { tone: "degraded", title: "当前视图暂未载入", detail: "已保留当前完整发布版本，未拼接其他日期数据" }
+      : snapshot.publication?.status === "pending"
+        ? { tone: "pending", title: "等待完整发布", detail: snapshot.publication.detail || "部分官方源尚未完成，当前 active release 不变" }
+        : warningDomain
+          ? { tone: "degraded", title: "部分数据待核验", detail: warningDomain.detail }
+          : { tone: "ready", title: "完整发布已确认", detail: "当前页面各模块使用同一 active release" };
   const navigateView = (nextView: DeskView) => {
     setView(nextView);
     const url = new URL(window.location.href);
@@ -931,9 +943,9 @@ export function Dashboard({
     if (venue) url.searchParams.set("venue", venue);
     else url.searchParams.delete("venue");
     url.searchParams.set("code", code);
-    const latest = availableDates.at(-1);
-    if (requestedDate || snapshot.asOf !== latest) url.searchParams.set("date", snapshot.asOf);
-    else url.searchParams.delete("date");
+    // Keep the date in every stock URL. This makes ETF→stock, search→stock
+    // and a refreshed deep link resolve the same immutable release.
+    url.searchParams.set("date", snapshot.asOf);
     setGlobalQuery("");
     window.location.assign(`${url.pathname}${url.search}`);
   };
@@ -1078,7 +1090,7 @@ export function Dashboard({
               <div className="global-search-results" role="listbox" aria-label="搜索结果">
                 {globalSearchResults.stocks.length ? <section><header>个股</header>{globalSearchResults.stocks.map((item, index) => <button aria-selected={searchActiveIndex === index} className={searchActiveIndex === index ? "is-active" : ""} key={`${item.listingMarket}:${item.code}`} onClick={() => openStockDetail(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.listingMarketName ?? item.listingMarket}</small></span><em>{item.available ? "个股" : "雷达兼容"}</em></button>)}</section> : null}
                 {globalSearchResults.etfs.length ? <section><header>ETF</header>{globalSearchResults.etfs.map((item, index) => { const optionIndex = globalSearchResults.stocks.length + index; return <button aria-selected={searchActiveIndex === optionIndex} className={searchActiveIndex === optionIndex ? "is-active" : ""} key={`${item.market}:${item.code}`} onClick={() => openEtfFromSearch(item)} role="option" type="button"><span><strong>{item.name}</strong><small>{item.code} · {item.market === "SZSE" ? "深市" : "沪市"}</small></span><em>ETF</em></button>; })}</section> : null}
-                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取个股索引…" : "没有找到匹配的 ETF 或个股"}</span>}
+                {!globalSearchResults.stocks.length && !globalSearchResults.etfs.length && <span className="global-search-no-result">{stockSearchLoading ? "正在读取当前发布的个股索引…" : stockSearchError === "release_pending" ? "新版本仍在发布，暂不拼接不同版本搜索索引" : stockSearchError ? "当前发布暂不可用个股索引" : "没有找到匹配的 ETF 或个股"}</span>}
               </div>
             )}
           </div>
@@ -1087,19 +1099,6 @@ export function Dashboard({
           <button className={`icon-button ${refreshing ? "is-refreshing" : ""}`} title="刷新数据" aria-label="刷新数据" disabled={refreshing} onClick={() => void onRefresh?.()} type="button"><ArrowsClockwise size={19} /></button>
         </div>
       </header>
-
-      {refreshError && (
-        <div className="refresh-status is-error" role="status" aria-live="polite">
-          <ArrowsClockwise size={15} />
-          <span>{refreshError}</span>
-        </div>
-      )}
-      {viewLoadError && (
-        <div className="refresh-status is-error" role="status" aria-live="polite">
-          <Database size={15} />
-          <span>当前视图数据暂时不可用，已保留已显示的完整版本（{viewLoadError}）</span>
-        </div>
-      )}
 
       <section className="command-strip" aria-label="数据摘要">
         <div className="command-title">
@@ -1151,6 +1150,13 @@ export function Dashboard({
         <strong>未披露的数据不展示、不补造</strong>
       </section>
 
+      <section className={`data-status-strip is-${dataStatus.tone}`} role="status" aria-live="polite">
+        <span className="data-status-dot" aria-hidden="true" />
+        <strong>{dataStatus.title}</strong>
+        <span>{dataStatus.detail}</span>
+        <small>{releaseId ? `release ${releaseId.slice(0, 10)}` : `截至 ${snapshot.asOf}`}</small>
+      </section>
+
       {(view === "overview" || view === "rotation" || view === "radar" || view === "national") && (
         <section className="period-strip" aria-label="ETF 观察口径">
           {view !== "national" && <div className="metric-switch" aria-label="指标口径">
@@ -1158,7 +1164,7 @@ export function Dashboard({
             <button className={etfDisplayMetric === "cash" ? "active" : ""} disabled={!cashAvailable} onClick={() => setEtfDisplayMetric("cash")} title={cashAvailable ? "逐日份额变化 × 对应交易日官方单位净值，单位亿元" : terminal.cashFlow?.warning ?? "等待官方单位净值覆盖"} type="button">金额估算（亿元）</button>
           </div>}
           <div className="period-tabs" aria-label="观察周期">
-            {periods.map((item) => <button aria-pressed={period === item.id} className={`${period === item.id ? "active" : ""} ${activeAvailablePeriods.has(item.id) ? "" : "unavailable"}`} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
+            {periods.map((item) => <button aria-pressed={period === item.id} aria-disabled={!activeAvailablePeriods.has(item.id)} className={`${period === item.id ? "active" : ""} ${activeAvailablePeriods.has(item.id) ? "" : "unavailable"}`} disabled={!activeAvailablePeriods.has(item.id)} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
           </div>
           <div className="coverage-chip"><Database size={16} /><span>{activeAvailablePeriods.size} 个可用周期</span><strong>{view === "national" ? `${nationalTeamEtfs.length} 只观察池 ETF` : etfDisplayMetric === "cash" ? `${terminal.cashFlow?.eligibleInstruments ?? 0} 只净值可比` : `${terminal.universe?.total ?? terminal.instruments.length} 只 ETF`} · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
         </section>
