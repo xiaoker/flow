@@ -9,8 +9,16 @@ from trading_desk.http import get
 
 
 class FakeResponse:
-    def __init__(self, status_code: int):
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        content: bytes = b"ok",
+        content_type: str = "application/json",
+    ):
         self.status_code = status_code
+        self.content = content
+        self.headers = {"Content-Type": content_type}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -20,12 +28,20 @@ class FakeResponse:
 class FakeSession:
     request_timeout = (1.0, 2.0)
 
-    def __init__(self, statuses: list[int]):
+    def __init__(
+        self,
+        statuses: list[int],
+        *,
+        responses: list[FakeResponse] | None = None,
+    ):
         self.statuses = statuses
+        self.responses = responses
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
         self.calls.append((url, kwargs))
+        if self.responses is not None:
+            return self.responses.pop(0)
         return FakeResponse(self.statuses.pop(0))
 
 
@@ -90,3 +106,39 @@ def test_never_relays_non_sse_failures(monkeypatch: pytest.MonkeyPatch) -> None:
         get(session, "https://example.com/data")
 
     assert len(session.calls) == 1
+
+
+def test_falls_back_to_authenticated_cloudflare_bse_relay_for_waf_html(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_proxy_environment(monkeypatch)
+    session = FakeSession(
+        [],
+        responses=[
+            FakeResponse(200, content=b"<html>challenge</html>", content_type="text/html"),
+            FakeResponse(200, content=b"cb([[{}]], '2026-08-17')", content_type="application/javascript"),
+        ],
+    )
+    params = {"callback": "cb", "transDate": "2026-08-17", "page": "0"}
+
+    response = get(
+        session,
+        "https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+        params=params,
+        headers={"Referer": "https://www.bse.cn/disclosure/rzrq_trans_list.html"},
+    )
+
+    assert response.status_code == 200
+    assert params["_flow_transport"] == "cloudflare_bse_relay"
+    assert len(session.calls) == 2
+    proxy_url, proxy_call = session.calls[1]
+    assert proxy_url == "https://flow.xiaoker.com/api/v1/admin/source-proxy"
+    assert proxy_call["params"]["path"] == "/rzrqjyyexxController/summaryInfoResult.do"
+    assert proxy_call["params"]["callback"] == "cb"
+    assert proxy_call["params"]["transDate"] == "2026-08-17"
+    assert proxy_call["params"]["page"] == "0"
+    assert proxy_call["headers"] == {
+        "Authorization": "Bearer ingest-key",
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+    }

@@ -47,19 +47,46 @@ def build_session(settings: HttpSettings | None = None) -> requests.Session:
 
 
 def get(session: requests.Session, url: str, **kwargs: object) -> requests.Response:
+    kwargs = dict(kwargs)
     timeout = getattr(session, "request_timeout", (8.0, 25.0))
     parsed = urlparse(url)
     is_sse_source = parsed.scheme == "https" and parsed.hostname == "query.sse.com.cn"
+    is_bse_source = (
+        parsed.scheme == "https"
+        and parsed.hostname == "www.bse.cn"
+        and parsed.path == "/rzrqjyyexxController/summaryInfoResult.do"
+    )
+    proxy = _source_proxy_config() if (is_sse_source or is_bse_source) else None
+    direct_error: requests.RequestException | None = None
+    response: requests.Response | None = None
+
+    def looks_like_bse_challenge(value: requests.Response) -> bool:
+        if not is_bse_source:
+            return False
+        content_type = value.headers.get("Content-Type", "").lower()
+        if "html" in content_type:
+            return True
+        prefix = value.content[:256].lstrip().lower()
+        return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
+
     try:
         response = session.get(url, timeout=timeout, **kwargs)
         response.raise_for_status()
-        if is_sse_source:
-            _record_transport(kwargs, "direct")
+        if not looks_like_bse_challenge(response):
+            if is_sse_source or is_bse_source:
+                _record_transport(kwargs, "direct")
+            return response
+    except requests.RequestException as exc:
+        direct_error = exc
+
+    if proxy is None:
+        if direct_error is not None:
+            raise direct_error
+        # A successful but challenge-shaped BSE response is retained for the
+        # adapter to archive as pending when no relay credentials are present.
+        assert response is not None
+        _record_transport(kwargs, "direct")
         return response
-    except requests.RequestException:
-        proxy = _source_proxy_config()
-        if not is_sse_source or proxy is None:
-            raise
 
     proxy_url, proxy_headers = proxy
     proxy_params: dict[str, object] = {
@@ -82,7 +109,10 @@ def get(session: requests.Session, url: str, **kwargs: object) -> requests.Respo
         timeout=timeout,
     )
     response.raise_for_status()
-    _record_transport(kwargs, "cloudflare_sse_relay")
+    _record_transport(
+        kwargs,
+        "cloudflare_bse_relay" if is_bse_source else "cloudflare_sse_relay",
+    )
     return response
 
 
