@@ -124,3 +124,22 @@ def test_pressure_preserves_security_margin_enrichment_and_coverage() -> None:
     assert row["shortBalanceShares"] == 1_200
     assert row["marginDataSource"] == "sse"
     assert pressure["coverage"]["securityMarginCoverage"]["matchedCount"] == 1
+
+
+def test_pressure_preserves_partial_pcf_capture_signal() -> None:
+    catalog = _catalog()
+    catalog["coverage"].update(
+        {
+            "captureLimited": True,
+            "deferredEtfCount": 12,
+            "captureWarnings": ["changed_etf_count_exceeds_cap:12"],
+        }
+    )
+
+    pressure = build_stock_pressure(catalog)
+
+    assert pressure["coverage"]["captureLimited"] is True
+    assert pressure["coverage"]["deferredEtfCount"] == 12
+    assert pressure["coverage"]["captureWarnings"] == [
+        "changed_etf_count_exceeds_cap:12"
+    ]

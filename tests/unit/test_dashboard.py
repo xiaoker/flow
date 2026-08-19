@@ -97,6 +97,95 @@ def test_build_dashboard_snapshot_from_normalized_frames(tmp_path: Path) -> None
     assert "披露日归属前一交易日" in snapshot["dataStatus"][1]["detail"]
 
 
+def test_dashboard_marks_deferred_pcf_codes_as_partial_capture(tmp_path: Path) -> None:
+    dates = ["2026-07-10", "2026-07-13", "2026-07-14"]
+    etf = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "market": "SSE",
+                "instrument_code": "510300",
+                "instrument_name": "沪深300ETF",
+                "shares": 100 + index,
+            }
+            for index, trade_date in enumerate(dates)
+        ]
+    )
+    paths = {
+        "sse_etf": _write(etf, tmp_path / "sse_etf.csv"),
+        "szse_etf": _write(
+            pd.DataFrame(columns=etf.columns),
+            tmp_path / "szse_etf.csv",
+        ),
+        "sse_margin": _write(
+            pd.DataFrame(
+                {
+                    "trade_date": dates,
+                    "financing_balance_yuan": [1000, 1010, 1020],
+                }
+            ),
+            tmp_path / "sse_margin.csv",
+        ),
+        "szse_margin": _write(
+            pd.DataFrame(
+                {
+                    "trade_date": dates,
+                    "financing_balance_yuan": [900, 910, 920],
+                }
+            ),
+            tmp_path / "szse_margin.csv",
+        ),
+        "stock_connect_summary": _write(
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": trade_date,
+                        "market": market,
+                        "direction": direction,
+                        "total_turnover": 1000,
+                        "net_buy": 100 if direction == "southbound" else None,
+                    }
+                    for trade_date in dates
+                    for market in ("SSE", "SZSE")
+                    for direction in ("southbound", "northbound")
+                ]
+            ),
+            tmp_path / "connect.csv",
+        ),
+    }
+    manifest_path = tmp_path / "manifest.json"
+    quality_path = tmp_path / "quality.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "requested_dates": dates,
+                "finished_at": "2026-07-14T23:59:00+08:00",
+                "combined_paths": paths,
+                "artifacts": [
+                    {
+                        "source": {"dataset": "etf_pcf"},
+                        "warnings": ["changed_etf_count_exceeds_cap:12"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    quality_path.write_text(
+        json.dumps({"counts": {"pass": 1, "warn": 1, "fail": 0}, "phase0_gate_status": "conditional_pass"}),
+        encoding="utf-8",
+    )
+
+    snapshot = build_dashboard_snapshot(
+        manifest_path=manifest_path,
+        quality_path=quality_path,
+        workspace_root=tmp_path,
+    )
+
+    assert snapshot["etfStockFlow"]["coverage"]["captureLimited"] is True
+    assert snapshot["etfStockFlow"]["coverage"]["deferredEtfCount"] == 12
+
+
 def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending(
     tmp_path: Path,
 ) -> None:

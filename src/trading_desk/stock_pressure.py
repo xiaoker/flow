@@ -229,6 +229,7 @@ def build_stock_pressure(
     value = _record(catalog)
     if value.get("schemaVersion") != 1:
         raise StockPressureError("pressure_catalog_schema_invalid")
+    source_coverage = value.get("coverage", {})
     as_of = str(value.get("asOf", "")).strip()
     items = value.get("items")
     try:
@@ -337,12 +338,15 @@ def build_stock_pressure(
         "summary": summary,
         "coverage": {
             "stockCount": len(rows),
-            "matchedEtfCount": int(value.get("coverage", {}).get("matchedEtfCount", 0)),
+            "matchedEtfCount": int(source_coverage.get("matchedEtfCount", 0)),
             "history20StockCount": history20_count,
             "history20Coverage": round(history20_count / len(rows) * 100, 2) if rows else 0,
             "priceCount": sum(row["closePriceYuan"] is not None for row in rows),
             "marginCount": sum(row["marginBalanceYuan"] is not None for row in rows),
-            "securityMarginCoverage": value.get("coverage", {}).get("securityMarginCoverage"),
+            "securityMarginCoverage": source_coverage.get("securityMarginCoverage"),
+            "captureLimited": bool(source_coverage.get("captureLimited", False)),
+            "deferredEtfCount": int(source_coverage.get("deferredEtfCount", 0) or 0),
+            "captureWarnings": list(source_coverage.get("captureWarnings", [])),
         },
         "marginAsOf": margin_as_of,
         "historyStatus": value.get("historyStatus", "unknown"),
