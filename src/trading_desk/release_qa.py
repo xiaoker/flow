@@ -13,7 +13,11 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from .adapters.official import parse_bse_margin_summary, parse_hkex_tab_data
+from .adapters.official import (
+    SSE_MARGIN_SECURITY,
+    parse_bse_margin_summary,
+    parse_hkex_tab_data,
+)
 from .dashboard import build_dashboard_snapshot
 from .etf_flow_state import materialize_dashboard_snapshot
 from .etf_facts import build_canonical_etf_daily_fact
@@ -268,26 +272,52 @@ def _expected_sse_etf_pcf(content: bytes, requested_date: str) -> pd.DataFrame:
 
 
 def _expected_sse_etf_nav(content: bytes, requested_date: str) -> pd.DataFrame:
+    """Rebuild SSE NAV rows using the collector's moving-publication rule.
+
+    The SSE ETF list is a current snapshot.  When it advances before the
+    requested share date is archived, the collector is allowed to align the
+    next publication to the *latest* known share date only.  Keeping this
+    reconstruction independent from the collector is important: QA must
+    verify the rule rather than simply compare the normalized file with the
+    same implementation that produced it.
+    """
+
     payload = json.loads(content)
+    known_dates = sorted(
+        {
+            parsed
+            for value in payload.get("known_trading_dates") or []
+            if (parsed := _normalized_date(value, ""))
+        }
+    )
+    latest_known_date = known_dates[-1] if known_dates else requested_date
     rows: list[dict[str, Any]] = []
     for response in payload.get("responses") or []:
         for row in response.get("result") or []:
             code = str(row.get("FUNDID2") or "").zfill(6)
             nav = _number(str(row.get("NAV") or "").replace("￥", "").replace("¥", ""))
             trading_day = _normalized_date(row.get("TRADING_DAY"), "")
-            if (
-                not re.fullmatch(r"\d{6}", code)
-                or nav is None
-                or not trading_day
-                or trading_day != requested_date
+            if not re.fullmatch(r"\d{6}", code) or nav is None or not trading_day:
+                continue
+            if trading_day == requested_date:
+                share_date = requested_date
+            elif (
+                requested_date == latest_known_date
+                and trading_day > requested_date
+                and (
+                    pd.to_datetime(trading_day) - pd.to_datetime(requested_date)
+                ).days
+                <= 10
             ):
+                share_date = requested_date
+            else:
                 continue
             rows.append(
                 {
-                    "trade_date": trading_day,
+                    "trade_date": share_date,
                     "market": "SSE",
                     "instrument_code": code,
-                    "instrument_name": row.get("ETF_FULLNAME"),
+                    "instrument_name": row.get("ETF_FULLNAME") or code,
                     "nav": nav,
                 }
             )
@@ -333,6 +363,53 @@ def _expected_sse_margin(content: bytes) -> pd.DataFrame:
             for row in rows
         ]
     )
+
+
+def _expected_sse_margin_security(content: bytes, requested_date: str) -> pd.DataFrame:
+    """Rebuild SSE per-security margin rows from the official response.
+
+    The endpoint can return a moving/stale response.  Only rows whose
+    ``opDate`` equals the requested date are eligible; stale rows are kept in
+    the raw evidence but must not be relabeled during normalization.
+    """
+
+    payload = json.loads(content)
+    page_help = payload.get("pageHelp") if isinstance(payload, dict) else None
+    rows = page_help.get("data") if isinstance(page_help, dict) else None
+    if not isinstance(rows, list):
+        rows = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        rows = []
+
+    expected: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_date = _normalized_date(row.get("opDate"), "")
+        if source_date != requested_date:
+            continue
+        code = str(row.get("stockCode") or "").strip().zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        expected.append(
+            {
+                "trade_date": requested_date,
+                "source_trade_date": source_date,
+                "market": "SSE",
+                "stock_code": code,
+                "security_name": row.get("securityAbbr") or code,
+                "financing_balance_yuan": _number(row.get("rzye")),
+                "financing_buy_yuan": _number(row.get("rzmre")),
+                "financing_repayment_yuan": _number(row.get("rzche")),
+                "securities_lending_balance_shares": _number(row.get("rqyl")),
+                "securities_lending_sell_shares": _number(row.get("rqmcl")),
+                "securities_lending_repayment_shares": _number(row.get("rqchl")),
+                "source_id": SSE_MARGIN_SECURITY.source_id,
+                "source_grade": SSE_MARGIN_SECURITY.source_grade,
+                "date_basis": SSE_MARGIN_SECURITY.date_semantics,
+            }
+        )
+    return pd.DataFrame(expected)
 
 
 def _expected_szse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
@@ -524,6 +601,27 @@ def validate_raw_to_normalized_mapping(
                     keys=["trade_date", "market"],
                     text_columns=[],
                     numeric_columns=["financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan"],
+                )
+            elif (source_id, dataset) == ("sse", "margin_security_daily"):
+                result = _compare_frames(
+                    _expected_sse_margin_security(content, requested_date),
+                    _read_csv(normalized_paths[0]),
+                    keys=["trade_date", "market", "stock_code"],
+                    text_columns=[
+                        "source_trade_date",
+                        "security_name",
+                        "source_id",
+                        "source_grade",
+                        "date_basis",
+                    ],
+                    numeric_columns=[
+                        "financing_balance_yuan",
+                        "financing_buy_yuan",
+                        "financing_repayment_yuan",
+                        "securities_lending_balance_shares",
+                        "securities_lending_sell_shares",
+                        "securities_lending_repayment_shares",
+                    ],
                 )
             elif (source_id, dataset) == ("szse", "margin_market_daily"):
                 result = _compare_frames(
