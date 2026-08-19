@@ -458,6 +458,53 @@ def test_sse_etf_pcf_preserves_hk_code_width_and_listing_market(
     assert set(frame["listing_market"]) == {"102", "103"}
 
 
+def test_sse_etf_pcf_respects_bounded_code_cap_and_records_deferred_codes(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    requested_codes: list[str] = []
+
+    def fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        params = kwargs["params"]
+        assert isinstance(params, dict)
+        code = str(params["FUNDID2"])
+        requested_codes.append(code)
+        if str(params["sqlId"]).endswith("_JBXX_C"):
+            return FakeResponse(
+                {
+                    "result": [
+                        {
+                            "TRADING_DAY": "20260715",
+                            "FUNDID2": code,
+                            "FUND_NAME": f"ETF-{code}",
+                            "CREATION_REDEMPTION_UNIT": "1000000",
+                        }
+                    ]
+                }
+            )
+        return FakeResponse(
+            {
+                "result": [
+                    {
+                        "INSTRUMENT_ID": "600000",
+                        "INSTRUMENT_NAME": "浦发银行",
+                        "UNDERLYION_SECURITY_ID": "101",
+                        "QUANTITY": "100",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(official, "get", fake_get)
+
+    frame, artifact = adapters.fetch_sse_etf_pcf(
+        ["588000", "588001"], "2026-07-15", max_codes=1
+    )
+
+    assert len(frame) == 1
+    assert set(requested_codes) == {"588000"}
+    assert "changed_etf_count_exceeds_cap:1" in artifact.warnings
+
+
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

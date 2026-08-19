@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from trading_desk.models import QualityFinding
-from trading_desk.phase0 import _pending_required_coverage_datasets, _resolve_phase0_gate
+from trading_desk.phase0 import (
+    DEFAULT_PCF_MAX_CODES,
+    _pending_required_coverage_datasets,
+    _resolve_phase0_gate,
+)
 
 
 def _coverage(dataset: str, status: str = "warn") -> QualityFinding:
@@ -49,3 +53,7 @@ def test_same_window_without_gaps_can_pass_or_warn_conditionally() -> None:
         [],
         [],
     ) == "conditional_pass"
+
+
+def test_daily_pcf_enrichment_has_a_bounded_default() -> None:
+    assert 0 < DEFAULT_PCF_MAX_CODES <= 32

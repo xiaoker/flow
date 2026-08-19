@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .phase0 import collect_phase0
+from .phase0 import DEFAULT_PCF_MAX_CODES, collect_phase0
 from .release_qa import failed_findings, run_release_qa
 
 
@@ -20,6 +20,15 @@ def _parser() -> argparse.ArgumentParser:
         choices=["auto", "evening", "morning", "reconcile"],
         default="auto",
         help="Source release window used for audit/reconciliation metadata",
+    )
+    collect.add_argument(
+        "--pcf-max-codes",
+        type=int,
+        default=DEFAULT_PCF_MAX_CODES,
+        help=(
+            "Maximum changed SSE ETF codes to enrich with PCF in this bounded "
+            "daily window; deferred codes remain explicitly unavailable"
+        ),
     )
     collect.add_argument("--data-root", default="data")
     collect.add_argument("--report-root", default="reports/phase0")
@@ -44,6 +53,7 @@ def main() -> None:
             report_root=Path(args.report_root),
             workspace_root=workspace_root,
             collection_window=args.window,
+            pcf_max_codes=args.pcf_max_codes,
         )
         summary = {
             "run_id": result["manifest"]["run_id"],

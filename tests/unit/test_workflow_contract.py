@@ -68,6 +68,8 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     ).read_text(encoding="utf-8")
 
     assert "MAX_ATTEMPTS=3" in workflow
+    assert "PCF_MAX_CODES=16" in workflow
+    assert "--pcf-max-codes \"$PCF_MAX_CODES\"" in workflow
     assert "phase0_gate_status=pending" in workflow
     assert "Source-not-ready is pending" in workflow
     assert "SOURCE_READINESS_ATTEMPTS" not in workflow
