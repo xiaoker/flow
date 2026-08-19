@@ -159,3 +159,19 @@ def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:
     assert "Authorization: Bearer $INGEST_API_KEY" in workflow
     assert "sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L" in workflow
     assert "Authenticated, allowlisted SSE fallback transport is healthy." in workflow
+
+
+def test_r2_recovery_drill_is_read_only_and_preserves_evidence() -> None:
+    workflow = (
+        REPOSITORY_ROOT / ".github/workflows/r2-recovery-drill.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "historical_snapshot" in workflow
+    assert "r2 object get" in workflow
+    assert "fetch_stock_flow_history_inputs.py" in workflow
+    assert "r2_recovery_drill.py" in workflow
+    assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow
+    assert "r2 object put" not in workflow
+    assert "d1 execute flow --remote --json" in workflow
+    assert "--apply" not in workflow

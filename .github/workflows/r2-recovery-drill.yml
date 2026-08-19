@@ -1,0 +1,115 @@
+name: R2 recovery drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Optional quality-passed historical date; blank selects one at random"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-recovery-drill
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FLOW_PUBLIC_URL: https://flow.xiaoker.com
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python replay tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Install Wrangler
+        run: npm ci
+        working-directory: web
+
+      - name: Resolve quality-passed historical pair
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovery/snapshots recovery/normalized
+          (cd web && npx wrangler d1 execute flow --remote --json \
+            --command "SELECT as_of, r2_object_key, snapshot_sha256 FROM historical_snapshot WHERE quality_fail = 0 ORDER BY as_of ASC;") \
+            > recovery/history-index.json
+          target_args=()
+          if [[ -n "${TARGET_DATE:-}" ]]; then
+            target_args=(--target-date "$TARGET_DATE")
+          fi
+          python scripts/select_r2_recovery_pair.py \
+            --input recovery/history-index.json \
+            --output recovery/selection.json \
+            "${target_args[@]}"
+          cat recovery/selection.json
+
+      - name: Restore immutable R2 snapshots and verify hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in target previous; do
+            date_value="$(jq -r ".${side}.as_of" recovery/selection.json)"
+            object_key="$(jq -r ".${side}.r2_object_key" recovery/selection.json)"
+            expected="$(jq -r ".${side}.snapshot_sha256" recovery/selection.json)"
+            output="recovery/snapshots/${date_value}.json"
+            (cd web && npx wrangler r2 object get "flow/${object_key}" --remote --file "../${output}")
+            actual="$(sha256sum "$output" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            echo "restored $date_value sha256=$actual bytes=$(wc -c < "$output")"
+          done
+
+      - name: Read normalized ETF and PCF artifacts through private history export
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -r '.previous.as_of, .target.as_of' recovery/selection.json | sort -u > recovery/dates.txt
+          python scripts/fetch_stock_flow_history_inputs.py \
+            --base-url "$FLOW_PUBLIC_URL" \
+            --dates recovery/dates.txt \
+            --as-of "$(jq -r '.target.as_of' recovery/selection.json)" \
+            --output-dir recovery/normalized \
+            --report recovery/normalized-report.json \
+            --inventory recovery/pcf-inventory.json \
+            --attempts 2
+
+      - name: Replay state and market history without writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/r2_recovery_drill.py \
+            --snapshot-dir recovery/snapshots \
+            --target-date "$(jq -r '.target.as_of' recovery/selection.json)" \
+            --normalized-dir recovery/normalized \
+            --normalized-report recovery/normalized-report.json \
+            --selection recovery/selection.json \
+            --output recovery/recovery-report.json
+          cat recovery/recovery-report.json
+
+      - name: Preserve recovery evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v6.0.0, Node 24
+        with:
+          name: r2-recovery-drill-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: recovery/
