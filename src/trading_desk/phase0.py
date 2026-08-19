@@ -215,12 +215,13 @@ def collect_phase0(
             frames["sse_etf_pcf"].append(frame)
             artifacts.append(artifact)
 
-    # The SSE ETF list publishes the previous trading day's unit NAV.  Keep a
-    # same-window artifact for every ETF snapshot date so the raw lineage is
-    # date-aligned.  The public list may only return the latest publication;
-    # the adapter filters exact dates and leaves older requested dates empty
-    # instead of silently reusing a newer NAV.  NAV is optional enrichment and
-    # must never block the share snapshot from being published.
+    # The SSE ETF list publishes the previous trading day's unit NAV and may
+    # advance its TRADING_DAY before the next collection window.  Keep a
+    # same-window artifact for every ETF snapshot date; the adapter accepts
+    # only an exact publication or the single next publication for the latest
+    # requested share date.  Older requested dates remain empty instead of
+    # silently receiving the moving current NAV.  NAV is optional enrichment
+    # and must never block the share snapshot from being published.
     for publication_date in dates:
         result = run_step(
             f"sse_etf_nav:{publication_date}",
@@ -300,9 +301,9 @@ def collect_phase0(
         combined_paths[dataset] = _relative(path, workspace_root)
 
     # Enrich the share frame only after both official feeds have been written.
-    # Historical rows without an exact NAV match remain null.  This preserves
-    # the scale source's raw-to-normalized reconciliation while making the
-    # derived dashboard calculation date-safe.
+    # Historical rows without an explicitly aligned NAV match remain null.
+    # This preserves the scale source's raw-to-normalized reconciliation while
+    # making the derived dashboard calculation date-safe.
     sse_frame = combined.get("sse_etf", pd.DataFrame()).copy()
     nav_frame = combined.get("sse_etf_nav", pd.DataFrame())
     if not sse_frame.empty:
@@ -388,7 +389,7 @@ def collect_phase0(
             profiles.get("sse_etf_nav", {}).get("distinct_trade_dates", []),
             dates,
             warn_only=True,
-            remediation="上交所单位净值只按公告日精确匹配；缺失时保留份额数据并等待该日官方发布，不把新公告日净值倒灌到历史日。",
+            remediation="上交所单位净值只接受精确公告或最新份额日的次日公告对齐；缺失时保留份额数据，不把新公告日净值倒灌到更早历史日。",
         )
     )
 

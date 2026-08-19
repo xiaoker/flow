@@ -215,7 +215,7 @@ def test_sse_etf_matches_code_name_date_and_ten_thousand_share_unit(
     assert "sse_etf_scale" in str(artifact.normalized_path)
 
 
-def test_sse_etf_nav_uses_exact_publication_date_and_previous_trading_day(
+def test_sse_etf_nav_aligns_exact_publication_to_share_date(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:
     payload = {
@@ -242,11 +242,66 @@ def test_sse_etf_nav_uses_exact_publication_date_and_previous_trading_day(
 
     assert len(frame) == 1
     assert frame.loc[0, "trade_date"] == "2026-07-15"
-    assert frame.loc[0, "nav_date"] == "2026-07-14"
+    assert frame.loc[0, "nav_date"] == "2026-07-15"
+    assert frame.loc[0, "source_publication_date"] == "2026-07-15"
+    assert frame.loc[0, "source_nav_date"] == "2026-07-14"
     assert frame.loc[0, "instrument_code"] == "510300"
     assert frame.loc[0, "nav"] == pytest.approx(4.321)
-    assert frame.loc[0, "date_basis"] == "source_publication_previous_trading_day_nav"
+    assert frame.loc[0, "date_basis"] == (
+        "source_publication_previous_trading_day_nav_aligned_to_share_date_exact_publication"
+    )
     assert "sse_etf_nav" in str(artifact.normalized_path)
+
+
+def test_sse_etf_nav_aligns_next_publication_to_latest_share_date(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "result": [
+            {
+                "TRADING_DAY": "20260819",
+                "FUNDID2": "510300",
+                "ETF_FULLNAME": "沪深300ETF",
+                "NAV": "￥4.3210",
+            }
+        ]
+    }
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_sse_etf_nav(
+        "2026-08-18", ["2026-08-14", "2026-08-17", "2026-08-18"]
+    )
+
+    assert len(frame) == 1
+    assert frame.loc[0, "trade_date"] == "2026-08-18"
+    assert frame.loc[0, "nav_date"] == "2026-08-18"
+    assert frame.loc[0, "source_publication_date"] == "2026-08-19"
+    assert frame.loc[0, "source_nav_date"] == "2026-08-18"
+    assert frame.loc[0, "date_basis"].endswith("_next_publication")
+    assert any("次日公告" in warning for warning in artifact.warnings)
+
+
+def test_sse_etf_nav_does_not_backfill_older_share_date_from_moving_current_list(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "result": [
+            {
+                "TRADING_DAY": "20260819",
+                "FUNDID2": "510300",
+                "ETF_FULLNAME": "沪深300ETF",
+                "NAV": "￥4.3210",
+            }
+        ]
+    }
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_sse_etf_nav(
+        "2026-08-17", ["2026-08-14", "2026-08-17", "2026-08-18"]
+    )
+
+    assert frame.empty
+    assert any("可对齐 2026-08-17" in warning for warning in artifact.warnings)
 
 
 def test_sse_etf_nav_uses_live_public_page_class_codes() -> None:

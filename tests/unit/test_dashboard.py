@@ -260,6 +260,7 @@ def test_etf_terminal_calculates_szse_period_changes_from_official_history() -> 
                 "instrument_name": "沪深300ETF",
                 "shares": shares,
                 "nav": 2.0,
+                "nav_date": trade_date,
                 "investment_type": "股票基金",
             }
             for trade_date, shares in zip(
@@ -362,6 +363,7 @@ def test_etf_group_aggregation_keeps_share_and_cash_estimates_separate() -> None
                 "instrument_name": "半导体ETF",
                 "shares": 100_000_000,
                 "nav": 2.0,
+                "nav_date": "2026-07-20",
                 "etf_type": "跨市",
                 "investment_type": None,
             },
@@ -371,6 +373,7 @@ def test_etf_group_aggregation_keeps_share_and_cash_estimates_separate() -> None
                 "instrument_name": "半导体ETF",
                 "shares": 120_000_000,
                 "nav": 2.0,
+                "nav_date": "2026-07-21",
                 "etf_type": "跨市",
                 "investment_type": None,
             },
@@ -404,6 +407,7 @@ def test_etf_group_aggregation_keeps_share_and_cash_estimates_separate() -> None
                     "instrument_name": "芯片ETF",
                     "shares": 80_000_000,
                     "nav": 1.2,
+                    "nav_date": "2026-07-21",
                     "etf_type": "ETF",
                     "investment_type": "股票基金",
                 }

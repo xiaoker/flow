@@ -162,16 +162,16 @@ def test_inferred_szse_etf_date_is_warning_not_silent_pass() -> None:
     assert source_date["severity"] == "high"
 
 
-def test_etf_nav_requires_exact_date_pair_and_nonnegative_value() -> None:
+def test_etf_nav_accepts_explicit_share_date_alignment_and_nonnegative_value() -> None:
     frame = pd.DataFrame(
         [
             {
                 "trade_date": "2026-07-15",
-                "nav_date": "2026-07-14",
+                "nav_date": "2026-07-15",
                 "market": "SSE",
                 "instrument_code": "510300",
                 "nav": 4.321,
-                "date_basis": "source_publication_previous_trading_day_nav",
+                "date_basis": "source_publication_previous_trading_day_nav_aligned_to_share_date_next_publication",
             }
         ]
     )
@@ -183,6 +183,31 @@ def test_etf_nav_requires_exact_date_pair_and_nonnegative_value() -> None:
         item["check_id"] == "validity.etf_nav_dates" and item["status"] == "pass"
         for item in summary["findings"]
     )
+
+
+def test_etf_nav_rejects_mismatched_aligned_date() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "nav_date": "2026-07-14",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "nav": 4.321,
+                "date_basis": "source_publication_previous_trading_day_nav_aligned_to_share_date_next_publication",
+            }
+        ]
+    )
+
+    summary = summarize_findings(validate_etf_nav(frame))
+
+    finding = next(
+        item
+        for item in summary["findings"]
+        if item["check_id"] == "consistency.etf_nav_previous_day"
+    )
+    assert finding["status"] == "fail"
+    assert finding["evidence"]["invalid_aligned_rows"] == 1
 
 
 def test_empty_etf_nav_is_warn_only_optional_enrichment() -> None:
