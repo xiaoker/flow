@@ -134,6 +134,37 @@ def test_bse_margin_accepts_current_round_fields_without_using_display_units(
     assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(8_377_084_099)
 
 
+def test_bse_margin_parses_current_bseinfo_wrapper_and_headers(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    # bseinfo.net currently wraps the rows and selected date in one array,
+    # unlike the legacy null([[...]], date) response shape.
+    payload = (
+        "cb([[{\"rqmcl\":20400,\"rqye\":74256,\"rqyl\":21500,"
+        "\"rzmre\":634607986,\"rzrqye\":8377084099,\"rzye\":8377009843,"
+        "\"zqdm\":\"999999\"}], '2026-08-17'])"
+    )
+    captured: dict[str, object] = {}
+
+    def fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        captured["url"] = args[1]
+        captured["headers"] = kwargs["headers"]
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(official, "get", fake_get)
+
+    frame, artifact = adapters.fetch_bse_margin("2026-08-17")
+
+    assert artifact.row_count == 1
+    assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(8_377_009_843)
+    assert captured["url"] == "https://www.bseinfo.net/rzrqjyyexxController/summaryInfoResult.do"
+    assert captured["headers"] == {
+        "Referer": "https://www.bseinfo.net/disclosure/rzrq_trans_list.html",
+        "Accept": "application/json,text/javascript,*/*;q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+
 def test_bse_margin_rejects_stale_jsonp_date(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

@@ -144,6 +144,33 @@ def test_falls_back_to_authenticated_cloudflare_bse_relay_for_waf_html(
     }
 
 
+def test_bseinfo_jsonp_is_not_mistaken_for_html_waf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_proxy_environment(monkeypatch)
+    session = FakeSession(
+        [],
+        responses=[
+            FakeResponse(
+                200,
+                content=b"cb([[{\"zqdm\":\"999999\"}], '2026-08-17'])",
+                content_type="text/html;charset=utf-8",
+            ),
+        ],
+    )
+    params = {"callback": "cb", "transDate": "2026-08-17", "page": "0"}
+
+    response = get(
+        session,
+        "https://www.bseinfo.net/rzrqjyyexxController/summaryInfoResult.do",
+        params=params,
+    )
+
+    assert response.status_code == 200
+    assert params["_flow_transport"] == "direct"
+    assert len(session.calls) == 1
+
+
 def test_preserves_direct_bse_waf_evidence_when_relay_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

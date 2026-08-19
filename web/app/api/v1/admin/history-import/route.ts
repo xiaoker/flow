@@ -93,7 +93,9 @@ function isOfficialSource(
       return dataset === "stock_connect_daily" && hostname === "www.hkex.com.hk";
     }
     if (sourceId === "sse") return hostname === "query.sse.com.cn";
-    if (sourceId === "bse") return hostname === "www.bse.cn";
+    if (sourceId === "bse") {
+      return hostname === "www.bse.cn" || hostname === "www.bseinfo.net";
+    }
     return hostname === "www.szse.cn" || hostname === "fund.szse.cn";
   } catch {
     return false;
