@@ -37,7 +37,14 @@ def discover_recent_trading_dates(*, end_date: date, count: int = 3) -> list[str
 
 
 def _read_csv(workspace_root: Path, relative_path: str) -> pd.DataFrame:
-    return pd.read_csv(workspace_root / relative_path, dtype={"instrument_code": str})
+    # Preserve leading zeroes for every exchange/security code.  The previous
+    # loader only protected ETF codes; security-level margin rows would
+    # otherwise turn SZSE/BSE codes such as 000001 into integers and fail the
+    # market+code join later in the offline catalog build.
+    return pd.read_csv(
+        workspace_root / relative_path,
+        dtype={"instrument_code": str, "etf_code": str, "stock_code": str},
+    )
 
 
 def _signed(value: float, decimals: int = 2) -> str:
@@ -577,6 +584,11 @@ def build_dashboard_snapshot(
         if "bse_margin" in paths and paths.get("bse_margin")
         else None
     )
+    security_margin = (
+        _read_csv(workspace_root, paths["sse_margin_security"])
+        if paths.get("sse_margin_security")
+        else pd.DataFrame()
+    )
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
     pcf = (
         _read_csv(workspace_root, paths["sse_etf_pcf"])
@@ -681,6 +693,7 @@ def build_dashboard_snapshot(
                 pcf,
                 as_of=as_of,
                 previous_date=dates[-2] if len(dates) >= 2 else None,
+                security_margin_frame=security_margin,
             )
         except StockFlowInputError as exc:
             stock_catalog = {

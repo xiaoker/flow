@@ -58,7 +58,7 @@ function filterRow(row: StockPressureRow, filter: Filter) {
   if (filter === "inflow") return row.inflowShares > 0;
   if (filter === "outflow") return row.outflowShares > 0;
   if (filter === "financing") return row.marginBalanceYuan != null;
-  if (filter === "lending") return row.shortBalanceYuan != null;
+  if (filter === "lending") return row.shortBalanceYuan != null || row.shortBalanceShares != null;
   return true;
 }
 
@@ -135,9 +135,27 @@ function normalizeStockDetail(item: Record<string, unknown>, fallback: StockPres
     floatMarketCapYuan: nullableNumber(item.floatMarketCapYuan),
     marginBalanceYuan: nullableNumber(item.marginBalanceYuan),
     shortBalanceYuan: nullableNumber(item.shortBalanceYuan),
+    financingBuyYuan: nullableNumber(item.financingBuyYuan),
+    financingRepaymentYuan: nullableNumber(item.financingRepaymentYuan),
+    shortBalanceShares: nullableNumber(item.shortBalanceShares),
+    shortSellShares: nullableNumber(item.shortSellShares),
+    shortRepaymentShares: nullableNumber(item.shortRepaymentShares),
     priceAsOf: typeof item.priceAsOf === "string" ? item.priceAsOf : fallback.priceAsOf,
     marginAsOf: typeof item.marginAsOf === "string" ? item.marginAsOf : fallback.marginAsOf,
+    marginDataSource: typeof item.marginDataSource === "string" ? item.marginDataSource : fallback.marginDataSource,
   };
+}
+
+function marginDetailLabel(row: StockPressureRow) {
+  const financing = row.marginBalanceYuan == null
+    ? "—"
+    : `${numberValue(row.marginBalanceYuan / 100_000_000, 2)}亿融资余额`;
+  const lending = row.shortBalanceYuan != null
+    ? `${numberValue(row.shortBalanceYuan / 100_000_000, 2)}亿融券余额`
+    : row.shortBalanceShares != null
+      ? `${numberValue(row.shortBalanceShares, 0)}股融券余量`
+      : "—";
+  return `${financing} / ${lending}`;
 }
 
 function rowSortValue(row: StockPressureRow, sort: Sort) {
@@ -306,7 +324,7 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
           <div className="pressure-table-wrap">
             <table className="pressure-table"><thead><tr><th>#</th><th>名称</th><th>代码</th><th>穿透持仓等价</th><th>ETF净增/减</th><th>毛流入</th><th>毛流出</th><th>20日覆盖</th><th>两融</th></tr></thead><tbody>
               {visibleRows.map((row, index) => <tr className={selected?.identity === row.identity ? "selected" : ""} key={row.identity} onClick={() => selectRow(row)}>
-                <td>{safePage * pageSize + index + 1}</td><td><strong>{row.stockName}</strong><small>{row.listingMarketName}</small></td><td className="mono">{row.stockCode}</td><td>{signedShares(row.penetratedShares)}</td><td className={tone(row.netShares)}>{signedShares(row.netShares)}</td><td className="text-in">{signedShares(row.inflowShares)}</td><td className="text-out">{signedShares(row.outflowShares)}</td><td>{row.rolling20 ? "20/20" : `${Math.min(row.historyCoverage, 20)}/20`}</td><td>{row.marginBalanceYuan === null && row.shortBalanceYuan === null ? "—" : "可比"}</td>
+                <td>{safePage * pageSize + index + 1}</td><td><strong>{row.stockName}</strong><small>{row.listingMarketName}</small></td><td className="mono">{row.stockCode}</td><td>{signedShares(row.penetratedShares)}</td><td className={tone(row.netShares)}>{signedShares(row.netShares)}</td><td className="text-in">{signedShares(row.inflowShares)}</td><td className="text-out">{signedShares(row.outflowShares)}</td><td>{row.rolling20 ? "20/20" : `${Math.min(row.historyCoverage, 20)}/20`}</td><td>{row.marginBalanceYuan == null && row.shortBalanceYuan == null && row.shortBalanceShares == null ? "—" : "可比"}</td>
               </tr>)}
             </tbody></table>
             {!visibleRows.length && <div className="pressure-no-results"><Table size={28} /><strong>没有匹配的个股</strong><span>调整方向、排序或搜索条件。</span></div>}
@@ -322,7 +340,7 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
             <div className="pressure-detail-kpis"><div><span>当日净变化</span><strong className={tone(selected.netShares)}>{signedShares(selected.netShares)}</strong></div><div><span>20日累计</span><strong className={tone(selectedDetail?.rolling20?.netShares ?? selected.rolling20?.netShares)}>{signedShares(selectedDetail?.rolling20?.netShares ?? selected.rolling20?.netShares)}</strong></div></div>
             <div className="pressure-chart-title"><strong>ETF 穿透历史</strong><span>{selectedDetail?.historyCoverage ?? selected.historyCoverage}/21 个真实节点</span></div>
             {selectedDetail && selectedDetail.history && selectedDetail.history.length >= 2 ? <ReactECharts className="pressure-chart" option={chartOption} notMerge lazyUpdate /> : <div className="pressure-chart-empty"><Database size={24} /><strong>{detailLoading ? "正在读取历史节点" : "历史节点不足或暂不可用"}</strong><span>{detailLoading ? "详情来自同一发布版本的个股分片。" : "至少需要两个发布日；当前只展示已确认数据。"}</span></div>}
-            <div className="pressure-factor-list"><div><span>穿透持仓等价</span><strong>{signedShares(selectedDetail?.penetratedShares ?? selected.penetratedShares)}</strong></div><div><span>ETF 净增贡献</span><strong className="text-in">{signedShares(selectedDetail?.inflowShares ?? selected.inflowShares)}</strong></div><div><span>ETF 净减抵消</span><strong className="text-out">−{signedShares(selectedDetail?.outflowShares ?? selected.outflowShares).replace("−", "")}</strong></div><div><span>当前收盘价</span><strong>{(selectedDetail?.closePriceYuan ?? selected.closePriceYuan) == null ? "—" : "¥" + numberValue(selectedDetail?.closePriceYuan ?? selected.closePriceYuan, 4)}</strong></div><div><span>融资 / 融券余额</span><strong>{(selectedDetail?.marginBalanceYuan ?? selected.marginBalanceYuan) == null && (selectedDetail?.shortBalanceYuan ?? selected.shortBalanceYuan) == null ? "—" : numberValue(selectedDetail?.marginBalanceYuan ?? selected.marginBalanceYuan, 2) + " / " + numberValue(selectedDetail?.shortBalanceYuan ?? selected.shortBalanceYuan, 2)}</strong></div></div>
+            <div className="pressure-factor-list"><div><span>穿透持仓等价</span><strong>{signedShares(selectedDetail?.penetratedShares ?? selected.penetratedShares)}</strong></div><div><span>ETF 净增贡献</span><strong className="text-in">{signedShares(selectedDetail?.inflowShares ?? selected.inflowShares)}</strong></div><div><span>ETF 净减抵消</span><strong className="text-out">−{signedShares(selectedDetail?.outflowShares ?? selected.outflowShares).replace("−", "")}</strong></div><div><span>当前收盘价</span><strong>{(selectedDetail?.closePriceYuan ?? selected.closePriceYuan) == null ? "—" : "¥" + numberValue(selectedDetail?.closePriceYuan ?? selected.closePriceYuan, 4)}</strong></div><div><span>融资余额 / 融券余量</span><strong>{marginDetailLabel(selectedDetail ?? selected)}</strong></div></div>
             <div className="pressure-contributors"><header><strong>主要 ETF 贡献</strong><span>{selectedDetail?.contributors?.length ?? 0} 条</span></header>{selectedDetail?.contributors?.length ? selectedDetail.contributors.map((item) => <div key={item.etfMarket + ":" + item.etfCode}><span><b>{item.etfName}</b><small>{item.etfCode}</small></span><strong className={tone(item.stockFlowShares)}>{signedShares(item.stockFlowShares)}</strong></div>) : <p>{detailLoading ? "正在读取同一发布版本的贡献明细。" : "当前发布版本没有附带贡献明细。"}</p>}</div>
             <p className="pressure-disclaimer"><Info size={16} />ETF 申赎篮子穿透是估算等价。现金替代、PCF 日期错位或未披露行情/两融数据不会被补成 0。</p>
           </> : <div className="pressure-chart-empty"><Database size={28} /><strong>当前发布版本没有可用个股</strong><span>等待 ETF 份额与 PCF 同日/明确次日对齐。</span></div>}

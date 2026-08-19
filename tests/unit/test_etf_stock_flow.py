@@ -4,6 +4,7 @@ import pytest
 from trading_desk.etf_stock_flow import (
     StockFlowInputError,
     build_stock_flow,
+    build_stock_flow_catalog,
 )
 
 
@@ -207,3 +208,58 @@ def test_same_etf_code_on_two_markets_is_counted_twice() -> None:
 
     assert result["stocks"][0]["etfCount"] == 2
     assert {(row["market"], row["code"]) for row in result["etfs"]} == {("SSE", "588000"), ("SZSE", "588000")}
+
+
+def _security_margin(*, date: str = "2026-07-02", code: str = "688008", market: str = "SSE") -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "trade_date": date,
+                "market": market,
+                "stock_code": code,
+                "security_name": "澜起科技",
+                "financing_balance_yuan": 1_234_500_000,
+                "financing_buy_yuan": 50_000_000,
+                "financing_repayment_yuan": 45_000_000,
+                "securities_lending_balance_shares": 12_300,
+                "securities_lending_sell_shares": 1_200,
+                "securities_lending_repayment_shares": 900,
+                "source_id": "sse",
+            }
+        ]
+    )
+
+
+def test_catalog_joins_exact_date_official_margin_without_filling_other_markets() -> None:
+    catalog = build_stock_flow_catalog(
+        _shares(),
+        _pcf(),
+        as_of="2026-07-02",
+        previous_date="2026-07-01",
+        security_margin_frame=_security_margin(),
+    )
+
+    row = catalog["items"][0]
+    assert row["listingMarket"] == "101"
+    assert row["marginBalanceYuan"] == 1_234_500_000.0
+    assert row["financingBuyYuan"] == 50_000_000.0
+    assert row["shortBalanceShares"] == 12_300.0
+    assert row["marginAsOf"] == "2026-07-02"
+    coverage = catalog["coverage"]["securityMarginCoverage"]
+    assert coverage["available"] is True
+    assert coverage["matchedCount"] == 1
+    assert coverage["availableMarkets"] == ["SSE"]
+    assert coverage["unsupportedMarkets"] == ["SZSE", "BSE"]
+
+
+def test_catalog_rejects_duplicate_security_margin_business_key() -> None:
+    duplicate = pd.concat([_security_margin(), _security_margin()], ignore_index=True)
+
+    with pytest.raises(StockFlowInputError, match="security_margin_duplicate_business_key"):
+        build_stock_flow_catalog(
+            _shares(),
+            _pcf(),
+            as_of="2026-07-02",
+            previous_date="2026-07-01",
+            security_margin_frame=duplicate,
+        )

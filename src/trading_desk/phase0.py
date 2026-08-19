@@ -20,6 +20,7 @@ from .quality import (
     validate_etf_pcf,
     validate_bse_margin,
     validate_margin,
+    validate_margin_security,
 )
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
 
@@ -147,19 +148,21 @@ def collect_phase0(
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
     artifacts: list[FetchArtifact] = []
     errors: list[dict[str, Any]] = []
+    optional_errors: list[dict[str, Any]] = []
 
-    def run_step(name: str, operation: Callable[[], Any]) -> Any | None:
+    def run_step(
+        name: str, operation: Callable[[], Any], *, required: bool = True
+    ) -> Any | None:
         try:
             return operation()
         except Exception as exc:  # keep independent data domains observable
-            errors.append(
-                {
-                    "step": name,
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                    "traceback": traceback.format_exc(limit=8),
-                }
-            )
+            error = {
+                "step": name,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(limit=8),
+            }
+            (errors if required else optional_errors).append(error)
             return None
 
     for trade_date in dates:
@@ -248,6 +251,21 @@ def collect_phase0(
         frame, artifact = result
         frames["sse_margin"].append(frame)
         artifacts.append(artifact)
+
+    # Security-level margin detail is an optional stock-pressure enrichment.
+    # It is collected independently for each requested date so a missing
+    # detail response cannot block the market-level snapshot or be replaced by
+    # a newer date.
+    for trade_date in dates:
+        result = run_step(
+            f"sse_margin_security:{trade_date}",
+            lambda date=trade_date: adapters.fetch_sse_margin_security(date),
+            required=False,
+        )
+        if result:
+            frame, artifact = result
+            frames["sse_margin_security"].append(frame)
+            artifacts.append(artifact)
 
     for trade_date in dates:
         result = run_step(
@@ -343,6 +361,7 @@ def collect_phase0(
         "sse_etf_nav": validate_etf_nav,
         "sse_etf_pcf": validate_etf_pcf,
         "sse_margin": validate_margin,
+        "sse_margin_security": validate_margin_security,
         "szse_margin": validate_margin,
         "bse_margin": validate_bse_margin,
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),
@@ -354,6 +373,23 @@ def collect_phase0(
         frame = combined.get(dataset, pd.DataFrame())
         profiles[dataset] = profile(frame)
         findings.extend(validators[dataset](frame, dataset))
+
+    for error in optional_errors:
+        findings.append(
+            QualityFinding(
+                check_id="collection.optional_step",
+                dataset=str(error["step"]).split(":", 1)[0],
+                status="warn",
+                severity="high",
+                message="可选增强采集失败；核心数据未被阻断",
+                evidence={
+                    "step": error["step"],
+                    "error_type": error["error_type"],
+                    "message": error["message"],
+                },
+                remediation="保留上一完整发布；在下一 reconcile 窗口重试可选增强源。",
+            )
+        )
 
     for dataset in ("sse_etf", "sse_margin", "szse_margin", "bse_margin", "stock_connect_summary"):
         observed_dates = profiles.get(dataset, {}).get("distinct_trade_dates", [])
@@ -392,6 +428,15 @@ def collect_phase0(
             remediation="上交所单位净值只接受精确公告或最新份额日的次日公告对齐；缺失时保留份额数据，不把新公告日净值倒灌到更早历史日。",
         )
     )
+    findings.append(
+        _coverage_finding(
+            "sse_margin_security",
+            profiles.get("sse_margin_security", {}).get("distinct_trade_dates", []),
+            dates,
+            warn_only=True,
+            remediation="上交所个股两融明细属于可选增强；缺失时个股页面保留未知，不用 0 或上一日值补齐。",
+        )
+    )
 
     quality = summarize_findings(findings)
     pending_domains = _pending_required_coverage_datasets(findings)
@@ -411,6 +456,7 @@ def collect_phase0(
     )
     quality["profiles"] = profiles
     quality["errors"] = errors
+    quality["optional_errors"] = optional_errors
     manifest = {
         "run_id": run_id,
         "collection_window": collection_window,
@@ -428,6 +474,7 @@ def collect_phase0(
             else str(combined["szse_etf"]["trade_date"].max())
         ),
         "artifacts": [],
+        "optional_errors": optional_errors,
         "combined_paths": combined_paths,
         "quality_summary_path": f"reports/phase0/{run_id}/quality-summary.json",
     }

@@ -15,6 +15,7 @@ const SSE_ETF_SCALE_SQL = "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L";
 const SSE_ETF_NAV_SQL = "COMMON_SSE_PL_ETFGGSGSHQD_L";
 const SSE_ETF_PCF_BASIC_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C";
 const SSE_ETF_PCF_COMPONENT_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C";
+const SSE_MARGIN_SECURITY_SQL = "RZRQ_MX_INFO";
 const BSE_MARGIN_PATH = "/rzrqjyyexxController/summaryInfoResult.do";
 
 const COMMON_QUERY_PARAMETERS = new Set([
@@ -45,6 +46,18 @@ const MARGIN_QUERY_PARAMETERS = new Set([
   "pageHelp.cacheSize",
   "pageHelp.endPage",
 ]);
+const MARGIN_SECURITY_QUERY_PARAMETERS = new Set([
+  "isPagination",
+  "pageHelp.pageSize",
+  "pageHelp.pageNo",
+  "pageHelp.beginPage",
+  "pageHelp.cacheSize",
+  "pageHelp.endPage",
+  "preStockCode",
+  "beginDate",
+  "endDate",
+  "sqlId",
+]);
 const BSE_MARGIN_QUERY_PARAMETERS = new Set(["callback", "transDate", "page"]);
 
 function secureEqual(left: string, right: string): boolean {
@@ -69,6 +82,7 @@ function invalidRequest(detail: string) {
 
 function allowedParameters(path: string): Set<string> | null {
   if (path === "/commonQuery.do") return COMMON_QUERY_PARAMETERS;
+  if (path === "/commonSoaQuery.do") return MARGIN_SECURITY_QUERY_PARAMETERS;
   if (path === "/marketdata/tradedata/queryMargin.do") {
     return MARGIN_QUERY_PARAMETERS;
   }
@@ -124,6 +138,22 @@ function validateQuery(path: string, query: URLSearchParams): string | null {
         return "ETF_VERSION must be XML";
       }
     }
+  } else if (path === "/commonSoaQuery.do") {
+    if (query.get("sqlId") !== SSE_MARGIN_SECURITY_SQL) {
+      return "sqlId is not allowlisted";
+    }
+    if (query.get("isPagination") !== "true") {
+      return "isPagination must be true";
+    }
+    if (!COMPACT_DATE.test(query.get("beginDate") ?? "")) {
+      return "beginDate must be YYYYMMDD";
+    }
+    if (!COMPACT_DATE.test(query.get("endDate") ?? "")) {
+      return "endDate must be YYYYMMDD";
+    }
+    if (query.get("preStockCode") !== "") {
+      return "preStockCode must be empty";
+    }
   } else if (path === BSE_MARGIN_PATH) {
     if (query.get("callback") !== "cb") {
       return "callback must be cb";
@@ -175,6 +205,8 @@ export async function GET(request: Request) {
     ? "https://www.bseinfo.net/disclosure/rzrq_trans_list.html"
     : path === "/commonQuery.do"
       ? "https://www.sse.com.cn/assortment/fund/etf/list/scale/"
+      : path === "/commonSoaQuery.do"
+        ? "https://www.sse.com.cn/market/othersdata/margin/detail/"
       : "https://www.sse.com.cn/market/othersdata/margin/sum/";
   const upstream = await fetch(upstreamUrl, {
     headers: {

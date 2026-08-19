@@ -39,6 +39,16 @@ class StockFlowLimits:
 
 STOCK_CATALOG_SCHEMA_VERSION = 1
 
+# Security-level margin disclosures use exchange names while PCF/security
+# master rows use the numeric listing-market codes.  Keep this mapping local
+# to the join so a numeric stock code can never accidentally merge across
+# exchanges.
+SECURITY_MARGIN_MARKET_CODES = {
+    "SSE": "101",
+    "SZSE": "102",
+    "BSE": "104",
+}
+
 
 REQUIRED_SHARE_COLUMNS = {"trade_date", "market", "instrument_code", "shares"}
 REQUIRED_PCF_COLUMNS = {
@@ -504,6 +514,7 @@ def build_stock_flow_catalog(
     previous_date: str | None = None,
     pcf_date: str | None = None,
     max_contributors: int = 8,
+    security_margin_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Build the complete, bounded stock-centric catalog for read-model shards.
 
@@ -548,11 +559,17 @@ def build_stock_flow_catalog(
                 "contributors": contributors,
             }
         )
+    margin_coverage = _enrich_catalog_with_security_margin(
+        items,
+        security_margin_frame,
+        as_of=as_of,
+    )
     items.sort(key=lambda item: (str(item["listingMarket"]), str(item["stockCode"])))
     coverage = dict(result.get("coverage") or {})
     coverage["stockCount"] = len(items)
     coverage["shownStockCount"] = len(items)
     coverage["limited"] = False
+    coverage["securityMarginCoverage"] = margin_coverage
     return {
         "schemaVersion": STOCK_CATALOG_SCHEMA_VERSION,
         "asOf": result["asOf"],
@@ -561,3 +578,121 @@ def build_stock_flow_catalog(
         "items": items,
         "warnings": result.get("warnings", []),
     }
+
+
+def _enrich_catalog_with_security_margin(
+    items: list[dict[str, Any]],
+    frame: pd.DataFrame | None,
+    *,
+    as_of: str,
+) -> dict[str, Any]:
+    """Join one exact-date official security-margin snapshot onto the catalog.
+
+    This is deliberately an optional enrichment.  A missing or unsupported
+    market remains unknown (``null`` in the read model), never zero.  The
+    current official detail adapter is SSE-only; the coverage object makes
+    that limitation explicit until SZSE/BSE detail sources pass the same
+    reproducibility checks.
+    """
+
+    markets = tuple(SECURITY_MARGIN_MARKET_CODES)
+    base_coverage: dict[str, Any] = {
+        "asOf": as_of,
+        "available": False,
+        "source": None,
+        "matchedCount": 0,
+        "totalCount": len(items),
+        "marketCounts": {market: 0 for market in markets},
+        "matchedMarketCounts": {market: 0 for market in markets},
+        "availableMarkets": [],
+        "unsupportedMarkets": ["SZSE", "BSE"],
+        "missingReason": "official_security_margin_detail_unavailable",
+    }
+    if frame is None or frame.empty:
+        return base_coverage
+
+    required = {
+        "trade_date",
+        "market",
+        "stock_code",
+        "financing_balance_yuan",
+        "financing_buy_yuan",
+        "financing_repayment_yuan",
+        "securities_lending_balance_shares",
+        "securities_lending_sell_shares",
+        "securities_lending_repayment_shares",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise StockFlowInputError(
+            f"security_margin_columns_missing:{','.join(missing)}"
+        )
+
+    value = frame.copy()
+    value["trade_date"] = _date_series(value, "trade_date")
+    value["market"] = value["market"].astype(str).str.upper().str.strip()
+    unknown_markets = sorted(set(value["market"]) - set(SECURITY_MARGIN_MARKET_CODES))
+    if unknown_markets:
+        raise StockFlowInputError(
+            f"security_margin_market_invalid:{','.join(unknown_markets)}"
+        )
+    value["listing_market"] = value["market"].map(SECURITY_MARGIN_MARKET_CODES)
+    value["stock_code"] = value["stock_code"].map(_code)
+    value = value[value["trade_date"].eq(as_of)].copy()
+    if value.empty:
+        base_coverage["missingReason"] = "no_official_rows_for_as_of"
+        return base_coverage
+    key = ["trade_date", "market", "stock_code"]
+    if value.duplicated(key).any():
+        raise StockFlowInputError("security_margin_duplicate_business_key")
+
+    for market, count in value["market"].value_counts().to_dict().items():
+        base_coverage["marketCounts"][market] = int(count)
+    source_ids = sorted(
+        {
+            str(source).strip()
+            for source in value.get("source_id", pd.Series(dtype=str)).dropna().tolist()
+            if str(source).strip()
+        }
+    )
+    base_coverage["source"] = source_ids[0] if len(source_ids) == 1 else source_ids or "official"
+    base_coverage["available"] = True
+    base_coverage["availableMarkets"] = sorted(value["market"].unique().tolist())
+    base_coverage["unsupportedMarkets"] = [
+        market for market in ("SSE", "SZSE", "BSE") if market not in base_coverage["availableMarkets"]
+    ]
+
+    margin_by_identity = value.set_index(["listing_market", "stock_code"], drop=False)
+    fields = {
+        "marginBalanceYuan": "financing_balance_yuan",
+        "financingBuyYuan": "financing_buy_yuan",
+        "financingRepaymentYuan": "financing_repayment_yuan",
+        "shortBalanceShares": "securities_lending_balance_shares",
+        "shortSellShares": "securities_lending_sell_shares",
+        "shortRepaymentShares": "securities_lending_repayment_shares",
+    }
+    matched = 0
+    for item in items:
+        identity = (str(item.get("listingMarket", "")), _code(item.get("stockCode", "")))
+        if identity not in margin_by_identity.index:
+            continue
+        row = margin_by_identity.loc[identity]
+        # The business-key validator above guarantees one row.  Keep the
+        # guard so a future adapter cannot silently turn a one-to-many join
+        # into an arbitrary first-row selection.
+        if isinstance(row, pd.DataFrame):
+            raise StockFlowInputError("security_margin_duplicate_business_key")
+        matched += 1
+        market = str(row["market"])
+        base_coverage["matchedMarketCounts"][market] += 1
+        item["marginAsOf"] = as_of
+        item["marginDataSource"] = str(row.get("source_id") or base_coverage["source"] or "official")
+        for output, source in fields.items():
+            number = pd.to_numeric(pd.Series([row.get(source)]), errors="coerce").iloc[0]
+            item[output] = None if pd.isna(number) else float(number)
+    base_coverage["matchedCount"] = matched
+    if matched == 0:
+        base_coverage["missingReason"] = "official_rows_do_not_match_pcf_security_master"
+    else:
+        base_coverage["missingReason"] = None
+    return base_coverage
