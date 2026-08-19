@@ -134,11 +134,16 @@ def _build_etf_terminal_from_canonical(
             if pd.isna(nav):
                 continue
             raw_nav_date = nav_date_pivot.at[key, current] if key in nav_date_pivot.index else None
-            if raw_nav_date is not None and not pd.isna(raw_nav_date):
-                parsed_nav_date = pd.to_datetime(raw_nav_date, errors="coerce")
-                parsed_current = pd.to_datetime(current, errors="coerce")
-                if pd.isna(parsed_nav_date) or pd.isna(parsed_current) or parsed_nav_date > parsed_current:
-                    continue
+            # Amounts are only valid when the normalized NAV is explicitly
+            # aligned to the same share snapshot date.  A prior-day or
+            # future-day NAV can still remain in the raw lineage, but it must
+            # never be used to manufacture a cash estimate for this interval.
+            if raw_nav_date is None or pd.isna(raw_nav_date):
+                continue
+            parsed_nav_date = pd.to_datetime(raw_nav_date, errors="coerce")
+            parsed_current = pd.to_datetime(current, errors="coerce")
+            if pd.isna(parsed_nav_date) or pd.isna(parsed_current) or parsed_nav_date != parsed_current:
+                continue
             daily_cash[key][current] = delta * float(nav) / 100_000_000
 
     instruments: list[dict[str, Any]] = []

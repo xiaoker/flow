@@ -164,15 +164,15 @@ def validate_etf(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
 def validate_etf_nav(frame: pd.DataFrame, dataset: str = "sse_etf_nav") -> list[QualityFinding]:
     """Validate the independent official NAV feed before it is joined to shares."""
     # NAV is an optional enrichment of the ETF share snapshot.  The SSE public
-    # bulletin endpoint can legitimately have no exact-date row (for example
-    # when a historical day was not captured at publication time).  Keep that
-    # evidence visible, but do not block publication of the underlying shares.
+    # The moving bulletin endpoint can legitimately have no exact-date row
+    # when it has advanced to the next publication day.  Keep that evidence
+    # visible, but do not block publication of the underlying shares.
     findings = [
         _finding(
             "completeness.non_empty",
             dataset,
             not frame.empty,
-            message="官方 NAV 数据集非空" if not frame.empty else "该日期暂无精确匹配的官方 NAV",
+            message="官方 NAV 数据集非空" if not frame.empty else "该日期暂无可对齐的官方 NAV",
             evidence={"rows": int(len(frame)), "optional_enrichment": True},
             severity="high",
             warn_only=True,
@@ -221,18 +221,35 @@ def validate_etf_nav(frame: pd.DataFrame, dataset: str = "sse_etf_nav") -> list[
                 invalid_dates == 0,
                 message="NAV 日期可解析" if invalid_dates == 0 else "NAV 日期不可解析",
                 evidence={"invalid_rows": invalid_dates},
-                remediation="保留公告日与净值日，禁止把公告日当作净值日。",
+                remediation="保留源公告日与源 NAV 日；用于金额计算的 nav_date 必须是已验证的份额快照日期。",
             )
         )
-        invalid_order = int((nav_dates.ge(trade_dates)).fillna(False).sum())
+        date_basis = frame.get("date_basis", pd.Series("", index=frame.index)).astype(str)
+        aligned = date_basis.str.contains("aligned_to_share_date", regex=False)
+        invalid_alignment = int((aligned & nav_dates.ne(trade_dates)).fillna(False).sum())
+        legacy = ~aligned
+        invalid_legacy_order = int((legacy & nav_dates.ge(trade_dates)).fillna(False).sum())
+        invalid_order = invalid_alignment + invalid_legacy_order
         findings.append(
             _finding(
                 "consistency.etf_nav_previous_day",
                 dataset,
                 invalid_order == 0,
-                message="单位净值日早于公告交易日" if invalid_order == 0 else "单位净值日不早于公告交易日",
-                evidence={"invalid_rows": invalid_order},
-                remediation="检查公告日与净值日字段映射；不得使用未来或同日净值。",
+                message=(
+                    "NAV 与份额快照日期已按官方语义对齐"
+                    if invalid_order == 0
+                    else "NAV 与份额快照日期存在错配"
+                ),
+                evidence={
+                    "invalid_rows": invalid_order,
+                    "aligned_rows": int(aligned.sum()),
+                    "invalid_aligned_rows": invalid_alignment,
+                    "invalid_legacy_rows": invalid_legacy_order,
+                },
+                remediation=(
+                    "对齐记录必须满足 nav_date == trade_date；历史兼容记录只能使用早于公告日的 NAV，"
+                    "不得使用未来或未对齐净值。"
+                ),
             )
         )
     return findings

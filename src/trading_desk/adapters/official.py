@@ -169,6 +169,8 @@ def _empty_sse_etf_nav_frame() -> pd.DataFrame:
         columns=[
             "trade_date",
             "nav_date",
+            "source_publication_date",
+            "source_nav_date",
             "market",
             "instrument_code",
             "instrument_name",
@@ -329,20 +331,28 @@ class OfficialMarketAdapters:
     def fetch_sse_etf_nav(
         self, publication_date: str, known_trading_dates: list[str]
     ) -> tuple[pd.DataFrame, FetchArtifact]:
-        """Fetch the SSE ETF list's official unit NAV for one publication day.
+        """Fetch the SSE ETF list's official unit NAV for one share snapshot.
 
-        The SSE list is published on the trading morning and its NAV is the
-        previous trading day's unit NAV.  The endpoint only exposes the
-        current publication list, so a response whose ``TRADING_DAY`` does
-        not equal ``publication_date`` is retained as raw evidence but is not
-        assigned to the requested share snapshot.
+        ``publication_date`` is the requested *share snapshot* date.  SSE's
+        public list is a moving current snapshot: on the next morning its
+        ``TRADING_DAY`` has already advanced by one trading day, while the
+        ``NAV`` field is explicitly the previous trading day's unit NAV.  A
+        strict equality filter therefore drops the only official NAV that can
+        be joined to yesterday's shares.  We accept either:
+
+        * an exact ``TRADING_DAY`` match, or
+        * the next observed publication date when the requested date is the
+          latest known trading date.
+
+        In both cases the normalized ``trade_date``/``nav_date`` is the share
+        snapshot date used by the cash-flow calculation.  The source
+        publication date and the source NAV date remain separate columns so
+        the alignment is auditable and never looks like a historical replay.
         """
         parsed_dates = sorted(
             _iso_date(value, field="known_trading_dates")
             for value in known_trading_dates
         )
-        prior_dates = [value for value in parsed_dates if value < publication_date]
-        nav_date = prior_dates[-1] if prior_dates else None
         responses: list[dict[str, Any]] = []
         request_log: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -390,7 +400,7 @@ class OfficialMarketAdapters:
         raw_payload = json.dumps(
             {
                 "publication_date_requested": publication_date,
-                "nav_date": nav_date,
+                "known_trading_dates": parsed_dates,
                 "requests": request_log,
                 "responses": responses,
             },
@@ -409,20 +419,41 @@ class OfficialMarketAdapters:
             request_params={
                 "sqlId": "COMMON_SSE_PL_ETFGGSGSHQD_L",
                 "ETF_CLASS": list(SSE_ETF_NAV_CLASSES),
-                "publication_date": publication_date,
-                "nav_date_rule": "TRADING_DAY_previous_known_trading_day",
+                "share_date": publication_date,
+                "nav_date_rule": "align_exact_or_next_publication_to_share_date",
             },
         )
         artifact.warnings.extend(warnings)
 
         normalized_rows: list[dict[str, Any]] = []
+        latest_known_date = parsed_dates[-1] if parsed_dates else publication_date
         for response_payload in responses:
             for row in response_payload["result"]:
                 row_date = row.get("TRADING_DAY") if isinstance(row, dict) else None
                 if not row_date:
                     continue
                 row_date = _iso_date(row_date, field="TRADING_DAY")
-                if row_date != publication_date:
+                if row_date == publication_date:
+                    share_date = publication_date
+                    alignment = "exact_publication"
+                    prior_dates = [value for value in parsed_dates if value < row_date]
+                    source_nav_date = prior_dates[-1] if prior_dates else None
+                elif (
+                    publication_date == latest_known_date
+                    and row_date > publication_date
+                    and (
+                        pd.to_datetime(row_date) - pd.to_datetime(publication_date)
+                    ).days
+                    <= 10
+                ):
+                    # The endpoint has advanced to the next publication day.
+                    # Only the latest requested share date can be aligned this
+                    # way; older requested dates must never receive the moving
+                    # current NAV.
+                    share_date = publication_date
+                    alignment = "next_publication"
+                    source_nav_date = publication_date
+                else:
                     continue
                 code = str(row.get("FUNDID2") or "").strip().zfill(6)
                 value = _nav(row.get("NAV"))
@@ -430,28 +461,44 @@ class OfficialMarketAdapters:
                     continue
                 normalized_rows.append(
                     {
-                        "trade_date": publication_date,
-                        "nav_date": nav_date,
+                        "trade_date": share_date,
+                        # The normalized NAV is explicitly aligned to the
+                        # share snapshot.  The source's actual prior-day NAV
+                        # date is retained in source_nav_date for lineage.
+                        "nav_date": share_date,
+                        "source_publication_date": row_date,
+                        "source_nav_date": source_nav_date,
                         "market": "SSE",
                         "instrument_code": code,
                         "instrument_name": row.get("ETF_FULLNAME") or code,
                         "nav": value,
                         "source_id": SSE_ETF_NAV.source_id,
                         "source_grade": SSE_ETF_NAV.source_grade,
-                        "date_basis": SSE_ETF_NAV.date_semantics,
+                        "date_basis": (
+                            f"{SSE_ETF_NAV.date_semantics}_aligned_to_share_date"
+                            f"_{alignment}"
+                        ),
                         "observed_at": artifact.observed_at,
                     }
                 )
         normalized = pd.DataFrame(normalized_rows)
         if normalized.empty:
             artifact.warnings.append(
-                f"上交所未返回 {publication_date} 的可匹配 ETF 单位净值；不把其他公告日净值用于该日。"
+                f"上交所未返回可对齐 {publication_date} 的 ETF 单位净值；不把其他公告日净值用于该日。"
             )
             normalized = _empty_sse_etf_nav_frame()
         else:
             normalized = normalized.drop_duplicates(
                 ["trade_date", "market", "instrument_code"], keep="last"
             ).reset_index(drop=True)
+            shifted = normalized.loc[
+                normalized["source_publication_date"].astype(str).ne(publication_date)
+            ]
+            if not shifted.empty:
+                artifact.warnings.append(
+                    "上交所 NAV 已从次日公告对齐到 "
+                    f"{publication_date}：{len(shifted)} 条；源公告日保留在 source_publication_date。"
+                )
         return self._persist(normalized, artifact, publication_date)
 
     def fetch_sse_etf_pcf(
