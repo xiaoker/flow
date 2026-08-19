@@ -168,7 +168,8 @@ def test_r2_recovery_drill_is_read_only_and_preserves_evidence() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert "historical_snapshot" in workflow
-    assert "r2 object get" in workflow
+    assert "history-snapshot" in workflow
+    assert "X-Flow-History-Snapshot-Sha256" in workflow
     assert "fetch_stock_flow_history_inputs.py" in workflow
     assert "r2_recovery_drill.py" in workflow
     assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow
