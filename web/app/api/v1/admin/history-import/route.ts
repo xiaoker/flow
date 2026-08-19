@@ -34,7 +34,13 @@ type NormalizedFile = {
 type HistoryArtifact = {
   releaseId: string;
   sourceId: "sse" | "szse" | "bse" | "hkex";
-  dataset: "etf_scale" | "etf_nav" | "etf_pcf" | "margin_market_daily" | "stock_connect_daily";
+  dataset:
+    | "etf_scale"
+    | "etf_nav"
+    | "etf_pcf"
+    | "margin_market_daily"
+    | "margin_security_daily"
+    | "stock_connect_daily";
   requestedDate: string;
   tradeDates: string[];
   observedAt: string;
@@ -130,6 +136,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
       dataset !== "etf_nav" &&
       dataset !== "etf_pcf" &&
       dataset !== "margin_market_daily" &&
+      dataset !== "margin_security_daily" &&
       dataset !== "stock_connect_daily")
   ) return false;
   const expectedPair =
@@ -138,7 +145,8 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
     (dataset === "etf_nav" && sourceId === "sse") ||
     (dataset === "etf_pcf" && sourceId === "sse") ||
     (dataset === "margin_market_daily" &&
-      (sourceId === "sse" || sourceId === "szse" || sourceId === "bse"));
+      (sourceId === "sse" || sourceId === "szse" || sourceId === "bse")) ||
+    (dataset === "margin_security_daily" && sourceId === "sse");
   if (!expectedPair) return false;
   return Boolean(
     typeof value.requestedDate === "string" &&
@@ -592,6 +600,38 @@ async function persistStandardRows(
       ),
     ];
     await executeD1Statements(db, statements);
+    return rows.length;
+  }
+
+  if (artifact.dataset === "margin_security_daily") {
+    const normalized = normalizedFiles.find(({ file }) => file.name === "data");
+    if (!normalized) throw new Error("missing_margin_security_data");
+    const rows = parseCsv(normalized.content);
+    if (rows.length !== normalized.file.rowCount) {
+      throw new Error("margin_security_row_count_mismatch");
+    }
+    if (!rows.length) throw new Error("missing_margin_security_data");
+    for (const row of rows) {
+      validateStandardRow(artifact, row);
+      if (
+        row.market !== "SSE" ||
+        !/^\d{6}$/.test(String(row.stock_code ?? "").trim()) ||
+        !row.security_name ||
+        !ISO_DATE.test(row.source_trade_date ?? "") ||
+        row.source_trade_date !== row.trade_date
+      ) {
+        throw new Error("invalid_margin_security_identity");
+      }
+      requiredInteger(row, "financing_balance_yuan");
+      requiredInteger(row, "financing_buy_yuan");
+      requiredInteger(row, "financing_repayment_yuan");
+      requiredInteger(row, "securities_lending_balance_shares");
+      requiredInteger(row, "securities_lending_sell_shares");
+      requiredInteger(row, "securities_lending_repayment_shares");
+    }
+    // Per-security detail is an immutable evidence feed used by the offline
+    // ETF-to-stock pressure build.  Keep it in R2 without expanding the D1
+    // schema; the raw and normalized objects remain independently auditable.
     return rows.length;
   }
 
