@@ -60,10 +60,27 @@ ETF→个股穿透历史目前有 7 个有效分区：
 
 因此“至少一次独立 R2 恢复演练”这一项已满足；后续仍可按月或在归档策略变更后重复执行。
 
+## 自动采集连续观察证据（截至 2026-08-19 18:18 CST）
+
+连续观察按 `asOf` 的**不同交易日**计数，而不是按 GitHub Actions 运行次数计数。同一交易日的手动重试、Cron failover 或同日修订，只能作为该日的补齐证据，不能增加观察天数。
+
+当前证据如下：
+
+| 运行 | 触发方式 | `asOf` | 结果 | 是否计入 |
+| --- | --- | --- | --- | --- |
+| [#32231482376](https://github.com/xiaoker/flow/actions/runs/32231482376) | workflow_dispatch | 2026-08-18 | read-model activated，`release:2026-08-18:4d8ae263005ae1d7` | 计入 1 天 |
+| [#32229701520](https://github.com/xiaoker/flow/actions/runs/32229701520) | workflow_dispatch | 2026-08-18 | 同日重试并激活 | 不重复计入 |
+| [#32221504254](https://github.com/xiaoker/flow/actions/runs/32221504254) | workflow_dispatch | 2026-08-18 | 同日重试并激活 | 不重复计入 |
+| [#32207497293](https://github.com/xiaoker/flow/actions/runs/32207497293) | schedule | 2026-08-18 | failover 同日激活 | 不重复计入 |
+| [#32204792088](https://github.com/xiaoker/flow/actions/runs/32204792088) | schedule | 2026-08-18 | `archived_pending`，等待北交所融资融券 | 不计入 |
+| [#32167401954](https://github.com/xiaoker/flow/actions/runs/32167401954) | workflow_dispatch | 2026-08-17 | `archived_pending`，等待北交所融资融券 | 不计入 |
+
+所以“连续 5 个交易日自动采集、补齐、激活”目前为 **1/5**，不能宣称已完成。2026-08-19 的晚间采集窗口在本记录时尚未开始；它只有在产生新的、完整且通过 QA 的 `asOf=2026-08-19` release 后，才可作为下一天观察。若某交易日仅归档 pending，或只出现同日重试，不得计入连续观察。
+
 ## 尚未满足的严格 DoD
 
 1. 穿透历史尚未达到 21 个有效交易日；需要恢复官方 PCF，或等待真实交易日累积。
-2. 连续 5 个交易日的自动采集、补齐、激活尚需观察记录。
+2. 连续 5 个交易日的自动采集、补齐、激活目前为 `1/5`，尚需 4 个不同交易日的有效记录。
 3. R2/D1/Actions/Worker 免费额度尚未形成月度用量证据；当前 read-model 仅有软预算提示，没有硬限制失败。
 4. 最新生产版本仍需人工验证日期选择、历史读取、个股搜索和国家队周期控件。
 
