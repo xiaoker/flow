@@ -176,3 +176,17 @@ def test_r2_recovery_drill_is_read_only_and_preserves_evidence() -> None:
     assert "r2 object put" not in workflow
     assert "d1 execute flow --remote --json" in workflow
     assert "--apply" not in workflow
+
+
+def test_stock_flow_inventory_is_metadata_only_and_does_not_publish() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/stock-flow-inventory.yml").read_text(encoding="utf-8")
+    script = (REPOSITORY_ROOT / "scripts/inventory_stock_flow_inputs.py").read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "market_history_daily" in workflow
+    assert "inventory_stock_flow_inputs.py" in workflow
+    assert "publish_stock_flow_history.py" not in workflow
+    assert "history-import" not in workflow
+    assert "metadata_only" in script
+    assert "stream=True" in script
+    assert "response.close()" in script
