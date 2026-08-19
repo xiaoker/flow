@@ -89,7 +89,16 @@ def publish_history_bundle(
         "CF-Access-Client-Secret": access_client_secret,
         "Content-Type": "application/json",
     }
-    common = {key: value for key, value in history.items() if key != "artifacts"}
+    # The dashboard snapshot is several megabytes and is immutable for the
+    # whole run.  Sending it with every resumable artifact chunk needlessly
+    # makes the Worker parse and validate the same payload 20+ times.  Keep
+    # it only on the final request; the Worker validates it at the atomic
+    # publish boundary.
+    common = {
+        key: value
+        for key, value in history.items()
+        if key not in {"artifacts", "snapshot"}
+    }
     for artifact in artifacts:
         _post_chunk(
             url=url,
@@ -114,6 +123,7 @@ def publish_history_bundle(
             "version": bundle.get("version", 1),
             "history": {
                 **common,
+                "snapshot": history["snapshot"],
                 "artifacts": [artifacts[-1]],
                 "expectedArtifacts": expected,
                 "finalize": True,
