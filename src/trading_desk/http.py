@@ -53,7 +53,7 @@ def get(session: requests.Session, url: str, **kwargs: object) -> requests.Respo
     is_sse_source = parsed.scheme == "https" and parsed.hostname == "query.sse.com.cn"
     is_bse_source = (
         parsed.scheme == "https"
-        and parsed.hostname == "www.bse.cn"
+        and parsed.hostname in {"www.bse.cn", "www.bseinfo.net"}
         and parsed.path == "/rzrqjyyexxController/summaryInfoResult.do"
     )
     proxy = _source_proxy_config() if (is_sse_source or is_bse_source) else None
@@ -63,10 +63,10 @@ def get(session: requests.Session, url: str, **kwargs: object) -> requests.Respo
     def looks_like_bse_challenge(value: requests.Response) -> bool:
         if not is_bse_source:
             return False
-        content_type = value.headers.get("Content-Type", "").lower()
-        if "html" in content_type:
-            return True
         prefix = value.content[:256].lstrip().lower()
+        # bseinfo.net labels the valid JSONP response as text/html, so the
+        # content type alone is not evidence of a challenge.  WAF pages are
+        # HTML documents and therefore have an unambiguous markup prefix.
         return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
 
     try:

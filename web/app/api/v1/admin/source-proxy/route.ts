@@ -4,7 +4,7 @@ import { runtimeEnv } from "@/app/lib/dashboard-store";
 export const dynamic = "force-dynamic";
 
 const UPSTREAM_ORIGIN = "https://query.sse.com.cn";
-const BSE_UPSTREAM_ORIGIN = "https://www.bse.cn";
+const BSE_UPSTREAM_ORIGIN = "https://www.bseinfo.net";
 const MAX_RESPONSE_BYTES = 10_000_000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const COMPACT_DATE = /^\d{8}$/;
@@ -172,7 +172,7 @@ export async function GET(request: Request) {
     if (key !== "path") upstreamUrl.searchParams.append(key, value);
   }
   const referer = isBseMargin
-    ? "https://www.bse.cn/disclosure/rzrq_trans_list.html"
+    ? "https://www.bseinfo.net/disclosure/rzrq_trans_list.html"
     : path === "/commonQuery.do"
       ? "https://www.sse.com.cn/assortment/fund/etf/list/scale/"
       : "https://www.sse.com.cn/market/othersdata/margin/sum/";
@@ -180,6 +180,7 @@ export async function GET(request: Request) {
     headers: {
       Accept: "application/json,text/plain,*/*",
       Referer: referer,
+      ...(isBseMargin ? { "X-Requested-With": "XMLHttpRequest" } : {}),
       "User-Agent":
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 " +
@@ -187,7 +188,7 @@ export async function GET(request: Request) {
     },
     redirect: "follow",
   });
-  const expectedHost = isBseMargin ? "www.bse.cn" : "query.sse.com.cn";
+  const expectedHost = isBseMargin ? "www.bseinfo.net" : "query.sse.com.cn";
   if (upstream.url && new URL(upstream.url).hostname !== expectedHost) {
     return NextResponse.json(
       { error: "unexpected_upstream_redirect" },

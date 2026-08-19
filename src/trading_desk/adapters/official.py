@@ -61,7 +61,10 @@ BSE_MARGIN = SourceSpec(
     source_id="bse",
     publisher="北京证券交易所",
     dataset="margin_market_daily",
-    url="https://www.bse.cn/rzrqjyyexxController/summaryInfoResult.do",
+    # bseinfo.net is the exchange's current public disclosure host.  The
+    # legacy bse.cn host is retained as an accepted historical evidence host
+    # by release QA, but it now serves a WAF challenge to server-side clients.
+    url="https://www.bseinfo.net/rzrqjyyexxController/summaryInfoResult.do",
     date_semantics="bse_official_summary_trade_date",
 )
 HKEX_CONNECT = SourceSpec(
@@ -77,6 +80,7 @@ HKEX_CONNECT_PAGE_URL = (
     "https://www.hkex.com.hk/Mutual-Market/Stock-Connect/Statistics/"
     "Historical-Daily?sc_lang=zh-CN"
 )
+BSE_MARGIN_PAGE_URL = "https://www.bseinfo.net/disclosure/rzrq_trans_list.html"
 
 SSE_ETF_NAV_CLASSES = (
     # These are the ETF_CLASS values used by the SSE ETF disclosure page's
@@ -220,10 +224,10 @@ def _szse_etf_dates(
 def parse_bse_margin_summary(text: str) -> tuple[list[dict[str, Any]], str | None]:
     """Parse the BSE summary endpoint's JSONP response.
 
-    The public page currently returns ``null([[{...}]], 'YYYY-MM-DD')`` rather
-    than JSON.  Keep the parser deliberately narrow: the selected date is
-    retained as evidence and callers must reject a response whose date does
-    not match the requested trade date.
+    The endpoint has returned both ``null([[{...}]], 'YYYY-MM-DD')`` and
+    ``cb([[{...}], 'YYYY-MM-DD'])`` wrappers.  Keep both forms deliberately
+    narrow: the selected date is retained as evidence and callers must reject
+    a response whose date does not match the requested trade date.
     """
 
     normalized = text.lstrip("\ufeff").strip()
@@ -232,10 +236,23 @@ def parse_bse_margin_summary(text: str) -> tuple[list[dict[str, Any]], str | Non
         normalized,
         flags=re.DOTALL,
     )
-    if not match:
-        raise ValueError("BSE margin response did not match the expected JSONP wrapper")
-    payload = json.loads(match.group(1))
-    selected_date = _iso_date(match.group(2), field="BSE selected date")
+    if match:
+        payload_text = match.group(1)
+        selected_date = _iso_date(match.group(2), field="BSE selected date")
+    else:
+        # Current bseinfo.net wraps the rows and date in one array.  The
+        # boundary before the date is intentionally strict so an HTML/WAF
+        # response can never be treated as a data payload.
+        match = re.search(
+            r"\(\s*\[(\s*\[\s*(?:\{.*\}\s*|)\])\s*,\s*['\"]?(20\d{2}-\d{2}-\d{2})['\"]?\s*\]\s*\)\s*;?\s*$",
+            normalized,
+            flags=re.DOTALL,
+        )
+        if not match:
+            raise ValueError("BSE margin response did not match the expected JSONP wrapper")
+        payload_text = match.group(1)
+        selected_date = _iso_date(match.group(2), field="BSE selected date")
+    payload = json.loads(payload_text)
     if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], list):
         payload = payload[0]
     if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
@@ -927,7 +944,13 @@ class OfficialMarketAdapters:
             self.session,
             BSE_MARGIN.url,
             params=params,
-            headers=self._headers("https://www.bse.cn/disclosure/rzrq_trans_list.html"),
+            headers={
+                **self._headers(BSE_MARGIN_PAGE_URL),
+                # The official page issues this header for its JSONP request;
+                # without it the same endpoint may return the WAF HTML shell.
+                "Accept": "application/json,text/javascript,*/*;q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+            },
         )
         artifact = write_raw_response(
             root=self.data_root,
@@ -940,7 +963,7 @@ class OfficialMarketAdapters:
             content_type=response.headers.get("Content-Type", "application/javascript"),
             request_params={
                 **params,
-                "page_url": "https://www.bse.cn/disclosure/rzrq_trans_list.html",
+                "page_url": BSE_MARGIN_PAGE_URL,
                 "raw_amount_unit": "yuan",
                 "raw_quantity_unit": "shares",
                 "display_amount_unit": "万元",

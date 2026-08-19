@@ -28,7 +28,10 @@ from .storage import now_iso, write_json
 APPROVED_SOURCE_HOSTS = {
     "sse": {"query.sse.com.cn", "www.sse.com.cn"},
     "szse": {"fund.szse.cn", "www.szse.cn"},
-    "bse": {"www.bse.cn"},
+    # New official disclosure host plus the legacy host used by archived
+    # evidence.  Historical artifacts must remain auditable after the host
+    # migration.
+    "bse": {"www.bse.cn", "www.bseinfo.net"},
     "hkex": {"www.hkex.com.hk"},
 }
 
