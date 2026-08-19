@@ -439,8 +439,7 @@ jobs:
             AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
             python scripts/verify_published_release.py \
               --release-id "$RELEASE_ID" \
-              --as-of "$AS_OF" \
-              --repeat 100 > release-canary.json
+              --as-of "$AS_OF" > release-canary.json
           else
             echo "Read-model release was staged or snapshot is pending; active release was not changed, so canary is not applicable."
           fi
