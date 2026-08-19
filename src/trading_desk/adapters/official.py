@@ -51,6 +51,13 @@ SSE_MARGIN = SourceSpec(
     dataset="margin_market_daily",
     url="https://query.sse.com.cn/marketdata/tradedata/queryMargin.do",
 )
+SSE_MARGIN_SECURITY = SourceSpec(
+    source_id="sse",
+    publisher="上海证券交易所",
+    dataset="margin_security_daily",
+    url="https://query.sse.com.cn/commonSoaQuery.do",
+    date_semantics="sse_margin_security_report_date",
+)
 SZSE_MARGIN = SourceSpec(
     source_id="szse",
     publisher="深圳证券交易所",
@@ -81,6 +88,7 @@ HKEX_CONNECT_PAGE_URL = (
     "Historical-Daily?sc_lang=zh-CN"
 )
 BSE_MARGIN_PAGE_URL = "https://www.bseinfo.net/disclosure/rzrq_trans_list.html"
+SSE_MARGIN_SECURITY_PAGE_URL = "https://www.sse.com.cn/market/othersdata/margin/detail/"
 
 SSE_ETF_NAV_CLASSES = (
     # These are the ETF_CLASS values used by the SSE ETF disclosure page's
@@ -910,6 +918,123 @@ class OfficialMarketAdapters:
             ]
         )
         return self._persist(normalized, artifact, partition)
+
+    def fetch_sse_margin_security(
+        self, trade_date: str
+    ) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Fetch SSE's official per-security margin detail for one date.
+
+        The detail page exposes one bounded JSON response (the server caps
+        ``pageHelp.pageSize`` at 2,000) with financing and securities-lending
+        fields in yuan/shares.  This is a security-level dataset, not a
+        replacement for the market aggregate.  A stale moving response is
+        archived but never assigned to the requested date.
+        """
+
+        requested_date = _iso_date(trade_date, field="trade_date")
+        params = {
+            "isPagination": "true",
+            "pageHelp.pageSize": "2000",
+            "pageHelp.pageNo": "1",
+            "pageHelp.beginPage": "1",
+            "pageHelp.cacheSize": "1",
+            "pageHelp.endPage": "1",
+            "preStockCode": "",
+            "beginDate": requested_date.replace("-", ""),
+            "endDate": requested_date.replace("-", ""),
+            "sqlId": "RZRQ_MX_INFO",
+        }
+        response = get(
+            self.session,
+            SSE_MARGIN_SECURITY.url,
+            params=params,
+            headers=self._headers(SSE_MARGIN_SECURITY_PAGE_URL),
+        )
+        artifact = write_raw_response(
+            root=self.data_root,
+            source=SSE_MARGIN_SECURITY,
+            requested_date=requested_date,
+            run_id=self.run_id,
+            content=response.content,
+            extension="json",
+            status_code=response.status_code,
+            content_type=response.headers.get("Content-Type", "application/json"),
+            request_params=params,
+        )
+        payload = response.json()
+        page_help = payload.get("pageHelp") if isinstance(payload, dict) else None
+        rows = page_help.get("data") if isinstance(page_help, dict) else None
+        if not isinstance(rows, list):
+            rows = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            rows = []
+
+        normalized_rows: list[dict[str, Any]] = []
+        stale_dates: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_date = row.get("opDate")
+            try:
+                normalized_date = _iso_date(row_date, field="opDate")
+            except ValueError:
+                continue
+            if normalized_date != requested_date:
+                stale_dates.add(normalized_date)
+                continue
+            code = str(row.get("stockCode") or "").strip().zfill(6)
+            if not re.fullmatch(r"\d{6}", code):
+                continue
+            normalized_rows.append(
+                {
+                    "trade_date": requested_date,
+                    "source_trade_date": normalized_date,
+                    "market": "SSE",
+                    "stock_code": code,
+                    "security_name": row.get("securityAbbr") or code,
+                    "financing_balance_yuan": _number(row.get("rzye")),
+                    "financing_buy_yuan": _number(row.get("rzmre")),
+                    "financing_repayment_yuan": _number(row.get("rzche")),
+                    "securities_lending_balance_shares": _number(row.get("rqyl")),
+                    "securities_lending_sell_shares": _number(row.get("rqmcl")),
+                    "securities_lending_repayment_shares": _number(row.get("rqchl")),
+                    "source_id": SSE_MARGIN_SECURITY.source_id,
+                    "source_grade": SSE_MARGIN_SECURITY.source_grade,
+                    "date_basis": SSE_MARGIN_SECURITY.date_semantics,
+                    "observed_at": artifact.observed_at,
+                }
+            )
+
+        normalized = pd.DataFrame(
+            normalized_rows,
+            columns=[
+                "trade_date",
+                "source_trade_date",
+                "market",
+                "stock_code",
+                "security_name",
+                "financing_balance_yuan",
+                "financing_buy_yuan",
+                "financing_repayment_yuan",
+                "securities_lending_balance_shares",
+                "securities_lending_sell_shares",
+                "securities_lending_repayment_shares",
+                "source_id",
+                "source_grade",
+                "date_basis",
+                "observed_at",
+            ],
+        )
+        if stale_dates:
+            artifact.warnings.append(
+                "上交所个股两融返回日期 "
+                f"{','.join(sorted(stale_dates))} 与请求日期 {requested_date} 不一致；未归属该日。"
+            )
+        if normalized.empty:
+            artifact.warnings.append(f"上交所尚未返回 {requested_date} 的个股两融明细。")
+        elif normalized.duplicated(["trade_date", "market", "stock_code"]).any():
+            raise ValueError("sse_margin_security_duplicate_business_key")
+        return self._persist(normalized, artifact, requested_date)
 
     def fetch_szse_margin(self, trade_date: str) -> tuple[pd.DataFrame, FetchArtifact]:
         params = {

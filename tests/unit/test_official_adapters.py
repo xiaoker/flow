@@ -612,6 +612,78 @@ def test_sse_margin_uses_named_source_fields(
     assert frame.loc[0, "securities_lending_balance_yuan"] == 13_885_066_040
 
 
+def test_sse_margin_security_normalizes_official_detail_fields_and_units(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "pageHelp": {
+            "data": [
+                {
+                    "opDate": "20260714",
+                    "stockCode": "688008",
+                    "securityAbbr": "澜起科技",
+                    "rzye": "1,452,014,185,914",
+                    "rzmre": "123,363,539,218",
+                    "rzche": "120000000000",
+                    "rqyl": "2467919946",
+                    "rqmcl": "60832165",
+                    "rqchl": "50000000",
+                }
+            ]
+        }
+    }
+    captured: dict[str, object] = {}
+
+    def fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        captured["url"] = args[1]
+        captured["params"] = kwargs["params"]
+        captured["headers"] = kwargs["headers"]
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(official, "get", fake_get)
+
+    frame, artifact = adapters.fetch_sse_margin_security("2026-07-14")
+
+    assert artifact.row_count == 1
+    assert frame.loc[0, "trade_date"] == "2026-07-14"
+    assert frame.loc[0, "source_trade_date"] == "2026-07-14"
+    assert frame.loc[0, "market"] == "SSE"
+    assert frame.loc[0, "stock_code"] == "688008"
+    assert frame.loc[0, "security_name"] == "澜起科技"
+    assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(1_452_014_185_914)
+    assert frame.loc[0, "financing_buy_yuan"] == pytest.approx(123_363_539_218)
+    assert frame.loc[0, "securities_lending_balance_shares"] == pytest.approx(2_467_919_946)
+    assert captured["url"] == "https://query.sse.com.cn/commonSoaQuery.do"
+    assert captured["params"]["sqlId"] == "RZRQ_MX_INFO"  # type: ignore[index]
+    assert captured["headers"]["Referer"].endswith("margin/detail/")  # type: ignore[index]
+
+
+def test_sse_margin_security_rejects_stale_rows_without_relabeling_them(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = {
+        "result": [
+            {
+                "opDate": "20260713",
+                "stockCode": "688008",
+                "securityAbbr": "澜起科技",
+                "rzye": 1,
+                "rzmre": 1,
+                "rzche": 1,
+                "rqyl": 1,
+                "rqmcl": 1,
+                "rqchl": 1,
+            }
+        ]
+    }
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload))
+
+    frame, artifact = adapters.fetch_sse_margin_security("2026-07-14")
+
+    assert frame.empty
+    assert any("返回日期" in warning for warning in artifact.warnings)
+
+
 def test_hkex_summary_converts_millions_and_keeps_northbound_net_empty(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

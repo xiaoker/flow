@@ -95,3 +95,32 @@ def test_pressure_does_not_roll_across_missing_global_partition() -> None:
 
     assert pressure["stocks"][0]["historyCoverage"] == 21
     assert pressure["stocks"][0]["rolling20"] is None
+
+
+def test_pressure_preserves_security_margin_enrichment_and_coverage() -> None:
+    catalog = _catalog()
+    catalog["items"][0].update(
+        {
+            "marginBalanceYuan": 123_000_000,
+            "financingBuyYuan": 10_000_000,
+            "financingRepaymentYuan": 8_000_000,
+            "shortBalanceShares": 1_200,
+            "shortSellShares": 100,
+            "shortRepaymentShares": 80,
+            "marginAsOf": catalog["asOf"],
+            "marginDataSource": "sse",
+        }
+    )
+    catalog["coverage"]["securityMarginCoverage"] = {
+        "available": True,
+        "matchedCount": 1,
+        "totalCount": 1,
+    }
+    pressure = build_stock_pressure(catalog, margin_as_of=catalog["asOf"])
+    row = pressure["stocks"][0]
+
+    assert row["marginBalanceYuan"] == 123_000_000
+    assert row["financingBuyYuan"] == 10_000_000
+    assert row["shortBalanceShares"] == 1_200
+    assert row["marginDataSource"] == "sse"
+    assert pressure["coverage"]["securityMarginCoverage"]["matchedCount"] == 1

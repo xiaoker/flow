@@ -300,8 +300,14 @@ def build_stock_pressure(
                 "floatMarketCapYuan": _rounded(item.get("floatMarketCapYuan")),
                 "marginBalanceYuan": _rounded(item.get("marginBalanceYuan")),
                 "shortBalanceYuan": _rounded(item.get("shortBalanceYuan")),
+                "financingBuyYuan": _rounded(item.get("financingBuyYuan")),
+                "financingRepaymentYuan": _rounded(item.get("financingRepaymentYuan")),
+                "shortBalanceShares": _rounded(item.get("shortBalanceShares")),
+                "shortSellShares": _rounded(item.get("shortSellShares")),
+                "shortRepaymentShares": _rounded(item.get("shortRepaymentShares")),
                 "priceAsOf": item.get("priceAsOf"),
                 "marginAsOf": item.get("marginAsOf"),
+                "marginDataSource": item.get("marginDataSource"),
             }
         )
 
@@ -336,6 +342,7 @@ def build_stock_pressure(
             "history20Coverage": round(history20_count / len(rows) * 100, 2) if rows else 0,
             "priceCount": sum(row["closePriceYuan"] is not None for row in rows),
             "marginCount": sum(row["marginBalanceYuan"] is not None for row in rows),
+            "securityMarginCoverage": value.get("coverage", {}).get("securityMarginCoverage"),
         },
         "marginAsOf": margin_as_of,
         "historyStatus": value.get("historyStatus", "unknown"),

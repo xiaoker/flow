@@ -617,6 +617,14 @@ test("keeps the official-source relay private and allowlisted", async () => {
     error: "invalid_source_request",
     detail: "page must be 0",
   });
+
+  const sourceProxy = await readFile(
+    new URL("../app/api/v1/admin/source-proxy/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(sourceProxy, /RZRQ_MX_INFO/);
+  assert.match(sourceProxy, /\/commonSoaQuery\.do/);
+  assert.match(sourceProxy, /othersdata\/margin\/detail/);
 });
 
 test("streams an archived dashboard for an explicitly selected date", async () => {

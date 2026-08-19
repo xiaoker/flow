@@ -10,6 +10,7 @@ from trading_desk.quality import (
     validate_etf_nav,
     validate_bse_margin,
     validate_margin,
+    validate_margin_security,
 )
 
 
@@ -218,4 +219,32 @@ def test_empty_etf_nav_is_warn_only_optional_enrichment() -> None:
     )
     assert completeness["status"] == "warn"
     assert completeness["evidence"]["optional_enrichment"] is True
+
+
+def test_margin_security_requires_sse_market_and_preserves_empty_as_warning() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-14",
+                "market": "SSE",
+                "stock_code": "688008",
+                "security_name": "澜起科技",
+                "financing_balance_yuan": 1_000,
+                "financing_buy_yuan": 100,
+                "financing_repayment_yuan": 90,
+                "securities_lending_balance_shares": 10,
+                "securities_lending_sell_shares": 2,
+                "securities_lending_repayment_shares": 1,
+            }
+        ]
+    )
+    summary = summarize_findings(validate_margin_security(frame))
+    assert summary["counts"]["fail"] == 0
+    assert any(item["check_id"] == "validity.margin_security_market" for item in summary["findings"])
+
+    empty = summarize_findings(validate_margin_security(pd.DataFrame()))
+    completeness = next(
+        item for item in empty["findings"] if item["check_id"] == "completeness.non_empty"
+    )
+    assert completeness["status"] == "warn"
     assert summary["counts"]["fail"] == 0

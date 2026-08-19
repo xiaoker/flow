@@ -381,6 +381,85 @@ def validate_margin(
     return findings
 
 
+def validate_margin_security(
+    frame: pd.DataFrame, dataset: str = "sse_margin_security", *, empty_warn_only: bool = True
+) -> list[QualityFinding]:
+    """Validate official per-security margin detail without mixing markets."""
+
+    required = [
+        "trade_date",
+        "market",
+        "stock_code",
+        "security_name",
+        "financing_balance_yuan",
+        "financing_buy_yuan",
+        "financing_repayment_yuan",
+        "securities_lending_balance_shares",
+        "securities_lending_sell_shares",
+        "securities_lending_repayment_shares",
+    ]
+    findings = check_empty(frame, dataset, warn_only=empty_warn_only)
+    findings += check_required_columns(frame, dataset, required)
+    findings += check_unique(frame, dataset, ["trade_date", "market", "stock_code"])
+    findings += check_nonnegative(frame, dataset, required[4:])
+    if not frame.empty and "market" in frame.columns:
+        invalid_market = int((frame["market"].astype(str) != "SSE").sum())
+        findings.append(
+            _finding(
+                "validity.margin_security_market",
+                dataset,
+                invalid_market == 0,
+                message="个股两融市场标记正确" if invalid_market == 0 else "个股两融混入其他市场",
+                evidence={"invalid_rows": invalid_market},
+                remediation="保留交易所市场键，禁止按代码前缀跨市场合并。",
+            )
+        )
+    if not frame.empty and "trade_date" in frame.columns:
+        parsed = pd.to_datetime(frame["trade_date"], errors="coerce")
+        invalid_dates = int(parsed.isna().sum())
+        findings.append(
+            _finding(
+                "validity.margin_security_date",
+                dataset,
+                invalid_dates == 0,
+                message="个股两融日期可解析" if invalid_dates == 0 else "个股两融日期不可解析",
+                evidence={"invalid_rows": invalid_dates},
+                remediation="只保留官方 opDate，不能用采集时间代替交易日。",
+            )
+        )
+        if "source_trade_date" in frame.columns:
+            source_dates = pd.to_datetime(frame["source_trade_date"], errors="coerce")
+            mismatched = int(
+                source_dates.isna().sum()
+                + (source_dates.notna() & parsed.notna() & source_dates.ne(parsed)).sum()
+            )
+            findings.append(
+                _finding(
+                    "consistency.margin_security_source_date",
+                    dataset,
+                    mismatched == 0,
+                    message="个股两融源日期与业务日期一致"
+                    if mismatched == 0
+                    else "个股两融源日期与业务日期不一致",
+                    evidence={"invalid_rows": mismatched},
+                    remediation="只按官方 opDate 归属；源日期不一致时阻断该明细进入个股关联。",
+                )
+            )
+    if not frame.empty and "stock_code" in frame.columns:
+        invalid_codes = int((~frame["stock_code"].astype(str).str.fullmatch(r"\d{6}")).sum())
+        findings.append(
+            _finding(
+                "validity.margin_security_code",
+                dataset,
+                invalid_codes == 0,
+                message="个股两融代码格式正确" if invalid_codes == 0 else "个股两融代码格式异常",
+                evidence={"invalid_rows": invalid_codes},
+                remediation="保留交易所六位证券代码和前导零。",
+            )
+        )
+    return findings
+
+
 def validate_bse_margin(frame: pd.DataFrame, dataset: str = "bse_margin") -> list[QualityFinding]:
     """Validate the BSE aggregate row without mixing it with SSE/SZSE data."""
 

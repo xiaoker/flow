@@ -230,8 +230,14 @@ export interface StockPressureRow {
   floatMarketCapYuan?: number | null;
   marginBalanceYuan?: number | null;
   shortBalanceYuan?: number | null;
+  financingBuyYuan?: number | null;
+  financingRepaymentYuan?: number | null;
+  shortBalanceShares?: number | null;
+  shortSellShares?: number | null;
+  shortRepaymentShares?: number | null;
   priceAsOf?: string | null;
   marginAsOf?: string | null;
+  marginDataSource?: string | null;
 }
 
 export interface EtfPressureData {
@@ -259,6 +265,16 @@ export interface EtfPressureData {
     history20Coverage: number;
     priceCount: number;
     marginCount: number;
+    securityMarginCoverage?: {
+      asOf?: string;
+      available?: boolean;
+      source?: string | null;
+      matchedCount?: number;
+      totalCount?: number;
+      availableMarkets?: string[];
+      unsupportedMarkets?: string[];
+      missingReason?: string | null;
+    } | null;
   };
   availableDates: string[];
   marginAsOf?: string | null;
