@@ -14,6 +14,9 @@
 - `中天科技` / `600522` 已进入 `stock_search`。
 - 国家队读模型包含 12 个 ETF，来源仍是 Radar 子集。
 - candidate 校验、原子激活、统一 releaseId、部署 SHA 校验均已通过。
+- [Deploy Flow Worker #32235571233](https://github.com/xiaoker/flow/actions/runs/32235571233) 已成功部署当前 `main`，生产接口具备可追踪的部署 SHA。
+- [Production release canary #32235771190](https://github.com/xiaoker/flow/actions/runs/32235771190) 通过 100 轮、1,600 次只读请求；releaseId、asOf、8 个视图和缓存条件均稳定。
+- [Cloudflare Access smoke #32237018779](https://github.com/xiaoker/flow/actions/runs/32237018779) 通过私有状态接口和官方 SSE source-proxy 验证。
 
 ## 当前真实覆盖
 
@@ -29,6 +32,8 @@ ETF→个股穿透历史目前有 7 个有效分区：
 ## 本次收尾增强
 
 `verify_published_release.py` 新增 `--repeat 1-100`，并将 100 轮完整读取合同放入独立的 `Production release canary` 工作流（每周一 10:30 Asia/Shanghai，亦可手动触发）。每日采集只执行一次发布验证，避免把 100 轮只读请求叠加到数据采集窗口，导致发布超时或浪费免费额度。canary 输出 `iterations` 和 `requests`，用于发现 1102、5xx、releaseId 漂移和日期漂移。
+
+部署后首次 canary 曾因生产 Worker 缺少 `buildSha` 在解析阶段失败（[失败运行 #32235465504](https://github.com/xiaoker/flow/actions/runs/32235465504)）；按部署工作流补齐版本身份后，100 轮 canary 成功。这证明 1102/发布稳定性合同现在可执行，而不是把“接口能打开”当作部署完成。
 
 历史归档分片也已修复为“非 final 分片不重复携带约 4 MB 的 dashboard snapshot，最后一个 finalize 请求才携带并校验快照”，避免 Worker 在每个分片重复解析同一份大对象。
 
