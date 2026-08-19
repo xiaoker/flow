@@ -18,6 +18,7 @@
 - [Production release canary #32235771190](https://github.com/xiaoker/flow/actions/runs/32235771190) 通过 100 轮、1,600 次只读请求；releaseId、asOf、8 个视图和缓存条件均稳定。
 - [Cloudflare Access smoke #32237018779](https://github.com/xiaoker/flow/actions/runs/32237018779) 通过私有状态接口和官方 SSE source-proxy 验证。
 - PR44（[Worker recovery route](https://github.com/xiaoker/flow/pull/44)，合并提交 `3ecb62e99d00a88779e6f52d783194ba3de1bd40`）已将 R2 恢复演练改为通过受保护的 Worker 绑定读取快照，不要求 GitHub Actions 的 Cloudflare API Token 直接读取 R2。
+- PR46（[stock-flow inventory](https://github.com/xiaoker/flow/pull/46)，合并提交 `e728c683b1ceb5ac39b1973b9e51d04787b55614`）增加了只读的 ETF/PCF 归档库存探针；它不下载大对象、不请求交易所、不写入生产。
 
 ## 当前真实覆盖
 
@@ -29,6 +30,8 @@ ETF→个股穿透历史目前有 7 个有效分区：
 ```
 
 其余日期因官方 PCF 与份额快照不能形成完整配对，保持缺失状态。覆盖不足时不计算 rolling20，也不复制当前节点冒充历史。
+
+库存探针运行 [#32240813249](https://github.com/xiaoker/flow/actions/runs/32240813249) 检查了 2026-07-01 至 2026-08-18 的 30 个交易日：份额对象较早已归档，但带可验证 lineage 的 PCF 只有上述 7 天；因此更早日期不能仅凭份额快照重建 ETF→个股穿透。后续由每日真实 PCF 归档逐日累积分区，达到 21 个有效日后才启用 rolling20。
 
 ## 本次收尾增强
 
