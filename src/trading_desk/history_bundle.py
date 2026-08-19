@@ -97,7 +97,14 @@ def serialize_history_artifact(
     requested_date = str(payload.get("requested_date") or "current")
     if source_id not in {"sse", "szse", "bse", "hkex"}:
         raise ValueError(f"Unsupported history source: {source_id!r}")
-    if dataset not in {"etf_scale", "etf_nav", "etf_pcf", "margin_market_daily", "stock_connect_daily"}:
+    if dataset not in {
+        "etf_scale",
+        "etf_nav",
+        "etf_pcf",
+        "margin_market_daily",
+        "margin_security_daily",
+        "stock_connect_daily",
+    }:
         raise ValueError(f"Unsupported history dataset: {dataset!r}")
     if not re.fullmatch(r"[0-9_-]{8,25}|current", requested_date):
         raise ValueError(f"Invalid history partition: {requested_date!r}")

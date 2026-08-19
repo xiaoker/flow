@@ -186,3 +186,57 @@ def test_history_bundle_accepts_bse_margin_source(tmp_path: Path) -> None:
     assert artifact["releaseId"].startswith("margin_market_daily:bse:2026-08-17:")
     assert artifact["tradeDates"] == ["2026-08-17"]
     assert artifact["normalized"][0]["rowCount"] == 1
+
+
+def test_history_bundle_accepts_sse_margin_security_source(tmp_path: Path) -> None:
+    raw_path = tmp_path / "data/raw/sse/margin_security_daily/2026-08-17/run.json"
+    metadata_path = raw_path.with_name("run.metadata.json")
+    normalized_path = tmp_path / "data/normalized/sse_margin_security/2026-08-17/run.csv"
+    raw_path.parent.mkdir(parents=True)
+    normalized_path.parent.mkdir(parents=True)
+    raw = b'{"pageHelp":{"data":[]}}'
+    digest = hashlib.sha256(raw).hexdigest()
+    raw_path.write_bytes(raw)
+    metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+    pd.DataFrame(
+        [{
+            "trade_date": "2026-08-17",
+            "source_trade_date": "2026-08-17",
+            "market": "SSE",
+            "stock_code": "600000",
+            "security_name": "浦发银行",
+            "financing_balance_yuan": 123456789,
+            "financing_buy_yuan": 2345678,
+            "financing_repayment_yuan": 345678,
+            "securities_lending_balance_shares": 456789,
+            "securities_lending_sell_shares": 56789,
+            "securities_lending_repayment_shares": 6789,
+            "source_id": "sse",
+            "source_grade": "A",
+            "date_basis": "sse_margin_security_report_date",
+            "observed_at": "2026-08-18T09:00:00+08:00",
+        }]
+    ).to_csv(normalized_path, index=False)
+
+    artifact = serialize_history_artifact(
+        {
+            "source": {
+                "source_id": "sse",
+                "dataset": "margin_security_daily",
+                "url": "https://query.sse.com.cn/commonSoaQuery.do",
+                "date_semantics": "sse_margin_security_report_date",
+            },
+            "requested_date": "2026-08-17",
+            "observed_at": "2026-08-18T09:00:00+08:00",
+            "content_type": "application/json",
+            "raw_path": str(raw_path.relative_to(tmp_path)),
+            "metadata_path": str(metadata_path.relative_to(tmp_path)),
+            "normalized_path": str(normalized_path.relative_to(tmp_path)),
+            "sha256": digest,
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert artifact["releaseId"].startswith("margin_security_daily:sse:2026-08-17:")
+    assert artifact["tradeDates"] == ["2026-08-17"]
+    assert artifact["normalized"][0]["rowCount"] == 1
