@@ -69,10 +69,19 @@ jobs:
           set -euo pipefail
           for side in target previous; do
             date_value="$(jq -r ".${side}.as_of" recovery/selection.json)"
-            object_key="$(jq -r ".${side}.r2_object_key" recovery/selection.json)"
             expected="$(jq -r ".${side}.snapshot_sha256" recovery/selection.json)"
             output="recovery/snapshots/${date_value}.json"
-            (cd web && npx wrangler r2 object get "flow/${object_key}" --remote --file "../${output}")
+            headers="recovery/snapshots/${date_value}.headers"
+            curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
+              --connect-timeout 15 --max-time 120 \
+              -H "Authorization: Bearer ${FLOW_INGEST_API_KEY}" \
+              -H "CF-Access-Client-Id: ${FLOW_CF_ACCESS_CLIENT_ID}" \
+              -H "CF-Access-Client-Secret: ${FLOW_CF_ACCESS_CLIENT_SECRET}" \
+              -D "$headers" \
+              "${FLOW_PUBLIC_URL}/api/v1/admin/history-snapshot?date=${date_value}" \
+              -o "$output"
+            returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Flow-History-Snapshot-Sha256:/ {gsub("\\r", "", $2); print tolower($2)}' "$headers" | tail -n 1)"
+            test "$returned" = "$expected"
             actual="$(sha256sum "$output" | awk '{print $1}')"
             test "$actual" = "$expected"
             echo "restored $date_value sha256=$actual bytes=$(wc -c < "$output")"

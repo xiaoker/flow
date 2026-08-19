@@ -683,6 +683,47 @@ test("streams an archived dashboard for an explicitly selected date", async () =
   assert.equal(streamed.asOf, "2025-01-02");
 });
 
+test("streams a quality-passed historical snapshot through the Worker R2 binding", async () => {
+  const worker = await loadWorker();
+  const body = Buffer.from('{"asOf":"2026-08-18","quality":{"fail":0}}');
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const db = {
+    prepare(sql) {
+      assert.match(sql, /FROM historical_snapshot/);
+      assert.match(sql, /quality_fail = 0/);
+      return {
+        bind(date) {
+          assert.equal(date, "2026-08-18");
+          return this;
+        },
+        async first() {
+          return {
+            as_of: "2026-08-18",
+            snapshot_sha256: sha256,
+            r2_object_key: "market-data/history/2026-08-18/snapshot.json",
+          };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async get(key) {
+      assert.equal(key, "market-data/history/2026-08-18/snapshot.json");
+      return { body: new Response(body).body, size: body.byteLength };
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/history-snapshot?date=2026-08-18", {
+      headers: { authorization: "Bearer test-key" },
+    }),
+    { ...env, DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key" },
+    context,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-flow-history-snapshot-sha256"), sha256);
+  assert.equal(await response.text(), body.toString());
+});
+
 test("streams the active release through the D1 pointer without parsing it", async () => {
   const worker = await loadWorker();
   const snapshot = {
