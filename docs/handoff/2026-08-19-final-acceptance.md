@@ -6,8 +6,8 @@
 
 - PR0 的候选发布、回归测试和基线合同已落地。
 - PR1–PR7 及其后续数据源/归档纠偏 PR 已合并到 `main`。
-- 最新基线发布运行：[Daily market data #32229701520](https://github.com/xiaoker/flow/actions/runs/32229701520)，耗时约 6 分钟并成功完成采集、归档、读模型构建、QA 和激活。
-- 当前读模型：`release:2026-08-18:b0a281e91e753609`。
+- 最新基线发布运行：[Daily market data #32231482376](https://github.com/xiaoker/flow/actions/runs/32231482376)，耗时约 5 分 30 秒并成功完成采集、归档、读模型构建、QA 和激活。
+- 当前读模型：`release:2026-08-18:4d8ae263005ae1d7`。
 - 发布 QA：166 pass、0 warn、0 fail。
 - 两融历史：2024-08-01 至 2026-08-18，共 491 个点。
 - ETF Radar：260 个真实交易日。
@@ -36,7 +36,7 @@ ETF→个股穿透历史目前有 7 个有效分区：
 
 本次受控运行实际记录 `changed_etf_count_exceeds_cap:504`，因此最新读模型同时暴露 `captureLimited=true`、`deferredEtfCount=504` 和原始 warning；页面不得把 16 只 ETF 的 PCF 结果解释为全市场完整覆盖。
 
-受控验证运行 [#32226876853](https://github.com/xiaoker/flow/actions/runs/32226876853) 在旧逻辑下于采集步骤达到 20 分钟上限，之后未构建或激活候选版本；该证据促成了上述 PCF 请求预算修复。修复后的 [#32229701520](https://github.com/xiaoker/flow/actions/runs/32229701520) 已证明采集步骤不再被未界定的 PCF 请求拖住。
+受控验证运行 [#32226876853](https://github.com/xiaoker/flow/actions/runs/32226876853) 在旧逻辑下于采集步骤达到 20 分钟上限，之后未构建或激活候选版本；该证据促成了上述 PCF 请求预算修复。修复后的 [#32229701520](https://github.com/xiaoker/flow/actions/runs/32229701520) 和合并 PR40 后的 [#32231482376](https://github.com/xiaoker/flow/actions/runs/32231482376) 均证明采集步骤不再被未界定的 PCF 请求拖住。
 
 ## 尚未满足的严格 DoD
 
