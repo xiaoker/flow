@@ -289,6 +289,18 @@ def build_stock_flow(
         pcf_date = pd.Timestamp(pcf_date).strftime("%Y-%m-%d")
 
     shares = _normalise_share_frame(shares, as_of=as_of, previous_date=previous_date)
+    # A collection window may intentionally skip the optional PCF request
+    # (for example, the evening window).  Keep that state distinct from a
+    # non-empty PCF response whose effective/publication dates are invalid;
+    # otherwise an empty frame is misleadingly reported as ``pcf_date_mismatch``.
+    if pcf_frame is None or pcf_frame.empty:
+        return _empty_result(
+            as_of=as_of,
+            previous_date=previous_date,
+            pcf_date=pcf_date,
+            warnings=[],
+            reason="aligned_pcf_missing",
+        )
     pcf = _normalise_pcf_frame(pcf_frame, as_of=as_of)
     pcf_dates = sorted(
         pd.to_datetime(pcf["pcf_date"], errors="coerce")
