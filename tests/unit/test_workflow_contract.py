@@ -104,6 +104,7 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "--read-model-dir read-models" in workflow
     assert "check_release_capabilities.py" in workflow
     assert "verify_published_release.py" in workflow
+    assert "--repeat 100" in workflow
     assert "--result-output read-model-publish.json" in workflow
     assert "'.status == \"activated\"'" in workflow
     assert '"Snapshot is pending source confirmation' in workflow

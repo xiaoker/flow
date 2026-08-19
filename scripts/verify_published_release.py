@@ -54,12 +54,19 @@ def verify(
     expected_release_id: str,
     expected_as_of: str,
     expected_build_sha: str | None = None,
+    repeat: int = 1,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
+    if not 1 <= repeat <= 100:
+        raise ValueError("repeat must be between 1 and 100")
+
     root = base_url.rstrip("/")
     headers = _headers()
+    request_count = 0
 
     def get(path: str, params: dict[str, str] | None = None) -> requests.Response:
+        nonlocal request_count
+        request_count += 1
         response = requests.get(
             f"{root}{path}",
             params=params,
@@ -73,53 +80,65 @@ def verify(
             raise RuntimeError(f"{path} selected {release_id}, expected {expected_release_id}")
         return response
 
-    latest_response = get("/api/v2/releases/latest")
-    latest = latest_response.json()
-    if not isinstance(latest, dict) or latest.get("releaseId") != expected_release_id:
-        raise RuntimeError(f"latest release mismatch: {latest}")
-    if latest.get("asOf") != expected_as_of or latest.get("observedAt") is None:
-        raise RuntimeError(f"latest asOf mismatch: {latest}")
-    if expected_build_sha and latest.get("buildSha") != expected_build_sha:
-        raise RuntimeError(f"latest build SHA mismatch: {latest.get('buildSha')} != {expected_build_sha}")
-    for path in ("/api/v2/dashboard", "/api/v2/history/dates"):
-        get(path)
-    # A stale CDN/proxy response must not be mistaken for a successful canary.
-    # The release endpoint is private/no-store, but also exercise its ETag
-    # path whenever the deployment supplies one.
-    latest_etag = latest_response.headers.get("etag")
-    if latest_etag:
-        cached = requests.get(
-            f"{root}/api/v2/releases/latest",
-            headers={**headers, "If-None-Match": latest_etag},
-            timeout=timeout,
-            allow_redirects=False,
-        )
-        if cached.status_code not in {200, 304}:
-            cached.raise_for_status()
-    get("/api/v2/dashboard", {"date": expected_as_of})
-    for view in VIEWS:
-        response = get(f"/api/v2/views/{view}", {"date": expected_as_of})
-        payload = response.json()
-        if isinstance(payload, dict) and payload.get("asOf") not in {None, expected_as_of}:
-            raise RuntimeError(f"{view} asOf mismatch")
-    get("/api/v2/stock-search", {"date": expected_as_of})
-    shard = get("/api/v2/stocks/stock_0", {"date": expected_as_of})
-    etag = shard.headers.get("etag")
-    if etag:
-        not_modified = requests.get(
-            f"{root}/api/v2/stocks/stock_0",
-            params={"date": expected_as_of},
-            headers={**headers, "If-None-Match": etag},
-            timeout=timeout,
-            allow_redirects=False,
-        )
-        if not_modified.status_code not in {200, 304}:
-            not_modified.raise_for_status()
+    latest: dict[str, Any] = {}
+    for iteration in range(1, repeat + 1):
+        latest_response = get("/api/v2/releases/latest")
+        payload = latest_response.json()
+        if not isinstance(payload, dict) or payload.get("releaseId") != expected_release_id:
+            raise RuntimeError(f"latest release mismatch on iteration {iteration}: {payload}")
+        if payload.get("asOf") != expected_as_of or payload.get("observedAt") is None:
+            raise RuntimeError(f"latest asOf mismatch on iteration {iteration}: {payload}")
+        if expected_build_sha and payload.get("buildSha") != expected_build_sha:
+            raise RuntimeError(
+                f"latest build SHA mismatch on iteration {iteration}: "
+                f"{payload.get('buildSha')} != {expected_build_sha}"
+            )
+        latest = payload
+        for path in ("/api/v2/dashboard", "/api/v2/history/dates"):
+            get(path)
+        # A stale CDN/proxy response must not be mistaken for a successful canary.
+        # Exercise its ETag path once per iteration when the deployment supplies one.
+        latest_etag = latest_response.headers.get("etag")
+        if latest_etag:
+            request_count += 1
+            cached = requests.get(
+                f"{root}/api/v2/releases/latest",
+                headers={**headers, "If-None-Match": latest_etag},
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            if cached.status_code not in {200, 304}:
+                cached.raise_for_status()
+        get("/api/v2/dashboard", {"date": expected_as_of})
+        for view in VIEWS:
+            response = get(f"/api/v2/views/{view}", {"date": expected_as_of})
+            view_payload = response.json()
+            if isinstance(view_payload, dict) and view_payload.get("asOf") not in {
+                None,
+                expected_as_of,
+            }:
+                raise RuntimeError(f"{view} asOf mismatch on iteration {iteration}")
+        get("/api/v2/stock-search", {"date": expected_as_of})
+        shard = get("/api/v2/stocks/stock_0", {"date": expected_as_of})
+        etag = shard.headers.get("etag")
+        if etag:
+            request_count += 1
+            not_modified = requests.get(
+                f"{root}/api/v2/stocks/stock_0",
+                params={"date": expected_as_of},
+                headers={**headers, "If-None-Match": etag},
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            if not_modified.status_code not in {200, 304}:
+                not_modified.raise_for_status()
     return {
         "releaseId": expected_release_id,
         "asOf": expected_as_of,
         "buildSha": latest.get("buildSha"),
         "checkedViews": len(VIEWS),
+        "iterations": repeat,
+        "requests": request_count,
     }
 
 
@@ -169,6 +188,12 @@ def main() -> None:
     parser.add_argument("--base-url", default=os.environ.get("FLOW_PUBLIC_URL", "https://flow.xiaoker.com"))
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--as-of", required=True)
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Repeat the active-release read canary 1-100 times",
+    )
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--build-sha", default=os.environ.get("FLOW_EXPECTED_BUILD_SHA"))
     parser.add_argument(
@@ -185,6 +210,7 @@ def main() -> None:
                 expected_release_id=args.release_id,
                 expected_as_of=args.as_of,
                 expected_build_sha=args.build_sha,
+                repeat=args.repeat,
                 timeout=args.timeout,
             )
         )
