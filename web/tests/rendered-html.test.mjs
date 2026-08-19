@@ -102,13 +102,14 @@ test("does not let the outer Worker overwrite an injected build identity", async
 });
 
 test("keeps release history and rollback reads exact and migration-compatible", async () => {
-  const [contract, capabilities, candidates, artifact, dates, importer] = await Promise.all([
+  const [contract, capabilities, candidates, artifact, dates, importer, historyArtifact] = await Promise.all([
     readFile(new URL("../app/lib/read-model-contract.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v1/admin/capabilities/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v1/admin/releases/previous-candidates/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v1/admin/releases/artifact/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/dashboard-store.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v1/admin/import/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/history-artifact/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(contract, /schemaVersion !== 2 && value\.schemaVersion !== 3/);
   assert.match(contract, /requiredArtifacts/);
@@ -121,6 +122,8 @@ test("keeps release history and rollback reads exact and migration-compatible", 
   assert.match(dates, /FROM release_manifest/);
   assert.match(importer, /observed_at/);
   assert.match(importer, /staged_stale_revision/);
+  assert.match(historyArtifact, /latest-uploaded/);
+  assert.match(historyArtifact, /X-Flow-Normalized-Candidate-Count/);
 });
 
 test("replaces repetitive margin day cards with derived diagnostics", async () => {

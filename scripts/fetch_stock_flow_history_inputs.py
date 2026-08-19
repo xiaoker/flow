@@ -48,6 +48,8 @@ def _fetch(
                 "code": response.status_code,
                 "sha256": response.headers.get("x-flow-normalized-sha256"),
                 "key": response.headers.get("x-flow-normalized-key"),
+                "candidateCount": int(response.headers.get("x-flow-normalized-candidate-count", "1")),
+                "selection": response.headers.get("x-flow-normalized-selection", "single"),
                 "rows": len(frame),
             }
         except Exception as exc:
