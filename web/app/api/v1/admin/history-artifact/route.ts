@@ -50,27 +50,33 @@ export async function GET(request: Request): Promise<Response> {
 
   const dateCandidates = [tradeDate, tradeDate.replaceAll("-", "")];
   try {
-    const keys = new Set<string>();
+    const objectsByKey = new Map<string, R2Object>();
     for (const requestedDate of dateCandidates) {
       const prefix = `market-data/normalized/${source}/${dataset}/${requestedDate}/`;
       let cursor: string | undefined;
       do {
         const listed = await runtime.RAW_BUCKET.list({ prefix, limit: 1000, cursor });
         for (const object of listed.objects ?? []) {
-          if (matchesFile(object.key, file)) keys.add(object.key);
+          if (matchesFile(object.key, file)) objectsByKey.set(object.key, object);
         }
         cursor = listed.truncated ? listed.cursor : undefined;
       } while (cursor);
     }
-    const candidates = [...keys].sort();
+    const candidates = [...objectsByKey.values()];
     if (!candidates.length) return badRequest("artifact_not_found", 404);
-    if (candidates.length !== 1) {
-      return Response.json(
-        { error: "artifact_ambiguous", date: tradeDate, source, dataset, file, candidates },
-        { status: 409, headers: { "Cache-Control": "no-store" } },
-      );
-    }
-    const key = candidates[0];
+    // A date can legitimately have more than one immutable object after a
+    // corrected or retried official publication.  The normalized D1 tables
+    // already resolve the same business key by latest observed_at; use the
+    // same deterministic rule for historical ETF/PCF reconstruction.  The
+    // selected key and candidate count are returned as lineage headers so a
+    // partition never hides which immutable object was consumed.
+    candidates.sort(
+      (left, right) =>
+        right.uploaded.getTime() - left.uploaded.getTime() ||
+        left.key.localeCompare(right.key),
+    );
+    const selected = candidates[0];
+    const key = selected.key;
     const object = await runtime.RAW_BUCKET.get(key);
     if (!object?.body) return badRequest("artifact_not_found", 404);
     if (typeof object.size === "number" && object.size > MAX_OBJECT_BYTES) {
@@ -84,6 +90,8 @@ export async function GET(request: Request): Promise<Response> {
         "Content-Disposition": `attachment; filename="${source}-${dataset}-${tradeDate}-${file}${isGzip ? ".csv.gz" : ".csv"}"`,
         "X-Flow-Normalized-Key": key,
         "X-Flow-Normalized-Sha256": object.customMetadata?.sha256 ?? "",
+        "X-Flow-Normalized-Candidate-Count": String(candidates.length),
+        "X-Flow-Normalized-Selection": candidates.length > 1 ? "latest-uploaded" : "single",
         "X-Flow-Trade-Date": tradeDate,
       },
     });
