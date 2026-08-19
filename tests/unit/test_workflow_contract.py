@@ -104,12 +104,25 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "--read-model-dir read-models" in workflow
     assert "check_release_capabilities.py" in workflow
     assert "verify_published_release.py" in workflow
-    assert "--repeat 100" in workflow
+    assert "--repeat 100" not in workflow
     assert "--result-output read-model-publish.json" in workflow
     assert "'.status == \"activated\"'" in workflow
     assert '"Snapshot is pending source confirmation' in workflow
     assert "Fail loudly on unresolved source errors" in workflow
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
+
+
+def test_production_canary_isolated_from_daily_collection() -> None:
+    workflow = (
+        REPOSITORY_ROOT / ".github/workflows/production-canary.yml"
+    ).read_text(encoding="utf-8")
+
+    assert '- cron: "30 2 * * 1"' in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "--repeat 100" in workflow
+    assert "Resolve active release" in workflow
+    assert "buildSha" in workflow
+    assert "cancel-in-progress: false" in workflow
 
 
 def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_index() -> None:

@@ -28,7 +28,9 @@ ETF→个股穿透历史目前有 7 个有效分区：
 
 ## 本次收尾增强
 
-`verify_published_release.py` 新增 `--repeat 1-100`，每日发布 canary 现在执行 100 轮完整读取合同，输出 `iterations` 和 `requests`，用于发现 1102、5xx、releaseId 漂移和日期漂移。
+`verify_published_release.py` 新增 `--repeat 1-100`，并将 100 轮完整读取合同放入独立的 `Production release canary` 工作流（每周一 10:30 Asia/Shanghai，亦可手动触发）。每日采集只执行一次发布验证，避免把 100 轮只读请求叠加到数据采集窗口，导致发布超时或浪费免费额度。canary 输出 `iterations` 和 `requests`，用于发现 1102、5xx、releaseId 漂移和日期漂移。
+
+历史归档分片也已修复为“非 final 分片不重复携带约 4 MB 的 dashboard snapshot，最后一个 finalize 请求才携带并校验快照”，避免 Worker 在每个分片重复解析同一份大对象。
 
 ## 尚未满足的严格 DoD
 
