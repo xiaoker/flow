@@ -74,6 +74,16 @@ def test_pcf_date_mismatch_is_unavailable_and_never_falls_back() -> None:
     assert result["stocks"] == []
 
 
+def test_empty_pcf_is_reported_as_missing_not_date_mismatch() -> None:
+    result = build_stock_flow(
+        _shares(), pd.DataFrame(), as_of="2026-07-02", previous_date="2026-07-01"
+    )
+
+    assert result["available"] is False
+    assert result["warnings"] == ["aligned_pcf_missing"]
+    assert result["stocks"] == []
+
+
 def test_duplicate_component_key_is_a_hard_quality_failure() -> None:
     duplicate = pd.concat([_pcf(), _pcf()], ignore_index=True)
 
