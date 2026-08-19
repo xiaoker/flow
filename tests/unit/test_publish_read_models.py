@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 from scripts.publish_read_models import build_upload_body
-from scripts.verify_published_release import CANDIDATE_ARTIFACTS, verify_candidate
+from scripts.verify_published_release import CANDIDATE_ARTIFACTS, verify, verify_candidate
 
 
 def _manifest() -> dict:
@@ -116,3 +116,58 @@ def test_candidate_canary_reads_each_explicit_staged_artifact_without_active_rou
     assert len(calls) == 18
     assert all(call["params"]["candidate"] == "1" for call in calls)
     assert all(call["headers"]["Authorization"] == "Bearer ingest-key" for call in calls)
+
+
+def test_active_canary_repeats_every_read_and_reports_request_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_ID", "access-id")
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_SECRET", "access-secret")
+    module = __import__("scripts.verify_published_release", fromlist=["requests"])
+    calls: list[dict] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {
+            "x-flow-release-id": "release:2026-08-13:0123456789abcdef",
+        }
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "releaseId": "release:2026-08-13:0123456789abcdef",
+                "asOf": "2026-08-13",
+                "observedAt": "2026-08-14T03:17:42.000Z",
+            }
+
+    def fake_get(url: str, **kwargs: object) -> FakeResponse:
+        calls.append({"url": url, **kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+    result = verify(
+        "https://flow.example",
+        expected_release_id="release:2026-08-13:0123456789abcdef",
+        expected_as_of="2026-08-13",
+        repeat=3,
+        timeout=1.0,
+    )
+
+    assert result["iterations"] == 3
+    assert result["checkedViews"] == 8
+    assert result["requests"] == 42
+    assert len(calls) == result["requests"]
+
+
+def test_active_canary_rejects_an_unbounded_repeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_ID", "access-id")
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_SECRET", "access-secret")
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        verify(
+            "https://flow.example",
+            expected_release_id="release:2026-08-13:0123456789abcdef",
+            expected_as_of="2026-08-13",
+            repeat=101,
+        )
