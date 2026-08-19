@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -49,6 +50,26 @@ def _read_csv(workspace_root: Path, relative_path: str) -> pd.DataFrame:
 
 def _signed(value: float, decimals: int = 2) -> str:
     return f"{value:+,.{decimals}f}"
+
+
+def _pcf_capture_metadata(warnings: list[str]) -> dict[str, Any]:
+    """Expose bounded PCF collection as coverage, never as a full universe.
+
+    The daily collector may intentionally defer changed ETF codes to the
+    resumable inventory/backfill workflow.  A warning alone is too easy for a
+    read model or UI to overlook, so carry an explicit partial-capture flag
+    and count alongside the lineage warning.
+    """
+
+    deferred = 0
+    for warning in warnings:
+        match = re.fullmatch(r"changed_etf_count_exceeds_cap:(\d+)", str(warning).strip())
+        if match:
+            deferred += int(match.group(1))
+    return {
+        "captureLimited": deferred > 0,
+        "deferredEtfCount": deferred,
+    }
 
 
 def _classify_etf(name: str, investment_type: str | None = None) -> str:
@@ -685,7 +706,9 @@ def build_dashboard_snapshot(
         stock_flow["warnings"] = list(
             dict.fromkeys([*stock_flow.get("warnings", []), *pcf_capture_warnings])
         )
-        stock_flow.setdefault("coverage", {})["captureWarnings"] = pcf_capture_warnings[:8]
+        stock_flow_coverage = stock_flow.setdefault("coverage", {})
+        stock_flow_coverage["captureWarnings"] = pcf_capture_warnings[:8]
+        stock_flow_coverage.update(_pcf_capture_metadata(pcf_capture_warnings))
     if stock_catalog_path is not None and publication_status == "confirmed":
         try:
             stock_catalog = build_stock_flow_catalog(
@@ -712,7 +735,9 @@ def build_dashboard_snapshot(
             stock_catalog["warnings"] = list(
                 dict.fromkeys([*stock_catalog.get("warnings", []), *pcf_capture_warnings])
             )
-            stock_catalog.setdefault("coverage", {})["captureWarnings"] = pcf_capture_warnings[:8]
+            stock_catalog_coverage = stock_catalog.setdefault("coverage", {})
+            stock_catalog_coverage["captureWarnings"] = pcf_capture_warnings[:8]
+            stock_catalog_coverage.update(_pcf_capture_metadata(pcf_capture_warnings))
         stock_catalog_path.parent.mkdir(parents=True, exist_ok=True)
         stock_catalog_path.write_text(
             json.dumps(stock_catalog, ensure_ascii=False, sort_keys=True),
