@@ -25,6 +25,15 @@ from .quality import (
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
 
 
+# The PCF endpoint is one request for the basic record plus one request for
+# the component list per ETF.  It is an optional enrichment for the daily
+# release, not a reason to let the entire official-source collection run past
+# its bounded window.  The full inventory/backfill path can request a larger
+# cap explicitly; the daily default intentionally remains small and records
+# every deferred code in the PCF artifact warning.
+DEFAULT_PCF_MAX_CODES = 16
+
+
 def _relative(path: str | Path, workspace_root: Path) -> str:
     candidate = Path(str(path).split(";")[0])
     try:
@@ -135,11 +144,14 @@ def collect_phase0(
     report_root: Path,
     workspace_root: Path,
     collection_window: str = "auto",
+    pcf_max_codes: int = DEFAULT_PCF_MAX_CODES,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
     if collection_window not in {"auto", "evening", "morning", "reconcile"}:
         raise ValueError(f"unsupported collection window: {collection_window}")
+    if not isinstance(pcf_max_codes, int) or pcf_max_codes < 0:
+        raise ValueError("pcf_max_codes must be a non-negative integer")
     dates = sorted(dates)
     run_id = new_run_id()
     started_at = now_iso()
@@ -207,7 +219,11 @@ def collect_phase0(
             )
         result = run_step(
             f"sse_etf_pcf:{dates[-1]}",
-            lambda: adapters.fetch_sse_etf_pcf(changed_codes, dates[-1]),
+            lambda: adapters.fetch_sse_etf_pcf(
+                changed_codes,
+                dates[-1],
+                max_codes=pcf_max_codes,
+            ),
         )
         if result:
             frame, artifact = result
@@ -460,6 +476,7 @@ def collect_phase0(
     manifest = {
         "run_id": run_id,
         "collection_window": collection_window,
+        "pcf_max_codes": pcf_max_codes,
         "started_at": started_at,
         "finished_at": now_iso(),
         "requested_dates": dates,

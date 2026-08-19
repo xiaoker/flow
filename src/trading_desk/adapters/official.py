@@ -510,7 +510,12 @@ class OfficialMarketAdapters:
         return self._persist(normalized, artifact, publication_date)
 
     def fetch_sse_etf_pcf(
-        self, etf_codes: list[str], trade_date: str, *, max_workers: int = 4
+        self,
+        etf_codes: list[str],
+        trade_date: str,
+        *,
+        max_workers: int = 4,
+        max_codes: int = 800,
     ) -> tuple[pd.DataFrame, FetchArtifact]:
         """Fetch PCFs for ETFs whose shares actually changed.
 
@@ -525,6 +530,8 @@ class OfficialMarketAdapters:
         basket.
         """
 
+        if not isinstance(max_codes, int) or max_codes < 0:
+            raise ValueError("max_codes must be a non-negative integer")
         requested_codes = list(
             dict.fromkeys(
                 str(code).strip().zfill(6)
@@ -535,7 +542,6 @@ class OfficialMarketAdapters:
         # A very large changed universe is a source/quality condition, not a
         # reason to silently sample.  Keep the run bounded and expose the
         # omitted count in the artifact warning.
-        max_codes = 800
         omitted_count = max(0, len(requested_codes) - max_codes)
         requested_codes = requested_codes[:max_codes]
         request_log: list[dict[str, Any]] = []

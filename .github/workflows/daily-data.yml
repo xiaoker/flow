@@ -102,11 +102,17 @@ jobs:
         run: |
           read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
           MAX_ATTEMPTS=3
+          # PCF requires two official requests per changed ETF.  Keep the
+          # daily window bounded; larger inventories belong to the resumable
+          # backfill/reconcile workflow and are never silently treated as
+          # complete by this release.
+          PCF_MAX_CODES=16
           attempt=1
           while (( attempt <= MAX_ATTEMPTS )); do
             trading-desk collect-phase0 \
               --dates "${DATES[@]}" \
-              --window "${{ steps.window.outputs.collection_window }}"
+              --window "${{ steps.window.outputs.collection_window }}" \
+              --pcf-max-codes "$PCF_MAX_CODES"
             if jq -e '.phase0_gate_status != "blocked"' \
               reports/phase0/latest-quality-summary.json >/dev/null; then
               break
