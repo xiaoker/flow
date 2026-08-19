@@ -10,7 +10,9 @@ import pandas as pd
 from trading_desk.adapters.official import (
     OfficialMarketAdapters,
     SSE_ETF,
+    SSE_ETF_NAV,
     SSE_ETF_PCF,
+    SSE_MARGIN_SECURITY,
     SZSE_ETF,
 )
 from trading_desk.models import FetchArtifact
@@ -199,6 +201,140 @@ def test_release_qa_reconciles_compressed_same_day_pcf(tmp_path: Path) -> None:
     )
 
     assert mapping.status == "pass"
+
+
+def test_release_qa_reconciles_sse_nav_next_publication_alignment(tmp_path: Path) -> None:
+    raw = tmp_path / "nav.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "publication_date_requested": "2026-07-15",
+                "known_trading_dates": ["2026-07-14", "2026-07-15"],
+                "responses": [
+                    {
+                        "result": [
+                            {
+                                "TRADING_DAY": "20260716",
+                                "FUNDID2": "510300",
+                                "ETF_FULLNAME": "沪深300ETF",
+                                "NAV": "￥4.3210",
+                            }
+                        ]
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    normalized = tmp_path / "nav.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "instrument_name": "沪深300ETF",
+                "nav": 4.321,
+                "nav_date": "2026-07-15",
+                "source_publication_date": "2026-07-16",
+                "source_nav_date": "2026-07-15",
+                "source_id": "sse",
+                "source_grade": "A",
+                "date_basis": "source_publication_previous_trading_day_nav_aligned_to_share_date_next_publication",
+            }
+        ]
+    ).to_csv(normalized, index=False)
+
+    findings = validate_raw_to_normalized_mapping(
+        {
+            "artifacts": [
+                _artifact(
+                    source=SSE_ETF_NAV,
+                    raw_path=raw,
+                    metadata_path=tmp_path / "metadata.json",
+                    normalized_path=normalized,
+                    digest=digest,
+                )
+            ]
+        },
+        tmp_path,
+    )
+
+    assert findings[0].status == "pass"
+
+
+def test_release_qa_reconciles_sse_margin_security_detail(tmp_path: Path) -> None:
+    raw = tmp_path / "margin-security.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "pageHelp": {
+                    "data": [
+                        {
+                            "opDate": "20260715",
+                            "stockCode": "600000",
+                            "securityAbbr": "浦发银行",
+                            "rzye": "123456789.00",
+                            "rzmre": "2345678.00",
+                            "rzche": "345678.00",
+                            "rqyl": "456789.00",
+                            "rqmcl": "56789.00",
+                            "rqchl": "6789.00",
+                        },
+                        {
+                            "opDate": "20260714",
+                            "stockCode": "600000",
+                            "securityAbbr": "浦发银行",
+                            "rzye": "1",
+                        },
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    normalized = tmp_path / "margin-security.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "source_trade_date": "2026-07-15",
+                "market": "SSE",
+                "stock_code": "600000",
+                "security_name": "浦发银行",
+                "financing_balance_yuan": 123456789.0,
+                "financing_buy_yuan": 2345678.0,
+                "financing_repayment_yuan": 345678.0,
+                "securities_lending_balance_shares": 456789.0,
+                "securities_lending_sell_shares": 56789.0,
+                "securities_lending_repayment_shares": 6789.0,
+                "source_id": "sse",
+                "source_grade": SSE_MARGIN_SECURITY.source_grade,
+                "date_basis": SSE_MARGIN_SECURITY.date_semantics,
+            }
+        ]
+    ).to_csv(normalized, index=False)
+
+    findings = validate_raw_to_normalized_mapping(
+        {
+            "artifacts": [
+                _artifact(
+                    source=SSE_MARGIN_SECURITY,
+                    raw_path=raw,
+                    metadata_path=tmp_path / "metadata.json",
+                    normalized_path=normalized,
+                    digest=digest,
+                )
+            ]
+        },
+        tmp_path,
+    )
+
+    assert findings[0].status == "pass"
 
 
 def test_release_qa_keeps_future_source_gap_as_pending_warning() -> None:
