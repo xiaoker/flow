@@ -46,6 +46,9 @@ def test_history_publish_uploads_individual_checkpoints_before_finalize(monkeypa
     assert [
         request[0]["history"]["finalize"] for request in responses
     ] == [False, False, True]
+    assert "snapshot" not in responses[0][0]["history"]
+    assert "snapshot" not in responses[1][0]["history"]
+    assert responses[2][0]["history"]["snapshot"] == {"asOf": "2026-07-31"}
     assert all(
         request[0]["history"]["expectedArtifacts"]
         == ["etf_scale:sse:2026-07-31:aaa", "margin_market_daily:sse:2026-07-31:bbb"]

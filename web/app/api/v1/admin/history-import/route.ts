@@ -62,7 +62,10 @@ type HistoryBundle = {
     finishedAt: string;
     retentionDays: number;
     asOf: string;
-    snapshot: DashboardSnapshot;
+    // Resumable non-final chunks intentionally omit the multi-megabyte
+    // snapshot.  The final chunk carries it and is the only point at which
+    // publication and snapshot validation are performed.
+    snapshot?: DashboardSnapshot;
     artifacts: HistoryArtifact[];
     /**
      * Chunked collection contract.  Each request may carry one artifact, and
@@ -182,6 +185,7 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
   if (!isRecord(value) || value.version !== 1 || !isRecord(value.history)) return false;
   const history = value.history;
   const expectedArtifacts = history.expectedArtifacts;
+  const finalizeRequested = history.finalize !== false;
   const expectedArtifactsValid =
     expectedArtifacts === undefined ||
     (Array.isArray(expectedArtifacts) &&
@@ -209,8 +213,9 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
       history.artifacts.every(isHistoryArtifact) &&
       expectedArtifactsValid &&
       (history.finalize === undefined || typeof history.finalize === "boolean") &&
-      isDashboardSnapshot(history.snapshot) &&
-      history.snapshot.asOf === history.asOf
+      (isDashboardSnapshot(history.snapshot) ||
+        (!finalizeRequested && history.snapshot === undefined)) &&
+      (history.snapshot === undefined || history.snapshot.asOf === history.asOf)
   );
 }
 
@@ -778,9 +783,14 @@ export async function POST(request: Request) {
 
   try {
     const { history } = value;
-    const etfQualityIssues = validateEtfTerminalCoverage(history.snapshot.etfTerminal);
-    const publishHistory = isPublishableSnapshot(history.snapshot) && etfQualityIssues.length === 0;
     const finalizeRequested = history.finalize !== false;
+    const snapshot = history.snapshot;
+    const etfQualityIssues = snapshot
+      ? validateEtfTerminalCoverage(snapshot.etfTerminal)
+      : [];
+    const publishHistory = snapshot
+      ? isPublishableSnapshot(snapshot) && etfQualityIssues.length === 0
+      : false;
     const expectedArtifacts = history.expectedArtifacts;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
     const collectionStateKeys: string[] = [];
@@ -924,6 +934,18 @@ export async function POST(request: Request) {
       }
     }
 
+    // Non-final chunks only checkpoint their artifact.  Avoid the expensive
+    // expected-set R2 scan and snapshot serialization until the final chunk,
+    // where completeness is checked exactly once before atomic publication.
+    if (!finalizeRequested && snapshot === undefined) {
+      return NextResponse.json({
+        status: "chunk_archived",
+        asOf: history.asOf,
+        artifacts: history.artifacts.length,
+        standardizedRows,
+      });
+    }
+
     const collection = await checkCollectionComplete(
       runtime.RAW_BUCKET,
       history.runId,
@@ -931,7 +953,10 @@ export async function POST(request: Request) {
       expectedArtifacts,
     );
     const shouldPublish = publishHistory && finalizeRequested && collection.complete;
-    const snapshotBody = JSON.stringify(history.snapshot);
+    if (!snapshot) {
+      return NextResponse.json({ error: "missing_final_snapshot" }, { status: 422 });
+    }
+    const snapshotBody = JSON.stringify(snapshot);
     const snapshotBytes = new TextEncoder().encode(snapshotBody);
     const snapshotSha256 = await sha256Hex(snapshotBytes);
     const historyPrefix = shouldPublish ? "market-data/history" : "market-data/history-pending";
@@ -973,7 +998,7 @@ export async function POST(request: Request) {
         snapshotSha256,
         snapshotKey: null,
         manifestKey,
-        publication: history.snapshot.publication ?? null,
+        publication: snapshot.publication ?? null,
         ...(etfQualityIssues.length
           ? { reason: "derived_etf_quality_failed", qualityIssues: etfQualityIssues.slice(0, 50) }
           : {}),
@@ -1000,19 +1025,19 @@ export async function POST(request: Request) {
       )
       .bind(
         history.asOf,
-        history.snapshot.observedAt,
+        snapshot.observedAt,
         snapshotSha256,
         snapshotKey,
         manifestKey,
         history.artifacts.length,
-        history.snapshot.quality.pass,
-        history.snapshot.quality.warn,
-        history.snapshot.quality.fail,
+        snapshot.quality.pass,
+        snapshot.quality.warn,
+        snapshot.quality.fail,
         createdAt,
       )
       .run();
 
-    const marketPoint = extractMarketHistoryPoint(history.snapshot);
+    const marketPoint = extractMarketHistoryPoint(snapshot);
     await runtime.DB
       .prepare(
         `INSERT INTO market_history_daily (
@@ -1068,7 +1093,7 @@ export async function POST(request: Request) {
         marketPoint.margin_available,
         marketPoint.connect_available,
         snapshotSha256,
-        history.snapshot.observedAt,
+        snapshot.observedAt,
         createdAt,
         marketPoint.bse_balance,
         marketPoint.margin_scope_version,
@@ -1081,7 +1106,7 @@ export async function POST(request: Request) {
     ]);
     const mergedState = mergeSnapshotIntoEtfFlowState(
       previousState,
-      history.snapshot,
+      snapshot,
       snapshotSha256,
       officialDailyChanges,
     );
