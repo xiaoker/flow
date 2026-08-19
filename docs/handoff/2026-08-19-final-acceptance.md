@@ -17,6 +17,7 @@
 - [Deploy Flow Worker #32235571233](https://github.com/xiaoker/flow/actions/runs/32235571233) 已成功部署当前 `main`，生产接口具备可追踪的部署 SHA。
 - [Production release canary #32235771190](https://github.com/xiaoker/flow/actions/runs/32235771190) 通过 100 轮、1,600 次只读请求；releaseId、asOf、8 个视图和缓存条件均稳定。
 - [Cloudflare Access smoke #32237018779](https://github.com/xiaoker/flow/actions/runs/32237018779) 通过私有状态接口和官方 SSE source-proxy 验证。
+- PR44（[Worker recovery route](https://github.com/xiaoker/flow/pull/44)，合并提交 `3ecb62e99d00a88779e6f52d783194ba3de1bd40`）已将 R2 恢复演练改为通过受保护的 Worker 绑定读取快照，不要求 GitHub Actions 的 Cloudflare API Token 直接读取 R2。
 
 ## 当前真实覆盖
 
@@ -43,12 +44,24 @@ ETF→个股穿透历史目前有 7 个有效分区：
 
 受控验证运行 [#32226876853](https://github.com/xiaoker/flow/actions/runs/32226876853) 在旧逻辑下于采集步骤达到 20 分钟上限，之后未构建或激活候选版本；该证据促成了上述 PCF 请求预算修复。修复后的 [#32229701520](https://github.com/xiaoker/flow/actions/runs/32229701520) 和合并 PR40 后的 [#32231482376](https://github.com/xiaoker/flow/actions/runs/32231482376) 均证明采集步骤不再被未界定的 PCF 请求拖住。
 
+## R2 恢复演练证据
+
+第一次直接使用 Actions Token 执行 `wrangler r2 object get` 的尝试（[#32238311670](https://github.com/xiaoker/flow/actions/runs/32238311670)）因 Token 没有 R2 读取权限返回 403；D1 查询和其他步骤正常。这是权限边界问题，不是归档对象损坏。
+
+部署 PR44 后，针对 `2026-08-18` 的独立只读恢复演练 [#32239467791](https://github.com/xiaoker/flow/actions/runs/32239467791) 已通过：
+
+- `status=pass`、`readOnly=true`；未写入 D1/R2，也未激活或切换 release。
+- `rawSha256`、`snapshotSchema`、`etfStateReplay`、`marketHistoryReplay`、`normalizedArtifacts` 全部为 `true`。
+- 恢复 `2026-08-17` 与 `2026-08-18` 两个相邻快照，ETF 状态重放质量为 `pass`，894 个 ETF、1,787 个已填充值。
+- ETF/PCF 标准化输入完整：两日份额各 1,608 行，PCF 合计 53,502 行，目标日 PCF 2,900 行。
+
+因此“至少一次独立 R2 恢复演练”这一项已满足；后续仍可按月或在归档策略变更后重复执行。
+
 ## 尚未满足的严格 DoD
 
 1. 穿透历史尚未达到 21 个有效交易日；需要恢复官方 PCF，或等待真实交易日累积。
 2. 连续 5 个交易日的自动采集、补齐、激活尚需观察记录。
-3. R2 随机历史恢复演练尚未形成独立运行证据。
-4. R2/D1/Actions/Worker 免费额度尚未形成月度用量证据；当前 read-model 仅有软预算提示，没有硬限制失败。
-5. 最新生产版本仍需人工验证日期选择、历史读取、个股搜索和国家队周期控件。
+3. R2/D1/Actions/Worker 免费额度尚未形成月度用量证据；当前 read-model 仅有软预算提示，没有硬限制失败。
+4. 最新生产版本仍需人工验证日期选择、历史读取、个股搜索和国家队周期控件。
 
 以上项目属于验收或官方数据覆盖工作，不应通过伪造历史数据来“修复”。
