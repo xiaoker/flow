@@ -288,7 +288,7 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
   })();
 
   if (!data) {
-    return <section className="terminal-panel pressure-empty"><Database size={34} /><h2>ETF β压强尚未进入当前发布版本</h2><p>请先完成一次包含个股穿透读模型的完整发布。旧版本不会在 Worker 请求中临时计算。</p></section>;
+    return <section className="terminal-panel pressure-empty"><Database size={34} /><h2>ETF穿透尚未进入当前发布版本</h2><p>请先完成一次包含个股穿透读模型的完整发布。旧版本不会在 Worker 请求中临时计算。</p></section>;
   }
 
   return (
@@ -296,13 +296,13 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
       <div className="pressure-heading">
         <div>
           <span className="eyebrow">ETF → 个股 · 申赎篮子等价</span>
-          <h2>ETF β压强</h2>
+          <h2>ETF穿透</h2>
           <p>截至 {data.asOf} · 只展示可由官方 ETF 份额与 PCF 复算的个股穿透；不等同真实资金流或基金实际持仓。</p>
         </div>
         <div className="pressure-proof"><Info size={17} /><span>{data.coverage.history20Coverage}% 个股具备最近 20 个真实发布节点</span></div>
       </div>
 
-      <div className="pressure-summary" aria-label="ETF压强摘要">
+      <div className="pressure-summary" aria-label="ETF穿透摘要">
         <article><span>覆盖个股</span><strong className="text-cyan">{numberValue(data.coverage.stockCount)}</strong><small>已识别市场 + 代码</small></article>
         <article><span>关联 ETF</span><strong>{numberValue(data.coverage.matchedEtfCount)}</strong><small>按 ETF 市场 + 代码去重</small></article>
         <article><span>ETF 篮子等价净变化</span><strong className={tone(data.summary.netShares)}>{signedShares(data.summary.netShares)}</strong><small>净值不代表没有正负对冲</small></article>
@@ -311,11 +311,11 @@ export function EtfPressureView({ data, onOpenStock }: Props) {
       </div>
 
       <div className="pressure-toolbar">
-        <div className="direction-tabs" aria-label="压强方向筛选">
+        <div className="direction-tabs" aria-label="穿透方向筛选">
           {(["all", "inflow", "outflow", "financing", "lending"] as Filter[]).map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => { setFilter(item); setPage(0); }} type="button">{item === "all" ? "全部" : item === "inflow" ? "ETF净增" : item === "outflow" ? "ETF净减" : item === "financing" ? "融资可比" : "融券可比"}</button>)}
         </div>
         <label className="pressure-search"><MagnifyingGlass size={17} /><input aria-label="搜索个股代码或名称" onChange={(event) => { setQuery(event.target.value); setPage(0); }} placeholder="搜索个股 / 代码" value={query} /></label>
-        <label className="pressure-sort">排序<select aria-label="ETF压强排序" onChange={(event) => setSort(event.target.value as Sort)} value={sort}><option value="net">净变化绝对值</option><option value="gross">毛变化</option><option value="inflow">流入</option><option value="outflow">流出</option><option value="coverage">历史覆盖</option></select></label>
+        <label className="pressure-sort">排序<select aria-label="ETF穿透排序" onChange={(event) => setSort(event.target.value as Sort)} value={sort}><option value="net">净变化绝对值</option><option value="gross">毛变化</option><option value="inflow">流入</option><option value="outflow">流出</option><option value="coverage">历史覆盖</option></select></label>
       </div>
 
       <div className="pressure-layout">
