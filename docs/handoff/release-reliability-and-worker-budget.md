@@ -4,7 +4,7 @@
 > 编写日期：2026-08-12
 > 仓库：`xiaoker/flow`
 > 生产地址：`https://flow.xiaoker.com`
-> 状态：PR 1A/1B 已在当前分支完成；PR 2 已实施并完成本地验证，待生产部署与 5 个交易日观测；PR 3 尚未实施
+> 状态：PR 1A/1B/2 已完成；PR 3 已实施并完成本地契约测试，待生产部署与 5 个交易日观测
 > 优先级：P0 发布正确性，P1 请求资源，P1 采集调度
 
 ## 0. 执行指令
@@ -672,6 +672,13 @@ PR 2 仍必须遵守“服务端先兼容、生产者后发新工件”：先让
 - morning / reconcile 缺数据时 job 红、证据存在、旧 active 不变。
 - 网络错误最多重试 3 次，Actions Summary 能区分网络失败与来源日期未就绪。
 - Cloudflare 与 GitHub 两个相邻任务重叠时，激活指针不会回退。
+
+### 9.4 当前实现记录（2026-08-20）
+
+- `daily-data.yml` 已改为窗口级单次采集；来源日期未就绪时归档 pending，不在同一 job 内执行 18 次长轮询。
+- 网络错误仍保留最多 3 次、30 秒/60 秒短退避；schema、认证和数据质量错误不重复采集。
+- Cloudflare Worker 调度 GitHub Actions 增加 0/1/3 秒短退避，并记录 `scheduleLagMs`；超过 5 分钟会写入延迟告警日志。
+- 生产部署后仍需观察 5 个交易日，确认 Cloudflare 主触发、GitHub 兜底、pending 归档和 active 指针连续无缺口。
 
 ## 10. 测试设计
 

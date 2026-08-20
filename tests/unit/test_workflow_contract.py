@@ -21,9 +21,14 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
-    assert 'inputs: { collection_window: collectionWindowForCron(cron) }' in worker
-    assert "response.status !== 200 && response.status !== 204" in worker
+    assert 'inputs: { collection_window: window }' in worker
+    assert "response.status === 200 || response.status === 204" in worker
     assert 'console.error("Daily collection dispatch failed"' in worker
+    assert "DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000]" in worker
+    assert "LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000" in worker
+    assert "isRetryableDispatchStatus" in worker
+    assert "scheduleLagMs" in worker
+    assert 'console.warn("GitHub workflow dispatch will be retried"' in worker
 
 
 def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
@@ -70,10 +75,15 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "MAX_ATTEMPTS=3" in workflow
     assert "PCF_MAX_CODES=16" in workflow
     assert "--pcf-max-codes \"$PCF_MAX_CODES\"" in workflow
-    assert "phase0_gate_status=pending" in workflow
-    assert "Source-not-ready is pending" in workflow
-    assert "SOURCE_READINESS_ATTEMPTS" not in workflow
+    assert "SOURCE_READINESS_ATTEMPTS=18" not in workflow
     assert "sleep 120" not in workflow
+    assert "id: collection" in workflow
+    assert 'echo "pending=false" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'echo "pending=true" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'source_pending="${{ steps.collection.outputs.pending }}"' in workflow
+    assert "Official source date is not ready" in workflow
+    assert "Collection window pending" in workflow
+    assert 'timeliness.requested_date_coverage' in workflow
     assert "pending_domains" in workflow
     assert '.status == "archived_pending"' in workflow
     assert '.error_type == "ConnectionError"' in workflow
