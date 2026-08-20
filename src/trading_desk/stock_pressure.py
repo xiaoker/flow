@@ -224,7 +224,7 @@ def build_stock_pressure(
     market_financing_balance_yuan: float | None = None,
     margin_as_of: str | None = None,
 ) -> dict[str, Any]:
-    """Build the compact, stock-centric ETF β压强 read model."""
+    """Build the compact, stock-centric ETF穿透 read model."""
 
     value = _record(catalog)
     if value.get("schemaVersion") != 1:

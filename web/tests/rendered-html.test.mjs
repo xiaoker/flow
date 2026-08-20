@@ -259,7 +259,7 @@ test("exposes the ETF pressure workbench without fabricating stock facts", async
     readFile(new URL("../app/etf-pressure-view.tsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/trading_desk/stock_pressure.py", import.meta.url), "utf8"),
   ]);
-  assert.match(source, /id: "pressure", label: "ETF β压强"/);
+  assert.match(source, /id: "pressure", label: "ETF穿透"/);
   assert.match(source, /<EtfPressureView data=\{snapshot\.pressure\}/);
   assert.match(bootstrap, /requestedView\(params\.get\("view"\)\)/);
   assert.match(bootstrap, /\/api\/v2\/views\/\$\{view\}/);
