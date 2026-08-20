@@ -21,9 +21,14 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
-    assert 'inputs: { collection_window: collectionWindowForCron(cron) }' in worker
-    assert "response.status !== 200 && response.status !== 204" in worker
+    assert 'inputs: { collection_window: window }' in worker
+    assert "response.status === 200 || response.status === 204" in worker
     assert 'console.error("Daily collection dispatch failed"' in worker
+    assert "DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000]" in worker
+    assert "LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000" in worker
+    assert "isRetryableDispatchStatus" in worker
+    assert "scheduleLagMs" in worker
+    assert 'console.warn("GitHub workflow dispatch will be retried"' in worker
 
 
 def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
@@ -45,8 +50,13 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     ).read_text(encoding="utf-8")
 
     assert "MAX_ATTEMPTS=3" in workflow
-    assert "SOURCE_READINESS_ATTEMPTS=18" in workflow
-    assert "SZSE source date is not ready" in workflow
+    assert "SOURCE_READINESS_ATTEMPTS=18" not in workflow
+    assert "sleep 120" not in workflow
+    assert "id: collect" in workflow
+    assert 'echo "pending=true" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'source_pending="${{ steps.collect.outputs.pending }}"' in workflow
+    assert "Official source date is not ready" in workflow
+    assert "Collection window pending" in workflow
     assert 'timeliness.requested_date_coverage' in workflow
     assert '.error_type == "ConnectionError"' in workflow
     assert '.error_type == "HTTPError"' in workflow

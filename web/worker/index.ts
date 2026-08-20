@@ -29,6 +29,8 @@ interface ScheduledController {
 
 const DAILY_DATA_DISPATCH_URL =
   "https://api.github.com/repos/xiaoker/flow/actions/workflows/daily-data.yml/dispatches";
+const DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000] as const;
+const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 
 function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
   if (cron.startsWith("45 23")) return "morning";
@@ -36,31 +38,96 @@ function collectionWindowForCron(cron: string): "evening" | "morning" | "reconci
   return "evening";
 }
 
-async function dispatchDailyCollection(env: Env, cron: string): Promise<void> {
+function isRetryableDispatchStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function dispatchDailyCollection(
+  env: Env,
+  controller: ScheduledController,
+): Promise<void> {
   if (!env.GITHUB_ACTIONS_TOKEN) {
     throw new Error("GITHUB_ACTIONS_TOKEN is not configured");
   }
-  const response = await fetch(DAILY_DATA_DISPATCH_URL, {
-    method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
-      "Content-Type": "application/json",
-      "User-Agent": "flow-cloudflare-scheduler",
-      "X-GitHub-Api-Version": "2026-03-10",
-    },
-    body: JSON.stringify({
-      ref: "main",
-      inputs: { collection_window: collectionWindowForCron(cron) },
-    }),
-  });
-  if (response.status !== 200 && response.status !== 204) {
+
+  const window = collectionWindowForCron(controller.cron);
+  const scheduleLagMs = Math.max(0, Date.now() - controller.scheduledTime);
+  if (scheduleLagMs > LATE_SCHEDULE_THRESHOLD_MS) {
+    console.warn("Cloudflare Cron delivered a late collection window", {
+      cron: controller.cron,
+      window,
+      scheduleLagMs,
+      scheduledTime: new Date(controller.scheduledTime).toISOString(),
+    });
+  }
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < DISPATCH_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delay = DISPATCH_RETRY_DELAYS_MS[attempt];
+    if (delay > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+    let response: Response;
+    try {
+      response = await fetch(DAILY_DATA_DISPATCH_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+          "Content-Type": "application/json",
+          "User-Agent": "flow-cloudflare-scheduler",
+          "X-GitHub-Api-Version": "2026-03-10",
+        },
+        body: JSON.stringify({
+          ref: "main",
+          inputs: { collection_window: window },
+        }),
+      });
+    } catch (error: unknown) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
+        throw lastError;
+      }
+      console.warn("GitHub workflow dispatch request failed; retrying", {
+        cron: controller.cron,
+        window,
+        attempt: attempt + 1,
+        scheduleLagMs,
+        detail: lastError.message.slice(0, 500),
+      });
+      continue;
+    }
+
+    if (response.status === 200 || response.status === 204) {
+      console.info("Dispatched Daily market data workflow from Cloudflare Cron", {
+        cron: controller.cron,
+        window,
+        attempt: attempt + 1,
+        scheduleLagMs,
+      });
+      return;
+    }
+
     const detail = (await response.text()).slice(0, 500);
-    throw new Error(
+    lastError = new Error(
       `GitHub workflow dispatch failed with ${response.status}: ${detail}`,
     );
+    if (!isRetryableDispatchStatus(response.status)) {
+      throw lastError;
+    }
+    if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
+      throw lastError;
+    }
+    console.warn("GitHub workflow dispatch will be retried", {
+      cron: controller.cron,
+      window,
+      attempt: attempt + 1,
+      status: response.status,
+      scheduleLagMs,
+    });
   }
-  console.info("Dispatched Daily market data workflow from Cloudflare Cron");
+
+  throw lastError ?? new Error("GitHub workflow dispatch failed without a response");
 }
 
 // Image security config. SVG sources with .svg extension auto-skip the
@@ -95,7 +162,7 @@ const worker = {
     ctx: ExecutionContext,
   ): Promise<void> {
     ctx.waitUntil(
-      dispatchDailyCollection(env, controller.cron).catch((error: unknown) => {
+      dispatchDailyCollection(env, controller).catch((error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error);
         console.error("Daily collection dispatch failed", {
           cron: controller.cron,
