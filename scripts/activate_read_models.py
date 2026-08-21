@@ -23,6 +23,7 @@ def activate(
     *,
     release_id: str,
     as_of: str,
+    slot: str = "dashboard",
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     root = base_url.rstrip("/")
@@ -35,7 +36,7 @@ def activate(
     response = requests.post(
         f"{root}/api/v1/admin/read-model-activate",
         headers=headers,
-        json={"releaseId": release_id, "asOf": as_of},
+        json={"releaseId": release_id, "asOf": as_of, "slot": slot},
         timeout=timeout,
         allow_redirects=False,
     )
@@ -43,7 +44,7 @@ def activate(
         detail = response.text[:500].replace("\n", " ")
         raise RuntimeError(f"candidate activation failed ({response.status_code}): {detail}")
     payload = response.json()
-    if not isinstance(payload, dict) or payload.get("releaseId") != release_id or payload.get("asOf") != as_of:
+    if not isinstance(payload, dict) or payload.get("releaseId") != release_id or payload.get("asOf") != as_of or payload.get("slot", "dashboard") != slot:
         raise RuntimeError(f"candidate activation response identity mismatch: {payload}")
     if payload.get("status") not in {"activated", "staged_older_than_active", "staged_stale_revision"}:
         raise RuntimeError(f"candidate activation returned an unsafe status: {payload}")
@@ -55,12 +56,13 @@ def main() -> None:
     parser.add_argument("--base-url", default=os.environ.get("FLOW_PUBLIC_URL", "https://flow.xiaoker.com"))
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--as-of", required=True)
+    parser.add_argument("--slot", choices=("dashboard", "etf_penetration"), default="dashboard")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            print(json.dumps(activate(args.base_url, release_id=args.release_id, as_of=args.as_of, timeout=args.timeout)))
+            print(json.dumps(activate(args.base_url, release_id=args.release_id, as_of=args.as_of, slot=args.slot, timeout=args.timeout)))
             return
         except Exception as exc:
             last_error = exc

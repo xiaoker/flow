@@ -4,6 +4,7 @@ import {
 } from "@/app/lib/release-store";
 import { runtimeEnv } from "@/app/lib/dashboard-store";
 import { flowBuildHeaders } from "@/app/lib/build-info";
+import { READ_MODEL_SLOTS, type ReadModelSlot } from "@/app/lib/read-model-contract";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ const ALLOWED_VIEWS = new Set([
   "margin",
   "pressure",
 ]);
+const PENETRATION_VIEWS = new Set(["radar_flow", "pressure"]);
 
 export async function GET(
   request: Request,
@@ -31,8 +33,18 @@ export async function GET(
   if (requestedDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
     return Response.json({ error: "invalid_date" }, { status: 400, headers: flowBuildHeaders() });
   }
-  const active = await getReleaseManifestForDate(requestedDate);
   const runtime = await runtimeEnv();
+  const requestedSlot = new URL(request.url).searchParams.get("slot");
+  if (requestedSlot !== null && !READ_MODEL_SLOTS.includes(requestedSlot as ReadModelSlot)) {
+    return Response.json({ error: "invalid_release_slot" }, { status: 400, headers: flowBuildHeaders() });
+  }
+  const slot = (requestedSlot ?? (runtime.PCF_CAPTURE_V2_READ_ENABLED === "1" && PENETRATION_VIEWS.has(view)
+    ? "etf_penetration"
+    : "dashboard")) as ReadModelSlot;
+  if (slot === "etf_penetration" && runtime.PCF_CAPTURE_V2_READ_ENABLED !== "1") {
+    return Response.json({ error: "penetration_slot_disabled" }, { status: 503, headers: flowBuildHeaders() });
+  }
+  const active = await getReleaseManifestForDate(requestedDate, slot);
   if (!active || !runtime.RAW_BUCKET) {
     return Response.json({ error: "active_release_unavailable" }, { status: 503, headers: flowBuildHeaders() });
   }
@@ -58,5 +70,6 @@ export async function GET(
     request,
   );
   response.headers.set("X-Flow-View", view);
+  response.headers.set("X-Flow-Release-Slot", slot);
   return response;
 }

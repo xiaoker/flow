@@ -7,6 +7,8 @@
 export const MAX_READ_MODEL_ARTIFACTS = 20;
 export const MAX_READ_MODEL_BYTES = 5_000_000;
 export const READ_MODEL_NAME = /^(bootstrap|overview|radar|radar_flow|rotation|national|connect|margin|pressure|stock_search|stock_[0-7])$/;
+export const READ_MODEL_SLOTS = ["dashboard", "etf_penetration"] as const;
+export type ReadModelSlot = (typeof READ_MODEL_SLOTS)[number];
 export const RELEASE_ID = /^release:\d{4}-\d{2}-\d{2}:[a-f0-9]{16}$/;
 export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 export const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -53,6 +55,28 @@ export const READ_MODEL_ORDER = [
   "stock_6",
   "stock_7",
 ] as const;
+export const MARKET_READ_MODEL_NAMES = [
+  "bootstrap",
+  "overview",
+  "radar",
+  "rotation",
+  "national",
+  "connect",
+  "margin",
+] as const;
+export const PENETRATION_READ_MODEL_NAMES = [
+  "radar_flow",
+  "pressure",
+  "stock_search",
+  "stock_0",
+  "stock_1",
+  "stock_2",
+  "stock_3",
+  "stock_4",
+  "stock_5",
+  "stock_6",
+  "stock_7",
+] as const;
 
 export type ReadModelArtifactDescriptor = {
   key: string;
@@ -80,6 +104,7 @@ export type MarketHistoryManifest = {
 
 export type ReadModelManifest = {
   schemaVersion: number;
+  slot?: ReadModelSlot;
   releaseId: string;
   asOf: string;
   observedAt?: string | null;
@@ -160,6 +185,7 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
   if (!isRecord(value)) return false;
   if (
     (value.schemaVersion !== 2 && value.schemaVersion !== 3) ||
+    (value.slot !== undefined && !READ_MODEL_SLOTS.includes(value.slot as ReadModelSlot)) ||
     typeof value.releaseId !== "string" ||
     !RELEASE_ID.test(value.releaseId) ||
     typeof value.asOf !== "string" ||
@@ -194,13 +220,19 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
     const stockShardCount = value.stockShardCount;
     if (pressureSchemaVersion !== 2) return false;
     if (stockShardCount !== 8) return false;
+    const slot = value.slot as ReadModelSlot | undefined;
+    const expectedNames = slot === "etf_penetration"
+      ? PENETRATION_READ_MODEL_NAMES
+      : slot === "dashboard"
+        ? MARKET_READ_MODEL_NAMES
+        : READ_MODEL_ORDER;
     if (
       !Array.isArray(value.requiredArtifacts) ||
-      value.requiredArtifacts.length !== READ_MODEL_ORDER.length ||
+      value.requiredArtifacts.length !== expectedNames.length ||
       new Set(value.requiredArtifacts).size !== names.length ||
       value.requiredArtifacts.some((name) => typeof name !== "string" || !names.includes(name)) ||
       JSON.stringify(value.requiredArtifacts) !==
-        JSON.stringify(READ_MODEL_ORDER)
+        JSON.stringify(expectedNames)
     ) {
       return false;
     }
@@ -211,5 +243,10 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
 
 export function hasCompleteReadModelManifest(manifest: ReadModelManifest): boolean {
   const names = new Set(Object.keys(manifest.artifacts));
-  return COMPLETE_READ_MODEL_NAMES.every((name) => names.has(name));
+  const required = manifest.slot === "etf_penetration"
+    ? PENETRATION_READ_MODEL_NAMES
+    : manifest.slot === "dashboard"
+      ? MARKET_READ_MODEL_NAMES
+      : COMPLETE_READ_MODEL_NAMES;
+  return required.every((name) => names.has(name));
 }

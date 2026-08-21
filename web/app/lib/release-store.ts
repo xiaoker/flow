@@ -1,5 +1,6 @@
 import { runtimeEnv } from "./dashboard-store";
 import { flowBuildHeaders } from "./build-info";
+import type { ReadModelSlot } from "./read-model-contract";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -23,6 +24,8 @@ type HistoricalReleaseRow = {
 
 type Runtime = Awaited<ReturnType<typeof runtimeEnv>>;
 
+export const DEFAULT_RELEASE_SLOT: ReadModelSlot = "dashboard";
+
 export type ActiveReleaseManifest = {
   releaseId: string;
   asOf: string;
@@ -32,7 +35,10 @@ export type ActiveReleaseManifest = {
   manifest: Record<string, unknown>;
 };
 
-async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseManifest | null> {
+async function readActiveReleaseManifest(
+  db: D1Database,
+  slot: ReadModelSlot = DEFAULT_RELEASE_SLOT,
+): Promise<ActiveReleaseManifest | null> {
   const read = async (withObservedAt: boolean) => db
     .prepare(
       withObservedAt
@@ -47,7 +53,7 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
              ON release_manifest.release_id = active_release.release_id
             AND release_manifest.as_of = active_release.as_of
             AND release_manifest.status = 'ACTIVE'
-           WHERE active_release.slot = 'dashboard'
+           WHERE active_release.slot = ?
            LIMIT 1`
         : `SELECT active_release.release_id,
                   active_release.as_of,
@@ -59,9 +65,10 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
              ON release_manifest.release_id = active_release.release_id
             AND release_manifest.as_of = active_release.as_of
             AND release_manifest.status = 'ACTIVE'
-           WHERE active_release.slot = 'dashboard'
+           WHERE active_release.slot = ?
            LIMIT 1`,
     )
+    .bind(slot)
     .first<{
       release_id: string;
       as_of: string;
@@ -84,7 +91,8 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
       typeof manifest !== "object" ||
       Array.isArray(manifest) ||
       (manifest as Record<string, unknown>).releaseId !== row.release_id ||
-      (manifest as Record<string, unknown>).asOf !== row.as_of
+      (manifest as Record<string, unknown>).asOf !== row.as_of ||
+      ((manifest as Record<string, unknown>).slot ?? DEFAULT_RELEASE_SLOT) !== slot
     ) return null;
     return {
       releaseId: row.release_id,
@@ -104,9 +112,11 @@ async function readActiveReleaseManifest(db: D1Database): Promise<ActiveReleaseM
   }
 }
 
-export async function getActiveReleaseManifest(): Promise<ActiveReleaseManifest | null> {
+export async function getActiveReleaseManifest(
+  slot: ReadModelSlot = DEFAULT_RELEASE_SLOT,
+): Promise<ActiveReleaseManifest | null> {
   const db = (await runtimeEnv()).DB;
-  return db ? readActiveReleaseManifest(db) : null;
+  return db ? readActiveReleaseManifest(db, slot) : null;
 }
 
 /**
@@ -116,12 +126,13 @@ export async function getActiveReleaseManifest(): Promise<ActiveReleaseManifest 
  */
 export async function getReleaseManifestForDate(
   requestedDate?: string,
+  slot: ReadModelSlot = DEFAULT_RELEASE_SLOT,
 ): Promise<ActiveReleaseManifest | null> {
   const db = (await runtimeEnv()).DB;
   if (!db) return null;
-  if (requestedDate === undefined) return readActiveReleaseManifest(db);
+  if (requestedDate === undefined) return readActiveReleaseManifest(db, slot);
   if (!ISO_DATE.test(requestedDate)) return null;
-  const active = await readActiveReleaseManifest(db);
+  const active = await readActiveReleaseManifest(db, slot);
   if (active?.asOf === requestedDate) return active;
   try {
     const read = async (withObservedAt: boolean) => db
@@ -130,16 +141,18 @@ export async function getReleaseManifestForDate(
           ? `SELECT release_id, as_of, manifest_sha256, observed_at, created_at, manifest_json
              FROM release_manifest
              WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+               AND (json_extract(manifest_json, '$.slot') = ? OR (? = 'dashboard' AND json_extract(manifest_json, '$.slot') IS NULL))
              ORDER BY COALESCE(observed_at, json_extract(manifest_json, '$.observedAt'), '') DESC,
                       created_at DESC
              LIMIT 1`
           : `SELECT release_id, as_of, manifest_sha256, created_at, manifest_json
              FROM release_manifest
              WHERE as_of = ? AND status IN ('ACTIVE', 'SUPERSEDED')
+               AND (json_extract(manifest_json, '$.slot') = ? OR (? = 'dashboard' AND json_extract(manifest_json, '$.slot') IS NULL))
              ORDER BY created_at DESC
              LIMIT 1`,
       )
-      .bind(requestedDate)
+      .bind(requestedDate, slot, slot)
       .first<{
         release_id: string;
         as_of: string;
@@ -161,7 +174,8 @@ export async function getReleaseManifestForDate(
       typeof manifest !== "object" ||
       Array.isArray(manifest) ||
       (manifest as Record<string, unknown>).releaseId !== row.release_id ||
-      (manifest as Record<string, unknown>).asOf !== row.as_of
+      (manifest as Record<string, unknown>).asOf !== row.as_of ||
+      ((manifest as Record<string, unknown>).slot ?? DEFAULT_RELEASE_SLOT) !== slot
     ) return null;
     return {
       releaseId: row.release_id,
@@ -241,10 +255,11 @@ async function readActivePublishedObject(
 export async function readPublishedArtifact(
   name: string,
   requestedDate?: string,
+  slot: ReadModelSlot = DEFAULT_RELEASE_SLOT,
 ): Promise<PublishedObject | null> {
   const runtime = await runtimeEnv();
   if (!runtime.DB || !runtime.RAW_BUCKET) return null;
-  const active = await getReleaseManifestForDate(requestedDate);
+  const active = await getReleaseManifestForDate(requestedDate, slot);
   if (!active) return null;
   const key = artifactKeyFromManifest(active, name);
   const releasePrefix = `market-data/releases/${active.asOf}/${active.releaseId}/`;
@@ -268,7 +283,10 @@ export async function readPublishedArtifact(
  * caller can stream the R2 body directly to the browser, which keeps the
  * Worker out of the large-snapshot parsing path.
  */
-export async function getPublishedObject(requestedDate?: string): Promise<PublishedObject | null> {
+export async function getPublishedObject(
+  requestedDate?: string,
+  slot: ReadModelSlot = DEFAULT_RELEASE_SLOT,
+): Promise<PublishedObject | null> {
   const runtime = await runtimeEnv();
   if (!runtime.DB || !runtime.RAW_BUCKET) return null;
   if (requestedDate !== undefined && !ISO_DATE.test(requestedDate)) return null;
@@ -277,7 +295,7 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
 
     let row: DashboardReleaseRow | HistoricalReleaseRow | null;
     let historical = false;
-    const active = await readActiveReleaseManifest(runtime.DB);
+    const active = await readActiveReleaseManifest(runtime.DB, slot);
 
     // The latest date is represented by the active release, not by the
     // short historical snapshot created by the collection/archive path. A
@@ -291,23 +309,25 @@ export async function getPublishedObject(requestedDate?: string): Promise<Publis
       // Prefer the immutable full release manifest. The compact historical
       // snapshot is retained only as a compatibility fallback for dates
       // published before release manifests were introduced.
-      const dated = await getReleaseManifestForDate(requestedDate);
+      const dated = await getReleaseManifestForDate(requestedDate, slot);
       if (dated) {
         const published = await readActivePublishedObject(runtime, dated, dated.asOf !== active?.asOf);
         if (published) return published;
       }
+      if (slot !== DEFAULT_RELEASE_SLOT) return null;
       historical = true;
       row = await runtime.DB
-          .prepare(
-            `SELECT as_of, r2_object_key
-             FROM historical_snapshot
-             WHERE as_of = ? AND quality_fail = 0
-             LIMIT 1`,
-          )
-          .bind(requestedDate)
-          .first<HistoricalReleaseRow>();
+        .prepare(
+          `SELECT as_of, r2_object_key
+           FROM historical_snapshot
+           WHERE as_of = ? AND quality_fail = 0
+           LIMIT 1`,
+        )
+        .bind(requestedDate)
+        .first<HistoricalReleaseRow>();
     } else {
       if (active) return await readActivePublishedObject(runtime, active);
+      if (slot !== DEFAULT_RELEASE_SLOT) return null;
       row = await runtime.DB
         .prepare(
           `SELECT id, as_of, r2_object_key
