@@ -39,9 +39,13 @@ git fetch origin main
 git merge-base --is-ancestor origin/main HEAD
 ```
 
-命令成功才表示当前分支包含最新生产基线。分支新鲜度检查是 PR 的必需门禁；如果
+命令成功才表示当前分支包含最新生产基线。分支新鲜度检查是发布前门禁；如果
 `main` 在检查后继续前进，PR 必须再次同步。合并后确认远端 `main` 和部署工作流
 使用同一个合并提交 SHA。
+
+> 限制：当前仓库是 GitHub 私有仓库的免费计划，不能启用原生 required status
+> checks/branch protection。因此 workflow 会明确失败并提示同步，但平台不会替
+> 管理员强制阻止手动合并。没有完成新鲜度检查时不得合并；不要使用管理员绕过。
 
 ## 发布后
 
