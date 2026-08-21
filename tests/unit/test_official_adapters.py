@@ -38,6 +38,17 @@ class BinaryResponse:
         self.headers = {"Content-Type": content_type}
 
 
+class XmlResponse:
+    def __init__(self, content: bytes, content_type: str = "application/xml"):
+        self.content = content
+        self.text = content.decode("utf-8")
+        self.status_code = 200
+        self.headers = {
+            "Content-Type": content_type,
+            "Content-Disposition": 'attachment; filename="515590.xml"',
+        }
+
+
 class MissingResponse(FakeResponse):
     def __init__(self) -> None:
         super().__init__("official file not retained", "text/html")
@@ -503,6 +514,59 @@ def test_sse_etf_pcf_respects_bounded_code_cap_and_records_deferred_codes(
     assert len(frame) == 1
     assert set(requested_codes) == {"588000"}
     assert "changed_etf_count_exceeds_cap:1" in artifact.warnings
+
+
+def test_sse_etf_pcf_v2_uses_one_xml_request_and_exact_dates(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    content = (Path(__file__).parents[1] / "fixtures" / "pcf" / "same-day.xml").read_bytes()
+    calls: list[dict[str, object]] = []
+
+    def fake_get(*args: object, **kwargs: object) -> XmlResponse:
+        calls.append(kwargs)
+        return XmlResponse(content)
+
+    monkeypatch.setattr(official, "get", fake_get)
+    frame, artifact = adapters.fetch_sse_etf_pcf_v2(
+        ["510300"], "2026-08-21", "2026-08-20"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["params"] == {"fundCode": "510300"}
+    assert len(frame) == 1
+    assert frame.loc[0, "quantity"] == 100
+    assert frame.loc[0, "date_basis"] == "sse_pcf_exact_same_trading_day_shadow"
+    assert artifact.source.dataset == "etf_pcf_v2_shadow"
+
+
+def test_sse_etf_pcf_v2_rejects_rolled_over_xml_without_producing_rows(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    content = (Path(__file__).parents[1] / "fixtures" / "pcf" / "next-day-rolled-over.xml").read_bytes()
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: XmlResponse(content))
+
+    frame, artifact = adapters.fetch_sse_etf_pcf_v2(
+        ["510300"], "2026-08-21", "2026-08-20"
+    )
+
+    assert frame.empty
+    assert any("TradingDay" in warning for warning in artifact.warnings)
+
+
+def test_sse_etf_pcf_v2_preserves_zero_quantity_and_unknown_tags(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    zero = (Path(__file__).parents[1] / "fixtures" / "pcf" / "zero-quantity-cash-substitution.xml").read_bytes()
+    unknown = (Path(__file__).parents[1] / "fixtures" / "pcf" / "unknown-component-tag.xml").read_bytes()
+    responses = iter([XmlResponse(zero), XmlResponse(unknown)])
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: next(responses))
+
+    frame, _ = adapters.fetch_sse_etf_pcf_v2(
+        ["510300", "510500"], "2026-08-21", "2026-08-20"
+    )
+
+    assert set(frame["quantity"]) == {0, 100}
+    assert "futureofficialfield" in frame.loc[frame["quantity"] == 100, "source_extra_json"].iloc[0]
 
 
 def test_szse_etf_matches_named_excel_columns_without_row_order_join(

@@ -11,13 +11,38 @@ release builder remains fail-closed.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 
 READINESS_SCHEMA_VERSION = 1
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
 DEFAULT_RECHECK_MINUTES = 30
+
+# PR 0 contract only.  The existing source-readiness ledger continues to emit
+# its legacy source states until the later capability-cutover PR.
+PcfCapabilityStatus = Literal[
+    "READY",
+    "READY_NO_CHANGE",
+    "PENDING_PLAN",
+    "CAPTURING",
+    "RATE_LIMITED",
+    "EXPIRED_EXACT_WINDOW",
+    "BLOCKED_DATE_MISMATCH",
+    "BLOCKED_QUALITY",
+    "FINALIZE_FAILED",
+]
+PCF_CAPABILITY_STATUSES: tuple[PcfCapabilityStatus, ...] = (
+    "READY",
+    "READY_NO_CHANGE",
+    "PENDING_PLAN",
+    "CAPTURING",
+    "RATE_LIMITED",
+    "EXPIRED_EXACT_WINDOW",
+    "BLOCKED_DATE_MISMATCH",
+    "BLOCKED_QUALITY",
+    "FINALIZE_FAILED",
+)
 
 # Dataset names are stable control-plane identities.  They are intentionally
 # not just publisher names because SSE ETF, SSE margin and SSE NAV have
