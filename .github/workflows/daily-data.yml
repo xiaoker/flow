@@ -23,6 +23,11 @@ on:
         default: "auto"
         type: choice
         options: [auto, evening, morning, reconcile]
+      run_pcf_shadow:
+        description: "Opt in to one legacy/v2 PCF parity run; never publishes v2"
+        required: false
+        default: false
+        type: boolean
 
 # Cloudflare Cron is the primary release-window dispatcher. GitHub schedules
 # run slightly later as a failover. Early runs preserve whichever official
@@ -169,6 +174,28 @@ jobs:
           done
           echo "phase0_gate=$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
           echo "pending_domains=$(jq -c '.pending_domains // []' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Run opt-in PCF shadow parity (never published)
+        id: pcf-shadow
+        if: ${{ inputs.run_pcf_shadow == true && steps.collection.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          SHARE_PATH="$(jq -r '.combined_paths.sse_etf // empty' reports/phase0/latest-manifest.json)"
+          if [[ -z "$SHARE_PATH" || ! -s "$SHARE_PATH" ]]; then
+            echo "SSE ETF share artifact is unavailable; shadow parity is recorded as an input failure." >&2
+            exit 1
+          fi
+          read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
+          mkdir -p reports/pcf-shadow
+          python scripts/run_pcf_shadow_parity.py \
+            --shares "$SHARE_PATH" \
+            --trade-date "${DATES[2]}" \
+            --previous-date "${DATES[1]}" \
+            --data-root ".shadow/pcf-v2/${DATES[2]}" \
+            --output "reports/pcf-shadow/${DATES[2]}.json"
+          jq '{status, tradeDate, coverage, comparison: {byCategory: .comparison.byCategory, unexpectedAnomalyCount: .comparison.unexpectedAnomalyCount}, budget}' \
+            "reports/pcf-shadow/${DATES[2]}.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record source readiness ledger
         id: readiness
@@ -613,6 +640,7 @@ jobs:
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json
+            reports/pcf-shadow/*.json
             reports/backfill/latest-summary.json
             history-bundle.json
             read-models/

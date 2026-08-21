@@ -4,7 +4,7 @@
 > 编写日期：2026-08-21<br>
 > 仓库：`xiaoker/flow`<br>
 > 生产地址：`https://flow.xiaoker.com`<br>
-> 状态：方案已由用户确认；尚未实施<br>
+> 状态：PR0–PR3 已合并；PR4 shadow 工具已实施，5 个交易日证据待积累<br>
 > 优先级：P0 数据日期与覆盖正确性，P0 可恢复采集，P1 免费额度与存储治理<br>
 > 实施原则：严格从 PR 0 开始，不跨阶段，不提前切换生产读取路径，不追溯删除旧对象
 
@@ -786,6 +786,8 @@ canonical/manifest 孤儿对象
 - 至少连续 5 个交易日验证。
 
 切换门禁：5 天均达到 100% required coverage；无日期错配；无 silent omission；无 403/429 持续失败；预算低于本文件护栏。
+
+PR4 工具实现：`src/trading_desk/pcf_parity.py` 提供逐 ETF、逐个股、全市场差异分类与预算合同；`scripts/run_pcf_shadow_parity.py` 执行单日顺序双轨采集；`scripts/summarize_pcf_shadow.py` 汇总至少 5 个交易日。`daily-data` 的 `run_pcf_shadow` 仅在手动 dispatch 明确开启时运行，默认关闭，报告以短期 Actions artifact 保存，不进入生产发布路径。
 
 ### PR 5：能力分槽与生产切换
 
