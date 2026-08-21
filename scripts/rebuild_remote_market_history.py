@@ -123,6 +123,7 @@ def _record(path: Path, metadata: dict[str, str]) -> tuple[list[Any], bool, bool
         _finite((margin or {}).get("totalBalance")),
         _finite((margin or {}).get("sseBalance")),
         _finite((margin or {}).get("szseBalance")),
+        _finite((margin or {}).get("bseBalance")),
         _finite((connect or {}).get("southboundNet")),
         _finite((connect or {}).get("southboundTurnover")),
         _finite((connect or {}).get("southboundSseNet")),
@@ -135,7 +136,6 @@ def _record(path: Path, metadata: dict[str, str]) -> tuple[list[Any], bool, bool
         metadata["snapshot_sha256"],
         str(snapshot.get("observedAt") or ""),
         str(snapshot.get("observedAt") or ""),
-        _finite((margin or {}).get("bseBalance")),
         str((margin or {}).get("marginScopeVersion") or "sse_szse_v1"),
     ]
     return values, bool(margin), bool(connect)
@@ -152,11 +152,11 @@ def _write_sql(
     columns = """
       trade_date, margin_balance, margin_change, financing_buy,
       lending_balance, lending_sell_volume, total_balance, sse_balance,
-      szse_balance, southbound_net, southbound_turnover,
+      szse_balance, bse_balance, southbound_net, southbound_turnover,
       southbound_sse_net, southbound_szse_net, northbound_turnover,
       northbound_etf_turnover, northbound_trade_count, margin_available,
       connect_available, source_snapshot_sha256, observed_at, created_at,
-      bse_balance, margin_scope_version
+      margin_scope_version
     """.strip()
     upsert = """ON CONFLICT(trade_date) DO UPDATE SET
           margin_balance=excluded.margin_balance,
@@ -209,7 +209,6 @@ def _write_sql(
 def _compact_row(values: list[Any]) -> dict[str, Any]:
     """Convert the SQL value tuple into the portable build-time row shape."""
     row = dict(zip(_MARKET_HISTORY_ROW_FIELDS, values[: len(_MARKET_HISTORY_ROW_FIELDS)]))
-    row["bse_balance"] = values[21] if len(values) > 21 else None
     row["margin_scope_version"] = values[22] if len(values) > 22 else "sse_szse_v1"
     return row
 
@@ -224,6 +223,7 @@ _MARKET_HISTORY_ROW_FIELDS = (
     "total_balance",
     "sse_balance",
     "szse_balance",
+    "bse_balance",
     "southbound_net",
     "southbound_turnover",
     "southbound_sse_net",
@@ -249,6 +249,7 @@ def _write_compact_history(
     rows = [_compact_row(record) for record in records]
     payload = {
         "schemaVersion": 1,
+        "scopeVersion": "sse-szse-bse-v1",
         "asOf": rows[-1]["trade_date"] if rows else None,
         "source": source,
         "rows": rows,

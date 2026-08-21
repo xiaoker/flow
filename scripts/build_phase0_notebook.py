@@ -68,7 +68,7 @@ def main() -> None:
         ),
         new_markdown_cell("### 两融单位与跨市场汇总"),
         new_code_cell(
-            "margin = pd.concat([load_dataset('sse_margin'), load_dataset('szse_margin')], ignore_index=True)\n"
+            "margin = pd.concat([load_dataset('sse_margin'), load_dataset('szse_margin'), load_dataset('bse_margin')], ignore_index=True)\n"
             "margin_daily = margin.groupby('trade_date', as_index=False).agg(\n"
             "    financing_balance_yuan=('financing_balance_yuan', 'sum'),\n"
             "    financing_buy_yuan=('financing_buy_yuan', 'sum'),\n"
@@ -131,4 +131,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

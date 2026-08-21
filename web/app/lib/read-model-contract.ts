@@ -69,6 +69,7 @@ export type MarketHistoryCoverage = {
 
 export type MarketHistoryManifest = {
   schemaVersion: 1;
+  scopeVersion?: "sse-szse-v1" | "sse-szse-bse-v1";
   sha256: string | null;
   archiveFrom: string | null;
   archiveTo: string | null;
@@ -82,6 +83,7 @@ export type ReadModelManifest = {
   releaseId: string;
   asOf: string;
   observedAt?: string | null;
+  producerBuildSha?: string;
   sourceDates?: Record<string, string | null>;
   marketHistory?: MarketHistoryManifest;
   pressureSchemaVersion?: number;
@@ -138,6 +140,7 @@ function isMarketHistoryManifest(value: unknown): value is MarketHistoryManifest
   return Boolean(
     isRecord(value) &&
       value.schemaVersion === 1 &&
+      (value.scopeVersion === undefined || value.scopeVersion === "sse-szse-v1" || value.scopeVersion === "sse-szse-bse-v1") &&
       (value.sha256 === null || (typeof value.sha256 === "string" && SHA256.test(value.sha256))) &&
       (value.archiveFrom === null || (typeof value.archiveFrom === "string" && ISO_DATE.test(value.archiveFrom))) &&
       (value.archiveTo === null || (typeof value.archiveTo === "string" && ISO_DATE.test(value.archiveTo))) &&
@@ -162,6 +165,8 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
     typeof value.asOf !== "string" ||
     !ISO_DATE.test(value.asOf) ||
     (value.observedAt !== undefined && value.observedAt !== null && !isIsoInstant(value.observedAt)) ||
+    (value.producerBuildSha !== undefined &&
+      (typeof value.producerBuildSha !== "string" || !/^[0-9a-f]{7,64}$/.test(value.producerBuildSha))) ||
     (value.sourceDates !== undefined && !isSourceDates(value.sourceDates)) ||
     (value.marketHistory !== undefined && !isMarketHistoryManifest(value.marketHistory)) ||
     (value.manifestSha256 !== undefined &&

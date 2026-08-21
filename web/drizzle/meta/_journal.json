@@ -57,6 +57,13 @@
       "when": 1787040000000,
       "tag": "0007_market_history_bse",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787278196766,
+      "tag": "0008_source_readiness",
+      "breakpoints": true
     }
   ]
 }
