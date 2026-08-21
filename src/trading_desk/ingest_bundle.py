@@ -59,15 +59,30 @@ def _stable_ingest_run_id(
     """
     basis = {
         "asOf": str(snapshot.get("asOf", "")),
+        # Raw exchange responses can contain request timestamps, pagination
+        # cursors, or other transport metadata that changes on a retry even
+        # when the normalized ETF business rows are byte-for-byte identical.
+        # Use the canonical normalized digest as the publication identity so
+        # Cloudflare and GitHub failover runs converge on one ingest run.  The
+        # raw SHA remains in the archive for lineage and correction detection.
         "artifacts": sorted(
             [
                 {
-                    "releaseId": str(artifact.get("releaseId", "")),
-                    "sha256": str(artifact.get("sha256", "")),
+                    "sourceId": str(artifact.get("sourceId", "")),
+                    "market": str(artifact.get("market", "")),
+                    "tradeDate": str(artifact.get("tradeDate", "")),
+                    "canonicalSha256": str(
+                        artifact.get("canonicalSha256") or artifact.get("sha256", "")
+                    ),
                 }
                 for artifact in artifacts
             ],
-            key=lambda item: (item["releaseId"], item["sha256"]),
+            key=lambda item: (
+                item["sourceId"],
+                item["market"],
+                item["tradeDate"],
+                item["canonicalSha256"],
+            ),
         ),
         "readModelReleaseId": str((read_manifest or {}).get("releaseId", "")),
         "readModels": sorted(
@@ -145,6 +160,21 @@ def _etf_artifact(
         )
 
     extension = raw_path.suffix.lower().lstrip(".")
+    canonical_payload = {
+        "sourceId": source_id,
+        "market": "SSE" if source_id == "sse" else "SZSE",
+        "tradeDate": requested_date,
+        "dateBasis": str(artifact.get("source", {}).get("date_semantics", "")),
+        "rows": sorted(rows, key=lambda item: item["code"]),
+    }
+    canonical_sha256 = hashlib.sha256(
+        json.dumps(
+            canonical_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "releaseId": f"etf:{source_id}:{requested_date}:{digest[:16]}",
         "sourceId": source_id,
@@ -154,6 +184,7 @@ def _etf_artifact(
         "sourceUrl": str(source.get("url", "")),
         "dateBasis": str(source.get("date_semantics", "")),
         "sha256": digest,
+        "canonicalSha256": canonical_sha256,
         "contentType": str(artifact.get("content_type", "application/octet-stream")),
         "extension": extension,
         "rawContentBase64": base64.b64encode(content).decode("ascii"),

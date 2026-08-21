@@ -185,9 +185,21 @@ def build_source_readiness(
     source_rows: list[dict[str, Any]] = []
     for dataset, definition in SOURCE_DEFINITIONS.items():
         required = bool(definition["required"])
+        previous_row = previous_sources.get(dataset) or {}
+        preserve_pcf = bool(
+            dataset == "sse_etf_pcf"
+            and manifest.get("pcf_capture_status") == "skipped"
+            and previous_row.get("status") == "ready"
+            and target_date in (previous_row.get("observedDates") or [])
+        )
         error = _source_error(quality, dataset)
         missing = _missing_target(quality, dataset, target_date)
-        if error:
+        if preserve_pcf:
+            error = None
+            missing = False
+            status = "ready"
+            reason = "official_source_target_date_observed_previous_window"
+        elif error:
             status = "error"
             reason = error
         elif missing:
@@ -197,7 +209,6 @@ def build_source_readiness(
             status = "ready"
             reason = "official_source_target_date_observed"
 
-        previous_row = previous_sources.get(dataset) or {}
         same_run = previous_row.get("runId") == manifest.get("run_id")
         previous_attempt = int(previous_row.get("attempt") or 0)
         attempt = previous_attempt if same_run else previous_attempt + 1
@@ -206,6 +217,14 @@ def build_source_readiness(
         next_check = None
         if status == "pending":
             next_check = _iso_utc(observed_at + timedelta(minutes=max(5, recheck_minutes)))
+        observed_dates = _observed_dates(quality, dataset)
+        if preserve_pcf:
+            observed_dates = [
+                date for date in previous_row.get("observedDates", []) if _iso_date(date)
+            ]
+        watermark = _watermark(manifest, quality, dataset)
+        if preserve_pcf and isinstance(previous_row.get("watermark"), dict):
+            watermark = dict(previous_row["watermark"])
         source_rows.append(
             {
                 "sourceId": dataset,
@@ -217,13 +236,14 @@ def build_source_readiness(
                 "nextCheckAt": next_check,
                 "deadlineAt": _iso_utc(deadline),
                 "deadlineExceeded": observed_at > deadline,
-                "observedDates": _observed_dates(quality, dataset)[-3:],
-                "watermark": _watermark(manifest, quality, dataset),
+                "observedDates": observed_dates[-3:],
+                "watermark": watermark,
                 "reason": reason,
                 "runId": str(manifest.get("run_id") or ""),
                 "evidence": {
                     "qualityPath": str(manifest.get("quality_summary_path") or ""),
                     "combinedPath": (manifest.get("combined_paths") or {}).get(dataset),
+                    "captureStatus": manifest.get("pcf_capture_status") if dataset == "sse_etf_pcf" else None,
                 },
             }
         )

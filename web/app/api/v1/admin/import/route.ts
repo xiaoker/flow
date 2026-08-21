@@ -39,6 +39,7 @@ type ArchiveArtifact = {
   sourceUrl: string;
   dateBasis: string;
   sha256: string;
+  canonicalSha256?: string;
   contentType: string;
   extension: string;
   rawContentBase64: string;
@@ -145,6 +146,8 @@ function isArchiveArtifact(value: unknown): value is ArchiveArtifact {
       value.dateBasis.length > 0 &&
       typeof value.sha256 === "string" &&
       SHA256.test(value.sha256) &&
+      (value.canonicalSha256 === undefined ||
+        (typeof value.canonicalSha256 === "string" && SHA256.test(value.canonicalSha256))) &&
       value.releaseId ===
         `etf:${sourceId}:${value.tradeDate}:${value.sha256.slice(0, 16)}` &&
       typeof value.contentType === "string" &&

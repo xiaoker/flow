@@ -32,6 +32,12 @@ from .storage import new_run_id, now_iso, write_json, write_normalized_csv
 # cap explicitly; the daily default intentionally remains small and records
 # every deferred code in the PCF artifact warning.
 DEFAULT_PCF_MAX_CODES = 16
+# PCF is a date-aligned enrichment and the endpoint may expose either the
+# current basket or the next publication's PRE_TRADING_DAY.  Every release
+# window must therefore make one bounded attempt; skipping the evening window
+# made the first (and often only) daily run publish an unusable stock-flow
+# state with ``aligned_pcf_missing``.
+PCF_COLLECTION_WINDOWS = frozenset({"auto", "evening", "morning", "reconcile"})
 
 
 def _relative(path: str | Path, workspace_root: Path) -> str:
@@ -192,7 +198,9 @@ def collect_phase0(
     # non-zero ETF flow.  The compressed response artifact is kept even when
     # the endpoint is stale or empty, but a stale 200 response can never block
     # publication or be used as a prior-day fallback.
-    if collection_window in {"auto", "morning", "reconcile"}:
+    pcf_capture_status = "not_requested"
+    if collection_window in PCF_COLLECTION_WINDOWS and pcf_max_codes > 0:
+        pcf_capture_status = "attempted"
         sse_share_parts = [part for part in frames.get("sse_etf", []) if not part.empty]
         changed_codes: list[str] = []
         if sse_share_parts:
@@ -233,6 +241,12 @@ def collect_phase0(
             # must never block the core dashboard publication.
             frames["sse_etf_pcf"].append(frame)
             artifacts.append(artifact)
+    elif collection_window in PCF_COLLECTION_WINDOWS:
+        # The workflow can suppress a duplicate PCF request after a prior
+        # window has already confirmed the same date.  The readiness ledger
+        # carries that prior confirmation forward; this run must not turn a
+        # deliberately skipped optional request into a false pending state.
+        pcf_capture_status = "skipped"
 
     # The SSE ETF list publishes the previous trading day's unit NAV and may
     # advance its TRADING_DAY before the next collection window.  Keep a
@@ -477,6 +491,7 @@ def collect_phase0(
         "run_id": run_id,
         "collection_window": collection_window,
         "pcf_max_codes": pcf_max_codes,
+        "pcf_capture_status": pcf_capture_status,
         "started_at": started_at,
         "finished_at": now_iso(),
         "requested_dates": dates,

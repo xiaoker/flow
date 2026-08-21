@@ -103,6 +103,7 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
     assert bundle["archive"]["retentionDays"] == RETENTION_DAYS
     artifact = bundle["archive"]["artifacts"][0]
     assert artifact["releaseId"] == f"etf:szse:2026-07-15:{digest[:16]}"
+    assert len(artifact["canonicalSha256"]) == 64
     assert artifact["metadata"]["request_params"]["page_date"] == "2026-07-16"
     assert artifact["rows"] == [
         {
@@ -134,3 +135,75 @@ def test_build_ingest_bundle_verifies_and_serializes_etf_evidence(tmp_path: Path
         read_model_dir=read_model_dir,
     )
     assert repeated["archive"]["runId"] == first_run_id
+
+
+def test_ingest_run_id_ignores_transport_only_raw_response_changes(tmp_path: Path) -> None:
+    raw_path = tmp_path / "data/raw/sse/etf_scale/2026-07-15/run.json"
+    metadata_path = raw_path.with_name("run.metadata.json")
+    normalized_path = tmp_path / "data/normalized/sse_etf_scale/2026-07-15/run.csv"
+    raw_path.parent.mkdir(parents=True)
+    normalized_path.parent.mkdir(parents=True)
+    normalized = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-15",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "instrument_name": "沪深300ETF",
+                "investment_type": "股票ETF",
+                "shares": 100,
+                "date_basis": "source_published",
+            }
+        ]
+    )
+    normalized.to_csv(normalized_path, index=False)
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps({"asOf": "2026-07-15"}), encoding="utf-8")
+
+    def write_manifest(raw: bytes, run_id: str) -> Path:
+        raw_path.write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+        manifest_path = tmp_path / f"manifest-{run_id}.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "started_at": "2026-07-16T09:15:00+08:00",
+                    "finished_at": "2026-07-16T09:16:00+08:00",
+                    "artifacts": [
+                        {
+                            "source": {
+                                "source_id": "sse",
+                                "dataset": "etf_scale",
+                                "url": "https://query.sse.com.cn/commonQuery.do",
+                                "date_semantics": "source_published",
+                            },
+                            "requested_date": "2026-07-15",
+                            "observed_at": "2026-07-16T09:15:20+08:00",
+                            "content_type": "application/json",
+                            "raw_path": str(raw_path.relative_to(tmp_path)),
+                            "metadata_path": str(metadata_path.relative_to(tmp_path)),
+                            "normalized_path": str(normalized_path.relative_to(tmp_path)),
+                            "sha256": digest,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manifest_path
+
+    first = build_ingest_bundle(
+        snapshot_path=snapshot_path,
+        manifest_path=write_manifest(b'{"requestId":"one"}', "run-one"),
+        workspace_root=tmp_path,
+    )
+    second = build_ingest_bundle(
+        snapshot_path=snapshot_path,
+        manifest_path=write_manifest(b'{"requestId":"two"}', "run-two"),
+        workspace_root=tmp_path,
+    )
+
+    assert first["archive"]["artifacts"][0]["sha256"] != second["archive"]["artifacts"][0]["sha256"]
+    assert first["archive"]["runId"] == second["archive"]["runId"]

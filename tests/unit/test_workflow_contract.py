@@ -77,6 +77,8 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "MAX_ATTEMPTS=3" in workflow
     assert "PCF_MAX_CODES=16" in workflow
     assert "--pcf-max-codes \"$PCF_MAX_CODES\"" in workflow
+    assert "previous-pcf-readiness.json" in workflow
+    assert "sse_etf_pcf" in workflow
     assert "SOURCE_READINESS_ATTEMPTS=18" not in workflow
     assert "sleep 120" not in workflow
     assert "id: collection" in workflow

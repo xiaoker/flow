@@ -84,6 +84,30 @@ def test_repeated_run_increments_attempt_but_same_run_is_idempotent() -> None:
     assert rows["sse_etf"]["attempt"] == 4
 
 
+def test_skipped_duplicate_pcf_window_preserves_prior_ready_state() -> None:
+    manifest, quality = _inputs()
+    manifest["pcf_capture_status"] = "skipped"
+    previous = {
+        "sources": [
+            {
+                "sourceId": "sse_etf_pcf",
+                "status": "ready",
+                "attempt": 1,
+                "runId": "previous-run",
+                "observedDates": ["2026-08-20"],
+                "watermark": {"observedTradeDate": "2026-08-20"},
+            }
+        ]
+    }
+
+    ledger = build_source_readiness(manifest, quality, previous=previous)
+    row = next(item for item in ledger["sources"] if item["sourceId"] == "sse_etf_pcf")
+
+    assert row["status"] == "ready"
+    assert row["observedDates"] == ["2026-08-20"]
+    assert row["reason"] == "official_source_target_date_observed_previous_window"
+
+
 def test_all_required_sources_ready_even_when_optional_enrichment_is_missing() -> None:
     manifest, quality = _inputs()
     ledger = build_source_readiness(manifest, quality)

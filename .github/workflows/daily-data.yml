@@ -114,6 +114,31 @@ jobs:
           # backfill/reconcile workflow and are never silently treated as
           # complete by this release.
           PCF_MAX_CODES=16
+          # Once a prior window has confirmed a date-aligned PCF, do not
+          # hammer the SSE endpoint again in the duplicate failover window.
+          # A 404/pending ledger deliberately leaves the bounded capture
+          # enabled so the next window can repair the missing enrichment.
+          PREVIOUS_READINESS="previous-pcf-readiness.json"
+          if [[ -n "$FLOW_INGEST_API_KEY" && -n "$FLOW_CF_ACCESS_CLIENT_ID" && -n "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            curl --silent --show-error --fail-with-body --retry 1 \
+              --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              "$FLOW_READINESS_URL?date=${{ steps.dates.outputs.latest }}" \
+              --output "$PREVIOUS_READINESS" || true
+            if jq -e --arg target "${{ steps.dates.outputs.latest }}" '
+              (.targetDate == $target) and
+              any(.sources[]?;
+                .sourceId == "sse_etf_pcf" and
+                .status == "ready" and
+                ((.observedDates // []) | index($target) != null)
+              )
+            ' "$PREVIOUS_READINESS" >/dev/null 2>&1; then
+              PCF_MAX_CODES=0
+              echo "Date-aligned PCF is already ready for ${{ steps.dates.outputs.latest }}; skipping duplicate PCF requests in this window."
+            fi
+          fi
+          echo "PCF_MAX_CODES=$PCF_MAX_CODES"
           attempt=1
           echo "pending=false" >> "$GITHUB_OUTPUT"
 
