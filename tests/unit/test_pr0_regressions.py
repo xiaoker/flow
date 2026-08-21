@@ -70,6 +70,7 @@ def _complete_inputs(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
         "szse_etf": _write(pd.DataFrame(szse_etf), tmp_path / "szse_etf.csv"),
         "sse_margin": _write(pd.DataFrame(margin), tmp_path / "sse_margin.csv"),
         "szse_margin": _write(pd.DataFrame(margin), tmp_path / "szse_margin.csv"),
+        "bse_margin": _write(pd.DataFrame(margin), tmp_path / "bse_margin.csv"),
         "stock_connect_summary": _write(pd.DataFrame(connect), tmp_path / "connect.csv"),
     }
     manifest_path = tmp_path / "manifest.json"

@@ -115,6 +115,34 @@ export const marketHistoryDaily = sqliteTable("market_history_daily", {
   index("market_history_daily_date_idx").on(table.tradeDate),
 ]);
 
+/**
+ * Small control-plane ledger for source publication watermarks.  It is kept
+ * separate from raw/read-model JSON so a later collection window can decide
+ * whether it is waiting on an exchange or handling a real parser failure.
+ */
+export const sourceReadiness = sqliteTable("source_readiness", {
+  targetDate: text("target_date").notNull(),
+  sourceId: text("source_id").notNull(),
+  status: text("status").notNull(),
+  overallStatus: text("overall_status").notNull(),
+  required: integer("required", { mode: "boolean" }).notNull().default(true),
+  observedAt: text("observed_at").notNull(),
+  nextCheckAt: text("next_check_at"),
+  deadlineAt: text("deadline_at").notNull(),
+  deadlineExceeded: integer("deadline_exceeded", { mode: "boolean" }).notNull().default(false),
+  attempt: integer("attempt").notNull().default(1),
+  observedDatesJson: text("observed_dates_json").notNull(),
+  watermarkJson: text("watermark_json").notNull(),
+  reason: text("reason").notNull(),
+  runId: text("run_id").notNull(),
+  evidenceJson: text("evidence_json").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.targetDate, table.sourceId] }),
+  index("source_readiness_status_idx").on(table.status, table.nextCheckAt),
+  index("source_readiness_target_idx").on(table.targetDate, table.updatedAt),
+]);
+
 export const etfDaily = sqliteTable("etf_daily", {
   releaseId: text("release_id").notNull(),
   tradeDate: text("trade_date").notNull(),

@@ -17,7 +17,9 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert '- cron: "55 0 * * 1-5"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "cancel-in-progress: false" in workflow
-    assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "45 0 * * mon-fri"]' in wrangler
+    assert '"30 10 * * mon-fri"' in wrangler
+    assert '"45 23 * * sun-thu"' in wrangler
+    assert '"45 0 * * mon-fri"' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
@@ -100,8 +102,8 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert workflow.index("Verify deployed read-model capabilities before building release") < workflow.index(
         "Build immutable read models offline"
     )
-    assert workflow.index("Publish immutable read models") < workflow.index(
-        "Verify published read-model release"
+    assert workflow.index("Stage immutable read-model candidate") < workflow.index(
+        "Verify staged read-model candidate"
     )
     assert "build_stock_pressure_state.py" in workflow
     assert "--daily-partitions stock-flow-history.json" in workflow
@@ -118,7 +120,8 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "verify_published_release.py" in workflow
     assert "--repeat 100" not in workflow
     assert "--result-output read-model-publish.json" in workflow
-    assert "'.status == \"activated\"'" in workflow
+    assert "'.status == \"staged_candidate\"'" in workflow
+    assert "Activate canary-verified read-model candidate" in workflow
     assert '"Snapshot is pending source confirmation' in workflow
     assert "Fail loudly on unresolved source errors" in workflow
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
@@ -146,8 +149,8 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
     assert 'steps.stock-flow.outputs.ready' in workflow
     readiness_index = workflow.index("Check ETF stock-flow read-model readiness")
     build_index = workflow.index("Build immutable read models offline")
-    publish_index = workflow.index("Publish immutable read models")
-    assert readiness_index < build_index < publish_index
+    stage_index = workflow.index("Stage immutable read-model candidate")
+    assert readiness_index < build_index < stage_index
 
 
 def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> None:

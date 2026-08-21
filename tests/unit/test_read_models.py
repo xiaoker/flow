@@ -168,6 +168,9 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
     assert manifest_a["sourceDates"]["sseEtfAsOf"] is None
     assert manifest_a["pressureSchemaVersion"] == 2
     assert manifest_a["stockShardCount"] == 8
+    assert manifest_a["coverage"]["etf"]["tradingDays"] == 4
+    assert manifest_a["coverage"]["pressure"]["availableDateCount"] == 1
+    assert manifest_a["coverage"]["stockSearch"]["count"] == 1
     assert manifest_a["requiredArtifacts"] == list(manifest_a["artifacts"])
     assert set(payloads_a) == {"bootstrap", "overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure", "stock_search", *{f"stock_{index}" for index in range(8)}}
     assert "etfTerminal" not in payloads_a["overview"]["data"]
@@ -181,6 +184,17 @@ def test_read_model_manifest_is_deterministic_and_split() -> None:
     assert len(payloads_a["bootstrap"]["etfSearch"]) == 2
     assert {item["code"] for item in payloads_a["national"]["data"]["etfTerminal"]["instruments"]} <= {"510300", "510310", "510330", "510500", "159915", "159919", "512100", "510050", "588080", "510180", "159845", "512500"}
     assert manifest_a["releaseId"].startswith("release:2026-08-06:")
+
+
+def test_read_model_manifest_records_data_producer_build_sha() -> None:
+    _, manifest = build_read_models(
+        _snapshot(),
+        require_materialized=True,
+        stock_catalog=_stock_catalog(),
+        producer_build_sha="0123456789abcdef0123456789abcdef01234567",
+    )
+
+    assert manifest["producerBuildSha"] == "0123456789abcdef0123456789abcdef01234567"
 
 
 def test_market_history_is_materialized_and_hashed() -> None:
@@ -198,6 +212,7 @@ def test_market_history_is_materialized_and_hashed() -> None:
     assert len(payloads["connect"]["data"]["connectSeries"]) == 61
     assert len(payloads["overview"]["data"]["marginSeries"]) == 61
     assert manifest["marketHistory"]["archiveDates"] == 61
+    assert manifest["marketHistory"]["scopeVersion"] == "sse-szse-bse-v1"
     assert manifest["marketHistory"]["margin"]["points"] == 61
     assert manifest["marketHistory"]["connect"]["points"] == 61
     assert len(manifest["marketHistory"]["sha256"]) == 64
@@ -246,6 +261,46 @@ def test_market_history_excludes_future_rows_and_rejects_shorter_previous_releas
             stock_catalog=catalog,
             market_history=shorter,
             previous_manifest=manifest,
+        )
+
+
+def test_read_model_rejects_shorter_pressure_history() -> None:
+    snapshot = _snapshot()
+    catalog = _stock_catalog()
+    catalog["availableDates"] = ["2026-08-05", "2026-08-06"]
+    catalog["items"][0]["history"] = [
+        {
+            "date": "2026-08-05",
+            "netShares": 1.0,
+            "inflowShares": 1.0,
+            "outflowShares": 0.0,
+            "etfCount": 1,
+        },
+        {
+            "date": "2026-08-06",
+            "netShares": 2.0,
+            "inflowShares": 2.0,
+            "outflowShares": 0.0,
+            "etfCount": 1,
+        },
+    ]
+    _, previous = build_read_models(
+        snapshot,
+        require_materialized=True,
+        stock_catalog=catalog,
+    )
+    shorter = dict(previous)
+    shorter["coverage"] = {
+        **previous["coverage"],
+        "pressure": {**previous["coverage"]["pressure"], "availableDateCount": 2},
+    }
+    catalog["availableDates"] = ["2026-08-06"]
+    with pytest.raises(ReadModelError, match="read_model_coverage_pressure_availableDateCount_regressed"):
+        build_read_models(
+            snapshot,
+            require_materialized=True,
+            stock_catalog=catalog,
+            previous_manifest=shorter,
         )
 
 

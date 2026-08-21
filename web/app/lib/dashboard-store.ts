@@ -14,6 +14,8 @@ type RuntimeEnv = {
   DB?: D1Database;
   RAW_BUCKET?: R2Bucket;
   INGEST_API_KEY?: string;
+  FLOW_BUILD_SHA?: string;
+  FLOW_DEPLOYED_AT?: string;
 };
 
 const DASHBOARD_CACHE_TTL_MS = 30_000;
@@ -91,7 +93,7 @@ async function loadMarketHistoryRows(
         `SELECT
            trade_date, margin_balance, margin_change, financing_buy,
            lending_balance, lending_sell_volume, total_balance, sse_balance,
-           szse_balance, southbound_net, southbound_turnover,
+           szse_balance, bse_balance, southbound_net, southbound_turnover,
            southbound_sse_net, southbound_szse_net, northbound_turnover,
            northbound_etf_turnover, northbound_trade_count, margin_available,
            connect_available, source_snapshot_sha256, observed_at,
