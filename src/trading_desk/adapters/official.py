@@ -873,10 +873,11 @@ class OfficialMarketAdapters:
                     {
                         "code": code,
                         "status": response.status_code,
-                        "accepted": True,
+                        "accepted": not parse_warnings,
                         "raw_sha256": raw_artifact.sha256,
                         "component_count": len(rows),
                         "header": header,
+                        "parse_warnings": parse_warnings,
                     }
                 )
                 raw_entries.append(

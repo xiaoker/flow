@@ -13,5 +13,10 @@ data/normalized/
 
 # Keep only the reproducible latest summaries in Git; timestamped runs stay local.
 reports/phase0/20*/
+reports/pcf-shadow/
 dashboard-snapshot.json
 .gstack/
+
+# PR4 shadow raw files are ephemeral runner evidence; only the JSON parity
+# report is uploaded as a short-lived Actions artifact.
+.shadow/

@@ -159,6 +159,24 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
 
 
+def test_pcf_shadow_parity_is_explicitly_opt_in_and_never_published() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    script = (REPOSITORY_ROOT / "scripts/run_pcf_shadow_parity.py").read_text(encoding="utf-8")
+    summary = (REPOSITORY_ROOT / "scripts/summarize_pcf_shadow.py").read_text(encoding="utf-8")
+    parity = (REPOSITORY_ROOT / "src/trading_desk/pcf_parity.py").read_text(encoding="utf-8")
+
+    assert "run_pcf_shadow:" in workflow
+    assert "default: false" in workflow
+    assert "inputs.run_pcf_shadow == true" in workflow
+    assert "Run opt-in PCF shadow parity (never published)" in workflow
+    assert "reports/pcf-shadow/*.json" in workflow
+    assert "--data-root \".shadow/pcf-v2/${DATES[2]}\"" in workflow
+    assert "productionPublishCalls" in parity
+    assert "/api/v1/admin/import" not in script
+    assert "--required-days" in summary
+    assert "default=5" in summary
+
+
 def test_production_canary_isolated_from_daily_collection() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/production-canary.yml"
