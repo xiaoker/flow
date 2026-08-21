@@ -9,6 +9,7 @@ interface Env {
   GITHUB_ACTIONS_TOKEN: string;
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
+  PCF_CAPTURE_V2_READ_ENABLED?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

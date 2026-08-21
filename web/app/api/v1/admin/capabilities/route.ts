@@ -46,8 +46,9 @@ export async function GET(request: Request) {
     ? [
         "requiredArtifacts",
         "sameDateObservedAtOrder",
-        "previousCompatibleRelease",
-        "radarFlowView",
+      "previousCompatibleRelease",
+      "radarFlowView",
+      "releaseSlots",
         ...(sourceReadinessReady ? ["sourceReadinessLedger"] : []),
         ...(bseMarginColumnReady ? ["bseMarginSeparateScope"] : []),
       ]
@@ -60,6 +61,7 @@ export async function GET(request: Request) {
       schemaVersions: observedAtColumnsReady ? [2, 3] : [2],
       pressureSchemaVersions: [2],
       stockShardCounts: [8],
+      readModelSlots: ["dashboard", "etf_penetration"],
       maxArtifacts: 20,
       maxArtifactBytes: 5_000_000,
       features,

@@ -7,6 +7,7 @@ import {
   MAX_READ_MODEL_BYTES,
   READ_MODEL_NAME,
   SHA256,
+  type ReadModelSlot,
   type ReadModelManifest,
 } from "@/app/lib/read-model-contract";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
@@ -562,6 +563,10 @@ export async function activateReadModels(
   // so concurrent imports cannot regress the pointer between a preflight read
   // and write.
   const observedAt = manifest.observedAt ?? null;
+  const slot: ReadModelSlot = manifest.slot === "etf_penetration" ? "etf_penetration" : "dashboard";
+  // The slot is an allowlisted manifest field. Keep its predicate in every
+  // release-manifest update so activating one slot never supersedes another.
+  const slotPredicate = `(json_extract(manifest_json, '$.slot') = '${slot}' OR ('${slot}' = 'dashboard' AND json_extract(manifest_json, '$.slot') IS NULL))`;
   let observedAtColumnsReady = false;
   try {
     await db.prepare("SELECT observed_at FROM release_manifest LIMIT 1").first();
@@ -603,11 +608,12 @@ export async function activateReadModels(
            SET status = 'SUPERSEDED'
            WHERE status = 'ACTIVE'
              AND release_id <> ?
+             AND ${slotPredicate}
              AND (
-               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = '${slot}')
                OR EXISTS (
                  SELECT 1 FROM active_release
-                 WHERE slot = 'dashboard' AND as_of <= ?
+                 WHERE slot = '${slot}' AND as_of <= ?
                )
              )`,
         )
@@ -617,11 +623,12 @@ export async function activateReadModels(
           `UPDATE release_manifest
            SET status = 'ACTIVE'
            WHERE release_id = ?
+             AND ${slotPredicate}
              AND (
-               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = '${slot}')
                OR EXISTS (
                  SELECT 1 FROM active_release
-                 WHERE slot = 'dashboard' AND as_of <= ?
+                 WHERE slot = '${slot}' AND as_of <= ?
                )
              )`,
         )
@@ -629,7 +636,7 @@ export async function activateReadModels(
       db
         .prepare(
           `INSERT INTO active_release (slot, release_id, as_of, manifest_sha256, activated_at)
-           VALUES ('dashboard', ?, ?, ?, ?)
+           VALUES ('${slot}', ?, ?, ?, ?)
            ON CONFLICT(slot) DO UPDATE SET
              release_id = excluded.release_id,
              as_of = excluded.as_of,
@@ -682,11 +689,12 @@ export async function activateReadModels(
            SET status = 'SUPERSEDED'
            WHERE status = 'ACTIVE'
              AND release_id <> ?
+             AND ${slotPredicate}
              AND (
-               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = '${slot}')
                OR EXISTS (
                  SELECT 1 FROM active_release
-                 WHERE slot = 'dashboard' AND ${newerOrSame}
+                 WHERE slot = '${slot}' AND ${newerOrSame}
                )
              )`,
         )
@@ -696,11 +704,12 @@ export async function activateReadModels(
           `UPDATE release_manifest
            SET status = 'ACTIVE'
            WHERE release_id = ?
+             AND ${slotPredicate}
              AND (
-               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = 'dashboard')
+               NOT EXISTS (SELECT 1 FROM active_release WHERE slot = '${slot}')
                OR EXISTS (
                  SELECT 1 FROM active_release
-                 WHERE slot = 'dashboard' AND ${newerOrSame}
+                 WHERE slot = '${slot}' AND ${newerOrSame}
                )
              )`,
         )
@@ -709,7 +718,7 @@ export async function activateReadModels(
         .prepare(
           `INSERT INTO active_release (
              slot, release_id, as_of, manifest_sha256, observed_at, activated_at
-           ) VALUES ('dashboard', ?, ?, ?, ?, ?)
+           ) VALUES ('${slot}', ?, ?, ?, ?, ?)
            ON CONFLICT(slot) DO UPDATE SET
              release_id = excluded.release_id,
              as_of = excluded.as_of,
@@ -726,7 +735,7 @@ export async function activateReadModels(
     .prepare(
       `SELECT release_id
        FROM active_release
-       WHERE slot = 'dashboard'
+       WHERE slot = '${slot}'
        LIMIT 1`,
     )
     .first<{ release_id: string }>();

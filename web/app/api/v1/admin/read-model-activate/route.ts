@@ -75,6 +75,10 @@ export async function POST(request: Request) {
   const value = body as Record<string, unknown>;
   const releaseId = typeof value.releaseId === "string" ? value.releaseId : "";
   const expectedAsOf = typeof value.asOf === "string" ? value.asOf : null;
+  const expectedSlot = value.slot === undefined ? null : value.slot;
+  if (expectedSlot !== null && expectedSlot !== "dashboard" && expectedSlot !== "etf_penetration") {
+    return NextResponse.json({ error: "invalid_release_slot" }, { status: 400 });
+  }
   if (!RELEASE_ID.test(releaseId)) {
     return NextResponse.json({ error: "invalid_release_id" }, { status: 400 });
   }
@@ -101,6 +105,10 @@ export async function POST(request: Request) {
     if (parsed.releaseId !== row.release_id || parsed.asOf !== row.as_of) {
       return NextResponse.json({ error: "staged_manifest_identity_mismatch" }, { status: 503 });
     }
+    const parsedSlot = parsed.slot ?? "dashboard";
+    if (expectedSlot !== null && expectedSlot !== parsedSlot) {
+      return NextResponse.json({ error: "release_slot_mismatch" }, { status: 422 });
+    }
     if (!(await candidateArtifactsAreIntact(runtime.RAW_BUCKET, parsed))) {
       return NextResponse.json({ error: "staged_artifact_unavailable" }, { status: 409 });
     }
@@ -117,7 +125,7 @@ export async function POST(request: Request) {
       parsed,
       activatedAt,
     );
-    return NextResponse.json({ status, releaseId: row.release_id, asOf: row.as_of });
+    return NextResponse.json({ status, releaseId: row.release_id, asOf: row.as_of, slot: parsed.slot ?? "dashboard" });
   } catch (error) {
     console.error("read model candidate activation failed", error);
     return NextResponse.json(
