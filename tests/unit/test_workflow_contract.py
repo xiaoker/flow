@@ -46,6 +46,38 @@ def test_worker_deploy_publishes_build_identity() -> None:
     assert "FLOW_DEPLOYED_AT" in workflow
 
 
+def test_pcf_capture_control_plane_is_additive_and_worker_upload_is_streaming() -> None:
+    capture = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/route.ts").read_text(encoding="utf-8")
+    upload = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/object/route.ts").read_text(encoding="utf-8")
+    schema = (REPOSITORY_ROOT / "web/db/schema.ts").read_text(encoding="utf-8")
+
+    assert "pcf_capture_job" in schema
+    assert "pcf_capture_item" in schema
+    assert "history_artifact_pointer" in schema
+    assert "BLOCKED_UNIVERSE_ANOMALY" in capture
+    assert "ITEM_BATCH_SIZE = 25" in capture
+    assert "request.body" in upload
+    assert "arrayBuffer()" not in upload
+    assert "text()" not in upload
+    assert "RAW_BUCKET.put(objectKey, request.body" in upload
+    assert "sha256: objectSha256" in upload
+    assert "!contentLengthHeader" in upload
+    assert "items: items.results" in capture
+    history = (REPOSITORY_ROOT / "web/app/api/v1/admin/history-artifact/route.ts").read_text(encoding="utf-8")
+    assert "history_artifact_pointer" in history
+    assert "pointerFor(runtime" in history
+    assert "R2_BUCKET.list" not in history
+    artifact = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/artifact/route.ts").read_text(encoding="utf-8")
+    finalize = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/finalize/route.ts").read_text(encoding="utf-8")
+    assert "request.body" in artifact
+    assert "pcf_artifact_not_verified" in finalize
+    assert "pcf_manifest_not_verified" in finalize
+    assert "history_artifact_pointer" in finalize
+    lease = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/lease/route.ts").read_text(encoding="utf-8")
+    assert "lease_expires_at" in lease
+    assert "pcf_capture_lease_unavailable" in lease
+
+
 def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
     workflow_text = "\n".join(
         path.read_text(encoding="utf-8")

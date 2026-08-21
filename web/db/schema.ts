@@ -142,6 +142,91 @@ export const sourceReadiness = sqliteTable("source_readiness", {
   index("source_readiness_target_idx").on(table.targetDate, table.updatedAt),
 ]);
 
+/**
+ * PCF v2 control plane. These tables are intentionally additive and are not
+ * read by the production release path until the later capability-cutover PR.
+ * The collector uses them as a durable, resumable ledger rather than keeping
+ * progress only inside a GitHub Actions process.
+ */
+export const pcfCaptureJob = sqliteTable("pcf_capture_job", {
+  jobId: text("job_id").primaryKey(),
+  targetDate: text("target_date").notNull(),
+  previousDate: text("previous_date").notNull(),
+  planSha256: text("plan_sha256").notNull(),
+  calculationVersion: text("calculation_version").notNull(),
+  status: text("status").notNull(),
+  expectedCount: integer("expected_count").notNull(),
+  requiredCount: integer("required_count").notNull(),
+  unchangedCount: integer("unchanged_count").notNull(),
+  newBaselineCount: integer("new_baseline_count").notNull(),
+  missingCurrentCount: integer("missing_current_count").notNull(),
+  capturedCount: integer("captured_count").notNull().default(0),
+  validCount: integer("valid_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  coveragePpm: integer("coverage_ppm").notNull().default(0),
+  leaseOwner: text("lease_owner"),
+  leaseExpiresAt: text("lease_expires_at"),
+  nextAttemptAt: text("next_attempt_at"),
+  canonicalManifestKey: text("canonical_manifest_key"),
+  canonicalManifestSha256: text("canonical_manifest_sha256"),
+  rawPackKey: text("raw_pack_key"),
+  rawPackSha256: text("raw_pack_sha256"),
+  errorJson: text("error_json").notNull().default("{}"),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("pcf_capture_job_plan_sha256_uq").on(table.planSha256),
+  index("pcf_capture_job_target_status_idx").on(table.targetDate, table.status),
+  index("pcf_capture_job_status_attempt_idx").on(table.status, table.nextAttemptAt),
+]);
+
+export const pcfCaptureItem = sqliteTable("pcf_capture_item", {
+  jobId: text("job_id").notNull(),
+  etfCode: text("etf_code").notNull(),
+  etfName: text("etf_name").notNull(),
+  currentShares: integer("current_shares"),
+  previousShares: integer("previous_shares"),
+  shareDelta: integer("share_delta"),
+  baselineStatus: text("baseline_status").notNull(),
+  state: text("state").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: text("next_attempt_at"),
+  httpStatus: integer("http_status"),
+  sourceTradingDay: text("source_trading_day"),
+  sourcePreviousDay: text("source_previous_day"),
+  rawObjectKey: text("raw_object_key"),
+  rawObjectSha256: text("raw_object_sha256"),
+  rawContentSha256: text("raw_content_sha256"),
+  rawBytes: integer("raw_bytes"),
+  componentCount: integer("component_count"),
+  normalizedSha256: text("normalized_sha256"),
+  failureReason: text("failure_reason"),
+  observedAt: text("observed_at"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.jobId, table.etfCode] }),
+  index("pcf_capture_item_state_attempt_idx").on(table.jobId, table.state, table.nextAttemptAt),
+]);
+
+export const historyArtifactPointer = sqliteTable("history_artifact_pointer", {
+  sourceId: text("source_id").notNull(),
+  dataset: text("dataset").notNull(),
+  tradeDate: text("trade_date").notNull(),
+  fileName: text("file_name").notNull(),
+  revisionId: text("revision_id").notNull(),
+  objectKey: text("object_key").notNull(),
+  sha256: text("sha256").notNull(),
+  contentEncoding: text("content_encoding"),
+  rowCount: integer("row_count").notNull(),
+  observedAt: text("observed_at").notNull(),
+  status: text("status").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.sourceId, table.dataset, table.tradeDate, table.fileName] }),
+  index("history_artifact_pointer_date_idx").on(table.dataset, table.tradeDate, table.status),
+]);
+
 export const etfDaily = sqliteTable("etf_daily", {
   releaseId: text("release_id").notNull(),
   tradeDate: text("trade_date").notNull(),

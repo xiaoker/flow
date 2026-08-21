@@ -64,6 +64,13 @@
       "when": 1787281354991,
       "tag": "0008_curved_marten_broadcloak",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1787319015396,
+      "tag": "0009_mixed_mariko_yashida",
+      "breakpoints": true
     }
   ]
 }
