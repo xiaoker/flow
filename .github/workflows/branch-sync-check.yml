@@ -1,0 +1,36 @@
+name: Branch freshness
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-base:
+    name: PR contains latest main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e # v6.0.1, Node 24
+        with:
+          fetch-depth: 0
+          # Check the contributor's head commit, not GitHub's synthetic merge
+          # ref (which would make every stale PR appear fresh).
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch current production baseline
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Reject stale branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            echo "This PR is behind origin/main. Sync the branch and push again before merging." >&2
+            echo "Suggested commands: git fetch origin main && git merge --no-edit origin/main && git push" >&2
+            exit 1
+          fi
+          echo "PR contains origin/main $(git rev-parse origin/main)."
