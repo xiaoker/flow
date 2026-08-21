@@ -336,7 +336,41 @@ def validate_margin(frame: pd.DataFrame, dataset: str) -> list[QualityFinding]:
     ]
     findings += check_required_columns(frame, dataset, required)
     findings += check_unique(frame, dataset, ["trade_date", "market"])
+    expected_market = {
+        "sse_margin": "SSE",
+        "szse_margin": "SZSE",
+        "bse_margin": "BSE",
+    }.get(dataset)
+    if expected_market and "market" in frame.columns:
+        invalid_market = int((frame["market"].astype(str) != expected_market).sum())
+        findings.append(
+            _finding(
+                "validity.margin_market_scope",
+                dataset,
+                invalid_market == 0,
+                message=f"{dataset} 仅包含 {expected_market} 市场" if invalid_market == 0 else f"{dataset} 混入其他市场",
+                evidence={"expected_market": expected_market, "invalid_rows": invalid_market},
+                remediation="按交易所独立留存和汇总，禁止把北交所数据写入深交所或上交所数据集。",
+            )
+        )
     findings += check_nonnegative(frame, dataset, required[2:])
+    for column in required[2:]:
+        if column not in frame.columns:
+            continue
+        numeric = pd.to_numeric(frame[column], errors="coerce")
+        invalid = int(
+            (numeric.isna() | numeric.isin([float("inf"), float("-inf")])).sum()
+        )
+        findings.append(
+            _finding(
+                f"validity.numeric.{column}",
+                dataset,
+                invalid == 0,
+                message=f"{column} 为有效数值" if invalid == 0 else f"{column} 含缺失或非数值",
+                evidence={"invalid_rows": invalid},
+                remediation="保留源站原始值并修正字段解析；禁止用 0 填补缺失的两融金额。",
+            )
+        )
     if not frame.empty and all(column in frame.columns for column in required[2:]):
         expected = frame["financing_balance_yuan"] + frame["securities_lending_balance_yuan"]
         delta = (frame["margin_total_balance_yuan"] - expected).abs()

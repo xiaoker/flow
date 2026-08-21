@@ -101,6 +101,7 @@ h1, h2, h3 { text-wrap: balance; }
 .refresh-status { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; padding: 5px 18px; border-bottom: 1px solid rgba(80,183,217,.18); background: rgba(80,183,217,.07); color: var(--cyan); font-size: 13px; }
 .refresh-status svg { animation: flow-spin 800ms linear infinite; }
 .refresh-status.is-error { border-bottom-color: rgba(241,174,66,.24); background: rgba(241,174,66,.08); color: var(--amber); }
+.refresh-status.is-pending { border-bottom-color: rgba(80,183,217,.24); background: rgba(80,183,217,.08); color: var(--cyan); }
 
 @keyframes flow-spin { to { transform: rotate(360deg); } }
 
@@ -492,7 +493,7 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .connect-top-list strong { overflow: hidden; font-family: var(--font-geist-mono), monospace; font-size: 21px; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
 .connect-top-list strong em { font-size: 12px; }
 .connect-top-list small { min-height: 16px; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
-.margin-kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 10px; }
+.margin-kpi-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; margin-top: 10px; }
 .margin-kpi-strip > div { display: flex; min-width: 0; flex-direction: column; gap: 5px; padding: 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(7,13,22,.38); }
 .margin-kpi-strip span { color: var(--muted); font-size: 13px; }
 .margin-kpi-strip strong { overflow: hidden; font-family: var(--font-geist-mono), monospace; font-size: var(--text-lg); text-overflow: ellipsis; white-space: nowrap; }

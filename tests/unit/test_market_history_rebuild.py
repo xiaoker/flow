@@ -78,8 +78,8 @@ def test_rebuild_extracts_only_the_snapshot_date(tmp_path: Path) -> None:
 
     assert values[0] == "2026-07-14"
     assert values[1] == 101.0
-    assert values[9] == 2.0
-    assert values[18] == "a" * 64
+    assert values[10] == 2.0
+    assert values[19] == "a" * 64
     assert margin_available is True
     assert connect_available is True
 
@@ -101,7 +101,7 @@ def test_rebuild_keeps_expired_hkex_day_missing(tmp_path: Path) -> None:
     assert margin_available is True
     assert connect_available is False
     assert values[9] is None
-    assert values[17] == 0
+    assert values[18] == 0
 
     sql_path = tmp_path / "history.sql"
     _write_sql([values, values], sql_path, batch_size=1)
@@ -122,6 +122,7 @@ def test_rebuild_can_write_deterministic_compact_history(tmp_path: Path) -> None
         6.0,
         7.0,
         8.0,
+        None,
         9.0,
         4.0,
         4.0,
@@ -139,6 +140,7 @@ def test_rebuild_can_write_deterministic_compact_history(tmp_path: Path) -> None
     payload = json.loads(output.read_text(encoding="utf-8"))
 
     assert payload["schemaVersion"] == 1
+    assert payload["scopeVersion"] == "sse-szse-bse-v1"
     assert payload["asOf"] == "2026-07-14"
     assert payload["rows"] == [_compact_row(values)]
     assert "created_at" not in payload["rows"][0]

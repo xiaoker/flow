@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from .adapters.official import parse_hkex_tab_data
+from .adapters.official import _parse_bse_jsonp, parse_hkex_tab_data
 from .dashboard import build_dashboard_snapshot
 from .etf_flow_state import materialize_dashboard_snapshot
 from .etf_facts import build_canonical_etf_daily_fact
@@ -28,6 +28,7 @@ from .storage import now_iso, write_json
 APPROVED_SOURCE_HOSTS = {
     "sse": {"query.sse.com.cn", "www.sse.com.cn"},
     "szse": {"fund.szse.cn", "www.szse.cn"},
+    "bse": {"www.bse.cn"},
     "hkex": {"www.hkex.com.hk"},
 }
 
@@ -36,6 +37,7 @@ COMBINED_DATASET_KEYS = {
     ("szse", "etf_scale"): ("szse_etf",),
     ("sse", "margin_market_daily"): ("sse_margin",),
     ("szse", "margin_market_daily"): ("szse_margin",),
+    ("bse", "margin_market_daily"): ("bse_margin",),
     ("hkex", "stock_connect_daily"): (
         "stock_connect_summary",
         "stock_connect_top",
@@ -47,6 +49,7 @@ EXPECTED_CONTEXT = {
     "szse_etf": ("szse", {"SZSE"}),
     "sse_margin": ("sse", {"SSE"}),
     "szse_margin": ("szse", {"SZSE"}),
+    "bse_margin": ("bse", {"BSE"}),
     "stock_connect_summary": ("hkex", {"SSE", "SZSE"}),
     "stock_connect_top": ("hkex", {"SSE", "SZSE"}),
 }
@@ -348,6 +351,38 @@ def _expected_szse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
     )
 
 
+def _expected_bse_margin(content: bytes, requested_date: str) -> pd.DataFrame:
+    rows, reported_date = _parse_bse_jsonp(content.decode("utf-8"))
+    if reported_date != requested_date or not rows:
+        return pd.DataFrame(
+            columns=[
+                "trade_date",
+                "market",
+                "financing_balance_yuan",
+                "financing_buy_yuan",
+                "securities_lending_balance_yuan",
+                "securities_lending_volume_shares",
+                "securities_lending_sell_volume_shares",
+                "margin_total_balance_yuan",
+            ]
+        )
+    row = rows[0]
+    return pd.DataFrame(
+        [
+            {
+                "trade_date": reported_date,
+                "market": "BSE",
+                "financing_balance_yuan": _number(row.get("rzye")),
+                "financing_buy_yuan": _number(row.get("rzmre")),
+                "securities_lending_balance_yuan": _number(row.get("rqye")),
+                "securities_lending_volume_shares": _number(row.get("rqyl")),
+                "securities_lending_sell_volume_shares": _number(row.get("rqmcl")),
+                "margin_total_balance_yuan": _number(row.get("rzrqye")),
+            }
+        ]
+    )
+
+
 def _expected_hkex(content: bytes, requested_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     text = content.decode("utf-8").lstrip("\ufeff").strip()
     summary_rows: list[dict[str, Any]] = []
@@ -501,6 +536,21 @@ def validate_raw_to_normalized_mapping(
                     keys=["trade_date", "market"],
                     text_columns=[],
                     numeric_columns=["financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan"],
+                )
+            elif (source_id, dataset) == ("bse", "margin_market_daily"):
+                result = _compare_frames(
+                    _expected_bse_margin(content, requested_date),
+                    _read_csv(normalized_paths[0]),
+                    keys=["trade_date", "market"],
+                    text_columns=[],
+                    numeric_columns=[
+                        "financing_balance_yuan",
+                        "financing_buy_yuan",
+                        "securities_lending_balance_yuan",
+                        "securities_lending_volume_shares",
+                        "securities_lending_sell_volume_shares",
+                        "margin_total_balance_yuan",
+                    ],
                 )
             elif (source_id, dataset) == ("hkex", "stock_connect_daily"):
                 expected_summary, expected_top = _expected_hkex(content, requested_date)
@@ -759,6 +809,7 @@ def validate_combined_data(
         "szse_etf": ["trade_date", "market", "instrument_code", "instrument_name", "shares", "source_id", "source_grade"],
         "sse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
         "szse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
+        "bse_margin": ["trade_date", "market", "financing_balance_yuan", "financing_buy_yuan", "securities_lending_balance_yuan", "margin_total_balance_yuan", "source_id"],
         "stock_connect_summary": ["trade_date", "market", "direction", "currency", "total_turnover", "total_trade_count", "etf_turnover", "source_id"],
         "stock_connect_top": ["trade_date", "market", "direction", "rank", "instrument_code", "instrument_name", "total_turnover", "source_id"],
     }
@@ -1394,7 +1445,10 @@ def validate_snapshot_values(
         )
         etf_expected = round(etf_expected, 2)
 
-        margin = pd.concat([frames["sse_margin"], frames["szse_margin"]], ignore_index=True)
+        margin = pd.concat(
+            [frames["sse_margin"], frames["szse_margin"], frames["bse_margin"]],
+            ignore_index=True,
+        )
         margin_expected = round(float(margin[margin["trade_date"].astype(str).eq(as_of)]["financing_balance_yuan"].sum()) / 1_000_000_000_000, 4)
         connect = frames["stock_connect_summary"]
         current = connect[connect["trade_date"].astype(str).eq(as_of)]

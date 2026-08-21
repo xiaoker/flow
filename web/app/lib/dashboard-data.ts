@@ -316,6 +316,15 @@ export interface DashboardSnapshot {
     pendingDomains: string[];
     detail: string;
   };
+  sourceReadiness?: {
+    schemaVersion: number;
+    targetDate: string | null;
+    state: "ready" | "pending" | "error" | string;
+    pendingDomains: string[];
+    errorDomains: string[];
+    nextCheckAt: string | null;
+    observedAt: string | null;
+  } | null;
   metrics: Array<{
     id: string;
     eyebrow: string;
@@ -342,6 +351,7 @@ export interface DashboardSnapshot {
     totalBalance?: number;
     sseBalance?: number;
     szseBalance?: number;
+    bseBalance?: number;
   }>;
   connect: Array<{
     name: string;
@@ -414,13 +424,13 @@ export const dashboardSnapshot: DashboardSnapshot = {
     },
     {
       id: "margin",
-      eyebrow: "沪深融资余额",
+      eyebrow: "沪深北融资余额",
       value: "2.8693",
       unit: "万亿元",
       delta: "较前日 −109.58 亿元",
       tone: "negative",
-      note: "沪深两市合计",
-      basis: { kind: "official", label: "官方汇总", detail: "上交所与深交所融资余额合计" },
+      note: "沪深北三市场合计",
+      basis: { kind: "official", label: "官方汇总", detail: "上交所、深交所与北交所融资余额合计" },
     },
     {
       id: "northbound",

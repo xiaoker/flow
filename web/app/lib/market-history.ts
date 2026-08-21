@@ -12,6 +12,7 @@ export type MarketHistoryRow = {
   total_balance: number | null;
   sse_balance: number | null;
   szse_balance: number | null;
+  bse_balance: number | null;
   southbound_net: number | null;
   southbound_turnover: number | null;
   southbound_sse_net: number | null;
@@ -58,6 +59,7 @@ export function extractMarketHistoryPoint(
     total_balance: finite(margin?.totalBalance),
     sse_balance: finite(margin?.sseBalance),
     szse_balance: finite(margin?.szseBalance),
+    bse_balance: finite(margin?.bseBalance),
     southbound_net: finite(connect?.southboundNet),
     southbound_turnover: finite(connect?.southboundTurnover),
     southbound_sse_net: finite(connect?.southboundSseNet),
@@ -101,6 +103,7 @@ export function enrichSnapshotWithMarketHistory(
           totalBalance: row.total_balance ?? undefined,
           sseBalance: row.sse_balance ?? undefined,
           szseBalance: row.szse_balance ?? undefined,
+          bseBalance: row.bse_balance ?? undefined,
         }]
       : [],
   );

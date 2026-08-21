@@ -16,12 +16,16 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert '- cron: "0 0 * * 1-5"' in workflow
     assert '- cron: "55 0 * * 1-5"' in workflow
     assert "workflow_dispatch:" in workflow
-    assert "cancel-in-progress: true" in workflow
-    assert '"crons": ["30 10 * * mon-fri", "45 23 * * sun-thu", "45 0 * * mon-fri"]' in wrangler
+    assert "cancel-in-progress: false" in workflow
+    assert '"15 1 * * mon-fri"' in wrangler
+    assert '"45 1 * * mon-fri"' in wrangler
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
     assert 'inputs: { collection_window: window }' in worker
+    assert 'cron.startsWith("15 1")' in worker
+    assert 'cron.startsWith("45 1")' in worker
+    assert 'return "reconcile"' in worker
     assert "response.status === 200 || response.status === 204" in worker
     assert 'console.error("Daily collection dispatch failed"' in worker
     assert "DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000]" in worker
@@ -29,6 +33,17 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "isRetryableDispatchStatus" in worker
     assert "scheduleLagMs" in worker
     assert 'console.warn("GitHub workflow dispatch will be retried"' in worker
+    assert "shouldDispatchReconcile" in worker
+    assert "source_readiness" in worker
+    assert 'X-Flow-Build-Sha' in worker
+
+
+def test_worker_deploy_publishes_build_identity() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/deploy-worker.yml").read_text(encoding="utf-8")
+    assert "npm run build" in workflow
+    assert "npx wrangler deploy" in workflow
+    assert '--var "FLOW_BUILD_SHA:${GITHUB_SHA}"' in workflow
+    assert "FLOW_DEPLOYED_AT" in workflow
 
 
 def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
@@ -39,9 +54,9 @@ def test_github_actions_use_node24_compatible_pinned_revisions() -> None:
     assert "actions/checkout@v4" not in workflow_text
     assert "actions/setup-python@v5" not in workflow_text
     assert "actions/upload-artifact@v4" not in workflow_text
-    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in workflow_text
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow_text
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow_text
+    assert "actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8" in workflow_text
+    assert "actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c" in workflow_text
+    assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow_text
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
@@ -56,6 +71,14 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert 'echo "pending=true" >> "$GITHUB_OUTPUT"' in workflow
     assert 'source_pending="${{ steps.collect.outputs.pending }}"' in workflow
     assert "Official source date is not ready" in workflow
+    assert "Official sources passed the collection gate" in workflow
+    assert 'phase0_gate_status == "pending"' in workflow
+    assert "Record source readiness ledger" in workflow
+    assert "build_source_readiness.py" in workflow
+    assert "api/v1/admin/source-readiness" in workflow
+    assert "source-readiness.json" in workflow
+    assert '- cron: "15 1 * * 1-5"' in workflow
+    assert '- cron: "45 1 * * 1-5"' in workflow
     assert "Collection window pending" in workflow
     assert 'timeliness.requested_date_coverage' in workflow
     assert '.error_type == "ConnectionError"' in workflow
@@ -72,9 +95,9 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert workflow.index("Verify deployed read-model capabilities before building release") < workflow.index(
         "Build immutable read models offline"
     )
-    assert workflow.index("Publish immutable read models") < workflow.index(
-        "Verify published read-model release"
-    )
+    assert workflow.index("Stage immutable read-model candidate") < workflow.index(
+        "Verify staged read-model candidate"
+    ) < workflow.index("Activate canary-verified read-model candidate")
     assert "build_stock_pressure_state.py" in workflow
     assert "--daily-partitions stock-flow-history.json" in workflow
     assert "Build ETF-to-stock daily partitions from archived R2 inputs" in workflow
@@ -89,7 +112,11 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "check_release_capabilities.py" in workflow
     assert "verify_published_release.py" in workflow
     assert "--result-output read-model-publish.json" in workflow
-    assert "'.status == \"activated\"'" in workflow
+    assert "--stage-only" in workflow
+    assert "--candidate" in workflow
+    assert "activate_read_models.py" in workflow
+    assert '.status == "staged_candidate"' in workflow
+    assert '.mode == "candidate"' in workflow
     assert '"Snapshot is pending source confirmation' in workflow
     assert "Fail loudly on unresolved source errors" in workflow
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
@@ -104,7 +131,7 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
     assert 'steps.stock-flow.outputs.ready' in workflow
     readiness_index = workflow.index("Check ETF stock-flow read-model readiness")
     build_index = workflow.index("Build immutable read models offline")
-    publish_index = workflow.index("Publish immutable read models")
+    publish_index = workflow.index("Stage immutable read-model candidate")
     assert readiness_index < build_index < publish_index
 
 

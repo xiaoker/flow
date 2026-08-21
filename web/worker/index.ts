@@ -8,6 +8,8 @@ interface Env {
   GITHUB_ACTIONS_TOKEN: string;
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
+  FLOW_BUILD_SHA?: string;
+  FLOW_DEPLOYED_AT?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -34,12 +36,65 @@ const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 
 function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
   if (cron.startsWith("45 23")) return "morning";
-  if (cron.startsWith("45 0") || cron.startsWith("55 0")) return "reconcile";
+  if (
+    cron.startsWith("45 0") ||
+    cron.startsWith("55 0") ||
+    cron.startsWith("15 1") ||
+    cron.startsWith("45 1")
+  ) {
+    return "reconcile";
+  }
   return "evening";
 }
 
 function isRetryableDispatchStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
+}
+
+async function shouldDispatchReconcile(env: Env): Promise<boolean> {
+  // The reconcile cron is a safety net, not a blind duplicate collector.  A
+  // ready ledger means the target date has already reached the publish gate;
+  // a future nextCheckAt means the source is still inside its declared
+  // publication window.  If the ledger is unavailable we fail open so the
+  // GitHub schedule remains an operational fallback rather than becoming a
+  // single point of failure.
+  if (!env.DB) return true;
+  try {
+    const target = await env.DB.prepare(
+      `SELECT target_date AS targetDate
+         FROM source_readiness
+        GROUP BY target_date
+        ORDER BY target_date DESC
+        LIMIT 1`,
+    ).first<{ targetDate: string }>();
+    if (!target?.targetDate) return true;
+    const result = await env.DB.prepare(
+      `SELECT status, required, next_check_at AS nextCheckAt
+         FROM source_readiness
+        WHERE target_date = ?`,
+    ).bind(target.targetDate).all<{ status: string; required: number; nextCheckAt: string | null }>();
+    const rows = (result.results ?? []).filter((row) => Number(row.required) === 1);
+    if (!rows.length) return true;
+    if (rows.some((row) => row.status === "error")) return false;
+    const now = Date.now();
+    if (rows.some((row) => row.status === "pending" &&
+      (!row.nextCheckAt || Number.isNaN(Date.parse(row.nextCheckAt)) || Date.parse(row.nextCheckAt) <= now))) {
+      return true;
+    }
+    return false;
+  } catch (error: unknown) {
+    console.warn("Source readiness ledger unavailable; dispatching reconcile fail-open", {
+      detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+    });
+    return true;
+  }
+}
+
+function withDiagnostics(response: Response, env: Env): Response {
+  const next = new Response(response.body, response);
+  if (env.FLOW_BUILD_SHA) next.headers.set("X-Flow-Build-Sha", env.FLOW_BUILD_SHA);
+  if (env.FLOW_DEPLOYED_AT) next.headers.set("X-Flow-Deployed-At", env.FLOW_DEPLOYED_AT);
+  return next;
 }
 
 async function dispatchDailyCollection(
@@ -51,6 +106,12 @@ async function dispatchDailyCollection(
   }
 
   const window = collectionWindowForCron(controller.cron);
+  if (window === "reconcile" && !(await shouldDispatchReconcile(env))) {
+    console.info("Skipped reconcile window because source readiness is not due", {
+      cron: controller.cron,
+    });
+    return;
+  }
   const scheduleLagMs = Math.max(0, Date.now() - controller.scheduledTime);
   if (scheduleLagMs > LATE_SCHEDULE_THRESHOLD_MS) {
     console.warn("Cloudflare Cron delivered a late collection window", {
@@ -145,16 +206,16 @@ const worker = {
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
+      return withDiagnostics(await handleImageOptimization(request, {
         fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
         transformImage: async (body, { width, format, quality }) => {
           const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
           return result.response();
         },
-      }, allowedWidths);
+      }, allowedWidths), env);
     }
 
-    return handler.fetch(request, env, ctx);
+    return withDiagnostics(await handler.fetch(request, env, ctx), env);
   },
   async scheduled(
     controller: ScheduledController,

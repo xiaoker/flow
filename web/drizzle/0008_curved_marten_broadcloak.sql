@@ -1,0 +1,1 @@
+ALTER TABLE `market_history_daily` ADD `bse_balance` real;

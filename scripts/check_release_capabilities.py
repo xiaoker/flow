@@ -41,12 +41,23 @@ def check(url: str, *, timeout: float = 20.0) -> dict:
     if payload.get("maxArtifacts", 0) < 20 or payload.get("maxArtifactBytes", 0) < 5_000_000:
         raise RuntimeError(f"deployed artifact budget is too small: {payload}")
     features = set(payload.get("features") or [])
-    required_features = {"requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease", "radarFlowView"}
+    required_features = {
+        "requiredArtifacts",
+        "sameDateObservedAtOrder",
+        "previousCompatibleRelease",
+        "radarFlowView",
+        "sourceReadinessLedger",
+        "bseMarginSeparateScope",
+    }
     if not required_features.issubset(features):
         raise RuntimeError(f"deployed release features are incomplete: {payload}")
     migration = payload.get("migration")
     if not isinstance(migration, dict) or migration.get("releaseObservedAtColumns") is not True:
         raise RuntimeError(f"release observed_at migration is not ready: {payload}")
+    if migration.get("sourceReadinessLedger") is not True or migration.get("marketHistoryBseColumn") is not True:
+        raise RuntimeError(f"source readiness/BSE history migrations are not ready: {payload}")
+    if payload.get("marketHistoryScopeVersion") != "sse-szse-bse-v1":
+        raise RuntimeError(f"market history scope is not three-market: {payload}")
     return payload
 
 

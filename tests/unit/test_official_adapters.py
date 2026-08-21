@@ -77,6 +77,40 @@ def test_szse_margin_converts_hundred_million_units(
     assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(1_424_700_000_000)
 
 
+def test_bse_margin_parses_official_jsonp_and_keeps_market_separate(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = (
+        "null([[{\"rzmre\":588622017,\"rzye\":8362644558,"
+        "\"rqmcl\":18766,\"rqyl\":19866,\"rqye\":224822,"
+        "\"rzrqye\":8362869380}]], '2026-08-20')"
+    )
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload, "application/javascript"))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-08-20")
+
+    assert artifact.row_count == 1
+    assert frame.loc[0, "market"] == "BSE"
+    assert frame.loc[0, "trade_date"] == "2026-08-20"
+    assert frame.loc[0, "financing_balance_yuan"] == pytest.approx(8_362_644_558)
+    assert frame.loc[0, "financing_buy_yuan"] == pytest.approx(588_622_017)
+    assert frame.loc[0, "securities_lending_volume_shares"] == pytest.approx(19_866)
+    assert frame.loc[0, "margin_total_balance_yuan"] == pytest.approx(8_362_869_380)
+    assert "bse_margin_market_daily" in str(artifact.normalized_path)
+
+
+def test_bse_margin_rejects_latest_response_for_wrong_requested_date(
+    monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
+) -> None:
+    payload = "null([[{\"rzye\":1,\"rzmre\":1,\"rqye\":0,\"rzrqye\":1}]], '2026-08-20')"
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: FakeResponse(payload, "application/javascript"))
+
+    frame, artifact = adapters.fetch_bse_margin("2026-08-19")
+
+    assert frame.empty
+    assert any("未匹配请求日期" in warning for warning in artifact.warnings)
+
+
 def test_sse_etf_matches_code_name_date_and_ten_thousand_share_unit(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

@@ -108,16 +108,16 @@ const navigation: Array<{ id: DeskView; label: string; icon: typeof ChartBar }> 
   { id: "overview", label: "数据总览", icon: ChartLineUp },
   { id: "rotation", label: "板块轮动", icon: ArrowsClockwise },
   { id: "radar", label: "ETF 雷达", icon: TableIcon },
-  { id: "pressure", label: "ETF β压强", icon: ChartLineUp },
+  { id: "pressure", label: "ETF 穿透", icon: ChartLineUp },
   { id: "national", label: "国家队持仓", icon: Buildings },
   { id: "connect", label: "南北互通", icon: ArrowsLeftRight },
   { id: "margin", label: "融资融券", icon: Pulse },
 ];
 
 const marginMetricDefinitions: Record<MarginDisplayMetric, { label: string; unit: string; note: string }> = {
-  balance: { label: "融资余额", unit: "亿元", note: "沪深融资余额合计" },
+  balance: { label: "融资余额", unit: "亿元", note: "沪深北融资余额合计" },
   financingBuy: { label: "融资买入额", unit: "亿元", note: "当日新增融资买入" },
-  lendingBalance: { label: "融券余额", unit: "亿元", note: "沪深融券余额合计" },
+  lendingBalance: { label: "融券余额", unit: "亿元", note: "沪深北融券余额合计" },
 };
 
 const groupTypeLabels: Record<string, string> = {
@@ -225,7 +225,7 @@ function metricValue(snapshot: DashboardSnapshot, id: string) {
 const defaultMetricBasis: Record<string, { kind: EvidenceKind; label: string; detail: string }> = {
   etf: { kind: "calculated", label: "公式计算", detail: "当日官方份额 − 前一交易日官方份额" },
   southbound: { kind: "calculated", label: "公式计算", detail: "港交所官方买入成交额 − 卖出成交额" },
-  margin: { kind: "official", label: "官方汇总", detail: "上交所与深交所融资余额合计" },
+  margin: { kind: "official", label: "官方汇总", detail: "上交所、深交所与北交所融资余额合计" },
   northbound: { kind: "official", label: "官方汇总", detail: "港交所北向成交总额，不推断资金方向" },
 };
 
@@ -686,9 +686,10 @@ export function Dashboard({
       xAxis: { type: "category", data: snapshot.marginSeries.map((item) => item.date), axisTick: { show: false }, axisLine: { lineStyle: { color: "#394759" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13, formatter: compactDate } },
       yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "rgba(68,82,102,.34)", type: "dashed" } }, axisLabel: { color: "#8795a8", fontFamily: "monospace", fontSize: 13 } },
       series: isBalance ? [
-        { name: "沪深合计", type: "line", smooth: true, symbolSize: 7, data, lineStyle: { width: 3, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" } },
+        { name: "沪深北合计", type: "line", smooth: true, symbolSize: 7, data, lineStyle: { width: 3, color: "#50b7d9" }, itemStyle: { color: "#50b7d9" }, areaStyle: { color: "rgba(80,183,217,.08)" } },
         { name: "上交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.sseBalance ?? null), lineStyle: { width: 1.5, color: "#e36464" }, itemStyle: { color: "#e36464" } },
         { name: "深交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.szseBalance ?? null), lineStyle: { width: 1.5, color: "#f1ae42" }, itemStyle: { color: "#f1ae42" } },
+        { name: "北交所", type: "line", smooth: true, data: snapshot.marginSeries.map((item) => item.bseBalance ?? null), lineStyle: { width: 1.5, color: "#5bb9d8" }, itemStyle: { color: "#5bb9d8" } },
       ] : [{ name: definition.label, type: "bar", barMaxWidth: 36, data, itemStyle: { color: marginDisplayMetric === "financingBuy" ? "#e36464" : "#f1ae42", borderRadius: [4, 4, 0, 0] } }],
     };
   }, [marginDisplayMetric, snapshot.marginSeries]);
@@ -715,10 +716,16 @@ export function Dashboard({
     const szseChange = latest?.szseBalance !== undefined && previous?.szseBalance !== undefined
       ? latest.szseBalance - previous.szseBalance
       : null;
-    const marketDriver = sseChange !== null && szseChange !== null
-      ? (Math.abs(sseChange) >= Math.abs(szseChange)
-        ? { label: "沪市主导", value: sseChange }
-        : { label: "深市主导", value: szseChange })
+    const bseChange = latest?.bseBalance !== undefined && previous?.bseBalance !== undefined
+      ? latest.bseBalance - previous.bseBalance
+      : null;
+    const marketChanges = [
+      { label: "沪市主导", value: sseChange },
+      { label: "深市主导", value: szseChange },
+      { label: "北市主导", value: bseChange },
+    ].filter((item): item is { label: string; value: number } => item.value !== null);
+    const marketDriver = marketChanges.length
+      ? marketChanges.reduce((best, item) => Math.abs(item.value) >= Math.abs(best.value) ? item : best)
       : null;
     const lendingChange = latest?.lendingBalance !== undefined && fiveDaysAgo?.lendingBalance !== undefined
       ? latest.lendingBalance - fiveDaysAgo.lendingBalance
@@ -741,12 +748,12 @@ export function Dashboard({
         note: `最新 ${formatFlow(latest?.financingBuy)} 亿元 · 基准 ${formatFlow(buyMedian)} 亿元`,
       },
       {
-        label: "沪深余额增量",
+        label: "沪深北余额增量",
         value: formatFlow(marketDriver?.value),
         unit: "亿元 / 当日",
         tone: marketDriver === null ? "" : marketDriver.value >= 0 ? "text-in" : "text-out",
         status: marketDriver?.label ?? "覆盖不足",
-        note: `沪市 ${formatFlow(sseChange)} 亿元 · 深市 ${formatFlow(szseChange)} 亿元`,
+        note: `沪市 ${formatFlow(sseChange)} 亿元 · 深市 ${formatFlow(szseChange)} 亿元 · 北市 ${formatFlow(bseChange)} 亿元`,
       },
       {
         label: "融券余额变化",
@@ -895,7 +902,7 @@ export function Dashboard({
     overview: "市场数据全景",
     rotation: "板块资金轮动",
     radar: "ETF 份额雷达",
-    pressure: "ETF β压强",
+    pressure: "ETF 穿透",
     national: "国家队持仓",
     connect: "互联互通",
     margin: "融资融券",
@@ -1092,6 +1099,25 @@ export function Dashboard({
         <div className="refresh-status is-error" role="status" aria-live="polite">
           <Database size={15} />
           <span>当前视图数据暂时不可用，已保留已显示的完整版本（{viewLoadError}）</span>
+        </div>
+      )}
+      {!requestedDate && snapshot.sourceReadiness?.state === "pending" && (
+        <div className="refresh-status is-pending" role="status" aria-live="polite">
+          <ArrowsClockwise size={15} />
+          <span>
+            官方源尚未全部发布 {snapshot.sourceReadiness.targetDate ?? "目标交易日"}；当前继续显示上一份完整数据
+            {snapshot.sourceReadiness.pendingDomains.length ? ` · 等待：${snapshot.sourceReadiness.pendingDomains.join("、")}` : ""}
+            {snapshot.sourceReadiness.nextCheckAt ? ` · 下次检查 ${snapshot.sourceReadiness.nextCheckAt}` : ""}
+          </span>
+        </div>
+      )}
+      {!requestedDate && snapshot.sourceReadiness?.state === "error" && (
+        <div className="refresh-status is-error" role="status" aria-live="polite">
+          <Database size={15} />
+          <span>
+            官方源校验未通过，当前继续显示上一份完整数据
+            {snapshot.sourceReadiness.errorDomains.length ? ` · 问题：${snapshot.sourceReadiness.errorDomains.join("、")}` : ""}
+          </span>
         </div>
       )}
 
@@ -1301,10 +1327,10 @@ export function Dashboard({
         {view === "margin" && (
           <section className="detail-grid">
             <article className="terminal-panel detail-main margin-detail">
-              <div className="panel-heading"><div><span className="eyebrow">沪深两市 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；{marketHistoryCoverage?.margin.points ?? snapshot.marginSeries.length} 个官方历史点{marketHistoryCoverage?.margin.from ? `（${marketHistoryCoverage.margin.from} 至 ${marketHistoryCoverage.margin.to}）` : ""}</p></div><div className="margin-hero-value"><small>最新完整数据日 · {snapshot.asOf}</small><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div></div>
+              <div className="panel-heading"><div><span className="eyebrow">沪深北三市场 · 官方汇总</span><h2>两融余额与交易数据</h2><p>{marginMetricDefinitions[marginDisplayMetric].note}；{marketHistoryCoverage?.margin.points ?? snapshot.marginSeries.length} 个官方历史点{marketHistoryCoverage?.margin.from ? `（${marketHistoryCoverage.margin.from} 至 ${marketHistoryCoverage.margin.to}）` : ""}</p></div><div className="margin-hero-value"><small>最新完整数据日 · {snapshot.asOf}</small><strong className="hero-number">{marginMetric?.value}<em>{marginMetric?.unit}</em></strong></div></div>
               <div className="margin-metric-tabs">{(Object.keys(marginMetricDefinitions) as MarginDisplayMetric[]).map((item) => <button className={marginDisplayMetric === item ? "active" : ""} key={item} onClick={() => setMarginDisplayMetric(item)} type="button">{marginMetricDefinitions[item].label}</button>)}</div>
               <ReactECharts className="margin-detail-chart" option={marginTrendOption} notMerge lazyUpdate />
-              <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div></div>
+              <div className="margin-kpi-strip"><div><span>最新融资买入</span><strong className="text-in">{formatFlow(snapshot.marginSeries.at(-1)?.financingBuy)}<em>亿元</em></strong></div><div><span>最新融券余额</span><strong className="text-amber">{formatFlow(snapshot.marginSeries.at(-1)?.lendingBalance)}<em>亿元</em></strong></div><div><span>上交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.sseBalance)}<em>亿元</em></strong></div><div><span>深交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.szseBalance)}<em>亿元</em></strong></div><div><span>北交所融资余额</span><strong>{formatFlow(snapshot.marginSeries.at(-1)?.bseBalance)}<em>亿元</em></strong></div></div>
               <section className="margin-insights" aria-labelledby="margin-insights-title"><div className="margin-insights-heading"><div><span className="eyebrow">从原始序列复算</span><h3 id="margin-insights-title">两融状态解读</h3></div><p>余额看存量趋势，买入额看交易活跃度；两者不能互相替代。</p></div><div className="margin-insight-grid">{marginInsights.map((item) => <article key={item.label}><header><span>{item.label}</span><small>{item.status}</small></header><strong className={item.tone}>{item.value}<em>{item.unit}</em></strong><p>{item.note}</p></article>)}</div></section>
             </article>
             <aside className="terminal-panel methodology"><Pulse size={24} /><h3>如何阅读</h3><p>{marginMetric?.delta}。余额变化只说明杠杆存量扩张或收缩，需要与指数趋势和成交额一起观察。</p><span>官方汇总 · 最新 {snapshot.asOf}</span><div className="method-list"><p><b>融资余额</b>存量杠杆规模，不叫净流入</p><p><b>融资买入</b>当日融资买入成交额</p><p><b>融券余额</b>融券卖出尚未偿还金额</p></div></aside>

@@ -29,6 +29,10 @@ def main() -> None:
         type=Path,
         help="Optional active-release manifest used for history-length regression gates",
     )
+    parser.add_argument(
+        "--producer-build-sha",
+        help="Git commit SHA of the data producer; recorded in the release manifest",
+    )
     args = parser.parse_args()
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
     result = write_read_models(
@@ -39,6 +43,7 @@ def main() -> None:
         stock_catalog_path=args.stock_catalog,
         market_history_path=args.market_history,
         previous_manifest_path=args.previous_manifest,
+        producer_build_sha=args.producer_build_sha,
     )
     print(json.dumps(result["manifest"], ensure_ascii=False, indent=2))
 

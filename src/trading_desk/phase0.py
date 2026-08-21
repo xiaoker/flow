@@ -21,6 +21,7 @@ from .quality import (
     validate_margin,
 )
 from .storage import new_run_id, now_iso, write_json, write_normalized_csv
+from .source_readiness import build_source_readiness
 
 
 def _relative(path: str | Path, workspace_root: Path) -> str:
@@ -209,6 +210,16 @@ def collect_phase0(
 
     for trade_date in dates:
         result = run_step(
+            f"bse_margin:{trade_date}",
+            lambda date=trade_date: adapters.fetch_bse_margin(date),
+        )
+        if result:
+            frame, artifact = result
+            frames["bse_margin"].append(frame)
+            artifacts.append(artifact)
+
+    for trade_date in dates:
+        result = run_step(
             f"hkex_connect:{trade_date}",
             lambda date=trade_date: adapters.fetch_hkex_connect(date),
         )
@@ -282,6 +293,7 @@ def collect_phase0(
         "sse_etf_pcf": validate_etf_pcf,
         "sse_margin": validate_margin,
         "szse_margin": validate_margin,
+        "bse_margin": validate_margin,
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),
         "stock_connect_top": lambda frame, _: validate_connect_top(frame),
     }
@@ -292,7 +304,7 @@ def collect_phase0(
         profiles[dataset] = profile(frame)
         findings.extend(validators[dataset](frame, dataset))
 
-    for dataset in ("sse_etf", "sse_margin", "szse_margin", "stock_connect_summary"):
+    for dataset in ("sse_etf", "sse_margin", "szse_margin", "bse_margin", "stock_connect_summary"):
         observed_dates = profiles.get(dataset, {}).get("distinct_trade_dates", [])
         findings.append(
             _coverage_finding(
@@ -379,6 +391,20 @@ def collect_phase0(
                 artifact.normalized_path, workspace_root
             )
         manifest["artifacts"].append(payload)
+
+    # Persist a small control-plane ledger alongside the quality report.  This
+    # is intentionally separate from the large source/read-model payloads:
+    # later windows can distinguish "the exchange has not advanced its
+    # business-date watermark" from a parser/transport failure without
+    # treating a partial run as a candidate release.
+    readiness = build_source_readiness(manifest, quality)
+    quality["readiness"] = readiness
+    if not errors and readiness["state"] == "pending":
+        gate_status = "pending"
+        quality["phase0_gate_status"] = gate_status
+        quality["phase0_gate_passed"] = False
+        quality["phase1_entry_recommendation"] = "wait_for_source_readiness"
+    manifest["readiness"] = readiness
 
     run_report_dir = report_root / run_id
     write_json(run_report_dir / "manifest.json", manifest)

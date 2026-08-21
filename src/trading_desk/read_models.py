@@ -38,6 +38,7 @@ REQUIRED_ARTIFACT_NAMES = (*VIEW_NAMES, STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES)
 MAX_READ_MODEL_BYTES = 5_000_000
 MARKET_HISTORY_MAX_DATES = 750
 MARKET_HISTORY_SCHEMA_VERSION = 1
+MARKET_HISTORY_SCOPE_VERSION = "sse-szse-bse-v1"
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # This is the same code-based observation pool shown by the National Team
@@ -183,6 +184,7 @@ _MARKET_HISTORY_FIELDS = (
     "total_balance",
     "sse_balance",
     "szse_balance",
+    "bse_balance",
     "southbound_net",
     "southbound_turnover",
     "southbound_sse_net",
@@ -195,7 +197,7 @@ _MARKET_HISTORY_FIELDS = (
     "source_snapshot_sha256",
     "observed_at",
 )
-_MARKET_HISTORY_NUMERIC_FIELDS = set(_MARKET_HISTORY_FIELDS[1:16])
+_MARKET_HISTORY_NUMERIC_FIELDS = set(_MARKET_HISTORY_FIELDS[1:17])
 
 
 def _is_valid_iso_date(value: Any) -> bool:
@@ -252,6 +254,9 @@ def _normalize_market_history(
         schema_version = metadata.get("schemaVersion")
         if schema_version not in (None, MARKET_HISTORY_SCHEMA_VERSION):
             raise ReadModelError("market_history_schema_invalid")
+        scope_version = metadata.get("scopeVersion")
+        if scope_version not in (None, "sse-szse-v1", MARKET_HISTORY_SCOPE_VERSION):
+            raise ReadModelError("market_history_scope_invalid")
     else:
         raise ReadModelError("market_history_not_object")
     if not isinstance(raw_rows, list):
@@ -316,6 +321,7 @@ def _normalize_market_history(
             ("total_balance", "totalBalance"),
             ("sse_balance", "sseBalance"),
             ("szse_balance", "szseBalance"),
+            ("bse_balance", "bseBalance"),
         ):
             if row[source] is not None:
                 point[target] = row[source]
@@ -358,6 +364,7 @@ def _normalize_market_history(
     }
     compact = {
         "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+        "scopeVersion": MARKET_HISTORY_SCOPE_VERSION,
         "asOf": as_of,
         "source": metadata.get("source", "market_history_daily"),
         "rows": normalized,
@@ -370,6 +377,7 @@ def _market_history_contract(compact: dict[str, Any] | None) -> dict[str, Any]:
     if compact is None:
         return {
             "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+            "scopeVersion": MARKET_HISTORY_SCOPE_VERSION,
             "sha256": None,
             "archiveFrom": None,
             "archiveTo": None,
@@ -380,6 +388,7 @@ def _market_history_contract(compact: dict[str, Any] | None) -> dict[str, Any]:
     coverage = compact["coverage"]
     return {
         "schemaVersion": MARKET_HISTORY_SCHEMA_VERSION,
+        "scopeVersion": compact.get("scopeVersion", MARKET_HISTORY_SCOPE_VERSION),
         "sha256": sha256_bytes(canonical_json_bytes(compact)),
         **coverage,
     }
@@ -408,6 +417,107 @@ def _assert_history_not_regressed(
         if isinstance(previous_points, int) and isinstance(current_points, int) and current_points < previous_points:
             raise ReadModelError(
                 f"market_history_{domain}_regressed:{current_points}<{previous_points}"
+            )
+
+
+def _read_model_coverage(
+    snapshot: dict[str, Any],
+    payloads: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the small, comparable coverage contract for a release.
+
+    Coverage is part of the release identity, not a UI-only annotation.  A
+    successful collection can still produce a shorter ETF/pressure history
+    when an input archive is accidentally replaced by the latest window.  By
+    recording only monotonic, source-derived counters here, the producer can
+    reject that regression before any pointer is touched.
+    """
+
+    terminal = snapshot.get("etfTerminal")
+    terminal = terminal if isinstance(terminal, dict) else {}
+    history = terminal.get("historyCoverage")
+    history = history if isinstance(history, dict) else {}
+    pressure_envelope = payloads.get("pressure") or {}
+    pressure_data = pressure_envelope.get("data")
+    pressure_data = pressure_data if isinstance(pressure_data, dict) else {}
+    pressure = pressure_data.get("pressure")
+    pressure = pressure if isinstance(pressure, dict) else {}
+    pressure_coverage = pressure.get("coverage")
+    pressure_coverage = pressure_coverage if isinstance(pressure_coverage, dict) else {}
+    available_dates = pressure.get("availableDates")
+    if not isinstance(available_dates, list):
+        available_dates = []
+    search = payloads.get(STOCK_SEARCH_NAME) or {}
+    search_items = search.get("items")
+    if not isinstance(search_items, list):
+        search_items = []
+    national = payloads.get("national") or {}
+    national_data = national.get("data")
+    national_data = national_data if isinstance(national_data, dict) else {}
+    national_terminal = national_data.get("etfTerminal")
+    national_terminal = national_terminal if isinstance(national_terminal, dict) else {}
+    national_items = national_terminal.get("instruments")
+    if not isinstance(national_items, list):
+        national_items = []
+    periods = terminal.get("availablePeriods")
+    if not isinstance(periods, list):
+        periods = []
+    return {
+        "etf": {
+            "tradingDays": int(history.get("tradingDays") or 0),
+            "instrumentCount": len(terminal.get("instruments") or []),
+            "availablePeriods": sorted(str(period) for period in periods),
+        },
+        "pressure": {
+            "availableDateCount": len(available_dates),
+            "stockCount": int(pressure_coverage.get("stockCount") or 0),
+            "history20StockCount": int(pressure_coverage.get("history20StockCount") or 0),
+        },
+        "stockSearch": {"count": len(search_items)},
+        "national": {"count": len(national_items)},
+    }
+
+
+def _assert_read_model_coverage_not_regressed(
+    current: dict[str, Any],
+    previous_manifest: dict[str, Any] | None,
+) -> None:
+    """Reject candidate releases that silently lose historical coverage.
+
+    Universe counts can legitimately move when instruments list or delist, so
+    they are reported but are not used as a hard gate.  Historical node counts
+    and previously available period windows, however, must never shrink.
+    """
+
+    if not isinstance(previous_manifest, dict):
+        return
+    nested = previous_manifest.get("manifest")
+    previous = nested if isinstance(nested, dict) else previous_manifest
+    old = previous.get("coverage")
+    if not isinstance(old, dict):
+        return
+    for section, field in (
+        ("etf", "tradingDays"),
+        ("pressure", "availableDateCount"),
+        ("pressure", "history20StockCount"),
+    ):
+        old_section = old.get(section)
+        new_section = current.get(section)
+        if not isinstance(old_section, dict) or not isinstance(new_section, dict):
+            continue
+        old_value = old_section.get(field)
+        new_value = new_section.get(field)
+        if isinstance(old_value, int) and isinstance(new_value, int) and new_value < old_value:
+            raise ReadModelError(
+                f"read_model_coverage_{section}_{field}_regressed:{new_value}<{old_value}"
+            )
+    old_periods = ((old.get("etf") or {}).get("availablePeriods"))
+    new_periods = ((current.get("etf") or {}).get("availablePeriods"))
+    if isinstance(old_periods, list) and isinstance(new_periods, list):
+        missing = sorted(set(str(value) for value in old_periods) - set(str(value) for value in new_periods))
+        if missing:
+            raise ReadModelError(
+                "read_model_coverage_etf_available_periods_regressed:" + ",".join(missing)
             )
 
 
@@ -847,6 +957,7 @@ def build_read_models(
     stock_catalog: dict[str, Any] | None = None,
     market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
     previous_manifest: dict[str, Any] | None = None,
+    producer_build_sha: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Return view payloads and a release manifest without touching storage."""
 
@@ -888,6 +999,8 @@ def build_read_models(
         margin_as_of=snapshot["asOf"],
     )
     payloads["pressure"] = _with_release_meta(effective_snapshot, {"pressure": pressure})
+    coverage_contract = _read_model_coverage(effective_snapshot, payloads)
+    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest)
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
     artifact_names = list(REQUIRED_ARTIFACT_NAMES)
     if set(encoded) != set(artifact_names):
@@ -902,10 +1015,13 @@ def build_read_models(
         "observedAt": observed_at,
         "sourceDates": source_dates,
         "marketHistory": market_history_contract,
+        "coverage": coverage_contract,
         "pressureSchemaVersion": PRESSURE_SCHEMA_VERSION,
         "stockShardCount": STOCK_SHARD_COUNT,
         "requiredArtifacts": artifact_names,
     }
+    if producer_build_sha:
+        release_contract["producerBuildSha"] = producer_build_sha
     # Include release semantics in the identity, not only the payload bytes.
     # A corrected source timestamp or source-date mapping must therefore get a
     # new immutable release even when the visible JSON happens to be equal.
@@ -931,6 +1047,7 @@ def build_read_models(
         "observedAt": observed_at,
         "sourceDates": source_dates,
         "marketHistory": market_history_contract,
+        "coverage": coverage_contract,
         # These are fixed contract declarations.  A release without the
         # stock sidecars is still useful to unit-test the view splitter, but
         # the importer/history picker will reject it as incomplete.
@@ -943,6 +1060,8 @@ def build_read_models(
         "quality": snapshot.get("quality"),
         "publication": snapshot.get("publication"),
     }
+    if producer_build_sha:
+        manifest["producerBuildSha"] = producer_build_sha
     # Canonicalize the manifest itself to ensure callers cannot accidentally
     # publish a different hash for the same view payloads.
     manifest["manifestSha256"] = sha256_bytes(canonical_json_bytes(manifest))
@@ -958,6 +1077,7 @@ def write_read_models(
     stock_catalog_path: Path | None = None,
     market_history_path: Path | None = None,
     previous_manifest_path: Path | None = None,
+    producer_build_sha: str | None = None,
 ) -> dict[str, Any]:
     stock_catalog = None
     if stock_catalog_path is not None:
@@ -975,6 +1095,7 @@ def write_read_models(
         stock_catalog=stock_catalog,
         market_history=market_history,
         previous_manifest=previous_manifest,
+        producer_build_sha=producer_build_sha,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():

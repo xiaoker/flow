@@ -7,6 +7,7 @@ import hashlib
 import pytest
 
 from scripts.publish_read_models import build_upload_body
+from scripts.activate_read_models import activate
 from scripts.verify_published_release import CANDIDATE_ARTIFACTS, verify_candidate
 
 
@@ -116,3 +117,44 @@ def test_candidate_canary_reads_each_explicit_staged_artifact_without_active_rou
     assert len(calls) == 18
     assert all(call["params"]["candidate"] == "1" for call in calls)
     assert all(call["headers"]["Authorization"] == "Bearer ingest-key" for call in calls)
+
+
+def test_candidate_activation_requires_matching_release_and_accepts_idempotent_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLOW_INGEST_API_KEY", "ingest-key")
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_ID", "access-id")
+    monkeypatch.setenv("FLOW_CF_ACCESS_CLIENT_SECRET", "access-secret")
+    module = __import__("scripts.activate_read_models", fromlist=["requests"])
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, str]:
+            return {
+                "status": "activated",
+                "releaseId": "release:2026-08-13:0123456789abcdef",
+                "asOf": "2026-08-13",
+            }
+
+    calls: list[dict] = []
+
+    def fake_post(url: str, **kwargs: object) -> FakeResponse:
+        calls.append({"url": url, **kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+    result = activate(
+        "https://flow.example",
+        release_id="release:2026-08-13:0123456789abcdef",
+        as_of="2026-08-13",
+    )
+
+    assert result["status"] == "activated"
+    assert calls[0]["url"].endswith("/api/v1/admin/read-model-activate")
+    assert calls[0]["json"] == {
+        "releaseId": "release:2026-08-13:0123456789abcdef",
+        "asOf": "2026-08-13",
+    }

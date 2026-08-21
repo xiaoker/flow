@@ -381,6 +381,7 @@ def _pending_publication_domains(
     szse_etf: pd.DataFrame,
     sse_margin: pd.DataFrame,
     szse_margin: pd.DataFrame,
+    bse_margin: pd.DataFrame,
     connect: pd.DataFrame,
 ) -> list[str]:
     """Return domains that have not supplied the target trading day yet.
@@ -406,6 +407,8 @@ def _pending_publication_domains(
         pending.append("上交所融资融券")
     if not has_date(szse_margin, target_date):
         pending.append("深交所融资融券")
+    if not has_date(bse_margin, target_date):
+        pending.append("北交所融资融券")
     required_channels = {
         ("SSE", "southbound"),
         ("SZSE", "southbound"),
@@ -433,6 +436,7 @@ def _latest_complete_snapshot_date(
     szse_etf: pd.DataFrame,
     sse_margin: pd.DataFrame,
     szse_margin: pd.DataFrame,
+    bse_margin: pd.DataFrame,
     connect: pd.DataFrame,
 ) -> tuple[str | None, list[str]]:
     """Select the newest fully reconcilable day, not merely the newest request.
@@ -452,6 +456,7 @@ def _latest_complete_snapshot_date(
             szse_etf=szse_etf,
             sse_margin=sse_margin,
             szse_margin=szse_margin,
+            bse_margin=bse_margin,
             connect=connect,
         )
         if index == len(requested_dates) - 1:
@@ -467,6 +472,7 @@ def _pending_snapshot(
     observed_at: str,
     quality: dict[str, Any],
     pending_domains: list[str],
+    source_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a valid, explicitly non-publishable envelope for partial runs.
 
@@ -493,6 +499,7 @@ def _pending_snapshot(
             "pendingDomains": pending_domains,
             "detail": "已归档已到达的原始数据，等待其余官方来源后统一发布",
         },
+        "sourceReadiness": source_readiness,
         "metrics": [
             {
                 "id": metric_id,
@@ -511,7 +518,7 @@ def _pending_snapshot(
             for metric_id, label, unit in (
                 ("etf", "ETF 份额变化", "亿份"),
                 ("southbound", "南向净买入", "亿港元"),
-                ("margin", "沪深融资余额", "万亿元"),
+                ("margin", "沪深北融资余额", "万亿元"),
                 ("northbound", "北向成交总额", "亿元"),
             )
         ],
@@ -547,6 +554,18 @@ def build_dashboard_snapshot(
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    readiness = manifest.get("readiness") or quality.get("readiness")
+    source_readiness = None
+    if isinstance(readiness, dict):
+        source_readiness = {
+            "schemaVersion": readiness.get("schemaVersion", 1),
+            "targetDate": readiness.get("targetDate"),
+            "state": readiness.get("state"),
+            "pendingDomains": list(readiness.get("pendingDomains") or []),
+            "errorDomains": list(readiness.get("errorDomains") or []),
+            "nextCheckAt": readiness.get("nextCheckAt"),
+            "observedAt": readiness.get("observedAt"),
+        }
     paths = manifest["combined_paths"]
     requested_dates = sorted(manifest["requested_dates"])
     target_as_of = requested_dates[-1]
@@ -559,6 +578,11 @@ def build_dashboard_snapshot(
     )
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
+    bse_margin = (
+        _read_csv(workspace_root, paths["bse_margin"])
+        if paths.get("bse_margin")
+        else pd.DataFrame()
+    )
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
     pcf = (
         _read_csv(workspace_root, paths["sse_etf_pcf"])
@@ -570,6 +594,7 @@ def build_dashboard_snapshot(
         "上交所 ETF": sse_etf,
         "上交所融资融券": sse_margin,
         "深交所融资融券": szse_margin,
+        "北交所融资融券": bse_margin,
         "港交所互联互通": connect,
     }
     missing_frames = [name for name, frame in required_frames.items() if frame.empty]
@@ -579,6 +604,7 @@ def build_dashboard_snapshot(
             observed_at=str(manifest.get("finished_at") or ""),
             quality=quality,
             pending_domains=missing_frames,
+            source_readiness=source_readiness,
         )
 
     complete_as_of, target_pending_domains = _latest_complete_snapshot_date(
@@ -587,18 +613,22 @@ def build_dashboard_snapshot(
         szse_etf=szse_etf,
         sse_margin=sse_margin,
         szse_margin=szse_margin,
+        bse_margin=bse_margin,
         connect=connect,
     )
     as_of = complete_as_of or target_as_of
     dates = [trade_date for trade_date in requested_dates if trade_date <= as_of]
-    publication_status = "confirmed" if complete_as_of else "pending"
-    # Coverage checks apply to every requested date. A newly requested but
-    # still-unpublished day must not turn the already complete prior day into a
-    # failed dashboard release. Non-coverage validation failures remain visible
-    # only when no complete date can be selected.
+    quality_failures = int((quality.get("counts") or {}).get("fail", 0))
+    publication_status = "confirmed" if complete_as_of and quality_failures == 0 else "pending"
+    # A complete source-date tuple is necessary but not sufficient for a
+    # release. Schema, mapping, unit and semantic QA failures must remain
+    # visible and must never be hidden by selecting an older complete date.
+    # This is the critical distinction between "the exchanges have published"
+    # and "the values are safe to activate".
+    publication_pending_domains = list(target_pending_domains)
+    if complete_as_of and quality_failures > 0 and not publication_pending_domains:
+        publication_pending_domains = ["数据质量门禁"]
     snapshot_counts = dict(quality["counts"])
-    if complete_as_of:
-        snapshot_counts["fail"] = 0
 
     canonical_etf = build_canonical_etf_daily_fact(sse_etf, szse_etf, dates)
     etf_terminal = _build_etf_terminal_from_canonical(canonical_etf, dates)
@@ -688,7 +718,9 @@ def build_dashboard_snapshot(
         sse_margin = sse_margin.assign(market="SSE")
     if "market" not in szse_margin.columns:
         szse_margin = szse_margin.assign(market="SZSE")
-    margin = pd.concat([sse_margin, szse_margin], ignore_index=True)
+    if "market" not in bse_margin.columns:
+        bse_margin = bse_margin.assign(market="BSE")
+    margin = pd.concat([sse_margin, szse_margin, bse_margin], ignore_index=True)
     # A newer SSE release may arrive before its SZSE counterpart.  Once the
     # snapshot selector falls back to the latest complete date, no later,
     # partial margin row may leak into the headline or chart.
@@ -812,6 +844,7 @@ def build_dashboard_snapshot(
                 "totalBalance": round(float(row.margin_total_balance_yuan) / 100_000_000, 2),
                 "sseBalance": round(float(split.get("SSE", 0)) / 100_000_000, 2),
                 "szseBalance": round(float(split.get("SZSE", 0)) / 100_000_000, 2),
+                "bseBalance": round(float(split.get("BSE", 0)) / 100_000_000, 2),
             }
         )
         previous_balance = balance
@@ -837,7 +870,7 @@ def build_dashboard_snapshot(
         "publication": {
             "status": publication_status,
             "targetAsOf": target_as_of,
-            "pendingDomains": target_pending_domains,
+            "pendingDomains": publication_pending_domains,
             "detail": (
                 (
                     "同一交易日的全部核心官方来源已确认"
@@ -848,6 +881,7 @@ def build_dashboard_snapshot(
                 else "已归档已到达的原始数据，等待其余官方来源后统一发布"
             ),
         },
+        "sourceReadiness": source_readiness,
         "metrics": [
             {
                 "id": "etf",
@@ -887,16 +921,16 @@ def build_dashboard_snapshot(
             },
             {
                 "id": "margin",
-                "eyebrow": "沪深融资余额",
+                "eyebrow": "沪深北融资余额",
                 "value": f"{latest_margin / 1_000_000_000_000:.4f}",
                 "unit": "万亿元",
                 "delta": f"较前日 {_signed((latest_margin - previous_margin) / 100_000_000)} 亿元",
                 "tone": "positive" if latest_margin >= previous_margin else "negative",
-                "note": "沪深两市合计",
+                "note": "沪深北三市场合计",
                 "basis": {
                     "kind": "official",
                     "label": "官方汇总",
-                    "detail": "上交所与深交所融资余额合计",
+                    "detail": "上交所、深交所与北交所融资余额合计",
                 },
             },
             {
@@ -933,7 +967,7 @@ def build_dashboard_snapshot(
                 ),
                 "basis": "official",
             },
-            {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深汇总", "basis": "official"},
+            {"name": "融资融券", "status": "ready", "asOf": as_of[5:], "detail": "官方沪深北汇总", "basis": "official"},
             {
                 "name": "互联互通",
                 "status": "warning" if connect_latest.empty else "ready",

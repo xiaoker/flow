@@ -28,7 +28,7 @@ def source_specs(generated_at: str, queries: dict[str, str]) -> list[dict[str, A
             "三日覆盖链路：请求的三个交易日均存在数据的核心数据集数量",
         ],
         "daily-sql": [
-            "沪深融资余额：上交所融资余额与深交所融资余额之和，单位人民币十亿元",
+            "沪深北融资余额：上交所、深交所与北交所融资余额之和，单位人民币十亿元",
             "南向净买入：港股通沪与港股通深买入成交额减卖出成交额之和，单位港币十亿元",
             "北向成交额：沪股通与深股通总成交额之和，单位人民币十亿元；不是净流入",
         ],
@@ -77,6 +77,7 @@ def main() -> None:
         "szse_etf": "深交所 ETF",
         "sse_margin": "上交所两融",
         "szse_margin": "深交所两融",
+        "bse_margin": "北交所两融",
         "stock_connect_summary": "互联互通汇总",
         "stock_connect_top": "互联互通前十",
     }
@@ -109,7 +110,11 @@ def main() -> None:
     ]
 
     margin = pd.concat(
-        [load_dataset(manifest, "sse_margin"), load_dataset(manifest, "szse_margin")],
+        [
+            load_dataset(manifest, "sse_margin"),
+            load_dataset(manifest, "szse_margin"),
+            load_dataset(manifest, "bse_margin"),
+        ],
         ignore_index=True,
     )
     connect = load_dataset(manifest, "stock_connect_summary")
@@ -277,7 +282,7 @@ def main() -> None:
                     "sourceId": "daily-sql",
                     "columns": [
                         {"field": "trade_date", "label": "交易日", "type": "date"},
-                        {"field": "financing_balance_billion_yuan", "label": "沪深融资余额（十亿元）", "format": "number"},
+                        {"field": "financing_balance_billion_yuan", "label": "沪深北融资余额（十亿元）", "format": "number"},
                         {"field": "southbound_net_buy_billion_hkd", "label": "南向净买入（十亿港元）", "format": "number", "movement": True},
                         {"field": "northbound_turnover_billion_rmb", "label": "北向成交额（十亿元）", "format": "number"},
                     ],

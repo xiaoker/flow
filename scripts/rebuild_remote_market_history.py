@@ -123,6 +123,7 @@ def _record(path: Path, metadata: dict[str, str]) -> tuple[list[Any], bool, bool
         _finite((margin or {}).get("totalBalance")),
         _finite((margin or {}).get("sseBalance")),
         _finite((margin or {}).get("szseBalance")),
+        _finite((margin or {}).get("bseBalance")),
         _finite((connect or {}).get("southboundNet")),
         _finite((connect or {}).get("southboundTurnover")),
         _finite((connect or {}).get("southboundSseNet")),
@@ -150,7 +151,7 @@ def _write_sql(
     columns = """
       trade_date, margin_balance, margin_change, financing_buy,
       lending_balance, lending_sell_volume, total_balance, sse_balance,
-      szse_balance, southbound_net, southbound_turnover,
+      szse_balance, bse_balance, southbound_net, southbound_turnover,
       southbound_sse_net, southbound_szse_net, northbound_turnover,
       northbound_etf_turnover, northbound_trade_count, margin_available,
       connect_available, source_snapshot_sha256, observed_at, created_at
@@ -164,6 +165,7 @@ def _write_sql(
           total_balance=excluded.total_balance,
           sse_balance=excluded.sse_balance,
           szse_balance=excluded.szse_balance,
+          bse_balance=excluded.bse_balance,
           southbound_net=excluded.southbound_net,
           southbound_turnover=excluded.southbound_turnover,
           southbound_sse_net=excluded.southbound_sse_net,
@@ -210,6 +212,7 @@ _MARKET_HISTORY_ROW_FIELDS = (
     "total_balance",
     "sse_balance",
     "szse_balance",
+    "bse_balance",
     "southbound_net",
     "southbound_turnover",
     "southbound_sse_net",
@@ -235,6 +238,7 @@ def _write_compact_history(
     rows = [_compact_row(record) for record in records]
     payload = {
         "schemaVersion": 1,
+        "scopeVersion": "sse-szse-bse-v1",
         "asOf": rows[-1]["trade_date"] if rows else None,
         "source": source,
         "rows": rows,

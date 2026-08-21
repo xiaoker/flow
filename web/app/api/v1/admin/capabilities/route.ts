@@ -19,6 +19,8 @@ export async function GET(request: Request) {
   }
 
   let observedAtColumnsReady = false;
+  let sourceReadinessReady = false;
+  let bseMarginColumnReady = false;
   if (runtime.DB) {
     try {
       await runtime.DB.prepare("SELECT observed_at FROM release_manifest LIMIT 1").first();
@@ -27,7 +29,29 @@ export async function GET(request: Request) {
     } catch {
       observedAtColumnsReady = false;
     }
+    try {
+      await runtime.DB.prepare("SELECT state FROM source_readiness LIMIT 1").first();
+      sourceReadinessReady = true;
+    } catch {
+      sourceReadinessReady = false;
+    }
+    try {
+      await runtime.DB.prepare("SELECT bse_balance FROM market_history_daily LIMIT 1").first();
+      bseMarginColumnReady = true;
+    } catch {
+      bseMarginColumnReady = false;
+    }
   }
+  const features = observedAtColumnsReady
+    ? [
+        "requiredArtifacts",
+        "sameDateObservedAtOrder",
+        "previousCompatibleRelease",
+        "radarFlowView",
+        ...(sourceReadinessReady ? ["sourceReadinessLedger"] : []),
+        ...(bseMarginColumnReady ? ["bseMarginSeparateScope"] : []),
+      ]
+    : [];
 
   return Response.json(
     {
@@ -38,13 +62,15 @@ export async function GET(request: Request) {
       stockShardCounts: [8],
       maxArtifacts: 20,
       maxArtifactBytes: 5_000_000,
-      features: observedAtColumnsReady
-        ? ["requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease", "radarFlowView"]
-        : [],
-      deploymentCommit: "unknown",
+      features,
+      deploymentCommit: runtime.FLOW_BUILD_SHA ?? "unknown",
+      deployedAt: runtime.FLOW_DEPLOYED_AT ?? null,
       migration: {
         releaseObservedAtColumns: observedAtColumnsReady,
+        sourceReadinessLedger: sourceReadinessReady,
+        marketHistoryBseColumn: bseMarginColumnReady,
       },
+      marketHistoryScopeVersion: bseMarginColumnReady ? "sse-szse-bse-v1" : "sse-szse-v0",
     },
     { headers: { "Cache-Control": "private, no-store" } },
   );

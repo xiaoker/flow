@@ -9,6 +9,8 @@ on:
     - cron: "45 10 * * 1-5"  # 18:45 Asia/Shanghai · failover after SSE/HKEX window
     - cron: "0 0 * * 1-5"    # 08:00 Asia/Shanghai · failover after SZSE window
     - cron: "55 0 * * 1-5"   # 08:55 Asia/Shanghai · failover after PCF capture/reconciliation
+    - cron: "15 1 * * 1-5"   # 09:15 Asia/Shanghai · bounded post-release reconciliation
+    - cron: "45 1 * * 1-5"   # 09:45 Asia/Shanghai · final morning reconciliation
   workflow_dispatch:
     inputs:
       dates:
@@ -32,10 +34,10 @@ permissions:
 
 concurrency:
   group: daily-market-data
-  # A newer release-window run supersedes a duplicate or delayed dispatch.
-  # Each run is now one-shot, so this cancellation cannot strand a 36-minute
-  # readiness poll or leave a later window waiting behind it.
-  cancel-in-progress: true
+  # Windows are one-shot and all writes are keyed by immutable source/release
+  # identities. Queueing instead of cancelling preserves raw evidence and the
+  # readiness ledger when a delayed window overlaps the next one.
+  cancel-in-progress: false
 
 jobs:
   collect-and-publish:
@@ -48,13 +50,14 @@ jobs:
       INPUT_COLLECTION_WINDOW: ${{ inputs.collection_window || 'auto' }}
       PUBLISH_URL: https://flow.xiaoker.com/api/v1/admin/import
       FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
+      FLOW_READINESS_URL: https://flow.xiaoker.com/api/v1/admin/source-readiness
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1, Node 24
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0, Node 24
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
         with:
           python-version: "3.12"
           cache: pip
@@ -91,6 +94,8 @@ jobs:
               "45 10 * * 1-5") WINDOW="evening" ;;
               "0 0 * * 1-5") WINDOW="morning" ;;
               "55 0 * * 1-5") WINDOW="reconcile" ;;
+              "15 1 * * 1-5") WINDOW="reconcile" ;;
+              "45 1 * * 1-5") WINDOW="reconcile" ;;
             esac
           fi
           echo "collection_window=$WINDOW" >> "$GITHUB_OUTPUT"
@@ -115,9 +120,9 @@ jobs:
             trading-desk collect-phase0 \
               --dates "${DATES[@]}" \
               --window "$COLLECTION_WINDOW"
-            if jq -e '.counts.fail == 0 and .phase0_gate_status != "blocked"' \
+            if jq -e '(.phase0_gate_status == "pass" or .phase0_gate_status == "conditional_pass")' \
               reports/phase0/latest-quality-summary.json >/dev/null; then
-              echo "Official sources are complete for this window."
+              echo "Official sources passed the collection gate for this window."
               break
             fi
 
@@ -126,9 +131,10 @@ jobs:
             # window; do not retry it as if it were a transport failure.
             if jq -e '
               (.errors | length == 0) and
+              (.phase0_gate_status == "pending" or
               any(.findings[]?;
                 (.check_id == "timeliness.requested_date_coverage" and
-                 .status == "fail"))
+                 .status == "fail")))
             ' reports/phase0/latest-quality-summary.json >/dev/null; then
               echo "Official source date is not ready; this window is pending and the next window will retry." >&2
               echo "pending=true" >> "$GITHUB_OUTPUT"
@@ -154,6 +160,52 @@ jobs:
             sleep $((attempt * 30))
             attempt=$((attempt + 1))
           done
+
+      - name: Record source readiness ledger
+        id: readiness
+        if: ${{ always() && steps.collect.outcome != 'cancelled' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets must be configured." >&2
+            exit 1
+          fi
+          TARGET_DATE="${{ steps.dates.outputs.latest }}"
+          curl --silent --show-error --fail-with-body --retry 2 --retry-all-errors \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            "$FLOW_READINESS_URL?date=$TARGET_DATE" \
+            --output previous-source-readiness.json || true
+          python scripts/build_source_readiness.py \
+            --manifest reports/phase0/latest-manifest.json \
+            --quality reports/phase0/latest-quality-summary.json \
+            --previous previous-source-readiness.json \
+            --output source-readiness.json
+          curl --fail-with-body --retry 3 --retry-all-errors \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header "Content-Type: application/json" \
+            --data-binary @source-readiness.json \
+            "$FLOW_READINESS_URL" \
+            --output source-readiness-response.json
+          jq '{targetDate, state, pendingDomains, errorDomains, nextCheckAt}' source-readiness.json
+          jq . source-readiness-response.json
+          {
+            echo "## Source readiness ledger"
+            jq -r '
+              "- target: \(.targetDate)\n" +
+              "- state: \(.state)\n" +
+              "- next check: \(.nextCheckAt // "none")\n" +
+              "- pending: \((.pendingDomains // []) | join(", "))\n" +
+              "- errors: \((.errorDomains // []) | join(", "))"
+            ' source-readiness.json
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build dashboard snapshot
         run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json
@@ -406,6 +458,7 @@ jobs:
               --output-dir read-models \
               --stock-catalog stock-pressure-catalog.json \
               --require-materialized \
+              --producer-build-sha "${GITHUB_SHA}" \
               "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py \
               --read-model-dir read-models \
@@ -418,7 +471,7 @@ jobs:
             echo "Pending snapshot has no active read models; preserving raw evidence only."
           fi
 
-      - name: Publish immutable read models
+      - name: Stage immutable read-model candidate
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -428,27 +481,52 @@ jobs:
             [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
             python scripts/publish_read_models.py \
               --read-model-dir read-models \
+              --stage-only \
               --result-output read-model-publish.json
           else
             echo "Pending snapshot has no active read models; preserving raw evidence only."
           fi
 
-      - name: Verify published read-model release
+      - name: Verify staged read-model candidate
         if: ${{ success() }}
         env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
             [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
-            jq -e '.status == "activated"' read-model-publish.json >/dev/null; then
+            jq -e '.status == "staged_candidate"' read-model-publish.json >/dev/null; then
             RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
             AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
             python scripts/verify_published_release.py \
               --release-id "$RELEASE_ID" \
-              --as-of "$AS_OF" > release-canary.json
+              --as-of "$AS_OF" \
+              --candidate > release-canary.json
           else
-            echo "Read-model release was staged or snapshot is pending; active release was not changed, so canary is not applicable."
+            echo "Read-model candidate was not staged or snapshot is pending; active release was not changed, so canary is not applicable."
+          fi
+
+      - name: Activate canary-verified read-model candidate
+        if: ${{ success() }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
+            [[ -s "read-models/manifest.json" && -s "release-canary.json" ]] && \
+            jq -e '.mode == "candidate"' release-canary.json >/dev/null; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
+            python scripts/activate_read_models.py \
+              --release-id "$RELEASE_ID" \
+              --as-of "$AS_OF" > read-model-activation.json
+            jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
+              '.releaseId == $releaseId and .asOf == $asOf and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+              read-model-activation.json >/dev/null
+          else
+            echo "Candidate canary did not pass or snapshot is pending; active release was not changed."
           fi
 
       - name: Fail loudly on unresolved source errors
@@ -457,17 +535,14 @@ jobs:
         run: |
           errors="$(jq '.errors | length' reports/phase0/latest-quality-summary.json)"
           gate="$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)"
-          collection_window="${{ steps.window.outputs.collection_window }}"
           source_pending="${{ steps.collect.outputs.pending }}"
           if [[ "$errors" -gt 0 || "$gate" == "blocked" ]]; then
-            # Evening collection intentionally runs before the SZSE current
-            # snapshot is published.  It may archive that raw response and
-            # keep the prior complete dashboard, but it must not be marked as
-            # a failed run when the source has explicitly reported that its
-            # business date is not ready. Morning/reconcile runs remain
-            # fail-closed so the missing source is visible to the operator.
-            if [[ "$errors" -eq 0 && "$gate" == "blocked" && "$collection_window" == "evening" && "$source_pending" == "true" ]]; then
-              echo "Evening window archived sources; an official source is expected to advance in a later window."
+            # A source that has not published the requested date is a normal
+            # release-timing state. Preserve the raw response and let the
+            # bounded follow-up windows retry it. Transport, schema and data
+            # quality errors remain hard failures.
+            if [[ "$errors" -eq 0 && "$source_pending" == "true" ]]; then
+              echo "Official source timing is pending; raw evidence was archived and a later reconciliation window will retry."
               exit 0
             fi
             echo "Collection archived partial evidence but still has unresolved source errors." >&2
@@ -478,7 +553,7 @@ jobs:
 
       - name: Preserve run evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0, Node 24
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
         with:
           name: market-data-${{ github.run_id }}
           if-no-files-found: warn
@@ -501,6 +576,9 @@ jobs:
             capabilities.json
             read-model-publish.json
             release-canary.json
+            source-readiness.json
+            source-readiness-response.json
+            previous-source-readiness.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json

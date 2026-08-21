@@ -33,7 +33,7 @@ type NormalizedFile = {
 
 type HistoryArtifact = {
   releaseId: string;
-  sourceId: "sse" | "szse" | "hkex";
+  sourceId: "sse" | "szse" | "bse" | "hkex";
   dataset: "etf_scale" | "etf_nav" | "etf_pcf" | "margin_market_daily" | "stock_connect_daily";
   requestedDate: string;
   tradeDates: string[];
@@ -92,6 +92,7 @@ function isOfficialSource(
     if (sourceId === "hkex") {
       return dataset === "stock_connect_daily" && hostname === "www.hkex.com.hk";
     }
+    if (sourceId === "bse") return hostname === "www.bse.cn";
     if (sourceId === "sse") return hostname === "query.sse.com.cn";
     return hostname === "www.szse.cn" || hostname === "fund.szse.cn";
   } catch {
@@ -122,7 +123,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
   const sourceId = value.sourceId;
   const dataset = value.dataset;
   if (
-    (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "hkex") ||
+    (sourceId !== "sse" && sourceId !== "szse" && sourceId !== "bse" && sourceId !== "hkex") ||
     (dataset !== "etf_scale" &&
       dataset !== "etf_nav" &&
       dataset !== "etf_pcf" &&
@@ -134,7 +135,7 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
     (dataset === "etf_scale" && (sourceId === "sse" || sourceId === "szse")) ||
     (dataset === "etf_nav" && sourceId === "sse") ||
     (dataset === "etf_pcf" && sourceId === "sse") ||
-    (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse"));
+    (dataset === "margin_market_daily" && (sourceId === "sse" || sourceId === "szse" || sourceId === "bse"));
   if (!expectedPair) return false;
   return Boolean(
     typeof value.requestedDate === "string" &&
@@ -552,7 +553,7 @@ async function persistStandardRows(
     if (rows.length !== normalized.file.rowCount) throw new Error("margin_row_count_mismatch");
     const values = rows.map((row) => {
       validateStandardRow(artifact, row);
-      if (!["SSE", "SZSE"].includes(row.market)) throw new Error("invalid_margin_market");
+      if (!["SSE", "SZSE", "BSE"].includes(row.market)) throw new Error("invalid_margin_market");
       return {
         tradeDate: row.trade_date,
         market: row.market,
@@ -974,11 +975,11 @@ export async function POST(request: Request) {
         `INSERT INTO market_history_daily (
            trade_date, margin_balance, margin_change, financing_buy,
            lending_balance, lending_sell_volume, total_balance, sse_balance,
-           szse_balance, southbound_net, southbound_turnover,
+           szse_balance, bse_balance, southbound_net, southbound_turnover,
            southbound_sse_net, southbound_szse_net, northbound_turnover,
            northbound_etf_turnover, northbound_trade_count, margin_available,
            connect_available, source_snapshot_sha256, observed_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(trade_date) DO UPDATE SET
            margin_balance = excluded.margin_balance,
            margin_change = excluded.margin_change,
@@ -988,6 +989,7 @@ export async function POST(request: Request) {
            total_balance = excluded.total_balance,
            sse_balance = excluded.sse_balance,
            szse_balance = excluded.szse_balance,
+           bse_balance = excluded.bse_balance,
            southbound_net = excluded.southbound_net,
            southbound_turnover = excluded.southbound_turnover,
            southbound_sse_net = excluded.southbound_sse_net,
@@ -1011,6 +1013,7 @@ export async function POST(request: Request) {
         marketPoint.total_balance,
         marketPoint.sse_balance,
         marketPoint.szse_balance,
+        marketPoint.bse_balance,
         marketPoint.southbound_net,
         marketPoint.southbound_turnover,
         marketPoint.southbound_sse_net,

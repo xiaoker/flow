@@ -88,6 +88,8 @@ test("refreshes the latest dashboard and schedules collection through source rel
     "30 10 * * mon-fri",
     "45 23 * * sun-thu",
     "45 0 * * mon-fri",
+    "15 1 * * mon-fri",
+    "45 1 * * mon-fri",
   ]);
 });
 
@@ -113,12 +115,28 @@ test("keeps release history and rollback reads exact and migration-compatible", 
   assert.match(importer, /staged_stale_revision/);
 });
 
+test("keeps release and market-history responses bound to one active release", async () => {
+  const [latest, dates, history, store] = await Promise.all([
+    readFile(new URL("../app/api/v2/releases/latest/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v2/history/dates/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v2/market-history/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/dashboard-store.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(latest, /X-Flow-Release-Id/);
+  assert.match(latest, /if-none-match/);
+  assert.match(dates, /getActiveReleaseManifest/);
+  assert.match(dates, /X-Flow-As-Of/);
+  assert.match(history, /target > active\.asOf/);
+  assert.match(history, /X-Flow-Release-Id/);
+  assert.match(store, /szse_balance, bse_balance, southbound_net/);
+});
+
 test("replaces repetitive margin day cards with derived diagnostics", async () => {
   const source = await readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8");
   assert.match(source, /最新完整数据日/);
   assert.match(source, /短期杠杆趋势/);
   assert.match(source, /融资买入活跃度/);
-  assert.match(source, /沪深余额增量/);
+  assert.match(source, /沪深北余额增量/);
   assert.match(source, /融券余额变化/);
   assert.doesNotMatch(source, /margin-history compact-history/);
 });
@@ -240,7 +258,7 @@ test("exposes the ETF pressure workbench without fabricating stock facts", async
     readFile(new URL("../app/etf-pressure-view.tsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/trading_desk/stock_pressure.py", import.meta.url), "utf8"),
   ]);
-  assert.match(source, /id: "pressure", label: "ETF β压强"/);
+  assert.match(source, /id: "pressure", label: "ETF 穿透"/);
   assert.match(source, /<EtfPressureView data=\{snapshot\.pressure\}/);
   assert.match(bootstrap, /requestedView\(params\.get\("view"\)\)/);
   assert.match(bootstrap, /\/api\/v2\/views\/\$\{view\}/);

@@ -68,7 +68,14 @@ def check_capabilities(url: str, headers: dict[str, str]) -> None:
         if not isinstance(values, list) or version not in values:
             raise RuntimeError(f"deployed capability missing {field}={version}")
     features = set(payload.get("features") or [])
-    if not {"requiredArtifacts", "sameDateObservedAtOrder", "previousCompatibleRelease", "radarFlowView"}.issubset(features):
+    if not {
+        "requiredArtifacts",
+        "sameDateObservedAtOrder",
+        "previousCompatibleRelease",
+        "radarFlowView",
+        "sourceReadinessLedger",
+        "bseMarginSeparateScope",
+    }.issubset(features):
         raise RuntimeError("deployed capability lacks v3 release features")
 
 

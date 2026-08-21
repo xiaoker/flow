@@ -59,6 +59,52 @@ def test_margin_total_consistency_passes_with_szse_rounding() -> None:
     assert consistency["evidence"]["max_abs_delta_yuan"] == 0
 
 
+def test_margin_market_scope_rejects_bse_rows_in_szse_dataset() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-08-20",
+                "market": "BSE",
+                "financing_balance_yuan": 10,
+                "financing_buy_yuan": 1,
+                "securities_lending_balance_yuan": 2,
+                "margin_total_balance_yuan": 12,
+            }
+        ]
+    )
+
+    summary = summarize_findings(validate_margin(frame, "szse_margin"))
+
+    scope = next(
+        item for item in summary["findings"] if item["check_id"] == "validity.margin_market_scope"
+    )
+    assert scope["status"] == "fail"
+
+
+def test_margin_rejects_missing_numeric_balance_instead_of_zero_filling() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-08-20",
+                "market": "BSE",
+                "financing_balance_yuan": None,
+                "financing_buy_yuan": 1,
+                "securities_lending_balance_yuan": 2,
+                "margin_total_balance_yuan": 3,
+            }
+        ]
+    )
+
+    summary = summarize_findings(validate_margin(frame, "bse_margin"))
+
+    numeric = next(
+        item
+        for item in summary["findings"]
+        if item["check_id"] == "validity.numeric.financing_balance_yuan"
+    )
+    assert numeric["status"] == "fail"
+
+
 def test_connect_rejects_northbound_buy_sell_after_disclosure_change() -> None:
     frame = pd.DataFrame(
         [

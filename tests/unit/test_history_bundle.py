@@ -143,3 +143,68 @@ def test_history_bundle_compresses_wide_pcf_in_transit(tmp_path: Path) -> None:
     assert normalized["contentEncoding"] == "gzip"
     assert hashlib.sha256(decoded).hexdigest() == normalized["sha256"]
     assert b"588000" in decoded
+
+
+def test_history_bundle_accepts_bse_margin_as_separate_source(tmp_path: Path) -> None:
+    raw_path = tmp_path / "data/raw/bse/margin_market_daily/2026-07-21/run.json"
+    metadata_path = raw_path.with_name("run.metadata.json")
+    normalized_path = tmp_path / "data/normalized/bse_margin/2026-07-21/run.csv"
+    raw_path.parent.mkdir(parents=True)
+    normalized_path.parent.mkdir(parents=True)
+    raw = b'{"data": [{"market": "BSE"}]}'
+    digest = hashlib.sha256(raw).hexdigest()
+    raw_path.write_bytes(raw)
+    metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-07-21",
+                "market": "BSE",
+                "financing_balance_yuan": 10_000,
+                "financing_buy_yuan": 500,
+                "securities_lending_balance_yuan": 300,
+                "margin_total_balance_yuan": 10_300,
+            }
+        ]
+    ).to_csv(normalized_path, index=False)
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps({"asOf": "2026-07-21"}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "bse-history-test",
+                "started_at": "2026-07-22T09:15:00+08:00",
+                "finished_at": "2026-07-22T09:16:00+08:00",
+                "artifacts": [
+                    {
+                        "source": {
+                            "source_id": "bse",
+                            "dataset": "margin_market_daily",
+                            "url": "https://www.bse.cn/disclosure/rzrq_trans_list.html",
+                            "date_semantics": "source_published",
+                        },
+                        "requested_date": "2026-07-21",
+                        "observed_at": "2026-07-22T09:15:20+08:00",
+                        "content_type": "application/json",
+                        "raw_path": str(raw_path.relative_to(tmp_path)),
+                        "metadata_path": str(metadata_path.relative_to(tmp_path)),
+                        "normalized_path": str(normalized_path.relative_to(tmp_path)),
+                        "sha256": digest,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = build_history_bundle_from_files(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+        workspace_root=tmp_path,
+    )
+
+    artifact = bundle["history"]["artifacts"][0]
+    assert artifact["sourceId"] == "bse"
+    assert artifact["dataset"] == "margin_market_daily"
+    assert artifact["normalized"][0]["rowCount"] == 1
