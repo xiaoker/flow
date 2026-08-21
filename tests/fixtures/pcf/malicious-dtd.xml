@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE PCF [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<PCF>
+  <FundInstrumentID>&xxe;</FundInstrumentID>
+  <TradingDay>20260821</TradingDay>
+</PCF>

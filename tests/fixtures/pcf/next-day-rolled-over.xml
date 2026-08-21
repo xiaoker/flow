@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PCF>
+  <FundInstrumentID>510300</FundInstrumentID>
+  <TradingDay>20260824</TradingDay>
+  <PreTradingDay>20260821</PreTradingDay>
+  <CreationRedemptionUnit>1000000</CreationRedemptionUnit>
+  <RecordNumber>1</RecordNumber>
+  <ComponentList><Component><InstrumentID>600000</InstrumentID><Quantity>101</Quantity></Component></ComponentList>
+</PCF>

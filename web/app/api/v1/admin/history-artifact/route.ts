@@ -29,6 +29,23 @@ function matchesFile(key: string, file: string): boolean {
   return key.endsWith(`/${file}.csv`) || key.endsWith(`/${file}.csv.gz`);
 }
 
+async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string) {
+  if (!runtime.DB || source !== "sse" || dataset !== "etf_pcf") return null;
+  try {
+    return await runtime.DB.prepare(
+      `SELECT revision_id AS revisionId, object_key AS objectKey, sha256, content_encoding AS contentEncoding,
+              row_count AS rowCount, observed_at AS observedAt, status
+         FROM history_artifact_pointer
+        WHERE source_id = ? AND dataset = ? AND trade_date = ? AND file_name = ? AND status = 'READY'
+        LIMIT 1`,
+    ).bind(source, dataset, tradeDate, file).first<Record<string, unknown>>();
+  } catch {
+    // The additive pointer table may not exist on an older Worker schema.
+    // Falling back preserves the legacy route until the migration is deployed.
+    return null;
+  }
+}
+
 export async function GET(request: Request): Promise<Response> {
   const runtime = await runtimeEnv();
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
@@ -50,6 +67,23 @@ export async function GET(request: Request): Promise<Response> {
 
   const dateCandidates = [tradeDate, tradeDate.replaceAll("-", "")];
   try {
+    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file);
+    if (pointer?.objectKey && typeof pointer.objectKey === "string") {
+      const object = await runtime.RAW_BUCKET.get(pointer.objectKey);
+      if (!object?.body) return badRequest("artifact_not_found", 404);
+      const isGzip = pointer.objectKey.endsWith(".gz");
+      return new Response(object.body, {
+        headers: {
+          "Cache-Control": "private, no-store",
+          "Content-Type": isGzip ? "application/gzip" : "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${source}-${dataset}-${tradeDate}-${file}${isGzip ? ".csv.gz" : ".csv"}"`,
+          "X-Flow-Normalized-Key": pointer.objectKey,
+          "X-Flow-Normalized-Sha256": String(pointer.sha256 ?? ""),
+          "X-Flow-Trade-Date": tradeDate,
+          "X-Flow-Pcf-Revision": String(pointer.revisionId ?? ""),
+        },
+      });
+    }
     const objectsByKey = new Map<string, R2Object>();
     for (const requestedDate of dateCandidates) {
       const prefix = `market-data/normalized/${source}/${dataset}/${requestedDate}/`;

@@ -38,6 +38,13 @@ SSE_ETF_PCF = SourceSpec(
     url="https://query.sse.com.cn/commonQuery.do",
     date_semantics="sse_pcf_current_day_or_previous_day_basket",
 )
+SSE_ETF_PCF_V2 = SourceSpec(
+    source_id="sse",
+    publisher="上海证券交易所",
+    dataset="etf_pcf_v2_shadow",
+    url="https://query.sse.com.cn/etfDownload/downloadETF2Bulletin.do",
+    date_semantics="sse_pcf_exact_same_trading_day_shadow",
+)
 SZSE_ETF = SourceSpec(
     source_id="szse",
     publisher="深圳证券交易所",
@@ -770,6 +777,154 @@ class OfficialMarketAdapters:
                     "stock_code", "stock_name", "quantity", "creation_unit",
                     "substitution_flag", "listing_market", "source_id",
                     "source_grade", "date_basis",
+                ]
+            )
+        else:
+            normalized["observed_at"] = artifact.observed_at
+        return self._persist(normalized, artifact, trade_date)
+
+    def fetch_sse_etf_pcf_v2(
+        self,
+        etf_codes: list[str],
+        trade_date: str,
+        previous_date: str,
+    ) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Shadow-fetch one official XML PCF request per ETF.
+
+        This method is intentionally separate from ``fetch_sse_etf_pcf``.  PR 1
+        proves the exact-date XML contract while the existing JSON adapter
+        remains the production path until the later dual-run/cutover PRs.
+        """
+
+        from ..pcf_xml import parse_sse_etf_pcf_xml
+
+        requested_codes = list(
+            dict.fromkeys(
+                str(code).strip().zfill(6)
+                for code in etf_codes
+                if re.fullmatch(r"\d{6}", str(code).strip().zfill(6))
+            )
+        )
+        normalized_rows: list[dict[str, Any]] = []
+        request_log: list[dict[str, Any]] = []
+        raw_entries: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        raw_xml_artifacts: list[FetchArtifact] = []
+        for code in requested_codes:
+            params = {"fundCode": code}
+            try:
+                response = get(
+                    self.session,
+                    SSE_ETF_PCF_V2.url,
+                    params=params,
+                    headers=self._headers(
+                        f"https://www.sse.com.cn/disclosure/fund/etflist/detail.shtml?fundid={code}"
+                    ),
+                )
+                content_type = response.headers.get("Content-Type", "")
+                disposition = response.headers.get("Content-Disposition", "")
+                body = response.content
+                content_prefix = body.lstrip()[:5].upper()
+                content_type_ok = content_type.lower().split(";", 1)[0].strip() in {
+                    "application/xml",
+                    "text/xml",
+                }
+                octet_xml_ok = (
+                    content_type.lower().split(";", 1)[0].strip() == "application/octet-stream"
+                    and re.search(r"\.xml(?:[\"']|$)", disposition, flags=re.IGNORECASE) is not None
+                    and content_prefix.startswith(b"<?XML")
+                )
+                if not (content_type_ok or octet_xml_ok):
+                    warnings.append(f"{code} PCF XML content-type 不可信")
+                    request_log.append({"code": code, "status": response.status_code, "accepted": False})
+                    continue
+                raw_artifact = write_raw_response(
+                    root=self.data_root,
+                    source=SSE_ETF_PCF_V2,
+                    requested_date=trade_date,
+                    run_id=f"{self.run_id}-{code}",
+                    content=body,
+                    extension="xml",
+                    status_code=response.status_code,
+                    content_type=content_type or "application/xml",
+                    request_params=params,
+                )
+                raw_xml_artifacts.append(raw_artifact)
+                rows, header, parse_warnings = parse_sse_etf_pcf_xml(
+                    body,
+                    requested_code=code,
+                    target_date=trade_date,
+                    previous_date=previous_date,
+                )
+                warnings.extend(f"{code} {warning}" for warning in parse_warnings)
+                for row in rows:
+                    normalized_rows.append(
+                        {
+                            **row,
+                            "trade_date": trade_date,
+                            "pcf_date": trade_date,
+                            "pcf_previous_date": previous_date,
+                            "date_basis": SSE_ETF_PCF_V2.date_semantics,
+                            "source_id": SSE_ETF_PCF_V2.source_id,
+                            "source_grade": SSE_ETF_PCF_V2.source_grade,
+                        }
+                    )
+                request_log.append(
+                    {
+                        "code": code,
+                        "status": response.status_code,
+                        "accepted": True,
+                        "raw_sha256": raw_artifact.sha256,
+                        "component_count": len(rows),
+                        "header": header,
+                    }
+                )
+                raw_entries.append(
+                    {
+                        "code": code,
+                        "raw_path": raw_artifact.raw_path,
+                        "raw_sha256": raw_artifact.sha256,
+                        "metadata_path": raw_artifact.metadata_path,
+                    }
+                )
+            except Exception as exc:
+                warnings.append(f"{code} PCF XML 请求或解析失败：{type(exc).__name__}")
+                request_log.append({"code": code, "accepted": False, "error": type(exc).__name__})
+
+        raw_index = json.dumps(
+            {
+                "schema_version": 1,
+                "adapter": "sse_etf_pcf_xml_shadow_v1",
+                "requested_date": trade_date,
+                "previous_date": previous_date,
+                "requested_etf_count": len(requested_codes),
+                "accepted_etf_count": len(raw_xml_artifacts),
+                "requests": request_log,
+                "raw_xml": raw_entries,
+                "warnings": warnings,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        artifact = write_raw_response(
+            root=self.data_root,
+            source=SSE_ETF_PCF_V2,
+            requested_date=trade_date,
+            run_id=self.run_id,
+            content=gzip.compress(raw_index, compresslevel=6),
+            extension="json.gz",
+            status_code=200 if requested_codes else 503,
+            content_type="application/gzip",
+            request_params={"fundCode": requested_codes, "one_request_per_etf": True},
+        )
+        artifact.warnings.extend(warnings)
+        normalized = pd.DataFrame(normalized_rows)
+        if normalized.empty:
+            normalized = pd.DataFrame(
+                columns=[
+                    "trade_date", "pcf_date", "pcf_previous_date", "market", "etf_code", "etf_name",
+                    "stock_code", "stock_name", "quantity", "creation_unit", "substitution_flag",
+                    "listing_market", "source_extra_json", "date_basis", "source_id", "source_grade",
                 ]
             )
         else:
