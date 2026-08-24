@@ -234,18 +234,27 @@ def main() -> None:
     )
     args = parser.parse_args()
     verifier = verify_candidate if args.candidate else verify
+    if args.candidate:
+        verifier_kwargs = {
+            "base_url": args.base_url,
+            "expected_release_id": args.release_id,
+            "expected_as_of": args.as_of,
+            "expected_build_sha": args.build_sha,
+            "timeout": args.timeout,
+            "slot": args.slot,
+        }
+    else:
+        verifier_kwargs = {
+            "base_url": args.base_url,
+            "expected_release_id": args.release_id,
+            "expected_as_of": args.as_of,
+            "expected_build_sha": args.build_sha,
+            "repeat": args.repeat,
+            "timeout": args.timeout,
+            "slot": args.slot,
+        }
     print(
-        json.dumps(
-            verifier(
-                args.base_url,
-                expected_release_id=args.release_id,
-                expected_as_of=args.as_of,
-                expected_build_sha=args.build_sha,
-                repeat=args.repeat,
-                timeout=args.timeout,
-                slot=args.slot,
-            )
-        )
+        json.dumps(verifier(**verifier_kwargs))
     )
 
 
