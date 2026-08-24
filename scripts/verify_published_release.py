@@ -10,16 +10,20 @@ from typing import Any
 import requests
 
 
-VIEWS = ("overview", "radar", "radar_flow", "rotation", "national", "connect", "margin", "pressure")
-CANDIDATE_ARTIFACTS = (
+MARKET_VIEWS = ("overview", "radar", "rotation", "national", "connect", "margin")
+PENETRATION_VIEWS = ("radar_flow", "pressure")
+FULL_VIEWS = (*MARKET_VIEWS, *PENETRATION_VIEWS)
+MARKET_ARTIFACTS = (
     "bootstrap",
     "overview",
     "radar",
-    "radar_flow",
     "rotation",
     "national",
     "connect",
     "margin",
+)
+PENETRATION_ARTIFACTS = (
+    "radar_flow",
     "pressure",
     "stock_search",
     "stock_0",
@@ -31,6 +35,20 @@ CANDIDATE_ARTIFACTS = (
     "stock_6",
     "stock_7",
 )
+FULL_ARTIFACTS = (*MARKET_ARTIFACTS, *PENETRATION_ARTIFACTS)
+# Backward-compatible name used by the legacy full-release canary tests and
+# callers. New workflows should select an explicit slot instead.
+CANDIDATE_ARTIFACTS = FULL_ARTIFACTS
+
+
+def slot_contract(slot: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if slot == "dashboard":
+        return MARKET_VIEWS, MARKET_ARTIFACTS
+    if slot == "etf_penetration":
+        return PENETRATION_VIEWS, PENETRATION_ARTIFACTS
+    if slot == "full":
+        return FULL_VIEWS, FULL_ARTIFACTS
+    raise ValueError(f"unsupported release slot: {slot}")
 
 
 def _headers() -> dict[str, str]:
@@ -56,10 +74,12 @@ def verify(
     expected_build_sha: str | None = None,
     repeat: int = 1,
     timeout: float = 20.0,
+    slot: str = "full",
 ) -> dict[str, Any]:
     if not 1 <= repeat <= 100:
         raise ValueError("repeat must be between 1 and 100")
 
+    views, _artifacts = slot_contract(slot)
     root = base_url.rstrip("/")
     headers = _headers()
     request_count = 0
@@ -110,33 +130,35 @@ def verify(
             if cached.status_code not in {200, 304}:
                 cached.raise_for_status()
         get("/api/v2/dashboard", {"date": expected_as_of})
-        for view in VIEWS:
-            response = get(f"/api/v2/views/{view}", {"date": expected_as_of})
+        for view in views:
+            response = get(f"/api/v2/views/{view}", {"date": expected_as_of, "slot": slot} if slot != "full" else {"date": expected_as_of})
             view_payload = response.json()
             if isinstance(view_payload, dict) and view_payload.get("asOf") not in {
                 None,
                 expected_as_of,
             }:
                 raise RuntimeError(f"{view} asOf mismatch on iteration {iteration}")
-        get("/api/v2/stock-search", {"date": expected_as_of})
-        shard = get("/api/v2/stocks/stock_0", {"date": expected_as_of})
-        etag = shard.headers.get("etag")
-        if etag:
-            request_count += 1
-            not_modified = requests.get(
-                f"{root}/api/v2/stocks/stock_0",
-                params={"date": expected_as_of},
-                headers={**headers, "If-None-Match": etag},
-                timeout=timeout,
-                allow_redirects=False,
-            )
-            if not_modified.status_code not in {200, 304}:
-                not_modified.raise_for_status()
+        if slot in {"full", "etf_penetration"}:
+            get("/api/v2/stock-search", {"date": expected_as_of, "slot": slot} if slot != "full" else {"date": expected_as_of})
+            shard = get("/api/v2/stocks/stock_0", {"date": expected_as_of, "slot": slot} if slot != "full" else {"date": expected_as_of})
+            etag = shard.headers.get("etag")
+            if etag:
+                request_count += 1
+                not_modified = requests.get(
+                    f"{root}/api/v2/stocks/stock_0",
+                    params={"date": expected_as_of, "slot": slot} if slot != "full" else {"date": expected_as_of},
+                    headers={**headers, "If-None-Match": etag},
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+                if not_modified.status_code not in {200, 304}:
+                    not_modified.raise_for_status()
     return {
         "releaseId": expected_release_id,
         "asOf": expected_as_of,
         "buildSha": latest.get("buildSha"),
-        "checkedViews": len(VIEWS),
+        "slot": slot,
+        "checkedViews": len(views),
         "iterations": repeat,
         "requests": request_count,
     }
@@ -149,12 +171,14 @@ def verify_candidate(
     expected_as_of: str,
     expected_build_sha: str | None = None,
     timeout: float = 20.0,
+    slot: str = "full",
 ) -> dict[str, Any]:
     """Verify a staged release by explicit release ID without reading active routes."""
 
+    _views, artifacts = slot_contract(slot)
     root = base_url.rstrip("/")
     headers = _candidate_headers()
-    for name in CANDIDATE_ARTIFACTS:
+    for name in artifacts:
         response = requests.get(
             f"{root}/api/v1/admin/releases/artifact",
             params={"releaseId": expected_release_id, "name": name, "candidate": "1"},
@@ -178,8 +202,9 @@ def verify_candidate(
         "releaseId": expected_release_id,
         "asOf": expected_as_of,
         "mode": "candidate",
+        "slot": slot,
         "buildSha": expected_build_sha,
-        "checkedArtifacts": len(CANDIDATE_ARTIFACTS),
+        "checkedArtifacts": len(artifacts),
     }
 
 
@@ -197,6 +222,12 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--build-sha", default=os.environ.get("FLOW_EXPECTED_BUILD_SHA"))
     parser.add_argument(
+        "--slot",
+        choices=("dashboard", "etf_penetration", "full"),
+        default="full",
+        help="Release slot to verify",
+    )
+    parser.add_argument(
         "--candidate",
         action="store_true",
         help="Verify an explicit STAGED candidate via the admin artifact endpoint; never reads active routes",
@@ -212,6 +243,7 @@ def main() -> None:
                 expected_build_sha=args.build_sha,
                 repeat=args.repeat,
                 timeout=args.timeout,
+                slot=args.slot,
             )
         )
     )

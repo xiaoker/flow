@@ -46,7 +46,9 @@ def post(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, A
     raise RuntimeError(f"read model import failed after retries: {last_error}")
 
 
-def check_capabilities(url: str, headers: dict[str, str]) -> None:
+def check_capabilities(url: str, headers: dict[str, str], *, slot: str = "full") -> None:
+    if slot not in {"dashboard", "etf_penetration", "full"}:
+        raise ValueError(f"unsupported release slot: {slot}")
     response = requests.get(
         url,
         headers={key: value for key, value in headers.items() if key != "Content-Type"},
@@ -68,14 +70,15 @@ def check_capabilities(url: str, headers: dict[str, str]) -> None:
         if not isinstance(values, list) or version not in values:
             raise RuntimeError(f"deployed capability missing {field}={version}")
     features = set(payload.get("features") or [])
-    if not {
+    required_features = {
         "requiredArtifacts",
         "sameDateObservedAtOrder",
-        "previousCompatibleRelease",
-        "radarFlowView",
-        "sourceReadinessLedger",
+        "releaseSlots",
         "bseMarginSeparateScope",
-    }.issubset(features):
+    }
+    if slot in {"etf_penetration", "full"}:
+        required_features.update({"previousCompatibleRelease", "radarFlowView", "sourceReadinessLedger"})
+    if not required_features.issubset(features):
         raise RuntimeError("deployed capability lacks v3 release features")
 
 
@@ -126,18 +129,27 @@ def main() -> None:
         action="store_true",
         help="Upload immutable candidate artifacts without changing the active release pointer",
     )
+    parser.add_argument(
+        "--slot",
+        choices=("dashboard", "etf_penetration", "full"),
+        help="Release slot to validate; omitted uses the manifest slot or the legacy full contract",
+    )
     args = parser.parse_args()
 
     manifest = json.loads((args.read_model_dir / "manifest.json").read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("artifacts"), dict):
         raise ValueError("read-model manifest is invalid")
+    manifest_slot = manifest.get("slot") if manifest.get("slot") in {"dashboard", "etf_penetration"} else "full"
+    effective_slot = args.slot or manifest_slot
+    if args.slot and args.slot != manifest_slot:
+        raise ValueError(f"manifest slot {manifest_slot} does not match requested slot {args.slot}")
     headers = {
         "Authorization": f"Bearer {required_env('FLOW_INGEST_API_KEY')}",
         "CF-Access-Client-Id": required_env("FLOW_CF_ACCESS_CLIENT_ID"),
         "CF-Access-Client-Secret": required_env("FLOW_CF_ACCESS_CLIENT_SECRET"),
         "Content-Type": "application/json",
     }
-    check_capabilities(args.capabilities_url, headers)
+    check_capabilities(args.capabilities_url, headers, slot=effective_slot)
     names = list(manifest["artifacts"])
     if not names:
         raise ValueError("read-model manifest has no artifacts")

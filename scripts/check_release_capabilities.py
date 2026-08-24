@@ -17,7 +17,9 @@ def _required(name: str) -> str:
     return value
 
 
-def check(url: str, *, timeout: float = 20.0) -> dict:
+def check(url: str, *, timeout: float = 20.0, slot: str = "full") -> dict:
+    if slot not in {"dashboard", "etf_penetration", "full"}:
+        raise ValueError(f"unsupported release slot: {slot}")
     headers = {
         "Authorization": f"Bearer {_required('FLOW_INGEST_API_KEY')}",
         "CF-Access-Client-Id": _required("FLOW_CF_ACCESS_CLIENT_ID"),
@@ -44,18 +46,20 @@ def check(url: str, *, timeout: float = 20.0) -> dict:
     required_features = {
         "requiredArtifacts",
         "sameDateObservedAtOrder",
-        "previousCompatibleRelease",
-        "radarFlowView",
-        "sourceReadinessLedger",
+        "releaseSlots",
         "bseMarginSeparateScope",
     }
+    if slot in {"etf_penetration", "full"}:
+        required_features.update({"previousCompatibleRelease", "radarFlowView", "sourceReadinessLedger"})
     if not required_features.issubset(features):
         raise RuntimeError(f"deployed release features are incomplete: {payload}")
     migration = payload.get("migration")
     if not isinstance(migration, dict) or migration.get("releaseObservedAtColumns") is not True:
         raise RuntimeError(f"release observed_at migration is not ready: {payload}")
-    if migration.get("sourceReadinessLedger") is not True or migration.get("marketHistoryBseColumn") is not True:
-        raise RuntimeError(f"source readiness/BSE history migrations are not ready: {payload}")
+    if migration.get("marketHistoryBseColumn") is not True:
+        raise RuntimeError(f"BSE history migration is not ready: {payload}")
+    if slot in {"etf_penetration", "full"} and migration.get("sourceReadinessLedger") is not True:
+        raise RuntimeError(f"source readiness migration is not ready: {payload}")
     if payload.get("marketHistoryScopeVersion") != "sse-szse-bse-v1":
         raise RuntimeError(f"market history scope is not three-market: {payload}")
     return payload
@@ -65,9 +69,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Check deployed Flow read-model capabilities")
     parser.add_argument("--url", default="https://flow.xiaoker.com/api/v1/admin/capabilities")
     parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--slot",
+        choices=("dashboard", "etf_penetration", "full"),
+        default="full",
+        help="Capability contract to check; dashboard does not require PCF readiness",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    payload = check(args.url, timeout=args.timeout)
+    payload = check(args.url, timeout=args.timeout, slot=args.slot)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if args.output:
         args.output.write_text(encoded + "\n", encoding="utf-8")

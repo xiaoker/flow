@@ -7,7 +7,14 @@ import pandas as pd
 import pytest
 
 from trading_desk.etf_flow_state import materialize_etf_terminal
-from trading_desk.read_models import ReadModelError, build_read_models, stock_shard_name, write_read_models
+from trading_desk.read_models import (
+    MARKET_READ_MODEL_NAMES,
+    ReadModelError,
+    build_market_read_models,
+    build_read_models,
+    stock_shard_name,
+    write_read_models,
+)
 
 
 def _state() -> dict:
@@ -195,6 +202,30 @@ def test_read_model_manifest_records_data_producer_build_sha() -> None:
     )
 
     assert manifest["producerBuildSha"] == "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_dashboard_slot_builds_without_pcf_or_stock_catalog() -> None:
+    snapshot = _snapshot() | {
+        "etfStockFlow": {
+            "available": False,
+            "basis": {"pcfDate": None, "shareDate": "2026-08-06"},
+            "coverage": {"stockCount": 0, "matchedEtfCount": 0},
+            "stocks": [],
+            "warnings": ["aligned_pcf_missing"],
+        }
+    }
+    payloads, manifest = build_market_read_models(
+        snapshot,
+        require_materialized=True,
+        market_history=_market_history(start="2026-05-14", count=61),
+    )
+
+    assert manifest["slot"] == "dashboard"
+    assert manifest["requiredArtifacts"] == list(MARKET_READ_MODEL_NAMES)
+    assert tuple(payloads) == MARKET_READ_MODEL_NAMES
+    assert "radar_flow" not in payloads
+    assert "pressure" not in payloads
+    assert manifest["marketHistory"]["archiveDates"] == 61
 
 
 def test_market_history_is_materialized_and_hashed() -> None:

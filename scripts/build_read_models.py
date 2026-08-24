@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from trading_desk.read_models import write_read_models
+from trading_desk.read_models import write_market_read_models, write_read_models
 
 
 def main() -> None:
@@ -14,10 +14,15 @@ def main() -> None:
     parser.add_argument("--object-prefix")
     parser.add_argument("--require-materialized", action="store_true")
     parser.add_argument(
+        "--slot",
+        choices=("dashboard", "full"),
+        default="full",
+        help="Build the core dashboard slot without PCF, or the complete legacy/full model set",
+    )
+    parser.add_argument(
         "--stock-catalog",
         type=Path,
-        required=True,
-        help="Complete ETF-to-stock catalog sidecar generated offline",
+        help="Complete ETF-to-stock catalog sidecar generated offline (required for --slot full)",
     )
     parser.add_argument(
         "--market-history",
@@ -34,17 +39,30 @@ def main() -> None:
         help="Git commit SHA of the data producer; recorded in the release manifest",
     )
     args = parser.parse_args()
+    if args.slot == "full" and args.stock_catalog is None:
+        parser.error("--stock-catalog is required when --slot full is selected")
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
-    result = write_read_models(
-        snapshot,
-        args.output_dir,
-        require_materialized=args.require_materialized,
-        object_prefix=args.object_prefix,
-        stock_catalog_path=args.stock_catalog,
-        market_history_path=args.market_history,
-        previous_manifest_path=args.previous_manifest,
-        producer_build_sha=args.producer_build_sha,
-    )
+    if args.slot == "dashboard":
+        result = write_market_read_models(
+            snapshot,
+            args.output_dir,
+            require_materialized=args.require_materialized,
+            object_prefix=args.object_prefix,
+            market_history_path=args.market_history,
+            previous_manifest_path=args.previous_manifest,
+            producer_build_sha=args.producer_build_sha,
+        )
+    else:
+        result = write_read_models(
+            snapshot,
+            args.output_dir,
+            require_materialized=args.require_materialized,
+            object_prefix=args.object_prefix,
+            stock_catalog_path=args.stock_catalog,
+            market_history_path=args.market_history,
+            previous_manifest_path=args.previous_manifest,
+            producer_build_sha=args.producer_build_sha,
+        )
     print(json.dumps(result["manifest"], ensure_ascii=False, indent=2))
 
 

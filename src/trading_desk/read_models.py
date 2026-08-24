@@ -35,6 +35,15 @@ STOCK_SEARCH_NAME = "stock_search"
 STOCK_SHARD_COUNT = 8
 STOCK_SHARD_NAMES = tuple(f"stock_{index}" for index in range(STOCK_SHARD_COUNT))
 REQUIRED_ARTIFACT_NAMES = (*VIEW_NAMES, STOCK_SEARCH_NAME, *STOCK_SHARD_NAMES)
+MARKET_READ_MODEL_NAMES = (
+    "bootstrap",
+    "overview",
+    "radar",
+    "rotation",
+    "national",
+    "connect",
+    "margin",
+)
 MAX_READ_MODEL_BYTES = 5_000_000
 MARKET_HISTORY_MAX_DATES = 750
 MARKET_HISTORY_SCHEMA_VERSION = 1
@@ -1078,6 +1087,120 @@ def build_read_models(
     return payloads, manifest
 
 
+def build_market_read_models(
+    snapshot: dict[str, Any],
+    *,
+    require_materialized: bool = False,
+    object_prefix: str | None = None,
+    market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
+    previous_manifest: dict[str, Any] | None = None,
+    producer_build_sha: str | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build the core market release without requiring ETF PCF.
+
+    The dashboard slot contains only views whose source contract is complete
+    once the exchange ETF, margin and connect snapshots are ready.  PCF and
+    the ETF-to-stock graph are intentionally absent; they are published in a
+    separate ``etf_penetration`` slot when their own date gate passes.
+    """
+
+    validate_snapshot(snapshot, require_materialized=require_materialized)
+    compact_history = None
+    effective_snapshot = snapshot
+    if market_history is not None:
+        compact_history, margin_series, connect_series, coverage = _normalize_market_history(
+            market_history,
+            as_of=str(snapshot["asOf"]),
+        )
+        effective_snapshot = dict(snapshot)
+        effective_snapshot["marginSeries"] = margin_series
+        effective_snapshot["connectSeries"] = connect_series
+        effective_snapshot["marketHistoryCoverage"] = coverage
+    _assert_history_not_regressed(_market_history_contract(compact_history), previous_manifest)
+
+    all_payloads = build_view_payloads(effective_snapshot)
+    payloads = {name: all_payloads[name] for name in MARKET_READ_MODEL_NAMES}
+    encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
+    for name, content in encoded.items():
+        if len(content) > MAX_READ_MODEL_BYTES:
+            raise ReadModelError(f"read_model_too_large:{name}")
+        _assert_finite(payloads[name])
+
+    terminal = effective_snapshot.get("etfTerminal")
+    terminal = terminal if isinstance(terminal, dict) else {}
+    history = terminal.get("historyCoverage")
+    history = history if isinstance(history, dict) else {}
+    national_data = payloads["national"].get("data")
+    national_data = national_data if isinstance(national_data, dict) else {}
+    national_terminal = national_data.get("etfTerminal")
+    national_terminal = national_terminal if isinstance(national_terminal, dict) else {}
+    national_items = national_terminal.get("instruments")
+    national_items = national_items if isinstance(national_items, list) else []
+    coverage_contract = {
+        "etf": {
+            "tradingDays": int(history.get("tradingDays") or 0),
+            "instrumentCount": len(terminal.get("instruments") or []),
+            "availablePeriods": sorted(str(period) for period in (terminal.get("availablePeriods") or [])),
+        },
+        "national": {"count": len(national_items)},
+    }
+    # The independent core slot still carries the ETF history contract. Do
+    # not let a PCF-independent rebuild silently shrink the periods already
+    # visible in the dashboard.
+    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest)
+    market_history_contract = _market_history_contract(compact_history)
+    observed_at = _observed_at_utc(effective_snapshot)
+    source_dates = _source_dates(effective_snapshot)
+    release_contract = {
+        "slot": "dashboard",
+        "asOf": snapshot["asOf"],
+        "observedAt": observed_at,
+        "sourceDates": source_dates,
+        "marketHistory": market_history_contract,
+        "coverage": coverage_contract,
+        "requiredArtifacts": list(MARKET_READ_MODEL_NAMES),
+        "artifactSha256": {name: sha256_bytes(encoded[name]) for name in MARKET_READ_MODEL_NAMES},
+    }
+    if producer_build_sha:
+        release_contract["producerBuildSha"] = producer_build_sha
+    release_hash = sha256_bytes(canonical_json_bytes(release_contract))
+    release_id = f"release:{snapshot['asOf']}:{release_hash[:16]}"
+    prefix = object_prefix or f"market-data/releases/{snapshot['asOf']}/{release_id}"
+    artifacts = {
+        name: {
+            "key": f"{prefix}/{name}.json",
+            "sha256": sha256_bytes(encoded[name]),
+            "bytes": len(encoded[name]),
+            "contentType": "application/json; charset=utf-8",
+        }
+        for name in MARKET_READ_MODEL_NAMES
+    }
+    manifest: dict[str, Any] = {
+        "schemaVersion": SCHEMA_VERSION,
+        "slot": "dashboard",
+        "releaseId": release_id,
+        "asOf": snapshot["asOf"],
+        "observedAt": observed_at,
+        "sourceDates": source_dates,
+        "marketHistory": market_history_contract,
+        "coverage": coverage_contract,
+        # The v3 contract keeps these declarations on every slot so the
+        # Worker can apply one bounded capability check to both slots.
+        "pressureSchemaVersion": PRESSURE_SCHEMA_VERSION,
+        "stockShardCount": STOCK_SHARD_COUNT,
+        "requiredArtifacts": list(MARKET_READ_MODEL_NAMES),
+        "classificationVersion": terminal.get("classificationVersion"),
+        "calculationVersion": terminal.get("calculation"),
+        "artifacts": artifacts,
+        "quality": snapshot.get("quality"),
+        "publication": snapshot.get("publication"),
+    }
+    if producer_build_sha:
+        manifest["producerBuildSha"] = producer_build_sha
+    manifest["manifestSha256"] = sha256_bytes(canonical_json_bytes(manifest))
+    return payloads, manifest
+
+
 def write_read_models(
     snapshot: dict[str, Any],
     output_dir: Path,
@@ -1103,6 +1226,38 @@ def write_read_models(
         require_materialized=require_materialized,
         object_prefix=object_prefix,
         stock_catalog=stock_catalog,
+        market_history=market_history,
+        previous_manifest=previous_manifest,
+        producer_build_sha=producer_build_sha,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name, payload in payloads.items():
+        (output_dir / f"{name}.json").write_bytes(canonical_json_bytes(payload))
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    return {"manifest": manifest, "manifestPath": str(manifest_path)}
+
+
+def write_market_read_models(
+    snapshot: dict[str, Any],
+    output_dir: Path,
+    *,
+    require_materialized: bool = False,
+    object_prefix: str | None = None,
+    market_history_path: Path | None = None,
+    previous_manifest_path: Path | None = None,
+    producer_build_sha: str | None = None,
+) -> dict[str, Any]:
+    market_history = None
+    if market_history_path is not None:
+        market_history = json.loads(market_history_path.read_text(encoding="utf-8"))
+    previous_manifest = None
+    if previous_manifest_path is not None and previous_manifest_path.is_file():
+        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
+    payloads, manifest = build_market_read_models(
+        snapshot,
+        require_materialized=require_materialized,
+        object_prefix=object_prefix,
         market_history=market_history,
         previous_manifest=previous_manifest,
         producer_build_sha=producer_build_sha,

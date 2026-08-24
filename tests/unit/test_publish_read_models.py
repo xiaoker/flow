@@ -6,8 +6,8 @@ import hashlib
 
 import pytest
 
-from scripts.publish_read_models import build_upload_body
-from scripts.verify_published_release import CANDIDATE_ARTIFACTS, verify, verify_candidate
+from scripts.publish_read_models import build_upload_body, check_capabilities
+from scripts.verify_published_release import CANDIDATE_ARTIFACTS, slot_contract, verify, verify_candidate
 
 
 def _manifest() -> dict:
@@ -75,6 +75,51 @@ def test_upload_rejects_unknown_activation_mode() -> None:
             finalize=False,
             activation_mode="activate_and_pray",
         )
+
+
+def test_dashboard_capability_does_not_require_pcf_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "readModelManifestSchemas": [2, 3],
+        "schemaVersions": [2, 3],
+        "pressureSchemaVersions": [2],
+        "stockShardCounts": [8],
+        "maxArtifacts": 20,
+        "maxArtifactBytes": 5_000_000,
+        "features": ["requiredArtifacts", "sameDateObservedAtOrder", "releaseSlots", "bseMarginSeparateScope"],
+        "migration": {
+            "releaseObservedAtColumns": True,
+            "sourceReadinessLedger": False,
+            "marketHistoryBseColumn": True,
+        },
+        "marketHistoryScopeVersion": "sse-szse-bse-v1",
+    }
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return payload
+
+    module = __import__("scripts.publish_read_models", fromlist=["requests"])
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: FakeResponse())
+    check_capabilities("https://flow.example/capabilities", {"Content-Type": "application/json"}, slot="dashboard")
+    with pytest.raises(RuntimeError, match="deployed capability lacks v3 release features"):
+        check_capabilities("https://flow.example/capabilities", {"Content-Type": "application/json"}, slot="etf_penetration")
+
+
+def test_dashboard_canary_contract_only_checks_market_artifacts() -> None:
+    views, artifacts = slot_contract("dashboard")
+    assert views == ("overview", "radar", "rotation", "national", "connect", "margin")
+    assert artifacts == (
+        "bootstrap",
+        "overview",
+        "radar",
+        "rotation",
+        "national",
+        "connect",
+        "margin",
+    )
 
 
 def test_candidate_canary_reads_each_explicit_staged_artifact_without_active_routes(

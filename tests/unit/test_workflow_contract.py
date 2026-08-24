@@ -126,16 +126,16 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
         "Build verified archive and publish bundle"
     )
     assert workflow.index("Archive raw evidence and publish normalized data") < workflow.index(
-        "Verify deployed read-model capabilities before building release"
+        "Verify deployed dashboard read-model capabilities"
     )
     assert workflow.index("Archive raw evidence and publish normalized data") < workflow.index(
         "Build ETF-to-stock daily partitions from archived R2 inputs"
     )
-    assert workflow.index("Verify deployed read-model capabilities before building release") < workflow.index(
-        "Build immutable read models offline"
+    assert workflow.index("Verify deployed dashboard read-model capabilities") < workflow.index(
+        "Build immutable dashboard and penetration read models offline"
     )
-    assert workflow.index("Stage immutable read-model candidate") < workflow.index(
-        "Verify staged read-model candidate"
+    assert workflow.index("Stage immutable dashboard read-model candidate") < workflow.index(
+        "Verify staged dashboard read-model candidate"
     )
     assert "build_stock_pressure_state.py" in workflow
     assert "--daily-partitions stock-flow-history.json" in workflow
@@ -145,15 +145,17 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "publish_stock_flow_history.py" in workflow
     assert "--lineage-report stock-flow-fetch-report.json" in workflow
     assert "--inventory pcf-inventory.json" in workflow
-    assert "Build immutable read models offline" in workflow
+    assert "Build immutable dashboard and penetration read models offline" in workflow
     assert "--require-materialized" in workflow
-    assert "--read-model-dir read-models" in workflow
+    assert "--read-model-dir read-models-full" in workflow
+    assert "--slot dashboard" in workflow
+    assert "--slot etf_penetration" in workflow
     assert "check_release_capabilities.py" in workflow
     assert "verify_published_release.py" in workflow
     assert "--repeat 100" not in workflow
-    assert "--result-output read-model-publish.json" in workflow
+    assert "--result-output dashboard-read-model-publish.json" in workflow
     assert "'.status == \"staged_candidate\"'" in workflow
-    assert "Activate canary-verified read-model candidate" in workflow
+    assert "Activate canary-verified dashboard candidate" in workflow
     assert '"Snapshot is pending source confirmation' in workflow
     assert "Fail loudly on unresolved source errors" in workflow
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
@@ -198,8 +200,8 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
     assert "((.etfStockFlow.coverage.stockCount // 0) > 0)" in workflow
     assert 'steps.stock-flow.outputs.ready' in workflow
     readiness_index = workflow.index("Check ETF stock-flow read-model readiness")
-    build_index = workflow.index("Build immutable read models offline")
-    stage_index = workflow.index("Stage immutable read-model candidate")
+    build_index = workflow.index("Build immutable dashboard and penetration read models offline")
+    stage_index = workflow.index("Stage immutable dashboard read-model candidate")
     assert readiness_index < build_index < stage_index
 
 

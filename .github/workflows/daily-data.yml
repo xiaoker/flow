@@ -331,8 +331,7 @@ jobs:
         run: |
           if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
                 "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
-             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
-            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
             AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
             if [[ -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
               echo "Cloudflare Access headers are required to read the compact market-history endpoint." >&2
@@ -363,7 +362,7 @@ jobs:
             jq '{asOf: .asOf, rows: (.rows | length), first: (.rows[0].trade_date // null), last: (.rows[-1].trade_date // null)}' \
               market-history.json
           else
-            echo "Snapshot/read-model prerequisites are incomplete; compact market history is not needed."
+            echo "Snapshot is not confirmed; compact market history is not needed."
           fi
 
       - name: Build verified archive and publish bundle
@@ -457,7 +456,7 @@ jobs:
             --index stock-flow-history.json \
             --url "https://flow.xiaoker.com/api/v1/admin/stock-flow-history"
 
-      - name: Verify deployed read-model capabilities before building release
+      - name: Verify deployed dashboard read-model capabilities
         if: ${{ success() }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
@@ -466,14 +465,13 @@ jobs:
         run: |
           if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
                 "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
-             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
-            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
-            python scripts/check_release_capabilities.py --output capabilities.json
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            python scripts/check_release_capabilities.py --slot dashboard --output dashboard-capabilities.json
           else
-            echo "Pending snapshot has no immutable release; skipping read-model capability preflight."
+            echo "Snapshot is not confirmed; skipping dashboard read-model capability preflight."
           fi
 
-      - name: Build immutable read models offline
+      - name: Build immutable dashboard and penetration read models offline
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -481,50 +479,68 @@ jobs:
         run: |
           if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
                 "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
-             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
-            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
-            # Build pressure history from real daily ETF/PCF partitions. The
-            # previous release is never treated as the historical source.
-            if [[ -s "stock-flow-catalog.json" && -s "stock-flow-history.json" ]]; then
-              python scripts/build_stock_pressure_state.py \
-                --catalog stock-flow-catalog.json \
-                --output stock-pressure-catalog.json \
-                --daily-partitions stock-flow-history.json
-            else
-              echo "stock-flow catalog/history is unavailable; cannot publish a pressure-consistent release." >&2
-              exit 1
-            fi
-            if [[ ! -s "stock-pressure-catalog.json" ]]; then
-              echo "stock-pressure-catalog.json was not produced." >&2
-              exit 1
-            fi
+             jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
             if [[ ! -s "market-history.json" ]]; then
-              echo "market-history.json was not produced; refusing to build a truncated release." >&2
+              echo "market-history.json was not produced; refusing to build a truncated dashboard release." >&2
               exit 1
             fi
             HISTORY_ARGS=(--market-history market-history.json)
             if [[ -s "previous-release.json" ]]; then
               HISTORY_ARGS+=(--previous-manifest previous-release.json)
             fi
-            python scripts/build_read_models.py \
-              --snapshot dashboard-snapshot.json \
-              --output-dir read-models \
-              --stock-catalog stock-pressure-catalog.json \
-              --require-materialized \
-              --producer-build-sha "${GITHUB_SHA}" \
-              "${HISTORY_ARGS[@]}"
-            python scripts/report_read_model_sizes.py \
-              --read-model-dir read-models \
-              --output artifact-size-report.json
+            if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
+              # Build pressure history from real daily ETF/PCF partitions. The
+              # previous release is never treated as the historical source.
+              if [[ -s "stock-flow-catalog.json" && -s "stock-flow-history.json" ]]; then
+                python scripts/build_stock_pressure_state.py \
+                  --catalog stock-flow-catalog.json \
+                  --output stock-pressure-catalog.json \
+                  --daily-partitions stock-flow-history.json
+              else
+                echo "stock-flow catalog/history is unavailable; cannot publish a pressure-consistent penetration release." >&2
+                exit 1
+              fi
+              python scripts/build_read_models.py \
+                --snapshot dashboard-snapshot.json \
+                --output-dir read-models-full \
+                --stock-catalog stock-pressure-catalog.json \
+                --require-materialized \
+                --producer-build-sha "${GITHUB_SHA}" \
+                "${HISTORY_ARGS[@]}"
+              python scripts/split_read_model_slots.py \
+                --source-dir read-models-full \
+                --output-dir read-models-dashboard \
+                --slot dashboard
+              python scripts/split_read_model_slots.py \
+                --source-dir read-models-full \
+                --output-dir read-models-penetration \
+                --slot etf_penetration
+              python scripts/report_read_model_sizes.py \
+                --read-model-dir read-models-full \
+                --output artifact-size-report.json
+            else
+              # Core market pages do not depend on PCF. Publish their slot
+              # from the confirmed snapshot even while penetration is pending.
+              python scripts/build_read_models.py \
+                --slot dashboard \
+                --snapshot dashboard-snapshot.json \
+                --output-dir read-models-dashboard \
+                --require-materialized \
+                --producer-build-sha "${GITHUB_SHA}" \
+                "${HISTORY_ARGS[@]}"
+              python scripts/report_read_model_sizes.py \
+                --read-model-dir read-models-dashboard \
+                --output artifact-size-report.json
+            fi
             if jq -e '.softWarnings | length > 0' artifact-size-report.json >/dev/null; then
               echo '::warning::One or more read-model artifacts exceed the PR2 soft budget.'
               jq -r '.softWarnings[]' artifact-size-report.json
             fi
           else
-            echo "Pending snapshot has no active read models; preserving raw evidence only."
+            echo "Snapshot is not confirmed; preserving raw evidence only."
           fi
 
-      - name: Stage immutable read-model candidate
+      - name: Stage immutable dashboard read-model candidate
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -533,57 +549,130 @@ jobs:
           if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
                 "${{ steps.collection.outputs.phase0_gate }}" != "blocked" ]] && \
              jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null && \
-            [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]]; then
+            [[ -s "read-models-dashboard/manifest.json" ]]; then
             python scripts/publish_read_models.py \
-              --read-model-dir read-models \
+              --read-model-dir read-models-dashboard \
+              --slot dashboard \
               --stage-only \
-              --result-output read-model-publish.json
+              --result-output dashboard-read-model-publish.json
           else
-            echo "Pending snapshot has no active read models; preserving raw evidence only."
+            echo "Dashboard candidate was not built or snapshot is not confirmed; preserving raw evidence only."
           fi
 
-      - name: Verify staged read-model candidate
+      - name: Verify staged dashboard read-model candidate
         if: ${{ success() }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if [[ "${{ steps.collection.outputs.phase0_gate }}" != "pending" && \
-                "${{ steps.collection.outputs.phase0_gate }}" != "blocked" && \
-                "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
-            [[ -s "read-models/manifest.json" && -s "read-model-publish.json" ]] && \
-            jq -e '.status == "staged_candidate"' read-model-publish.json >/dev/null; then
-            RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
-            AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
+          if [[ -s "read-models-dashboard/manifest.json" && -s "dashboard-read-model-publish.json" ]] && \
+            jq -e '.status == "staged_candidate"' dashboard-read-model-publish.json >/dev/null; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models-dashboard/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models-dashboard/manifest.json)"
             python scripts/verify_published_release.py \
               --release-id "$RELEASE_ID" \
               --as-of "$AS_OF" \
-              --candidate > release-canary.json
+              --slot dashboard \
+              --candidate > dashboard-release-canary.json
           else
-            echo "Read-model candidate was not staged or snapshot is pending; active release was not changed, so canary is not applicable."
+            echo "Dashboard candidate was not staged; active dashboard was not changed."
           fi
 
-      - name: Activate canary-verified read-model candidate
+      - name: Activate canary-verified dashboard candidate
         if: ${{ success() }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          if [[ "${{ steps.stock-flow.outputs.ready }}" == "true" ]] && \
-            [[ -s "read-models/manifest.json" && -s "release-canary.json" ]] && \
-            jq -e '.mode == "candidate"' release-canary.json >/dev/null; then
-            RELEASE_ID="$(jq -r '.releaseId' read-models/manifest.json)"
-            AS_OF="$(jq -r '.asOf' read-models/manifest.json)"
+          if [[ -s "read-models-dashboard/manifest.json" && -s "dashboard-release-canary.json" ]] && \
+            jq -e '.mode == "candidate" and .slot == "dashboard"' dashboard-release-canary.json >/dev/null; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models-dashboard/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models-dashboard/manifest.json)"
             python scripts/activate_read_models.py \
               --release-id "$RELEASE_ID" \
-              --as-of "$AS_OF" > read-model-activation.json
+              --as-of "$AS_OF" \
+              --slot dashboard > dashboard-read-model-activation.json
             jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
-              '.releaseId == $releaseId and .asOf == $asOf and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
-              read-model-activation.json >/dev/null
+              '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+              dashboard-read-model-activation.json >/dev/null
           else
-            echo "Candidate canary did not pass or snapshot is pending; active release was not changed."
+            echo "Dashboard candidate canary did not pass; active dashboard was not changed."
+          fi
+
+      - name: Verify deployed penetration capabilities
+        id: penetration-capabilities
+        if: ${{ success() && steps.stock-flow.outputs.ready == 'true' }}
+        continue-on-error: true
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -s "read-models-penetration/manifest.json" ]]; then
+            python scripts/check_release_capabilities.py --slot etf_penetration --output penetration-capabilities.json
+          else
+            echo "Penetration candidate was not built; preserving the previous penetration slot."
+          fi
+
+      - name: Stage immutable penetration candidate
+        if: ${{ success() && steps.penetration-capabilities.outcome == 'success' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -s "read-models-penetration/manifest.json" ]]; then
+            python scripts/publish_read_models.py \
+              --read-model-dir read-models-penetration \
+              --slot etf_penetration \
+              --stage-only \
+              --result-output penetration-read-model-publish.json
+          else
+            echo "Penetration candidate was not built; preserving the previous penetration slot."
+          fi
+
+      - name: Verify staged penetration candidate
+        if: ${{ success() && steps.penetration-capabilities.outcome == 'success' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -s "read-models-penetration/manifest.json" && -s "penetration-read-model-publish.json" ]] && \
+            jq -e '.status == "staged_candidate"' penetration-read-model-publish.json >/dev/null; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models-penetration/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models-penetration/manifest.json)"
+            python scripts/verify_published_release.py \
+              --release-id "$RELEASE_ID" \
+              --as-of "$AS_OF" \
+              --slot etf_penetration \
+              --candidate > penetration-release-canary.json
+          else
+            echo "Penetration candidate was not staged; preserving the previous penetration slot."
+          fi
+
+      - name: Activate canary-verified penetration candidate
+        if: ${{ success() && steps.penetration-capabilities.outcome == 'success' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -s "read-models-penetration/manifest.json" && -s "penetration-release-canary.json" ]] && \
+            jq -e '.mode == "candidate" and .slot == "etf_penetration"' penetration-release-canary.json >/dev/null; then
+            RELEASE_ID="$(jq -r '.releaseId' read-models-penetration/manifest.json)"
+            AS_OF="$(jq -r '.asOf' read-models-penetration/manifest.json)"
+            python scripts/activate_read_models.py \
+              --release-id "$RELEASE_ID" \
+              --as-of "$AS_OF" \
+              --slot etf_penetration > penetration-read-model-activation.json
+            jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
+              '.releaseId == $releaseId and .asOf == $asOf and .slot == "etf_penetration" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+              penetration-read-model-activation.json >/dev/null
+          else
+            echo "Penetration candidate canary did not pass; previous penetration slot remains active."
           fi
 
       - name: Fail loudly on unresolved source errors
@@ -631,9 +720,14 @@ jobs:
             market-history.json
             previous-release.json
             artifact-size-report.json
-            capabilities.json
-            read-model-publish.json
-            release-canary.json
+            dashboard-capabilities.json
+            penetration-capabilities.json
+            dashboard-read-model-publish.json
+            dashboard-release-canary.json
+            dashboard-read-model-activation.json
+            penetration-read-model-publish.json
+            penetration-release-canary.json
+            penetration-read-model-activation.json
             source-readiness.json
             source-readiness-response.json
             previous-source-readiness.json
@@ -643,5 +737,7 @@ jobs:
             reports/pcf-shadow/*.json
             reports/backfill/latest-summary.json
             history-bundle.json
-            read-models/
+            read-models-full/
+            read-models-dashboard/
+            read-models-penetration/
             publish-response.json
