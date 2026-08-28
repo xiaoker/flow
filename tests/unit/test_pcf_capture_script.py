@@ -7,6 +7,7 @@ from pathlib import Path
 import requests
 
 from scripts.capture_sse_pcf_v2 import capture_plan, fetch_xml, upload_xml
+from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "pcf" / "same-day.xml"
@@ -57,7 +58,7 @@ class CaptureSession:
     def get(self, *args: object, **kwargs: object) -> FakeResponse:
         self.get_calls.append(kwargs)
         if kwargs.get("params") == {"jobId": "pcf:2026-08-21:0123456789abcdef"}:
-            return FakeResponse(200, content=b'{"items":[{"etfCode":"510300","state":"CAPTURED"}]}' )
+            return FakeResponse(200, content=b'{"items":[{"etfCode":"510500","state":"CAPTURED"}]}' )
         return FakeResponse(200, content=FIXTURE.read_bytes(), content_type="application/xml")
 
     def put(self, *args: object, **kwargs: object) -> FakeResponse:
@@ -80,6 +81,14 @@ def test_fetch_xml_does_not_retry_403() -> None:
 
 def test_upload_xml_stream_contract_uses_content_hash_headers() -> None:
     raw = FIXTURE.read_bytes()
+    rows, _, warnings = parse_sse_etf_pcf_xml(
+        raw,
+        requested_code="510300",
+        target_date="2026-08-21",
+        previous_date="2026-08-20",
+    )
+    assert warnings == []
+    normalized_sha256 = hash_normalized_pcf_rows(rows)
     session = FakeSession([FakeResponse(200)])
     result = upload_xml(
         session,
@@ -89,6 +98,10 @@ def test_upload_xml_stream_contract_uses_content_hash_headers() -> None:
         code="510300",
         target_date="2026-08-21",
         raw_xml=raw,
+        component_count=len(rows),
+        source_trading_day="2026-08-21",
+        source_previous_day="2026-08-20",
+        normalized_sha256=normalized_sha256,
     )
 
     assert result["state"] == "CAPTURED"
@@ -99,6 +112,8 @@ def test_upload_xml_stream_contract_uses_content_hash_headers() -> None:
     assert isinstance(body, bytes)
     assert headers["X-Flow-Raw-Sha256"] == hashlib.sha256(raw).hexdigest()
     assert headers["X-Flow-Object-Sha256"] == hashlib.sha256(body).hexdigest()
+    assert headers["X-Flow-Capture-Outcome"] == "EXACT"
+    assert headers["X-Flow-Normalized-Sha256"] == normalized_sha256
     assert str(headers["X-Flow-Object-Key"]).endswith(f"/{headers['X-Flow-Object-Sha256']}.xml.gz")
 
 
@@ -107,6 +122,7 @@ def test_capture_plan_skips_items_already_checkpointed_by_control_plane() -> Non
     plan = {
         "status": "PLANNED",
         "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
         "items": [
             {"etfCode": "510300", "required": True},
             {"etfCode": "510500", "required": True},

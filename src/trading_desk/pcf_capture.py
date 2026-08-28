@@ -13,6 +13,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 import pandas as pd
@@ -88,12 +89,19 @@ def _share(value: Any, *, field_name: str) -> int | None:
     if isinstance(value, bool):
         raise ValueError(f"{field_name} must be a non-negative integer")
     try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be a non-negative integer") from exc
-    if not math.isfinite(number) or number < 0 or not number.is_integer():
+    if not number.is_finite() or number < 0:
         raise ValueError(f"{field_name} must be a non-negative integer")
-    return int(number)
+    nearest = number.to_integral_value()
+    # SSE publishes scale in 10k shares.  The normalized CSV historically
+    # passed through binary floats, so values such as 7633566800.000001 are
+    # serialization noise rather than fractional shares.  Accept only a tiny
+    # sub-share tolerance; material fractions remain a hard quality failure.
+    if abs(number - nearest) > Decimal("0.001"):
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return int(nearest)
 
 
 class PcfCaptureItemContract(BaseModel):

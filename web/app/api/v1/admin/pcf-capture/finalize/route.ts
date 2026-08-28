@@ -28,6 +28,15 @@ function artifact(value: unknown): value is { key: string; sha256: string; rows?
 }
 
 type ManifestArtifact = { key: string; sha256: string; rows?: number; members?: number };
+type ValidatedItem = { etfCode: string; tradingDay: string; preTradingDay: string; componentCount: number; normalizedSha256: string };
+
+function validatedItem(value: unknown): value is ValidatedItem {
+  return isRecord(value) && typeof value.etfCode === "string" && /^\d{6}$/.test(value.etfCode) &&
+    typeof value.tradingDay === "string" && ISO_DATE.test(value.tradingDay) &&
+    typeof value.preTradingDay === "string" && ISO_DATE.test(value.preTradingDay) &&
+    Number.isSafeInteger(value.componentCount) && Number(value.componentCount) >= 0 &&
+    typeof value.normalizedSha256 === "string" && SHA256.test(value.normalizedSha256);
+}
 
 async function readJson(request: Request): Promise<unknown> {
   const length = Number(request.headers.get("content-length") || 0);
@@ -58,7 +67,10 @@ export async function POST(request: Request): Promise<Response> {
   const revisionId = typeof value.revisionId === "string" ? value.revisionId : "";
   const manifestKey = typeof value.manifestKey === "string" ? value.manifestKey : "";
   const manifestSha256 = typeof value.manifestSha256 === "string" ? value.manifestSha256 : "";
-  if (manifest.schemaVersion !== 2 || manifest.dataset !== "sse_etf_pcf" || manifest.calculationVersion !== "pcf-capture-v2" || !ISO_DATE.test(tradeDate) || !jobId || !/^[a-f0-9]{24}$/.test(revisionId) || manifestKey !== `market-data/pcf-v2/manifests/${tradeDate}/${revisionId}.json` || !SHA256.test(manifestSha256) || !coverage || !universe || !artifacts || !artifact(artifacts.headers) || !artifact(artifacts.components) || !artifact(artifacts.data) || !artifact(artifacts.rawPack)) return bad("invalid_pcf_manifest", 422);
+  const validatedItems = Array.isArray(value.validatedItems) && value.validatedItems.every(validatedItem)
+    ? value.validatedItems as ValidatedItem[]
+    : null;
+  if (manifest.schemaVersion !== 2 || manifest.dataset !== "sse_etf_pcf" || manifest.calculationVersion !== "pcf-capture-v2" || !ISO_DATE.test(tradeDate) || !jobId || !/^[a-f0-9]{24}$/.test(revisionId) || manifestKey !== `market-data/pcf-v2/manifests/${tradeDate}/${revisionId}.json` || !SHA256.test(manifestSha256) || !coverage || !universe || !artifacts || !artifact(artifacts.headers) || !artifact(artifacts.components) || !artifact(artifacts.data) || !artifact(artifacts.rawPack) || !validatedItems) return bad("invalid_pcf_manifest", 422);
   const required = Number(universe.required);
   const captured = Number(coverage.captured);
   const valid = Number(coverage.valid);
@@ -74,6 +86,30 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const job = await runtime.DB.prepare("SELECT * FROM pcf_capture_job WHERE job_id = ? LIMIT 1").bind(jobId).first<Record<string, unknown>>();
     if (!job || job.target_date !== tradeDate) return bad("pcf_capture_job_not_found", 404);
+    if (String(job.previous_date) !== String(manifest.previousDate) || Number(job.required_count) !== required || Number(job.captured_count) !== required) {
+      return bad("pcf_capture_job_coverage_mismatch", 409);
+    }
+    const requiredItems = await runtime.DB.prepare(
+      `SELECT etf_code AS etfCode, state, source_trading_day AS tradingDay,
+              source_previous_day AS preTradingDay, component_count AS componentCount,
+              normalized_sha256 AS normalizedSha256
+         FROM pcf_capture_item
+        WHERE job_id = ? AND baseline_status = 'COMPARABLE_CHANGED'
+        ORDER BY etf_code`,
+    ).bind(jobId).all<Record<string, unknown>>();
+    const expectedItems = requiredItems.results ?? [];
+    const submittedByCode = new Map(validatedItems.map((item) => [item.etfCode, item]));
+    if (expectedItems.length !== required || submittedByCode.size !== required) return bad("pcf_validated_item_coverage_mismatch", 409);
+    for (const item of expectedItems) {
+      const submitted = submittedByCode.get(String(item.etfCode));
+      if (!submitted || !["CAPTURED", "VALID"].includes(String(item.state)) ||
+          submitted.tradingDay !== tradeDate || submitted.preTradingDay !== String(job.previous_date) ||
+          String(item.tradingDay) !== tradeDate || String(item.preTradingDay) !== String(job.previous_date) ||
+          Number(item.componentCount) !== submitted.componentCount ||
+          String(item.normalizedSha256) !== submitted.normalizedSha256) {
+        return bad("pcf_validated_item_lineage_mismatch", 409);
+      }
+    }
     const artifactEntries = Object.values(canonicalArtifacts);
     for (const entry of artifactEntries) {
       const object = await runtime.RAW_BUCKET.head(String(entry.key));
@@ -84,6 +120,11 @@ export async function POST(request: Request): Promise<Response> {
     const now = new Date().toISOString();
     const status = required === 0 ? "READY_NO_CHANGE" : "READY";
     const statements = [
+      runtime.DB.prepare(
+        `UPDATE pcf_capture_item
+            SET state = 'VALID', failure_reason = NULL, updated_at = ?
+          WHERE job_id = ? AND baseline_status = 'COMPARABLE_CHANGED' AND state IN ('CAPTURED', 'VALID')`,
+      ).bind(now, jobId),
       runtime.DB.prepare(
         `UPDATE pcf_capture_job
             SET status = ?, captured_count = ?, valid_count = ?, failed_count = ?, coverage_ppm = 1000000,

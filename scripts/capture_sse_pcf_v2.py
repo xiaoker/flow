@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Resumable, rate-limited SSE PCF v2 shadow collector.
 
-The script is intentionally not wired into the production workflow until the
-dual-run PR.  It creates a control-plane job first, then fetches only required
-changed ETFs one at a time and uploads each gzip object to the streaming admin
-endpoint.  The endpoint updates the D1 item checkpoint, so a later run skips
-objects already acknowledged by R2/D1.
+The collector is wired only to the shadow workflow: it never changes the
+production read flag.  It creates a control-plane job first, then fetches only
+required changed ETFs one at a time and uploads each gzip object to the
+streaming admin endpoint.  D1 checkpoints let later runs skip exact objects
+already acknowledged by R2/D1.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import random
 import re
 import sys
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import requests
+
+from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
 
 SSE_XML_URL = "https://query.sse.com.cn/etfDownload/downloadETF2Bulletin.do"
@@ -38,6 +41,35 @@ class RateLimited(RuntimeError):
 
 class CaptureError(RuntimeError):
     """Raised for a non-retryable per-item capture error."""
+
+
+class ExactWindowNotReady(RuntimeError):
+    """Raised after one stale PCF proves this collection window is too early."""
+
+
+class ExpiredExactWindow(RuntimeError):
+    """Raised after one rolled PCF proves the target exact window has expired."""
+
+
+def _auth_headers(
+    api_key: str,
+    *,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
+) -> dict[str, str]:
+    if not api_key:
+        raise CaptureError("api_key_missing")
+    if bool(access_client_id) != bool(access_client_secret):
+        raise CaptureError("cloudflare_access_credentials_incomplete")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if access_client_id and access_client_secret:
+        headers.update(
+            {
+                "CF-Access-Client-Id": access_client_id,
+                "CF-Access-Client-Secret": access_client_secret,
+            }
+        )
+    return headers
 
 
 def _json_response(response: requests.Response, *, label: str) -> dict[str, Any]:
@@ -82,11 +114,20 @@ def submit_plan(
     base_url: str,
     api_key: str,
     plan: Mapping[str, Any],
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
     timeout: tuple[float, float] = (10.0, 45.0),
 ) -> dict[str, Any]:
     response = session.post(
         f"{base_url.rstrip('/')}/api/v1/admin/pcf-capture",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            **_auth_headers(
+                api_key,
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            ),
+            "Content-Type": "application/json",
+        },
         json=plan,
         timeout=timeout,
     )
@@ -101,12 +142,18 @@ def capture_status(
     base_url: str,
     api_key: str,
     job_id: str,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
     timeout: tuple[float, float] = (10.0, 45.0),
 ) -> dict[str, Any]:
     response = session.get(
         f"{base_url.rstrip('/')}/api/v1/admin/pcf-capture",
         params={"jobId": job_id},
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=_auth_headers(
+            api_key,
+            access_client_id=access_client_id,
+            access_client_secret=access_client_secret,
+        ),
         timeout=timeout,
     )
     if response.status_code in {401, 403, 429}:
@@ -122,10 +169,19 @@ def lease(
     job_id: str,
     owner: str,
     action: str,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
 ) -> dict[str, Any]:
     response = session.post(
         f"{base_url.rstrip('/')}/api/v1/admin/pcf-capture/lease",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            **_auth_headers(
+                api_key,
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            ),
+            "Content-Type": "application/json",
+        },
         json={"action": action, "jobId": job_id, "owner": owner},
         timeout=(10.0, 45.0),
     )
@@ -186,25 +242,50 @@ def upload_xml(
     code: str,
     target_date: str,
     raw_xml: bytes,
+    outcome: str = "EXACT",
+    source_trading_day: str | None = None,
+    source_previous_day: str | None = None,
+    component_count: int | None = None,
+    normalized_sha256: str | None = None,
+    failure_reason: str | None = None,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
     timeout: tuple[float, float] = (10.0, 45.0),
 ) -> dict[str, Any]:
     raw_sha256 = hashlib.sha256(raw_xml).hexdigest()
     wire = gzip.compress(raw_xml, compresslevel=6, mtime=0)
     object_sha256 = hashlib.sha256(wire).hexdigest()
-    object_key = f"market-data/pcf-v2/raw-xml/{target_date}/{job_id}/{code}/{object_sha256}.xml.gz"
+    prefix = "raw-xml" if outcome == "EXACT" else "degraded"
+    object_key = f"market-data/pcf-v2/{prefix}/{target_date}/{job_id}/{code}/{object_sha256}.xml.gz"
+    headers = {
+        **_auth_headers(
+            api_key,
+            access_client_id=access_client_id,
+            access_client_secret=access_client_secret,
+        ),
+        "Content-Type": "application/gzip",
+        "Content-Length": str(len(wire)),
+        "X-Flow-Job-Id": job_id,
+        "X-Flow-ETF-Code": code,
+        "X-Flow-Trade-Date": target_date,
+        "X-Flow-Object-Key": object_key,
+        "X-Flow-Object-Sha256": object_sha256,
+        "X-Flow-Raw-Sha256": raw_sha256,
+        "X-Flow-Capture-Outcome": outcome,
+    }
+    if source_trading_day:
+        headers["X-Flow-Source-Trading-Day"] = source_trading_day
+    if source_previous_day:
+        headers["X-Flow-Source-Previous-Day"] = source_previous_day
+    if component_count is not None:
+        headers["X-Flow-Component-Count"] = str(component_count)
+    if normalized_sha256:
+        headers["X-Flow-Normalized-Sha256"] = normalized_sha256
+    if failure_reason:
+        headers["X-Flow-Failure-Reason"] = failure_reason[:120]
     response = session.put(
         f"{base_url.rstrip('/')}/api/v1/admin/pcf-capture/object",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/gzip",
-            "Content-Length": str(len(wire)),
-            "X-Flow-Job-Id": job_id,
-            "X-Flow-ETF-Code": code,
-            "X-Flow-Trade-Date": target_date,
-            "X-Flow-Object-Key": object_key,
-            "X-Flow-Object-Sha256": object_sha256,
-            "X-Flow-Raw-Sha256": raw_sha256,
-        },
+        headers=headers,
         data=wire,
         timeout=timeout,
     )
@@ -218,6 +299,8 @@ def capture_plan(
     *,
     base_url: str,
     api_key: str,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
     session: requests.Session | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     random_fn: Callable[[float, float], float] = random.uniform,
@@ -227,7 +310,15 @@ def capture_plan(
 
     target_date = str(plan.get("targetDate") or "")
     client = session or requests.Session()
-    job_response = submit_plan(client, base_url=base_url, api_key=api_key, plan=plan)
+    previous_date = str(plan.get("previousDate") or "")
+    job_response = submit_plan(
+        client,
+        base_url=base_url,
+        api_key=api_key,
+        plan=plan,
+        access_client_id=access_client_id,
+        access_client_secret=access_client_secret,
+    )
     job_id = str(job_response.get("jobId") or "")
     if not job_id:
         raise CaptureError("control_plane_job_id_missing")
@@ -243,9 +334,25 @@ def capture_plan(
             "status": plan.get("status"),
         }
     owner = f"pcf-script-{uuid.uuid4().hex[:16]}"
-    lease(client, base_url=base_url, api_key=api_key, job_id=job_id, owner=owner, action="acquire")
+    lease(
+        client,
+        base_url=base_url,
+        api_key=api_key,
+        job_id=job_id,
+        owner=owner,
+        action="acquire",
+        access_client_id=access_client_id,
+        access_client_secret=access_client_secret,
+    )
     try:
-        status_response = capture_status(client, base_url=base_url, api_key=api_key, job_id=job_id)
+        status_response = capture_status(
+            client,
+            base_url=base_url,
+            api_key=api_key,
+            job_id=job_id,
+            access_client_id=access_client_id,
+            access_client_secret=access_client_secret,
+        )
         completed_codes = {
             str(item.get("etfCode"))
             for item in status_response.get("items", [])
@@ -264,6 +371,59 @@ def capture_plan(
                 sleep_fn(random_fn(0.8, 1.3))
             try:
                 raw_xml = fetch_xml(client, code=code, target_date=target_date, sleep_fn=sleep_fn)
+                try:
+                    rows, header, warnings = parse_sse_etf_pcf_xml(
+                        raw_xml,
+                        requested_code=code,
+                        target_date=target_date,
+                        previous_date=previous_date,
+                    )
+                except ValueError as exc:
+                    upload_xml(
+                        client,
+                        base_url=base_url,
+                        api_key=api_key,
+                        job_id=job_id,
+                        code=code,
+                        target_date=target_date,
+                        raw_xml=raw_xml,
+                        outcome="QUALITY_FAILED",
+                        failure_reason=type(exc).__name__ + ":" + str(exc),
+                        access_client_id=access_client_id,
+                        access_client_secret=access_client_secret,
+                    )
+                    failures.append({"code": code, "reason": f"xml_quality:{exc}"})
+                    continue
+                source_trading_day = str(header.get("tradingDay") or "") or None
+                source_previous_day = str(header.get("preTradingDay") or "") or None
+                if warnings:
+                    upload_xml(
+                        client,
+                        base_url=base_url,
+                        api_key=api_key,
+                        job_id=job_id,
+                        code=code,
+                        target_date=target_date,
+                        raw_xml=raw_xml,
+                        outcome="DATE_MISMATCH",
+                        source_trading_day=source_trading_day,
+                        source_previous_day=source_previous_day,
+                        component_count=len(rows),
+                        failure_reason=";".join(warnings),
+                        access_client_id=access_client_id,
+                        access_client_secret=access_client_secret,
+                    )
+                    failures.append({"code": code, "reason": "date_or_code_mismatch"})
+                    if source_trading_day and source_trading_day > target_date:
+                        raise ExpiredExactWindow(
+                            f"{code}_source_rolled_to_{source_trading_day}"
+                        )
+                    if source_trading_day and source_trading_day < target_date:
+                        raise ExactWindowNotReady(
+                            f"{code}_source_still_at_{source_trading_day}"
+                        )
+                    continue
+                normalized_sha256 = hash_normalized_pcf_rows(rows)
                 upload_xml(
                     client,
                     base_url=base_url,
@@ -272,9 +432,18 @@ def capture_plan(
                     code=code,
                     target_date=target_date,
                     raw_xml=raw_xml,
+                    outcome="EXACT",
+                    source_trading_day=source_trading_day,
+                    source_previous_day=source_previous_day,
+                    component_count=len(rows),
+                    normalized_sha256=normalized_sha256,
+                    access_client_id=access_client_id,
+                    access_client_secret=access_client_secret,
                 )
                 completed += 1
             except RateLimited:
+                raise
+            except (ExactWindowNotReady, ExpiredExactWindow):
                 raise
             except CaptureError as exc:
                 failures.append({"code": code, "reason": str(exc)})
@@ -286,10 +455,25 @@ def capture_plan(
             "skipped": skipped,
             "failed": len(failures),
             "failures": failures,
+            "status": "COMPLETE" if not failures else "PARTIAL",
+            "budget": {
+                "sourceRequests": completed + len(failures),
+                "r2ClassA": completed + len(failures),
+                "d1RowsWrittenUpperBound": completed + len(failures) + 8,
+            },
         }
     finally:
         try:
-            lease(client, base_url=base_url, api_key=api_key, job_id=job_id, owner=owner, action="release")
+            lease(
+                client,
+                base_url=base_url,
+                api_key=api_key,
+                job_id=job_id,
+                owner=owner,
+                action="release",
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            )
         except (RateLimited, CaptureError, requests.RequestException):
             pass
 
@@ -297,8 +481,11 @@ def capture_plan(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--base-url", required=True)
-    parser.add_argument("--api-key", required=True)
+    parser.add_argument("--base-url", default="https://flow.xiaoker.com")
+    parser.add_argument("--api-key", default=os.environ.get("FLOW_INGEST_API_KEY", ""))
+    parser.add_argument("--access-client-id", default=os.environ.get("FLOW_CF_ACCESS_CLIENT_ID", ""))
+    parser.add_argument("--access-client-secret", default=os.environ.get("FLOW_CF_ACCESS_CLIENT_SECRET", ""))
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--no-sleep", action="store_true", help="testing only; do not use for production collection")
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -309,14 +496,41 @@ def main() -> int:
             plan,
             base_url=args.base_url,
             api_key=args.api_key,
+            access_client_id=args.access_client_id or None,
+            access_client_secret=args.access_client_secret or None,
             no_sleep=args.no_sleep,
         )
+    except ExpiredExactWindow as exc:
+        result = {"status": "EXPIRED_EXACT_WINDOW", "reason": str(exc)}
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result, ensure_ascii=False))
+        return 2
+    except ExactWindowNotReady as exc:
+        result = {"status": "SOURCE_NOT_READY", "reason": str(exc)}
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result, ensure_ascii=False))
+        return 2
     except RateLimited as exc:
-        print(json.dumps({"status": "RATE_LIMITED", "reason": str(exc)}, ensure_ascii=False))
+        result = {"status": "RATE_LIMITED", "reason": str(exc)}
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result, ensure_ascii=False))
         return 75
     except (CaptureError, requests.RequestException) as exc:
-        print(json.dumps({"status": "FAILED", "reason": str(exc)}, ensure_ascii=False))
+        result = {"status": "FAILED", "reason": str(exc)}
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result, ensure_ascii=False))
         return 1
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["failed"] == 0 else 2
 
