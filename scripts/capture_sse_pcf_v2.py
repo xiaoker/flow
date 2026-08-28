@@ -51,6 +51,14 @@ class ExpiredExactWindow(RuntimeError):
     """Raised after one rolled PCF proves the target exact window has expired."""
 
 
+def _ascii_http_header(value: str, *, max_length: int = 120) -> str:
+    """Return a bounded ASCII diagnostic that is safe for HTTP/1 headers."""
+
+    escaped = value.encode("unicode_escape").decode("ascii")
+    printable = "".join(character if " " <= character <= "~" else "?" for character in escaped)
+    return printable[:max_length]
+
+
 def _auth_headers(
     api_key: str,
     *,
@@ -282,7 +290,7 @@ def upload_xml(
     if normalized_sha256:
         headers["X-Flow-Normalized-Sha256"] = normalized_sha256
     if failure_reason:
-        headers["X-Flow-Failure-Reason"] = failure_reason[:120]
+        headers["X-Flow-Failure-Reason"] = _ascii_http_header(failure_reason)
     response = session.put(
         f"{base_url.rstrip('/')}/api/v1/admin/pcf-capture/object",
         headers=headers,

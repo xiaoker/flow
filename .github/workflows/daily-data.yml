@@ -208,15 +208,33 @@ jobs:
             echo "SSE ETF share artifact is unavailable; no PCF v2 plan can be built." >&2
             exit 1
           fi
-          read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
           mkdir -p reports/pcf-v2
-          python scripts/build_pcf_v2_plan.py \
+          REPORT="reports/pcf-v2/automatic-plan.json"
+          set +e
+          python -m scripts.build_pcf_v2_plan \
             --shares "$SHARE_PATH" \
-            --trade-date "${DATES[2]}" \
-            --previous-date "${DATES[1]}" \
-            --output "reports/pcf-v2/${DATES[2]}-plan.json"
+            --official-current \
+            --evidence-dir reports/pcf-v2 \
+            --output "$REPORT"
+          exit_code=$?
+          set -e
+          if (( exit_code != 0 )) && [[ ! -s "$REPORT" ]]; then
+            jq -n --argjson exitCode "$exit_code" \
+              '{schemaVersion: 1, shadowOnly: true, status: "EXECUTION_FAILED", exitCode: $exitCode, productionPublishCalls: 0}' \
+              > reports/pcf-v2/automatic-plan-error.json
+          fi
+          if (( exit_code != 0 )); then
+            exit "$exit_code"
+          fi
+          TARGET_DATE="$(jq -r '.targetDate // empty' "$REPORT")"
+          if [[ ! "$TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "PCF v2 plan did not expose a valid target date." >&2
+            exit 1
+          fi
+          echo "target_date=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+          echo "plan_path=$REPORT" >> "$GITHUB_OUTPUT"
           jq '{targetDate, previousDate, status, counts, planSha256}' \
-            "reports/pcf-v2/${DATES[2]}-plan.json" >> "$GITHUB_STEP_SUMMARY"
+            "$REPORT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Capture resumable PCF v2 exact-date XML
         id: pcf-v2-capture
@@ -228,12 +246,23 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
-          TARGET_DATE="${{ steps.dates.outputs.latest }}"
-          python scripts/capture_sse_pcf_v2.py \
-            --plan "reports/pcf-v2/${TARGET_DATE}-plan.json" \
-            --output "reports/pcf-v2/${TARGET_DATE}-capture.json"
+          TARGET_DATE="${{ steps.pcf-v2-plan.outputs.target_date }}"
+          PLAN_PATH="${{ steps.pcf-v2-plan.outputs.plan_path }}"
+          REPORT="reports/pcf-v2/${TARGET_DATE}-capture.json"
+          set +e
+          python -m scripts.capture_sse_pcf_v2 \
+            --plan "$PLAN_PATH" \
+            --output "$REPORT"
+          exit_code=$?
+          set -e
+          if (( exit_code != 0 )) && [[ ! -s "$REPORT" ]]; then
+            jq -n --arg targetDate "$TARGET_DATE" --argjson exitCode "$exit_code" \
+              '{schemaVersion: 1, shadowOnly: true, status: "EXECUTION_FAILED", targetDate: $targetDate, exitCode: $exitCode, productionPublishCalls: 0}' \
+              > "$REPORT"
+          fi
           jq '{targetDate, jobId, required, captured, skipped, failed, status, failures}' \
-            "reports/pcf-v2/${TARGET_DATE}-capture.json" >> "$GITHUB_STEP_SUMMARY"
+            "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          exit "$exit_code"
 
       - name: Finalize complete PCF v2 canonical shadow
         id: pcf-v2-finalize
@@ -245,12 +274,23 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
-          TARGET_DATE="${{ steps.dates.outputs.latest }}"
-          python scripts/finalize_sse_pcf_v2.py \
-            --plan "reports/pcf-v2/${TARGET_DATE}-plan.json" \
-            --output "reports/pcf-v2/${TARGET_DATE}-finalize.json"
+          TARGET_DATE="${{ steps.pcf-v2-plan.outputs.target_date }}"
+          PLAN_PATH="${{ steps.pcf-v2-plan.outputs.plan_path }}"
+          REPORT="reports/pcf-v2/${TARGET_DATE}-finalize.json"
+          set +e
+          python -m scripts.finalize_sse_pcf_v2 \
+            --plan "$PLAN_PATH" \
+            --output "$REPORT"
+          exit_code=$?
+          set -e
+          if (( exit_code != 0 )) && [[ ! -s "$REPORT" ]]; then
+            jq -n --arg targetDate "$TARGET_DATE" --argjson exitCode "$exit_code" \
+              '{schemaVersion: 1, shadowOnly: true, status: "EXECUTION_FAILED", tradeDate: $targetDate, exitCode: $exitCode, productionPublishCalls: 0}' \
+              > "$REPORT"
+          fi
           jq '{status, tradeDate, previousDate, jobId, revisionId, coverage, budget, productionPublishCalls}' \
-            "reports/pcf-v2/${TARGET_DATE}-finalize.json" >> "$GITHUB_STEP_SUMMARY"
+            "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          exit "$exit_code"
 
       - name: Record source readiness ledger
         id: readiness
@@ -764,13 +804,29 @@ jobs:
         run: |
           mkdir -p reports/pcf-v2
           jq -r '[.rows[]?.trade_date | select(type == "string")] | unique | .[-5:][]' \
-            market-history.json > reports/pcf-v2/gate-dates.txt
-          python scripts/summarize_pcf_v2_history.py \
+            market-history.json > reports/pcf-v2/gate-dates-candidates.txt
+          PCF_TARGET="${{ steps.pcf-v2-plan.outputs.target_date }}"
+          if [[ "$PCF_TARGET" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "$PCF_TARGET" >> reports/pcf-v2/gate-dates-candidates.txt
+          fi
+          sort -u reports/pcf-v2/gate-dates-candidates.txt | tail -5 \
+            > reports/pcf-v2/gate-dates.txt
+          REPORT="reports/pcf-v2/five-day-summary.json"
+          set +e
+          python -m scripts.summarize_pcf_v2_history \
             --dates reports/pcf-v2/gate-dates.txt \
             --required-days 5 \
-            --output reports/pcf-v2/five-day-summary.json
+            --output "$REPORT"
+          exit_code=$?
+          set -e
+          if (( exit_code != 0 )) && [[ ! -s "$REPORT" ]]; then
+            jq -n --argjson exitCode "$exit_code" \
+              '{schemaVersion: 1, status: "EXECUTION_FAILED", requiredDays: 5, observedDays: 0, passingDays: 0, exitCode: $exitCode, guardrails: {productionReadFlagChanged: false, productionPublishCalls: 0}}' \
+              > "$REPORT"
+          fi
           jq '{status, requiredDays, observedDays, passingDays, dates, failedDates, guardrails}' \
-            reports/pcf-v2/five-day-summary.json >> "$GITHUB_STEP_SUMMARY"
+            "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          exit "$exit_code"
 
       - name: Preserve run evidence
         if: always()
@@ -810,6 +866,7 @@ jobs:
             reports/phase0/latest-release-qa.json
             reports/pcf-shadow/*.json
             reports/pcf-v2/*.json
+            reports/pcf-v2/*.xml
             reports/pcf-v2/gate-dates.txt
             reports/backfill/latest-summary.json
             history-bundle.json
