@@ -4,8 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import pandas as pd
 import requests
 
+from scripts.build_pcf_v2_plan import build_current_official_plan
 from scripts.capture_sse_pcf_v2 import capture_plan, fetch_xml, upload_xml
 from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
@@ -115,6 +117,73 @@ def test_upload_xml_stream_contract_uses_content_hash_headers() -> None:
     assert headers["X-Flow-Capture-Outcome"] == "EXACT"
     assert headers["X-Flow-Normalized-Sha256"] == normalized_sha256
     assert str(headers["X-Flow-Object-Key"]).endswith(f"/{headers['X-Flow-Object-Sha256']}.xml.gz")
+
+
+def test_upload_xml_escapes_unicode_diagnostics_for_http_headers() -> None:
+    session = FakeSession([FakeResponse(200)])
+    upload_xml(
+        session,
+        base_url="https://flow.example",
+        api_key="secret",
+        job_id="pcf:2026-08-21:0123456789abcdef",
+        code="510300",
+        target_date="2026-08-21",
+        raw_xml=FIXTURE.read_bytes(),
+        outcome="DATE_MISMATCH",
+        failure_reason="TradingDay=2026-08-20 不等于目标日 2026-08-21",
+    )
+
+    reason = str(session.put_calls[0]["headers"]["X-Flow-Failure-Reason"])
+    reason.encode("latin-1")
+    assert "\\u4e0d" in reason
+    assert "不" not in reason
+    assert len(reason) <= 120
+
+
+def test_current_plan_uses_live_pcf_dates_and_matching_official_share_snapshots(tmp_path: Path) -> None:
+    shares_path = tmp_path / "known-shares.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-08-20",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "instrument_name": "300ETF",
+                "shares": "10000",
+            }
+        ]
+    ).to_csv(shares_path, index=False)
+    current = {
+        "result": [
+            {"STAT_DATE": "2026-08-21", "SEC_CODE": "510300", "SEC_NAME": "300ETF", "TOT_VOL": "2"}
+        ]
+    }
+    previous = {
+        "result": [
+            {"STAT_DATE": "2026-08-20", "SEC_CODE": "510300", "SEC_NAME": "300ETF", "TOT_VOL": "1"}
+        ]
+    }
+    session = FakeSession(
+        [
+            FakeResponse(200, FIXTURE.read_bytes(), "application/xml"),
+            FakeResponse(200, json.dumps(current, ensure_ascii=False).encode()),
+            FakeResponse(200, json.dumps(previous, ensure_ascii=False).encode()),
+        ]
+    )
+    evidence_dir = tmp_path / "evidence"
+
+    plan = build_current_official_plan(
+        shares_path,
+        evidence_dir=evidence_dir,
+        session=session,
+    )
+
+    assert plan["targetDate"] == "2026-08-21"
+    assert plan["previousDate"] == "2026-08-20"
+    assert plan["counts"]["required"] == 1
+    assert plan["items"][0]["shareDelta"] == 10_000
+    assert (evidence_dir / "2026-08-21-date-evidence.json").is_file()
+    assert (evidence_dir / "2026-08-21-pcf-probe-510300.xml").read_bytes() == FIXTURE.read_bytes()
 
 
 def test_capture_plan_skips_items_already_checkpointed_by_control_plane() -> None:

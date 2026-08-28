@@ -193,8 +193,23 @@ def test_pcf_v2_exact_capture_is_automatic_but_stays_shadow_only() -> None:
     assert "steps.window.outputs.collection_window == 'evening'" in workflow
     assert "steps.window.outputs.collection_window == 'morning'" in workflow
     assert "reports/pcf-v2/*.json" in workflow
+    assert "reports/pcf-v2/*.xml" in workflow
     assert "Summarize PCF v2 five-day shadow gate" in workflow
-    assert "summarize_pcf_v2_history.py" in workflow
+    assert "--official-current" in workflow
+    assert "steps.pcf-v2-plan.outputs.target_date" in workflow
+    assert "steps.pcf-v2-plan.outputs.plan_path" in workflow
+    pcf_steps = workflow[
+        workflow.index("Build automatic PCF v2 exact-date capture plan"):
+        workflow.index("Record source readiness ledger")
+    ]
+    assert "steps.dates.outputs.latest" not in pcf_steps
+    assert "python -m scripts.capture_sse_pcf_v2" in workflow
+    assert "python -m scripts.finalize_sse_pcf_v2" in workflow
+    assert "python -m scripts.summarize_pcf_v2_history" in workflow
+    assert "reports/pcf-v2/gate-dates-candidates.txt" in workflow
+    assert 'PCF_TARGET="${{ steps.pcf-v2-plan.outputs.target_date }}"' in workflow
+    assert "sort -u reports/pcf-v2/gate-dates-candidates.txt | tail -5" in workflow
+    assert workflow.count('status: "EXECUTION_FAILED"') == 4
     assert "DATE_MISMATCH" in capture
     assert "market-data/pcf-v2/degraded" not in finalize
     assert "productionPublishCalls" in finalize
