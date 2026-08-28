@@ -36,7 +36,7 @@ const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 
 function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
   if (cron.startsWith("45 23")) return "morning";
-  if (cron.startsWith("45 0") || cron.startsWith("55 0")) return "reconcile";
+  if (cron.startsWith("45 0") || cron.startsWith("55 0") || cron.startsWith("15 1")) return "reconcile";
   return "evening";
 }
 

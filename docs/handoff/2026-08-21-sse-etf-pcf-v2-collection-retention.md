@@ -4,7 +4,7 @@
 > 编写日期：2026-08-21<br>
 > 仓库：`xiaoker/flow`<br>
 > 生产地址：`https://flow.xiaoker.com`<br>
-> 状态：PR0–PR4 代码已合并；PR4 的 5 个交易日证据待积累；PR5 服务端分槽兼容已实施，尚未部署或切换生产读取<br>
+> 状态：PR0–PR3 已合并；PR4 已接入自动 exact-date 影子采集与 5 日门禁，证据从首个真实同日节点开始积累；PR5 服务端分槽兼容已实施，尚未切换生产读取<br>
 > 优先级：P0 数据日期与覆盖正确性，P0 可恢复采集，P1 免费额度与存储治理<br>
 > 实施原则：严格从 PR 0 开始，不跨阶段，不提前切换生产读取路径，不追溯删除旧对象
 
@@ -787,7 +787,7 @@ canonical/manifest 孤儿对象
 
 切换门禁：5 天均达到 100% required coverage；无日期错配；无 silent omission；无 403/429 持续失败；预算低于本文件护栏。
 
-PR4 工具实现：`src/trading_desk/pcf_parity.py` 提供逐 ETF、逐个股、全市场差异分类与预算合同；`scripts/run_pcf_shadow_parity.py` 执行单日顺序双轨采集；`scripts/summarize_pcf_shadow.py` 汇总至少 5 个交易日。`daily-data` 的 `run_pcf_shadow` 仅在手动 dispatch 明确开启时运行，默认关闭，报告以短期 Actions artifact 保存，不进入生产发布路径。
+PR4 工具实现：`src/trading_desk/pcf_parity.py` 提供逐 ETF、逐个股、全市场差异分类与预算合同；`scripts/run_pcf_shadow_parity.py` 保留为手动 legacy/v2 对照工具；`build_pcf_v2_plan.py`、`capture_sse_pcf_v2.py`、`finalize_sse_pcf_v2.py` 在晚间与 08:30 前精确窗口自动运行；`summarize_pcf_v2_history.py` 只根据 D1 中真实 `READY/READY_NO_CHANGE` job 汇总 5 日门禁。全部报告以短期 Actions artifact 保存，`PCF_CAPTURE_V2_READ_ENABLED` 保持关闭，不进入生产读取路径。
 
 PR5 服务端兼容实现：`active_release.slot` 现在可独立解析 `dashboard` 与 `etf_penetration`；manifest 增加可选 `slot` 合同；`scripts/split_read_model_slots.py` 可在离线一次构建后生成两个独立、可校验的不可变发布目录；Worker 的 release/view/stock routes 在 `PCF_CAPTURE_V2_READ_ENABLED=1` 前保持旧 dashboard 读取，开启后只按同日 penetration slot 读取，不回退到 D-1。该开关、生产者双 slot 发布和浏览器切换必须在 PR4 影子门禁通过并完成部署验证后单独执行。
 
@@ -976,6 +976,18 @@ GitHub producer shadow
 - 旧 `next_day_previous_trade_date` 只能标记为 legacy estimate，不进入 exact 历史；
 - exact 节点不足 21 时，页面显示真实覆盖数，不能把 1 个节点复制成 21 个；
 - 新 exact 数据逐日积累到 21/60 节点后自动开放相应周期。
+
+2026-08-28 对部署前最近五个已发布交易日完成证据审计：
+
+| 归属交易日 | legacy PCF 的 `pcf_date` | 结论 |
+| --- | --- | --- |
+| 2026-08-21 | 2026-08-24 | `LEGACY_ESTIMATE_ONLY` |
+| 2026-08-24 | 2026-08-25 | `LEGACY_ESTIMATE_ONLY` |
+| 2026-08-25 | 2026-08-26 | `LEGACY_ESTIMATE_ONLY` |
+| 2026-08-26 | 2026-08-27 | `LEGACY_ESTIMATE_ONLY` |
+| 2026-08-27 | 2026-08-28 | `LEGACY_ESTIMATE_ONLY` |
+
+五天均使用 `sse_pcf_next_day_previous_trading_day`，不满足同日 exact 合同，因此不得迁移为 V2。系统保留这些 legacy 估算供旧链路审计；V2 覆盖从部署后首次取得 `TradingDay=D`、`PreTradingDay=D-1` 且三段哈希一致的真实节点开始计数，不能通过复制或改标签补足 5 天。
 
 ## 18. 需要修改的模块
 

@@ -197,6 +197,61 @@ jobs:
           jq '{status, tradeDate, coverage, comparison: {byCategory: .comparison.byCategory, unexpectedAnomalyCount: .comparison.unexpectedAnomalyCount}, budget}' \
             "reports/pcf-shadow/${DATES[2]}.json" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build automatic PCF v2 exact-date capture plan
+        id: pcf-v2-plan
+        if: ${{ steps.collection.outcome == 'success' && (steps.window.outputs.collection_window == 'evening' || steps.window.outputs.collection_window == 'morning') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          SHARE_PATH="$(jq -r '.combined_paths.sse_etf // empty' reports/phase0/latest-manifest.json)"
+          if [[ -z "$SHARE_PATH" || ! -s "$SHARE_PATH" ]]; then
+            echo "SSE ETF share artifact is unavailable; no PCF v2 plan can be built." >&2
+            exit 1
+          fi
+          read -r -a DATES <<< "${{ steps.dates.outputs.dates }}"
+          mkdir -p reports/pcf-v2
+          python scripts/build_pcf_v2_plan.py \
+            --shares "$SHARE_PATH" \
+            --trade-date "${DATES[2]}" \
+            --previous-date "${DATES[1]}" \
+            --output "reports/pcf-v2/${DATES[2]}-plan.json"
+          jq '{targetDate, previousDate, status, counts, planSha256}' \
+            "reports/pcf-v2/${DATES[2]}-plan.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capture resumable PCF v2 exact-date XML
+        id: pcf-v2-capture
+        if: ${{ steps.pcf-v2-plan.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          TARGET_DATE="${{ steps.dates.outputs.latest }}"
+          python scripts/capture_sse_pcf_v2.py \
+            --plan "reports/pcf-v2/${TARGET_DATE}-plan.json" \
+            --output "reports/pcf-v2/${TARGET_DATE}-capture.json"
+          jq '{targetDate, jobId, required, captured, skipped, failed, status, failures}' \
+            "reports/pcf-v2/${TARGET_DATE}-capture.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Finalize complete PCF v2 canonical shadow
+        id: pcf-v2-finalize
+        if: ${{ always() && steps.pcf-v2-plan.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          TARGET_DATE="${{ steps.dates.outputs.latest }}"
+          python scripts/finalize_sse_pcf_v2.py \
+            --plan "reports/pcf-v2/${TARGET_DATE}-plan.json" \
+            --output "reports/pcf-v2/${TARGET_DATE}-finalize.json"
+          jq '{status, tradeDate, previousDate, jobId, revisionId, coverage, budget, productionPublishCalls}' \
+            "reports/pcf-v2/${TARGET_DATE}-finalize.json" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Record source readiness ledger
         id: readiness
         if: ${{ always() && steps.collection.outcome != 'cancelled' }}
@@ -698,6 +753,25 @@ jobs:
             exit 1
           fi
 
+      - name: Summarize PCF v2 five-day shadow gate
+        if: ${{ always() && hashFiles('market-history.json') != '' }}
+        continue-on-error: true
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          mkdir -p reports/pcf-v2
+          jq -r '[.rows[]?.trade_date | select(type == "string")] | unique | .[-5:][]' \
+            market-history.json > reports/pcf-v2/gate-dates.txt
+          python scripts/summarize_pcf_v2_history.py \
+            --dates reports/pcf-v2/gate-dates.txt \
+            --required-days 5 \
+            --output reports/pcf-v2/five-day-summary.json
+          jq '{status, requiredDays, observedDays, passingDays, dates, failedDates, guardrails}' \
+            reports/pcf-v2/five-day-summary.json >> "$GITHUB_STEP_SUMMARY"
+
       - name: Preserve run evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
@@ -735,6 +809,8 @@ jobs:
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json
             reports/pcf-shadow/*.json
+            reports/pcf-v2/*.json
+            reports/pcf-v2/gate-dates.txt
             reports/backfill/latest-summary.json
             history-bundle.json
             read-models-full/

@@ -218,7 +218,11 @@ export async function GET(request: Request): Promise<Response> {
          FROM pcf_capture_item WHERE job_id = ? GROUP BY baseline_status, state`,
     ).bind(job.job_id).all<Record<string, unknown>>();
     const items = await runtime.DB.prepare(
-      `SELECT etf_code AS etfCode, state
+      `SELECT etf_code AS etfCode, etf_name AS etfName, baseline_status AS baselineStatus, state,
+              raw_object_key AS rawObjectKey, raw_object_sha256 AS rawObjectSha256,
+              raw_content_sha256 AS rawContentSha256, source_trading_day AS sourceTradingDay,
+              source_previous_day AS sourcePreviousDay, component_count AS componentCount,
+              normalized_sha256 AS normalizedSha256, failure_reason AS failureReason, observed_at AS observedAt
          FROM pcf_capture_item WHERE job_id = ? ORDER BY etf_code`,
     ).bind(job.job_id).all<Record<string, unknown>>();
     return Response.json(

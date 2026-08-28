@@ -20,6 +20,8 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert '"30 10 * * mon-fri"' in wrangler
     assert '"45 23 * * sun-thu"' in wrangler
     assert '"45 0 * * mon-fri"' in wrangler
+    assert '"15 11 * * mon-fri"' in wrangler
+    assert 'cron.startsWith("15 1")' in worker
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
@@ -177,6 +179,27 @@ def test_pcf_shadow_parity_is_explicitly_opt_in_and_never_published() -> None:
     assert "/api/v1/admin/import" not in script
     assert "--required-days" in summary
     assert "default=5" in summary
+
+
+def test_pcf_v2_exact_capture_is_automatic_but_stays_shadow_only() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    capture = (REPOSITORY_ROOT / "scripts/capture_sse_pcf_v2.py").read_text(encoding="utf-8")
+    finalize = (REPOSITORY_ROOT / "scripts/finalize_sse_pcf_v2.py").read_text(encoding="utf-8")
+    object_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/object/route.ts").read_text(encoding="utf-8")
+
+    assert "Build automatic PCF v2 exact-date capture plan" in workflow
+    assert "Capture resumable PCF v2 exact-date XML" in workflow
+    assert "Finalize complete PCF v2 canonical shadow" in workflow
+    assert "steps.window.outputs.collection_window == 'evening'" in workflow
+    assert "steps.window.outputs.collection_window == 'morning'" in workflow
+    assert "reports/pcf-v2/*.json" in workflow
+    assert "Summarize PCF v2 five-day shadow gate" in workflow
+    assert "summarize_pcf_v2_history.py" in workflow
+    assert "DATE_MISMATCH" in capture
+    assert "market-data/pcf-v2/degraded" not in finalize
+    assert "productionPublishCalls" in finalize
+    assert "export async function GET" in object_route
+    assert "pcf_exact_object_lineage_mismatch" in object_route
 
 
 def test_production_canary_isolated_from_daily_collection() -> None:

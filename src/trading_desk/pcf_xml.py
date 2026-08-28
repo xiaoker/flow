@@ -8,6 +8,7 @@ canonical layer can remain low-loss when the exchange adds a tag.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -42,6 +43,23 @@ _KNOWN_COMPONENT = {
     "underlyingsecurityid",
     "underlyionsecurityid",
 }
+
+
+def hash_normalized_pcf_rows(rows: list[dict[str, Any]]) -> str:
+    """Return the stable per-ETF digest used across capture and finalize.
+
+    The digest deliberately covers the parser output before release-specific
+    lineage fields are added.  This lets the streaming Worker persist one
+    small integrity fact without decoding the XML or canonical CSV.
+    """
+
+    payload = json.dumps(
+        rows,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _local_name(tag: str) -> str:
