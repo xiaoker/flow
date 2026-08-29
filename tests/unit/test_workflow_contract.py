@@ -384,6 +384,7 @@ def test_production_canary_isolated_from_daily_collection() -> None:
     assert '- cron: "30 2 * * 1"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "--repeat 100" in workflow
+    assert "--slot dashboard" in workflow
     assert "Resolve active release" in workflow
     assert "buildSha" in workflow
     assert "cancel-in-progress: false" in workflow

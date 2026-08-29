@@ -55,12 +55,17 @@ jobs:
             echo "build_sha=$build_sha"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Verify 100-round production read canary
+      - name: Verify 100-round dashboard production read canary
+        # The dashboard slot is the required core release.  The optional
+        # ETF-penetration slot remains disabled until its own PCF v2 gate has
+        # passed, so the generic full-slot check would correctly receive 503
+        # and incorrectly fail this core canary.
         run: |
           python scripts/verify_published_release.py \
             --release-id "${{ steps.release.outputs.release_id }}" \
             --as-of "${{ steps.release.outputs.as_of }}" \
             --build-sha "${{ steps.release.outputs.build_sha }}" \
+            --slot dashboard \
             --repeat 100 > release-canary.json
           cat release-canary.json
 
