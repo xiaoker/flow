@@ -95,7 +95,10 @@ test("refreshes the latest dashboard and schedules collection through source rel
     "15 1 * * mon-fri",
     "15 11 * * mon-fri",
   ]);
-  assert.equal(config.vars.HISTORY_IMPORT_ARCHIVE_ONLY, "0");
+  // PR4 rollout: the compatibility gate is now enabled after candidate and
+  // dashboard-only production canary verification.  The route-level tests
+  // still exercise the flag-off fallback with an environment that omits it.
+  assert.equal(config.vars.HISTORY_IMPORT_ARCHIVE_ONLY, "1");
 });
 
 test("does not let the outer Worker overwrite an injected build identity", async () => {
