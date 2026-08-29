@@ -109,9 +109,8 @@ type HistoryBundle = {
     snapshot?: DashboardSnapshot;
     artifacts: HistoryArtifact[];
     /**
-     * Offline, canonical ETF adjacent changes.  PR3 validates and archives
-     * this evidence only; the legacy D1 calculation remains authoritative
-     * until the separately reviewed archive-only PR4.
+     * Offline, canonical ETF adjacent changes.  PR3 archives this evidence;
+     * PR4 may apply it to the R2 flow state when archive-only mode is enabled.
      */
     officialEtfDailyChanges?: OfficialEtfDailyChangesContract;
     /**
@@ -132,6 +131,25 @@ function secureEqual(left: string, right: string): boolean {
     difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
   }
   return difference === 0;
+}
+
+function isEnabledFlag(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true";
+}
+
+function officialDailyChangesFromContract(
+  contract: OfficialEtfDailyChangesContract,
+): OfficialEtfDailyChange[] {
+  return contract.rows.map((row) => ({
+    code: row.code,
+    market: row.market,
+    previousTradeDate: row.previousTradeDate,
+    expectedPreviousTradeDate: contract.expectedPreviousDate,
+    value: row.aligned && row.changeShares !== null
+      ? Number((row.changeShares / 100_000_000).toFixed(6))
+      : null,
+  }));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -663,6 +681,7 @@ async function persistStandardRows(
   db: D1Database,
   artifact: HistoryArtifact,
   normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }>,
+  options: { writeEtfDaily?: boolean } = {},
 ): Promise<number> {
   if (artifact.dataset === "etf_nav") {
     const rows = normalizedFiles.flatMap(({ file, content }) => {
@@ -733,6 +752,7 @@ async function persistStandardRows(
         observedAt: row.observed_at,
       };
     });
+    if (options.writeEtfDaily === false) return rows.length;
     const statements: D1PreparedStatement[] = [
       db.prepare("DELETE FROM etf_daily WHERE release_id = ?").bind(artifact.releaseId),
       ...values.map((value) =>
@@ -1010,6 +1030,7 @@ async function checkCollectionComplete(
 
 export async function POST(request: Request) {
   const runtime = await runtimeEnv();
+  const archiveOnly = isEnabledFlag(runtime.HISTORY_IMPORT_ARCHIVE_ONLY);
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   if (!runtime.INGEST_API_KEY || !suppliedKey || !secureEqual(suppliedKey, runtime.INGEST_API_KEY)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -1049,6 +1070,9 @@ export async function POST(request: Request) {
     const officialEtfDailyChanges = history.officialEtfDailyChanges;
     const finalizeRequested = history.finalize !== false;
     const snapshot = history.snapshot;
+    if (archiveOnly && finalizeRequested && snapshot && !officialEtfDailyChanges) {
+      return NextResponse.json({ error: "missing_official_etf_daily_changes" }, { status: 422 });
+    }
     const etfQualityIssues = snapshot
       ? validateEtfTerminalCoverage(snapshot.etfTerminal)
       : [];
@@ -1151,7 +1175,12 @@ export async function POST(request: Request) {
           continue;
         }
         try {
-          standardizedRows += await persistStandardRows(runtime.DB, artifact, normalizedFiles);
+          standardizedRows += await persistStandardRows(
+            runtime.DB,
+            artifact,
+            normalizedFiles,
+            { writeEtfDaily: !archiveOnly },
+          );
         } catch (error) {
           const detail = error instanceof Error ? error.message : "unknown_standardization_error";
           throw new Error(
@@ -1248,6 +1277,7 @@ export async function POST(request: Request) {
         snapshotSha256,
         artifacts: manifestArtifacts,
         officialEtfDailyChanges: officialEtfDailyChanges ?? null,
+        historyImportMode: archiveOnly ? "archive_only" : "legacy_compatibility",
         expectedArtifacts: expectedArtifacts ?? history.artifacts.map((artifact) => artifact.releaseId),
         collectionStateKeys,
         pendingArtifacts: collection.pending,
@@ -1365,10 +1395,15 @@ export async function POST(request: Request) {
       )
       .run();
 
-    const [previousState, officialDailyChanges] = await Promise.all([
-      loadEtfFlowState(runtime.RAW_BUCKET),
-      loadOfficialEtfDailyChanges(runtime.DB, history.asOf),
-    ]);
+    const previousState = await loadEtfFlowState(runtime.RAW_BUCKET);
+    // Keep the D1 query as a rollback path while the archive-only mode is
+    // disabled.  Once explicitly enabled, the validated offline contract is
+    // the only source for the ETF adjacent change used by the state merge.
+    const officialDailyChanges = archiveOnly
+      ? officialEtfDailyChanges
+        ? officialDailyChangesFromContract(officialEtfDailyChanges)
+        : []
+      : await loadOfficialEtfDailyChanges(runtime.DB, history.asOf);
     const mergedState = mergeSnapshotIntoEtfFlowState(
       previousState,
       snapshot,
@@ -1383,6 +1418,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       status: "archived",
       asOf: history.asOf,
+      historyImportMode: archiveOnly ? "archive_only" : "legacy_compatibility",
       artifacts: history.artifacts.length,
       standardizedRows,
       snapshotSha256,
@@ -1401,7 +1437,7 @@ export async function POST(request: Request) {
         : { status: "unchanged" },
       officialEtfDailyChanges: officialEtfDailyChanges
         ? {
-            status: "validated_shadow_only",
+            status: archiveOnly ? "applied_archive_only" : "validated_shadow_only",
             rows: officialEtfDailyChanges.rows.length,
             inputSha256: officialEtfDailyChanges.inputSha256,
           }
