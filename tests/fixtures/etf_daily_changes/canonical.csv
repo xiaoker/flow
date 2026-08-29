@@ -1,0 +1,5 @@
+trade_date,market,instrument_code,instrument_name,shares
+2026-08-21,SSE,510300,沪深300ETF,100
+2026-08-21,SZSE,159919,沪深300ETF,200
+2026-08-22,SSE,510300,沪深300ETF,130
+2026-08-22,SZSE,159919,沪深300ETF,250

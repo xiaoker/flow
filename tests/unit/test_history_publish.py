@@ -54,3 +54,51 @@ def test_history_publish_uploads_individual_checkpoints_before_finalize(monkeypa
         == ["etf_scale:sse:2026-07-31:aaa", "margin_market_daily:sse:2026-07-31:bbb"]
         for request in responses
     )
+
+
+def test_history_publish_sends_adjacent_contract_only_at_final_boundary(monkeypatch) -> None:
+    requests = []
+
+    def post(_url, *, data, headers, timeout):
+        requests.append(json.loads(data))
+        result = Mock()
+        result.ok = True
+        result.json.return_value = {"status": "archived"}
+        return result
+
+    monkeypatch.setattr(history_publish.requests, "post", post)
+    contract = {
+        "schemaVersion": 1,
+        "asOf": "2026-07-31",
+        "expectedPreviousDate": "2026-07-30",
+        "sourceReleaseIds": ["etf_scale:sse:2026-07-31:aaa"],
+        "inputSha256": "a" * 64,
+        "rows": [],
+    }
+    bundle = {
+        "version": 1,
+        "history": {
+            "runId": "history-adjacent",
+            "startedAt": "2026-08-01T18:30:00+08:00",
+            "finishedAt": "2026-08-01T18:31:00+08:00",
+            "retentionDays": 0,
+            "asOf": "2026-07-31",
+            "officialEtfDailyChanges": contract,
+            "snapshot": {"asOf": "2026-07-31"},
+            "artifacts": [
+                {"releaseId": "etf_scale:sse:2026-07-31:aaa"},
+                {"releaseId": "margin_market_daily:sse:2026-07-31:bbb"},
+            ],
+        },
+    }
+
+    history_publish.publish_history_bundle(
+        url="https://flow.example/api/v1/admin/history-import",
+        bundle=bundle,
+        ingest_key="ingest",
+        access_client_id="client",
+        access_client_secret="secret",
+    )
+
+    assert all("officialEtfDailyChanges" not in item["history"] for item in requests[:-1])
+    assert requests[-1]["history"]["officialEtfDailyChanges"] == contract

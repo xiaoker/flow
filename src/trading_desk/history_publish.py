@@ -97,7 +97,10 @@ def publish_history_bundle(
     common = {
         key: value
         for key, value in history.items()
-        if key not in {"artifacts", "snapshot"}
+        # The compact adjacent-change contract is verified at the final
+        # completeness boundary.  Keeping it out of every artifact chunk
+        # avoids repeating the same ETF universe in each resumable request.
+        if key not in {"artifacts", "snapshot", "officialEtfDailyChanges"}
     }
     for artifact in artifacts:
         _post_chunk(
@@ -124,6 +127,11 @@ def publish_history_bundle(
             "history": {
                 **common,
                 "snapshot": history["snapshot"],
+                **(
+                    {"officialEtfDailyChanges": history["officialEtfDailyChanges"]}
+                    if "officialEtfDailyChanges" in history
+                    else {}
+                ),
                 "artifacts": [artifacts[-1]],
                 "expectedArtifacts": expected,
                 "finalize": True,

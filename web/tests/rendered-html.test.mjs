@@ -991,8 +991,23 @@ test("archives full-source history with server-side hash verification", async ()
     "2026-07-14,SZSE,northbound,RMB,100000000000,,,,3500000000,hkex,2026-07-22T09:15:30+08:00\n",
   );
   const connectTop = Buffer.from("trade_date,market,direction,rank,instrument_code,instrument_name,total_turnover,source_id,observed_at\n");
+  const etfRaw = Buffer.from('{"result":[{"SEC_CODE":"510300"}]}');
+  const etfNormalized = Buffer.from(
+    "trade_date,market,instrument_code,instrument_name,investment_type,shares,date_basis,source_id,observed_at\n" +
+    `${snapshot.asOf},SSE,510300,沪深300ETF,股票ETF,130,source_published,sse,2026-07-22T09:15:20+08:00\n`,
+  );
   const sha256 = createHash("sha256").update(raw).digest("hex");
   const normalizedSha256 = createHash("sha256").update(normalized).digest("hex");
+  const etfSha256 = createHash("sha256").update(etfRaw).digest("hex");
+  const etfNormalizedSha256 = createHash("sha256").update(etfNormalized).digest("hex");
+  const etfReleaseId = `etf_scale:sse:${snapshot.asOf}:${etfSha256.slice(0, 16)}`;
+  const adjacentInput = [
+    snapshot.asOf,
+    "2026-07-13",
+    etfReleaseId,
+    "SSE,510300,2026-07-13,130,100,30,1,aligned",
+  ].join("\n");
+  const adjacentInputSha256 = createHash("sha256").update(adjacentInput).digest("hex");
   const bseSha256 = createHash("sha256").update(bseRaw).digest("hex");
   const bseNormalizedSha256 = createHash("sha256").update(bseNormalized).digest("hex");
   const connectSha256 = createHash("sha256").update(connectRaw).digest("hex");
@@ -1037,8 +1052,52 @@ test("archives full-source history with server-side hash verification", async ()
       finishedAt: "2026-07-22T09:16:00+08:00",
       retentionDays: 0,
       asOf: snapshot.asOf,
+      officialEtfDailyChanges: {
+        schemaVersion: 1,
+        asOf: snapshot.asOf,
+        expectedPreviousDate: "2026-07-13",
+        sourceReleaseIds: [etfReleaseId],
+        inputSha256: adjacentInputSha256,
+        rows: [
+          {
+            market: "SSE",
+            code: "510300",
+            previousTradeDate: "2026-07-13",
+            currentShares: 130,
+            previousShares: 100,
+            changeShares: 30,
+            aligned: true,
+            alignmentReason: "aligned",
+          },
+        ],
+      },
       snapshot,
       artifacts: [
+        {
+          releaseId: etfReleaseId,
+          sourceId: "sse",
+          dataset: "etf_scale",
+          requestedDate: snapshot.asOf,
+          tradeDates: [snapshot.asOf],
+          observedAt: "2026-07-22T09:15:20+08:00",
+          sourceUrl: "https://query.sse.com.cn/commonQuery.do",
+          dateBasis: "source_published",
+          sha256: etfSha256,
+          contentType: "application/json",
+          extension: "json",
+          rawContentBase64: etfRaw.toString("base64"),
+          metadata: { sha256: etfSha256 },
+          normalized: [
+            {
+              name: "data",
+              format: "csv",
+              sha256: etfNormalizedSha256,
+              rowCount: 1,
+              tradeDates: [snapshot.asOf],
+              contentBase64: etfNormalized.toString("base64"),
+            },
+          ],
+        },
         {
           releaseId: `margin_market_daily:sse:2026-07-14:${sha256.slice(0, 16)}`,
           sourceId: "sse",
@@ -1141,7 +1200,14 @@ test("archives full-source history with server-side hash verification", async ()
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.status, "archived");
-  assert.equal(result.standardizedRows, 6);
+  assert.equal(result.standardizedRows, 7);
+  assert.deepEqual(result.officialEtfDailyChanges, {
+    status: "validated_shadow_only",
+    rows: 1,
+    inputSha256: adjacentInputSha256,
+  });
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/sse/etf_scale")));
+  assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/etf_scale")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/normalized/sse/margin_market_daily")));
   assert.ok([...objects.keys()].some((key) => key.includes("market-data/raw/bse/margin_market_daily")));
@@ -1161,7 +1227,11 @@ test("archives full-source history with server-side hash verification", async ()
       values.includes(8_210_630_112),
   ));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO etf_daily")));
   assert.ok(statements.some(({ sql }) => sql.includes("WITH current_rows AS")));
+  const manifest = [...objects.entries()].find(([key]) => key.includes("history-manifests/"));
+  assert.ok(manifest);
+  assert.match(String(manifest[1]), /"officialEtfDailyChanges"/);
 });
 
 test("archives verified ETF evidence before publishing a snapshot", async () => {
