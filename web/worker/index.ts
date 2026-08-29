@@ -39,8 +39,8 @@ interface ScheduledController {
   scheduledTime: number;
 }
 
-const DAILY_DATA_DISPATCH_URL =
-  "https://api.github.com/repos/xiaoker/flow/actions/workflows/daily-data.yml/dispatches";
+const MARKET_DATA_COLLECT_DISPATCH_URL =
+  "https://api.github.com/repos/xiaoker/flow/actions/workflows/market-data-collect.yml/dispatches";
 const DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000] as const;
 const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 
@@ -111,7 +111,7 @@ async function dispatchDailyCollection(
       }
       let response: Response;
       try {
-        response = await fetch(DAILY_DATA_DISPATCH_URL, {
+        response = await fetch(MARKET_DATA_COLLECT_DISPATCH_URL, {
           method: "POST",
           headers: {
             Accept: "application/vnd.github+json",
@@ -129,6 +129,7 @@ async function dispatchDailyCollection(
               target_date: windowDate,
               lease_owner: leaseOwner,
               contract_version: contractVersion,
+              delegate_publish: "true",
             },
           }),
         });
@@ -149,7 +150,7 @@ async function dispatchDailyCollection(
       }
 
       if (response.status === 200 || response.status === 204) {
-        console.info("Dispatched Daily market data workflow from Cloudflare Cron", {
+        console.info("Dispatched market-data-collect workflow from Cloudflare Cron", {
           cron: controller.cron,
           window,
           runKey,

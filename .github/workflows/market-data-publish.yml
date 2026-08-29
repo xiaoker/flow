@@ -1,0 +1,396 @@
+name: Market data publish
+
+on:
+  # Publishing is a separate, resumable dispatch.  It consumes the immutable
+  # source artifact produced by market-data-collect.yml and never recollects
+  # official sources.
+  workflow_dispatch:
+    inputs:
+      run_key:
+        description: "Stable pipeline run key"
+        required: true
+        type: string
+      window_name:
+        description: "Stable scheduler window name"
+        required: true
+        type: string
+      target_date:
+        description: "Shanghai business date associated with the window"
+        required: true
+        type: string
+      lease_owner:
+        description: "Pipeline-window lease owner"
+        required: true
+        type: string
+      contract_version:
+        description: "Pipeline run-key contract version"
+        required: false
+        default: "v1"
+        type: string
+      source_run_id:
+        description: "Collection workflow run that uploaded the source artifact"
+        required: true
+        type: string
+      artifact_name:
+        description: "Immutable collection artifact to download"
+        required: true
+        type: string
+      gate_enabled:
+        description: "Whether pipeline_window status must be checked"
+        required: false
+        default: "false"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: market-data-publish-${{ inputs.run_key || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish_window_gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      gate_enabled: ${{ steps.gate.outputs.gate_enabled }}
+    env:
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ inputs.gate_enabled || 'false' }}
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Verify publish lease before installing dependencies
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_KEY="${{ inputs.run_key }}"
+          if [[ ! "$RUN_KEY" =~ ^daily-market-data:[0-9]{4}-[0-9]{2}-[0-9]{2}:[a-z_]+:v[0-9]+$ ]]; then
+            echo "Invalid run_key input: $RUN_KEY" >&2
+            exit 1
+          fi
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ]]; then
+            echo "gate_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Pipeline-window gate disabled; publishing the explicitly dispatched artifact."
+            exit 0
+          fi
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Publish gate requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+            exit 1
+          fi
+          AUTH_ARGS=(
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+          )
+          ENCODED_RUN_KEY="$(jq -rn --arg value "$RUN_KEY" '$value|@uri')"
+          STATUS_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --output pipeline-window-status.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/status?runKey=$ENCODED_RUN_KEY")"
+          if [[ "$STATUS_CODE" != "200" ]]; then
+            echo "Publish lease status failed with HTTP $STATUS_CODE; fail closed." >&2
+            jq . pipeline-window-status.json >&2 || true
+            exit 1
+          fi
+          STATUS="$(jq -r '.status // empty' pipeline-window-status.json)"
+          OWNER="$(jq -r '.leaseOwner // empty' pipeline-window-status.json)"
+          NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+          if [[ "$STATUS" == "COMPLETED" ]]; then
+            echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Publish window is already completed; exiting before checkout."
+            exit 0
+          fi
+          if [[ "$STATUS" != "RUNNING" && "$STATUS" != "DISPATCHED" ]]; then
+            echo "Publish window is not leased for execution: status=$STATUS" >&2
+            exit 1
+          fi
+          if [[ "$OWNER" != "${{ inputs.lease_owner }}" ]]; then
+            echo "Publish lease owner mismatch; refusing to publish." >&2
+            exit 1
+          fi
+          if ! jq -e --arg now "$NOW_ISO" '(.leaseExpiresAt // "") > $now' pipeline-window-status.json >/dev/null; then
+            echo "Publish lease has expired; refusing to build or activate a candidate." >&2
+            exit 1
+          fi
+          echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "Publish lease is valid for $RUN_KEY."
+
+  publish:
+    needs: publish_window_gate
+    if: ${{ needs.publish_window_gate.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLOW_PUBLIC_URL: https://flow.xiaoker.com
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      INPUT_RUN_KEY: ${{ inputs.run_key }}
+      INPUT_WINDOW_NAME: ${{ inputs.window_name }}
+      INPUT_TARGET_DATE: ${{ inputs.target_date }}
+      INPUT_LEASE_OWNER: ${{ inputs.lease_owner }}
+      INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
+    steps:
+      - name: Checkout producer
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Download immutable collection source bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .collection-source
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Verify source artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .collection-source/dashboard-snapshot.json
+          jq -e --arg targetDate "$INPUT_TARGET_DATE" '
+            (.asOf | type == "string") and
+            (.publication.status == "confirmed" or .publication.status == "pending") and
+            (.asOf <= $targetDate or $targetDate == "")
+          ' .collection-source/dashboard-snapshot.json >/dev/null
+          if [[ -s .collection-source/market-history.json ]]; then
+            jq -e '(.rows | type == "array") and all(.rows[]?; .trade_date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
+              .collection-source/market-history.json >/dev/null
+          fi
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install publisher
+        run: python -m pip install -e '.[dev]'
+
+      - name: Run targeted publish smoke tests
+        run: >-
+          python -m pytest -q
+          tests/unit/test_publish_read_models.py
+          tests/unit/test_read_models.py
+          tests/unit/test_read_model_slots.py
+
+      - name: Materialize source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .collection-source/dashboard-snapshot.json dashboard-snapshot.json
+          for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json market-history.json previous-release.json history-bundle.json ingest-bundle.json source-readiness.json source-readiness-response.json; do
+            if [[ -s ".collection-source/$file" ]]; then cp ".collection-source/$file" "$file"; fi
+          done
+          if [[ -d .collection-source/stock-flow-partitions ]]; then
+            cp -R .collection-source/stock-flow-partitions stock-flow-partitions
+          fi
+
+      - name: Build immutable read-model candidates offline
+        id: build_models
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
+            echo "Source snapshot is pending; no read-model candidate will be built."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HISTORY_ARGS=()
+          if [[ -s market-history.json ]]; then HISTORY_ARGS+=(--market-history market-history.json); fi
+          if [[ -s previous-release.json ]]; then HISTORY_ARGS+=(--previous-manifest previous-release.json); fi
+          if [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+            python scripts/build_stock_pressure_state.py \
+              --catalog stock-flow-catalog.json \
+              --output stock-pressure-catalog.json \
+              --daily-partitions stock-flow-history.json
+            python scripts/build_read_models.py \
+              --snapshot dashboard-snapshot.json \
+              --output-dir read-models-full \
+              --stock-catalog stock-pressure-catalog.json \
+              --require-materialized \
+              --producer-build-sha "${GITHUB_SHA}" \
+              "${HISTORY_ARGS[@]}"
+            python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-dashboard --slot dashboard
+            python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
+            python scripts/report_read_model_sizes.py --read-model-dir read-models-full --output artifact-size-report.json
+          else
+            python scripts/build_read_models.py \
+              --slot dashboard \
+              --snapshot dashboard-snapshot.json \
+              --output-dir read-models-dashboard \
+              --require-materialized \
+              --producer-build-sha "${GITHUB_SHA}" \
+              "${HISTORY_ARGS[@]}"
+            python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check dashboard capability contract
+        if: ${{ steps.build_models.outputs.ready == 'true' }}
+        run: python scripts/check_release_capabilities.py --slot dashboard --output dashboard-capabilities.json
+
+      - name: Stage dashboard candidate
+        if: ${{ steps.build_models.outputs.ready == 'true' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python scripts/publish_read_models.py \
+            --read-model-dir read-models-dashboard \
+            --slot dashboard \
+            --stage-only \
+            --result-output dashboard-read-model-publish.json
+
+      - name: Verify and activate dashboard candidate
+        if: ${{ steps.build_models.outputs.ready == 'true' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.status == "staged_candidate"' dashboard-read-model-publish.json >/dev/null
+          RELEASE_ID="$(jq -r '.releaseId' read-models-dashboard/manifest.json)"
+          AS_OF="$(jq -r '.asOf' read-models-dashboard/manifest.json)"
+          python scripts/verify_published_release.py \
+            --release-id "$RELEASE_ID" \
+            --as-of "$AS_OF" \
+            --slot dashboard \
+            --candidate > dashboard-release-canary.json
+          python scripts/activate_read_models.py \
+            --release-id "$RELEASE_ID" \
+            --as-of "$AS_OF" \
+            --slot dashboard > dashboard-read-model-activation.json
+          jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
+            '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+            dashboard-read-model-activation.json >/dev/null
+
+      - name: Check and stage ETF penetration candidate
+        if: ${{ steps.build_models.outputs.ready == 'true' && hashFiles('read-models-penetration/manifest.json') != '' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_release_capabilities.py --slot etf_penetration --output penetration-capabilities.json
+          python scripts/publish_read_models.py \
+            --read-model-dir read-models-penetration \
+            --slot etf_penetration \
+            --stage-only \
+            --result-output penetration-read-model-publish.json
+
+      - name: Verify and activate ETF penetration candidate
+        if: ${{ success() && hashFiles('read-models-penetration/manifest.json') != '' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.status == "staged_candidate"' penetration-read-model-publish.json >/dev/null
+          RELEASE_ID="$(jq -r '.releaseId' read-models-penetration/manifest.json)"
+          AS_OF="$(jq -r '.asOf' read-models-penetration/manifest.json)"
+          python scripts/verify_published_release.py \
+            --release-id "$RELEASE_ID" \
+            --as-of "$AS_OF" \
+            --slot etf_penetration \
+            --candidate > penetration-release-canary.json
+          python scripts/activate_read_models.py \
+            --release-id "$RELEASE_ID" \
+            --as-of "$AS_OF" \
+            --slot etf_penetration > penetration-read-model-activation.json
+          jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
+            '.releaseId == $releaseId and .asOf == $asOf and .slot == "etf_penetration" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+            penetration-read-model-activation.json >/dev/null
+
+      - name: Record publish resource budget
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p reports/budget
+          python scripts/report_stage_budget.py \
+            --stage publish \
+            --run-key "$INPUT_RUN_KEY" \
+            --actions-minutes 0 \
+            --actions-run-attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+            --output reports/budget/publish.json
+
+      - name: Mark pipeline window terminal status
+        if: ${{ always() && needs.publish_window_gate.outputs.gate_enabled == 'true' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="COMPLETED"
+          ERROR_CODE=""
+          if [[ "${{ job.status }}" != "success" ]]; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="publish_workflow_failed"
+          elif [[ ! -s dashboard-snapshot.json ]] || ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null 2>&1; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="source_not_ready"
+          elif [[ -s dashboard-snapshot.json ]] && jq -e '(.errors | length > 0) or (.phase0_gate_status == "blocked")' dashboard-snapshot.json >/dev/null 2>&1; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="quality_gate_blocked"
+          fi
+          jq -n \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg leaseOwner "$INPUT_LEASE_OWNER" \
+            --arg githubRunId "${{ github.run_id }}" \
+            --arg status "$STATUS" \
+            --arg errorCode "$ERROR_CODE" \
+            '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+            > pipeline-window-terminal.json
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header "Content-Type: application/json" \
+            --data-binary @pipeline-window-terminal.json \
+            "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --output pipeline-window-terminal-response.json
+
+      - name: Preserve publish evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
+        with:
+          name: market-data-publish-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            pipeline-window-status.json
+            pipeline-window-terminal.json
+            pipeline-window-terminal-response.json
+            dashboard-snapshot.json
+            market-history.json
+            previous-release.json
+            stock-flow-history.json
+            stock-pressure-catalog.json
+            artifact-size-report.json
+            dashboard-capabilities.json
+            dashboard-read-model-publish.json
+            dashboard-release-canary.json
+            dashboard-read-model-activation.json
+            penetration-capabilities.json
+            penetration-read-model-publish.json
+            penetration-release-canary.json
+            penetration-read-model-activation.json
+            reports/budget/publish.json
+            read-models-dashboard/
+            read-models-penetration/

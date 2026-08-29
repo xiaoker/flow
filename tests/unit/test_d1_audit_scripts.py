@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.audit_etf_daily_duplicates import _unwrap_wrangler_json, summarize
 from scripts.report_d1_usage import aggregate
+from scripts.report_stage_budget import build_stage_report
 
 
 def test_etf_daily_audit_reports_business_key_multiplier_and_redundancy() -> None:
@@ -48,3 +49,30 @@ def test_wrangler_envelope_is_unwrapped() -> None:
         "orphan_rows": 0,
         "superseded_rows": 0,
     }
+
+
+def test_stage_budget_receipt_records_d1_r2_and_actions_evidence() -> None:
+    config = {
+        "limits": {
+            "d1RowsReadPerDay": 5_000_000,
+            "d1RowsWrittenPerDay": 100_000,
+        },
+        "storage": {"d1Bytes": 5_000_000_000, "hardD1Bytes": 2_500_000_000},
+        "targets": {"d1RowsReadPerDay": 500_000, "d1RowsWrittenPerDay": 20_000},
+        "hardLimits": {"d1RowsReadPerDay": 2_500_000, "d1RowsWrittenPerDay": 50_000},
+        "stageBudgets": {"publish": {"rowsRead": 50_000, "rowsWritten": 500}},
+    }
+    report = build_stage_report(
+        config=config,
+        stage="publish",
+        run_key="daily-market-data:2026-08-29:evening:v1",
+        actions_minutes=2,
+        r2_bytes=1234,
+    )
+    assert report["stage"] == "publish"
+    assert report["runKey"].endswith(":evening:v1")
+    assert report["estimate"] == {"rowsRead": 50_000, "rowsWritten": 500, "storageBytes": 0}
+    assert report["actionsMinutes"] == 2
+    assert report["actionsRunAttempt"] == 0
+    assert report["r2Bytes"] == 1234
+    assert report["decision"] in {"allow", "warn", "defer_optional", "block_d1_bulk"}

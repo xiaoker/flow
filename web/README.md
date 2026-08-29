@@ -41,9 +41,25 @@ npm run deploy
 - `CLOUDFLARE_ACCOUNT_ID`：当前 Cloudflare 账号 ID；
 - `CLOUDFLARE_API_TOKEN`：仅授予该账号 Worker 部署和 D1 迁移所需权限的 API Token。
 
-Token 只保存在 GitHub Secrets，不要写入仓库文件、日志或前端代码。数据采集仍由 `Daily market data` workflow 负责，与代码部署相互独立。
+Token 只保存在 GitHub Secrets，不要写入仓库文件、日志或前端代码。数据采集由 `market-data-collect.yml` 负责，与代码部署相互独立；旧的 `daily-data.yml` 只保留手动兼容转发。
 
 生产入口为 `https://flow.xiaoker.com`，页面和只读 API 由所有者账号中的 Cloudflare Access 管理，仅允许项目所有者邮箱登录。GitHub Actions 通过独立 Service Auth 策略访问写入路由；写入接口仍要求独立的 `INGEST_API_KEY`。`workers.dev` 与 Worker Preview URL 均已关闭。
+
+### Market data pipeline stages
+
+`market-data-watchdog.yml` 是唯一的 GitHub schedule，只做
+`pipeline_window` 状态检查和条件补发；它不会 checkout、安装依赖或运行
+pytest。`market-data-collect.yml` 是 dispatch-only 的来源采集和证据归档阶段，
+完成后上传短期 immutable source artifact 并 dispatch
+`market-data-publish.yml`。发布阶段独立下载该 artifact，离线构建候选 read
+models、执行 canary，再更新发布状态。`pcf-v2-capture.yml` 独立按官方精确日期捕获
+PCF，并用 D1 checkpoint 做有界恢复和影子摘要；PCF 失败不会阻塞核心 market slot。旧的
+`daily-data.yml` 仅是手动兼容 wrapper。
+
+完整 Python 与 Web build/test/lint 在 `ci.yml` 的 PR/main 检查中运行；定时采集
+只运行目标 smoke 和数据质量门禁。`PIPELINE_WINDOW_GATE_ENABLED` 仍须在
+Cloudflare Worker 与 GitHub repository variable 同时显式开启，PR2 不会自动
+切换生产开关。
 
 ### Daily pipeline window gate
 
