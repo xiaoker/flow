@@ -25,7 +25,8 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "daily-data.yml/dispatches" in worker
     assert 'ref: "main"' in worker
-    assert 'inputs: { collection_window: window }' in worker
+    assert 'collection_window: window' in worker
+    assert 'run_key: runKey' in worker
     assert "response.status === 200 || response.status === 204" in worker
     assert 'console.error("Daily collection dispatch failed"' in worker
     assert "DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000]" in worker
@@ -56,6 +57,48 @@ def test_pr0_baseline_makes_dual_full_schedule_explicit() -> None:
     assert "cancel-in-progress: false" in workflow
     assert "daily-data.yml/dispatches" in worker
     assert "concurrency" in workflow
+
+
+def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
+    claim_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/claim/route.ts").read_text(encoding="utf-8")
+    status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/status/route.ts").read_text(encoding="utf-8")
+    migration = (REPOSITORY_ROOT / "web/drizzle/0010_fair_jasper_sitwell.sql").read_text(encoding="utf-8")
+    pipeline_window = (REPOSITORY_ROOT / "web/app/lib/pipeline-window.ts").read_text(encoding="utf-8")
+
+    assert "pipeline_window_gate:" in workflow
+    assert "needs: pipeline_window_gate" in workflow
+    assert "if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' }}" in workflow
+    assert "FLOW_PIPELINE_WINDOW_URL/status?runKey=" in workflow
+    assert "FLOW_PIPELINE_WINDOW_URL/claim" in workflow
+    assert "Mark pipeline window running" in workflow
+    assert "Mark pipeline window terminal status" in workflow
+    assert "setup-python" in workflow
+    assert workflow.index("Claim or skip pipeline window") < workflow.index("setup-python")
+    assert "run_key:" in workflow
+    assert "window_name:" in workflow
+    assert "target_date:" in workflow
+    assert "lease_owner:" in workflow
+    assert "Concurrency is not cross-scheduler deduplication." in workflow
+    assert "pipeline_window is the idempotency boundary" in workflow
+
+    assert "PIPELINE_WINDOW_GATE_ENABLED" in worker
+    assert "claimPipelineWindow" in worker
+    assert "buildPipelineRunKey" in worker
+    assert "decision !== \"acquired\" && claim.decision !== \"takeover\"" in worker
+    assert 'run_key: runKey' in worker
+    assert 'window_name: window' in worker
+    assert 'target_date: windowDate' in worker
+    assert 'lease_owner: leaseOwner' in worker
+    assert "pipeline_window" in migration
+    assert "CREATE INDEX `pipeline_window_status_lease_idx`" in migration
+    assert "ALTER TABLE" not in migration
+    assert "ON CONFLICT(run_key) DO UPDATE" in pipeline_window
+    assert "WHERE pipeline_window.status" in pipeline_window
+    assert "SELECT-then-UPDATE" in pipeline_window
+    assert "pipeline_window_not_found" in status_route
+    assert "secureEqual" in claim_route
 
 
 def test_pcf_capture_control_plane_is_additive_and_worker_upload_is_streaming() -> None:

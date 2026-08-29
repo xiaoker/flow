@@ -144,6 +144,32 @@ export const sourceReadiness = sqliteTable("source_readiness", {
 ]);
 
 /**
+ * Small cross-scheduler lease ledger.  It is deliberately independent from
+ * the heavy collection and release tables so a claim reads/writes one row
+ * instead of scanning market history or ETF facts.
+ */
+export const pipelineWindow = sqliteTable("pipeline_window", {
+  runKey: text("run_key").primaryKey(),
+  pipeline: text("pipeline").notNull(),
+  windowDate: text("window_date").notNull(),
+  windowName: text("window_name").notNull(),
+  contractVersion: text("contract_version").notNull(),
+  targetDate: text("target_date"),
+  status: text("status").notNull(),
+  leaseOwner: text("lease_owner"),
+  leaseExpiresAt: text("lease_expires_at"),
+  sourceFingerprint: text("source_fingerprint"),
+  githubRunId: text("github_run_id"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lastErrorCode: text("last_error_code"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [
+  index("pipeline_window_status_lease_idx").on(table.status, table.leaseExpiresAt),
+]);
+
+/**
  * PCF v2 control plane. These tables are intentionally additive and are not
  * read by the production release path until the later capability-cutover PR.
  * The collector uses them as a durable, resumable ledger rather than keeping

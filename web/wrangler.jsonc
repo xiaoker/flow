@@ -31,6 +31,10 @@
   "images": {
     "binding": "IMAGES"
   },
+  "vars": {
+    "PIPELINE_WINDOW_GATE_ENABLED": "0",
+    "PIPELINE_WINDOW_CONTRACT_VERSION": "v1"
+  },
   "d1_databases": [
     {
       "binding": "DB",
