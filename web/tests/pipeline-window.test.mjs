@@ -1,0 +1,368 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import {
+  buildPipelineRunKey,
+  claimPipelineWindow,
+  getPipelineWindow,
+  markPipelineWindow,
+  parsePipelineRunKey,
+  shanghaiDate,
+} from "../app/lib/pipeline-window.ts";
+
+async function loadWorker() {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("pipeline-window-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  return worker;
+}
+
+class D1Statement {
+  constructor(database, sql) {
+    this.database = database;
+    this.sql = sql;
+    this.values = [];
+  }
+
+  bind(...values) {
+    this.values = values;
+    return this;
+  }
+
+  async run() {
+    const result = this.database.prepare(this.sql).run(...this.values);
+    return {
+      meta: {
+        changes: Number(result.changes ?? 0),
+        rows_written: Number(result.changes ?? 0),
+      },
+    };
+  }
+
+  async first() {
+    return this.database.prepare(this.sql).get(...this.values) ?? null;
+  }
+}
+
+class LocalD1 {
+  constructor() {
+    this.database = new DatabaseSync(":memory:");
+  }
+
+  prepare(sql) {
+    return new D1Statement(this.database, sql);
+  }
+
+  close() {
+    this.database.close();
+  }
+}
+
+async function createDatabase() {
+  const db = new LocalD1();
+  const migration = await readFile(new URL("../drizzle/0010_fair_jasper_sitwell.sql", import.meta.url), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) db.database.exec(sql);
+  }
+  return db;
+}
+
+function input(runKey, windowName = "evening", owner = "runner:00000001", extras = {}) {
+  return {
+    runKey,
+    windowDate: "2026-08-29",
+    windowName,
+    contractVersion: "v1",
+    targetDate: "2026-08-29",
+    leaseOwner: owner,
+    ...extras,
+  };
+}
+
+test("runKey is stable, parseable and uses Shanghai window dates", () => {
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  assert.equal(runKey, "daily-market-data:2026-08-29:evening:v1");
+  assert.deepEqual(parsePipelineRunKey(runKey), {
+    windowDate: "2026-08-29",
+    windowName: "evening",
+    contractVersion: "v1",
+  });
+  assert.equal(shanghaiDate(Date.parse("2026-08-28T16:30:00.000Z")), "2026-08-29");
+  assert.equal(parsePipelineRunKey("daily-market-data:2026-08-29:unknown:v1"), null);
+  assert.equal(parsePipelineRunKey("daily-market-data:2026-08-29:evening:v2"), null);
+});
+
+test("twenty concurrent claims produce exactly one winner", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-08-29T00:00:00.000Z");
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  const results = await Promise.all(
+    Array.from({ length: 20 }, (_, index) => claimPipelineWindow(
+      db,
+      input(runKey, "evening", `runner:${String(index + 1).padStart(8, "0")}`),
+      now,
+    )),
+  );
+  assert.equal(results.filter((result) => result.decision === "acquired").length, 1);
+  assert.equal(results.filter((result) => result.decision === "takeover").length, 0);
+  assert.equal(results.filter((result) => result.decision === "skip_leased").length, 19);
+  assert.ok(results.every((result) => result.rowsWritten <= 1));
+  assert.equal(results.find((result) => result.decision === "acquired").rowsWritten, 1);
+  db.close();
+});
+
+test("completed, retryable and blocked states are idempotent", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-08-29T00:00:00.000Z");
+
+  const completedKey = buildPipelineRunKey("2026-08-29", "reconcile");
+  await claimPipelineWindow(db, input(completedKey, "reconcile"), now);
+  await markPipelineWindow(db, {
+    runKey: completedKey,
+    leaseOwner: "runner:00000001",
+    status: "COMPLETED",
+  }, now);
+  assert.equal((await claimPipelineWindow(db, input(completedKey, "reconcile", "runner:00000002"), now)).decision, "skip_completed");
+
+  const retryKey = buildPipelineRunKey("2026-08-29", "morning");
+  await claimPipelineWindow(db, input(retryKey, "morning"), now);
+  await markPipelineWindow(db, {
+    runKey: retryKey,
+    leaseOwner: "runner:00000001",
+    status: "FAILED_RETRYABLE",
+    errorCode: "source_not_ready",
+  }, now);
+  assert.equal((await claimPipelineWindow(db, input(retryKey, "morning", "runner:00000002"), now)).decision, "takeover");
+
+  const blockedKey = buildPipelineRunKey("2026-08-29", "morning_exact");
+  await claimPipelineWindow(db, input(blockedKey, "morning_exact", "runner:00000001", { sourceFingerprint: "fp-old" }), now);
+  await markPipelineWindow(db, {
+    runKey: blockedKey,
+    leaseOwner: "runner:00000001",
+    status: "BLOCKED_QUALITY",
+    errorCode: "quality_gate_blocked",
+    sourceFingerprint: "fp-old",
+  }, now);
+  assert.equal((await claimPipelineWindow(db, input(blockedKey, "morning_exact", "runner:00000002", { sourceFingerprint: "fp-old" }), now)).decision, "skip_blocked_quality");
+  assert.equal((await claimPipelineWindow(db, input(blockedKey, "morning_exact", "runner:00000004"), now)).decision, "skip_blocked_quality");
+  assert.equal((await claimPipelineWindow(db, input(blockedKey, "morning_exact", "runner:00000003", { sourceFingerprint: "fp-new" }), now)).decision, "takeover");
+
+  const row = await getPipelineWindow(db, blockedKey);
+  assert.equal(row.status, "DISPATCHED");
+  assert.equal(row.attempt_count, 2);
+  db.close();
+});
+
+test("an expired lease can be taken over atomically", async () => {
+  const db = await createDatabase();
+  const claimedAt = new Date("2026-08-29T00:00:00.000Z");
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  await claimPipelineWindow(db, input(runKey), claimedAt);
+  const takeover = await claimPipelineWindow(
+    db,
+    input(runKey, "evening", "runner:00000002"),
+    new Date(claimedAt.getTime() + 15 * 60 * 1_000 + 1),
+  );
+  assert.equal(takeover.decision, "takeover");
+  assert.equal(takeover.leaseOwner, "runner:00000002");
+  assert.equal(takeover.attemptCount, 2);
+  db.close();
+});
+
+test("invalid identities and ownership cannot claim or update", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-08-29T00:00:00.000Z");
+  const key = buildPipelineRunKey("2026-08-29", "evening");
+  await assert.rejects(
+    claimPipelineWindow(db, input("daily-market-data:2026-08-29:evening:v2"), now),
+    /run_key_mismatch/,
+  );
+  await assert.rejects(
+    claimPipelineWindow(
+      db,
+      input("daily-market-data:2026-08-29:evening:v2", "evening", "runner:00000001", { contractVersion: "v2" }),
+      now,
+    ),
+    /unknown_contract_version/,
+  );
+  await claimPipelineWindow(db, input(key), now);
+  await assert.rejects(
+    markPipelineWindow(db, { runKey: key, leaseOwner: "runner:00000002", status: "RUNNING" }, now),
+    /pipeline_window_status_conflict/,
+  );
+  db.close();
+});
+
+test("protected claim and status routes expose bounded machine-readable responses", async () => {
+  const worker = await loadWorker();
+  const db = await createDatabase();
+  const env = {
+    DB: db,
+    INGEST_API_KEY: "test-key",
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  const claimRequest = {
+    runKey,
+    windowDate: "2026-08-29",
+    windowName: "evening",
+    contractVersion: "v1",
+    targetDate: "2026-08-29",
+    leaseOwner: "runner:00000001",
+  };
+
+  const unauthenticated = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/claim", {
+      method: "POST",
+      body: JSON.stringify(claimRequest),
+      headers: { "Content-Type": "application/json" },
+    }),
+    env,
+    context,
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const claimResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/claim", {
+      method: "POST",
+      body: JSON.stringify(claimRequest),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(claimResponse.status, 200);
+  const claimBody = await claimResponse.json();
+  assert.equal(claimBody.decision, "acquired");
+  assert.equal(claimBody.rowsWritten, 1);
+
+  const encoded = encodeURIComponent(runKey);
+  const statusResponse = await worker.fetch(
+    new Request(`http://localhost/api/v1/admin/pipeline-window/status?runKey=${encoded}`, {
+      headers: { Authorization: "Bearer test-key" },
+    }),
+    env,
+    context,
+  );
+  assert.equal(statusResponse.status, 200);
+  assert.equal((await statusResponse.json()).status, "DISPATCHED");
+
+  const markResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/status", {
+      method: "POST",
+      body: JSON.stringify({ runKey, leaseOwner: "runner:00000001", githubRunId: "12345678", status: "COMPLETED" }),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(markResponse.status, 200);
+  assert.equal((await markResponse.json()).status, "COMPLETED");
+  assert.equal((await getPipelineWindow(db, runKey)).github_run_id, "12345678");
+  db.close();
+});
+
+test("Cloudflare scheduler claims before dispatch and skips a duplicate window", async () => {
+  const worker = await loadWorker();
+  const db = await createDatabase();
+  const dispatched = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    dispatched.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const env = {
+      DB: db,
+      GITHUB_ACTIONS_TOKEN: "github-token",
+      INGEST_API_KEY: "test-key",
+      PIPELINE_WINDOW_GATE_ENABLED: "1",
+      PIPELINE_WINDOW_CONTRACT_VERSION: "v1",
+    };
+    const controller = {
+      cron: "30 10 * * mon-fri",
+      scheduledTime: Date.parse("2026-08-29T10:30:00.000Z"),
+    };
+    const pending = [];
+    const context = { waitUntil(promise) { pending.push(promise); }, passThroughOnException() {} };
+    await worker.scheduled(controller, env, context);
+    await Promise.all(pending.splice(0));
+    assert.equal(dispatched.length, 1);
+    const body = JSON.parse(dispatched[0].options.body);
+    assert.equal(body.inputs.run_key, "daily-market-data:2026-08-29:evening:v1");
+    assert.equal(body.inputs.window_name, "evening");
+    assert.equal(body.inputs.target_date, "2026-08-29");
+
+    const duplicatePending = [];
+    await worker.scheduled(controller, env, {
+      waitUntil(promise) { duplicatePending.push(promise); },
+      passThroughOnException() {},
+    });
+    await Promise.all(duplicatePending);
+    assert.equal(dispatched.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+});
+
+test("a D1 claim error fails closed without dispatch", async () => {
+  const worker = await loadWorker();
+  const dispatched = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (...args) => {
+    dispatched.push(args);
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const env = {
+      DB: { prepare() { throw new Error("d1 unavailable"); } },
+      GITHUB_ACTIONS_TOKEN: "github-token",
+      INGEST_API_KEY: "test-key",
+      PIPELINE_WINDOW_GATE_ENABLED: "1",
+      PIPELINE_WINDOW_CONTRACT_VERSION: "v1",
+    };
+    const pending = [];
+    await worker.scheduled(
+      { cron: "30 10 * * mon-fri", scheduledTime: Date.parse("2026-08-29T10:30:00.000Z") },
+      env,
+      { waitUntil(promise) { pending.push(promise); }, passThroughOnException() {} },
+    );
+    await Promise.all(pending);
+    assert.equal(dispatched.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("flag off preserves dispatch without requiring the pipeline-window table", async () => {
+  const worker = await loadWorker();
+  const dispatched = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    dispatched.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const pending = [];
+    await worker.scheduled(
+      { cron: "30 10 * * mon-fri", scheduledTime: Date.parse("2026-08-29T10:30:00.000Z") },
+      { GITHUB_ACTIONS_TOKEN: "github-token", INGEST_API_KEY: "test-key" },
+      { waitUntil(promise) { pending.push(promise); }, passThroughOnException() {} },
+    );
+    await Promise.all(pending);
+    assert.equal(dispatched.length, 1);
+    assert.equal(JSON.parse(dispatched[0].options.body).ref, "main");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

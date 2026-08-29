@@ -3,8 +3,8 @@ name: Daily market data
 on:
   # Keep an independent GitHub schedule as a fail-safe. Cloudflare Cron also
   # dispatches this workflow, but a broken/expired GitHub token must not make
-  # the collection silently stop. The concurrency group below deduplicates
-  # overlapping dispatches.
+  # the collection silently stop. The concurrency group below serializes
+  # overlapping dispatches; pipeline_window is the idempotency boundary.
   schedule:
     - cron: "45 10 * * 1-5"  # 18:45 Asia/Shanghai · failover after SSE/HKEX window
     - cron: "0 0 * * 1-5"    # 08:00 Asia/Shanghai · failover after SZSE window
@@ -23,6 +23,31 @@ on:
         default: "auto"
         type: choice
         options: [auto, evening, morning, reconcile]
+      run_key:
+        description: "Stable pipeline run key from the Cloudflare scheduler"
+        required: false
+        default: ""
+        type: string
+      window_name:
+        description: "Stable scheduler window name"
+        required: false
+        default: ""
+        type: string
+      target_date:
+        description: "Shanghai business date associated with the scheduler window"
+        required: false
+        default: ""
+        type: string
+      lease_owner:
+        description: "Lease owner assigned by the scheduler"
+        required: false
+        default: ""
+        type: string
+      contract_version:
+        description: "Pipeline run-key contract version"
+        required: false
+        default: "v1"
+        type: string
       run_pcf_shadow:
         description: "Opt in to one legacy/v2 PCF parity run; never publishes v2"
         required: false
@@ -42,18 +67,182 @@ concurrency:
   # Cloudflare Cron is primary and GitHub schedule is failover. Each window is
   # one-shot; immutable source/release identities and serialized execution
   # preserve raw evidence and the readiness ledger when a delayed window
-  # overlaps the next one.
+  # overlaps the next one. Concurrency is not cross-scheduler deduplication.
   cancel-in-progress: false
 
 jobs:
+  pipeline_window_gate:
+    runs-on: ubuntu-latest
+    # This small job runs before checkout, Python setup, dependency install or
+    # pytest.  With the flag enabled it is the only place that may acquire a
+    # cross-scheduler lease for this workflow invocation.
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      gate_enabled: ${{ steps.gate.outputs.gate_enabled }}
+      run_key: ${{ steps.gate.outputs.run_key }}
+      window_name: ${{ steps.gate.outputs.window_name }}
+      target_date: ${{ steps.gate.outputs.target_date }}
+      lease_owner: ${{ steps.gate.outputs.lease_owner }}
+      contract_version: ${{ steps.gate.outputs.contract_version }}
+    env:
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ vars.PIPELINE_WINDOW_GATE_ENABLED || '0' }}
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      INPUT_COLLECTION_WINDOW: ${{ inputs.collection_window || 'auto' }}
+      INPUT_RUN_KEY: ${{ inputs.run_key || '' }}
+      INPUT_WINDOW_NAME: ${{ inputs.window_name || '' }}
+      INPUT_TARGET_DATE: ${{ inputs.target_date || '' }}
+      INPUT_LEASE_OWNER: ${{ inputs.lease_owner || '' }}
+      INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
+    steps:
+      - name: Claim or skip pipeline window
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WINDOW="$INPUT_WINDOW_NAME"
+          if [[ -z "$WINDOW" || "$WINDOW" == "auto" ]]; then
+            WINDOW="$INPUT_COLLECTION_WINDOW"
+          fi
+          if [[ -z "$WINDOW" || "$WINDOW" == "auto" ]]; then
+            case "${{ github.event.schedule || '' }}" in
+              "45 10 * * 1-5") WINDOW="evening" ;;
+              "0 0 * * 1-5") WINDOW="morning" ;;
+              "55 0 * * 1-5"|"15 1 * * 1-5"|"45 1 * * 1-5") WINDOW="reconcile" ;;
+              *) WINDOW="evening" ;;
+            esac
+          fi
+
+          WINDOW_DATE="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
+          CONTRACT_VERSION="$INPUT_CONTRACT_VERSION"
+          RUN_KEY="$INPUT_RUN_KEY"
+          if [[ -n "$RUN_KEY" ]]; then
+            if [[ ! "$RUN_KEY" =~ ^daily-market-data:([0-9]{4}-[0-9]{2}-[0-9]{2}):([a-z_]+):(v[0-9]+)$ ]]; then
+              echo "Invalid run_key input: $RUN_KEY" >&2
+              exit 1
+            fi
+            WINDOW_DATE="${BASH_REMATCH[1]}"
+            WINDOW="${BASH_REMATCH[2]}"
+            CONTRACT_VERSION="${BASH_REMATCH[3]}"
+          else
+            RUN_KEY="daily-market-data:${WINDOW_DATE}:${WINDOW}:${CONTRACT_VERSION}"
+          fi
+          TARGET_DATE="${INPUT_TARGET_DATE:-$WINDOW_DATE}"
+          LEASE_OWNER="${INPUT_LEASE_OWNER:-github:${GITHUB_RUN_ID}}"
+          {
+            echo "run_key=$RUN_KEY"
+            echo "window_name=$WINDOW"
+            echo "target_date=$TARGET_DATE"
+            echo "lease_owner=$LEASE_OWNER"
+            echo "contract_version=$CONTRACT_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ]]; then
+            echo "gate_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Pipeline-window gate is disabled; preserving legacy workflow behavior."
+            exit 0
+          fi
+
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Pipeline-window gate requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+            exit 1
+          fi
+          AUTH_ARGS=(
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+          )
+          ENCODED_RUN_KEY="$(jq -rn --arg value "$RUN_KEY" '$value|@uri')"
+          STATUS_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --output pipeline-window-status.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/status?runKey=$ENCODED_RUN_KEY")"
+          if [[ "$STATUS_CODE" == "200" ]] && jq -e '.status == "COMPLETED"' pipeline-window-status.json >/dev/null; then
+            echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Pipeline window already completed; exiting before checkout and dependency installation."
+            exit 0
+          fi
+          # Cloudflare already acquired the lease before dispatching this
+          # workflow.  The dispatched run consumes that lease; it must not
+          # claim the same active row again and mistake its own lease for a
+          # duplicate.  A second run with the same owner is allowed only while
+          # the row is still DISPATCHED; once RUNNING, it exits below.
+          NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+          if [[ "$STATUS_CODE" == "200" ]] && jq -e --arg owner "$LEASE_OWNER" --arg now "$NOW_ISO" \
+            '.status == "DISPATCHED" and .leaseOwner == $owner and (.leaseExpiresAt // "") > $now' pipeline-window-status.json >/dev/null; then
+            echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Consuming the lease acquired by the Cloudflare dispatcher."
+            exit 0
+          fi
+          if [[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "404" ]]; then
+            echo "Pipeline-window status check failed with HTTP $STATUS_CODE" >&2
+            jq . pipeline-window-status.json >&2 || true
+            exit 1
+          fi
+
+          jq -n \
+            --arg runKey "$RUN_KEY" \
+            --arg pipeline "daily-market-data" \
+            --arg windowDate "$WINDOW_DATE" \
+            --arg windowName "$WINDOW" \
+            --arg contractVersion "$CONTRACT_VERSION" \
+            --arg targetDate "$TARGET_DATE" \
+            --arg leaseOwner "$LEASE_OWNER" \
+            --arg githubRunId "$GITHUB_RUN_ID" \
+            '{runKey:$runKey,pipeline:$pipeline,windowDate:$windowDate,windowName:$windowName,contractVersion:$contractVersion,targetDate:$targetDate,leaseOwner:$leaseOwner,githubRunId:$githubRunId}' \
+            > pipeline-window-claim-request.json
+          CLAIM_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --header 'Content-Type: application/json' \
+            --data-binary @pipeline-window-claim-request.json \
+            --output pipeline-window-claim.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/claim")"
+          if [[ "$CLAIM_CODE" != "200" ]]; then
+            echo "Pipeline-window claim failed with HTTP $CLAIM_CODE; fail closed without dispatch." >&2
+            jq . pipeline-window-claim.json >&2 || true
+            exit 1
+          fi
+          DECISION="$(jq -r '.decision // empty' pipeline-window-claim.json)"
+          case "$DECISION" in
+            acquired|takeover)
+              echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              ;;
+            skip_completed|skip_leased|skip_blocked_quality)
+              echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "Pipeline-window decision=$DECISION; exiting before checkout and dependency installation."
+              ;;
+            *)
+              echo "Unknown pipeline-window decision: $DECISION" >&2
+              exit 1
+              ;;
+          esac
+          jq '{runKey,decision,status,leaseOwner,leaseExpiresAt,attemptCount,rowsWritten}' pipeline-window-claim.json
+
   collect-and-publish:
+    needs: pipeline_window_gate
+    if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
     # Each window performs one bounded collection. Source timing is represented
     # as pending and reconciled by the next window, not by a long-running job.
     timeout-minutes: 20
     env:
       INPUT_DATES: ${{ inputs.dates }}
-      INPUT_COLLECTION_WINDOW: ${{ inputs.collection_window || 'auto' }}
+      INPUT_COLLECTION_WINDOW: ${{ needs.pipeline_window_gate.outputs.window_name }}
+      INPUT_RUN_KEY: ${{ needs.pipeline_window_gate.outputs.run_key }}
+      INPUT_WINDOW_NAME: ${{ needs.pipeline_window_gate.outputs.window_name }}
+      INPUT_TARGET_DATE: ${{ needs.pipeline_window_gate.outputs.target_date }}
+      INPUT_LEASE_OWNER: ${{ needs.pipeline_window_gate.outputs.lease_owner }}
+      INPUT_CONTRACT_VERSION: ${{ needs.pipeline_window_gate.outputs.contract_version }}
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ needs.pipeline_window_gate.outputs.gate_enabled }}
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
       PUBLISH_URL: https://flow.xiaoker.com/api/v1/admin/import
       FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
       FLOW_READINESS_URL: https://flow.xiaoker.com/api/v1/admin/source-readiness
@@ -62,6 +251,26 @@ jobs:
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Mark pipeline window running
+        if: ${{ needs.pipeline_window_gate.outputs.gate_enabled == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg leaseOwner "$INPUT_LEASE_OWNER" \
+            --arg githubRunId "${{ github.run_id }}" \
+            '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:"RUNNING"}' \
+            > pipeline-window-running.json
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header "Content-Type: application/json" \
+            --data-binary @pipeline-window-running.json \
+            "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --output pipeline-window-running-response.json
 
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
         with:
@@ -827,6 +1036,40 @@ jobs:
           jq '{status, requiredDays, observedDays, passingDays, dates, failedDates, guardrails}' \
             "$REPORT" >> "$GITHUB_STEP_SUMMARY"
           exit "$exit_code"
+
+      - name: Mark pipeline window terminal status
+        if: always() && needs.pipeline_window_gate.outputs.gate_enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="COMPLETED"
+          ERROR_CODE=""
+          if [[ "${{ job.status }}" != "success" ]]; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="workflow_failed"
+          elif [[ "${{ steps.collection.outputs.pending }}" == "true" ]]; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="source_not_ready"
+          elif jq -e '(.errors | length > 0) or (.phase0_gate_status == "blocked")' reports/phase0/latest-quality-summary.json >/dev/null 2>&1; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="quality_gate_blocked"
+          fi
+          jq -n \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg leaseOwner "$INPUT_LEASE_OWNER" \
+            --arg githubRunId "${{ github.run_id }}" \
+            --arg status "$STATUS" \
+            --arg errorCode "$ERROR_CODE" \
+            '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+            > pipeline-window-terminal.json
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header "Content-Type: application/json" \
+            --data-binary @pipeline-window-terminal.json \
+            "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --output pipeline-window-terminal-response.json
 
       - name: Preserve run evidence
         if: always()

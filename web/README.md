@@ -45,6 +45,20 @@ Token 只保存在 GitHub Secrets，不要写入仓库文件、日志或前端�
 
 生产入口为 `https://flow.xiaoker.com`，页面和只读 API 由所有者账号中的 Cloudflare Access 管理，仅允许项目所有者邮箱登录。GitHub Actions 通过独立 Service Auth 策略访问写入路由；写入接口仍要求独立的 `INGEST_API_KEY`。`workers.dev` 与 Worker Preview URL 均已关闭。
 
+### Daily pipeline window gate
+
+`pipeline_window` 是 Cloudflare Cron 与 GitHub schedule 之间的幂等边界。PR1
+提供受保护的 `/api/v1/admin/pipeline-window/claim` 和 `/status` 接口；claim
+只做单行条件写，不扫描历史市场或 ETF 数据。`PIPELINE_WINDOW_GATE_ENABLED`
+默认是 `0`，因此部署新代码不会改变生产调度行为。启用时必须同时设置：
+
+- Cloudflare Worker 变量 `PIPELINE_WINDOW_GATE_ENABLED=1`；
+- GitHub Actions repository variable `PIPELINE_WINDOW_GATE_ENABLED=1`。
+
+两者必须同时启用并先完成 canary；任一 claim/status 异常都会 fail closed，避免
+在不确定时启动重采集。`concurrency` 仍只负责串行化，不能替代 `pipeline_window`
+的跨调度器去重。
+
 ## Useful Commands
 
 - `npm run dev`: start local development

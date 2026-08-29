@@ -2,6 +2,14 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { flowBuildHeaders } from "../app/lib/build-info";
+import {
+  buildPipelineRunKey,
+  claimPipelineWindow,
+  markPipelineWindow,
+  PIPELINE_WINDOW_CONTRACT_VERSION,
+  shanghaiDate,
+  type PipelineWindowName,
+} from "../app/lib/pipeline-window";
 
 interface Env {
   ASSETS: Fetcher;
@@ -9,6 +17,8 @@ interface Env {
   GITHUB_ACTIONS_TOKEN: string;
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
+  PIPELINE_WINDOW_GATE_ENABLED?: string;
+  PIPELINE_WINDOW_CONTRACT_VERSION?: string;
   PCF_CAPTURE_V2_READ_ENABLED?: string;
   IMAGES: {
     input(stream: ReadableStream): {
@@ -34,7 +44,7 @@ const DAILY_DATA_DISPATCH_URL =
 const DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000] as const;
 const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 
-function collectionWindowForCron(cron: string): "evening" | "morning" | "reconcile" {
+export function collectionWindowForCron(cron: string): PipelineWindowName {
   if (cron.startsWith("45 23")) return "morning";
   if (cron.startsWith("45 0") || cron.startsWith("55 0") || cron.startsWith("15 1")) return "reconcile";
   return "evening";
@@ -53,6 +63,11 @@ async function dispatchDailyCollection(
   }
 
   const window = collectionWindowForCron(controller.cron);
+  const windowDate = shanghaiDate(controller.scheduledTime);
+  const contractVersion = env.PIPELINE_WINDOW_CONTRACT_VERSION ?? PIPELINE_WINDOW_CONTRACT_VERSION;
+  const runKey = buildPipelineRunKey(windowDate, window, contractVersion);
+  const leaseOwner = `cloudflare:${window}:${controller.scheduledTime}`;
+  const gateEnabled = env.PIPELINE_WINDOW_GATE_ENABLED === "1" || env.PIPELINE_WINDOW_GATE_ENABLED === "true";
   const scheduleLagMs = Math.max(0, Date.now() - controller.scheduledTime);
   if (scheduleLagMs > LATE_SCHEDULE_THRESHOLD_MS) {
     console.warn("Cloudflare Cron delivered a late collection window", {
@@ -62,74 +77,127 @@ async function dispatchDailyCollection(
       scheduledTime: new Date(controller.scheduledTime).toISOString(),
     });
   }
-  let lastError: Error | undefined;
-
-  for (let attempt = 0; attempt < DISPATCH_RETRY_DELAYS_MS.length; attempt += 1) {
-    const delay = DISPATCH_RETRY_DELAYS_MS[attempt];
-    if (delay > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, delay));
-    }
-    let response: Response;
-    try {
-      response = await fetch(DAILY_DATA_DISPATCH_URL, {
-        method: "POST",
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
-          "Content-Type": "application/json",
-          "User-Agent": "flow-cloudflare-scheduler",
-          "X-GitHub-Api-Version": "2026-03-10",
-        },
-        body: JSON.stringify({
-          ref: "main",
-          inputs: { collection_window: window },
-        }),
-      });
-    } catch (error: unknown) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
-        throw lastError;
-      }
-      console.warn("GitHub workflow dispatch request failed; retrying", {
+  let leaseAcquired = false;
+  if (gateEnabled) {
+    if (!env.DB) throw new Error("PIPELINE_WINDOW_GATE_ENABLED requires DB");
+    const claim = await claimPipelineWindow(env.DB, {
+      runKey,
+      windowDate,
+      windowName: window,
+      contractVersion,
+      // The workflow resolves the exact trading date after checkout.  This is
+      // the Shanghai business date of the scheduling window, not fabricated
+      // market data.
+      targetDate: windowDate,
+      leaseOwner,
+    });
+    if (claim.decision !== "acquired" && claim.decision !== "takeover") {
+      console.info("Skipped duplicate daily collection window", {
         cron: controller.cron,
-        window,
-        attempt: attempt + 1,
-        scheduleLagMs,
-        detail: lastError.message.slice(0, 500),
-      });
-      continue;
-    }
-
-    if (response.status === 200 || response.status === 204) {
-      console.info("Dispatched Daily market data workflow from Cloudflare Cron", {
-        cron: controller.cron,
-        window,
-        attempt: attempt + 1,
-        scheduleLagMs,
+        runKey,
+        decision: claim.decision,
+        status: claim.status,
       });
       return;
     }
-
-    const detail = (await response.text()).slice(0, 500);
-    lastError = new Error(
-      `GitHub workflow dispatch failed with ${response.status}: ${detail}`,
-    );
-    if (!isRetryableDispatchStatus(response.status)) {
-      throw lastError;
-    }
-    if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
-      throw lastError;
-    }
-    console.warn("GitHub workflow dispatch will be retried", {
-      cron: controller.cron,
-      window,
-      attempt: attempt + 1,
-      status: response.status,
-      scheduleLagMs,
-    });
+    leaseAcquired = true;
   }
+  let lastError: Error | undefined;
+  try {
+    for (let attempt = 0; attempt < DISPATCH_RETRY_DELAYS_MS.length; attempt += 1) {
+      const delay = DISPATCH_RETRY_DELAYS_MS[attempt];
+      if (delay > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      }
+      let response: Response;
+      try {
+        response = await fetch(DAILY_DATA_DISPATCH_URL, {
+          method: "POST",
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+            "Content-Type": "application/json",
+            "User-Agent": "flow-cloudflare-scheduler",
+            "X-GitHub-Api-Version": "2026-03-10",
+          },
+          body: JSON.stringify({
+            ref: "main",
+            inputs: {
+              collection_window: window,
+              run_key: runKey,
+              window_name: window,
+              target_date: windowDate,
+              lease_owner: leaseOwner,
+              contract_version: contractVersion,
+            },
+          }),
+        });
+      } catch (error: unknown) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
+          throw lastError;
+        }
+        console.warn("GitHub workflow dispatch request failed; retrying", {
+          cron: controller.cron,
+          window,
+          runKey,
+          attempt: attempt + 1,
+          scheduleLagMs,
+          detail: lastError.message.slice(0, 500),
+        });
+        continue;
+      }
 
-  throw lastError ?? new Error("GitHub workflow dispatch failed without a response");
+      if (response.status === 200 || response.status === 204) {
+        console.info("Dispatched Daily market data workflow from Cloudflare Cron", {
+          cron: controller.cron,
+          window,
+          runKey,
+          attempt: attempt + 1,
+          scheduleLagMs,
+        });
+        return;
+      }
+
+      const detail = (await response.text()).slice(0, 500);
+      lastError = new Error(
+        `GitHub workflow dispatch failed with ${response.status}: ${detail}`,
+      );
+      if (!isRetryableDispatchStatus(response.status)) {
+        throw lastError;
+      }
+      if (attempt === DISPATCH_RETRY_DELAYS_MS.length - 1) {
+        throw lastError;
+      }
+      console.warn("GitHub workflow dispatch will be retried", {
+        cron: controller.cron,
+        window,
+        runKey,
+        attempt: attempt + 1,
+        status: response.status,
+        scheduleLagMs,
+      });
+    }
+
+    throw lastError ?? new Error("GitHub workflow dispatch failed without a response");
+  } catch (error: unknown) {
+    if (leaseAcquired) {
+      try {
+        await markPipelineWindow(env.DB!, {
+          runKey,
+          leaseOwner,
+          status: "FAILED_RETRYABLE",
+          errorCode: "github_dispatch_failed",
+        });
+      } catch (markError: unknown) {
+        console.error("Failed to mark pipeline window retryable", {
+          runKey,
+          detail: markError instanceof Error ? markError.message : String(markError),
+        });
+      }
+    }
+    throw error;
+  }
 }
 
 // Image security config. SVG sources with .svg extension auto-skip the
