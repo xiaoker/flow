@@ -197,17 +197,98 @@ def build_current_official_plan(
     return plan
 
 
+def build_live_official_plan(
+    *,
+    hard_limit: int = 2_000,
+    evidence_dir: Path | None = None,
+    session: requests.Session | None = None,
+) -> dict:
+    """Build a plan from the live SSE universe without a market-run artifact.
+
+    PR2 runs PCF independently from the market collector.  A fixed, liquid
+    probe ETF supplies the official ``TradingDay``/``PreTradingDay`` pair;
+    the two matching SSE scale responses then provide the complete universe.
+    The capture and finalize scripts still use the D1 checkpoint control plane
+    for idempotent per-ETF recovery.
+    """
+
+    client = session or requests.Session()
+    probe_code = "510300"
+    probe_xml = fetch_xml(client, code=probe_code, target_date="current")
+    _, header, _ = parse_sse_etf_pcf_xml(
+        probe_xml,
+        requested_code=probe_code,
+        target_date="1900-01-02",
+        previous_date="1900-01-01",
+    )
+    target_date = str(header.get("tradingDay") or "")
+    previous_date = str(header.get("preTradingDay") or "")
+    if str(header.get("fundInstrumentId") or "") != probe_code:
+        raise ValueError("sse_pcf_probe_code_mismatch")
+    if len(target_date) != 10 or len(previous_date) != 10 or previous_date >= target_date:
+        raise ValueError("sse_pcf_probe_dates_invalid")
+
+    current, current_raw = fetch_sse_share_snapshot(client, trade_date=target_date)
+    previous, previous_raw = fetch_sse_share_snapshot(client, trade_date=previous_date)
+    plan = build_changed_etf_capture_plan(
+        current,
+        previous,
+        target_date=target_date,
+        previous_date=previous_date,
+        hard_limit=hard_limit,
+    )
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / f"{target_date}-pcf-probe-{probe_code}.xml").write_bytes(probe_xml)
+        (evidence_dir / f"{target_date}-sse-etf-scale.json").write_bytes(current_raw)
+        (evidence_dir / f"{previous_date}-sse-etf-scale.json").write_bytes(previous_raw)
+        evidence = {
+            "schemaVersion": 1,
+            "probeCode": probe_code,
+            "targetDate": target_date,
+            "previousDate": previous_date,
+            "pcfProbeSha256": hashlib.sha256(probe_xml).hexdigest(),
+            "shareSnapshots": {
+                target_date: hashlib.sha256(current_raw).hexdigest(),
+                previous_date: hashlib.sha256(previous_raw).hexdigest(),
+            },
+            "dateContract": "PCF TradingDay/PreTradingDay select the exact SSE share snapshots",
+            "universeSource": "live_sse_scale_snapshot",
+        }
+        (evidence_dir / f"{target_date}-date-evidence.json").write_text(
+            json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return plan
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shares", type=Path, required=True)
+    parser.add_argument("--shares", type=Path)
     parser.add_argument("--trade-date")
     parser.add_argument("--previous-date")
     parser.add_argument("--official-current", action="store_true")
+    parser.add_argument(
+        "--official-live",
+        action="store_true",
+        help="Fetch the complete live SSE universe; independent of market-run artifacts",
+    )
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--hard-limit", type=int, default=2_000)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.official_current:
+    if args.official_current and args.official_live:
+        parser.error("--official-current and --official-live are mutually exclusive")
+    if args.official_live:
+        if args.shares or args.trade_date or args.previous_date:
+            parser.error("--official-live cannot be combined with --shares or explicit dates")
+        plan = build_live_official_plan(
+            hard_limit=args.hard_limit,
+            evidence_dir=args.evidence_dir,
+        )
+    elif args.official_current:
+        if not args.shares:
+            parser.error("--shares is required with --official-current")
         if args.trade_date or args.previous_date:
             parser.error("--official-current cannot be combined with explicit dates")
         plan = build_current_official_plan(
@@ -216,7 +297,7 @@ def main() -> None:
             evidence_dir=args.evidence_dir,
         )
     else:
-        if not args.trade_date or not args.previous_date:
+        if not args.shares or not args.trade_date or not args.previous_date:
             parser.error("--trade-date and --previous-date are required without --official-current")
         plan = build_plan(
             args.shares,

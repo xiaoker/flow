@@ -1,0 +1,198 @@
+name: Market data watchdog
+
+on:
+  # This is intentionally the only GitHub scheduled market-data workflow.
+  # It performs a small status/claim request and dispatches the heavy
+  # collector only when the pipeline window is missing or recoverable.
+  schedule:
+    - cron: "45 10 * * 1-5"  # 18:45 Asia/Shanghai
+    - cron: "0 0 * * 1-5"    # 08:00 Asia/Shanghai
+    - cron: "55 0 * * 1-5"   # 08:55 Asia/Shanghai
+    - cron: "15 1 * * 1-5"   # 09:15 Asia/Shanghai
+    - cron: "45 1 * * 1-5"   # 09:45 Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      collection_window:
+        description: "Release window to check"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, evening, morning, reconcile]
+      target_date:
+        description: "Optional Shanghai business date (YYYY-MM-DD)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: market-data-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      GH_TOKEN: ${{ secrets.GITHUB_ACTIONS_TOKEN || github.token }}
+    steps:
+      - name: Check and recover one market-data window
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Watchdog requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+            exit 1
+          fi
+
+          WINDOW="${{ inputs.collection_window || 'auto' }}"
+          if [[ "$WINDOW" == "auto" || -z "$WINDOW" ]]; then
+            case "${{ github.event.schedule || '' }}" in
+              "45 10 * * 1-5") WINDOW="evening" ;;
+              "0 0 * * 1-5") WINDOW="morning" ;;
+              "55 0 * * 1-5"|"15 1 * * 1-5"|"45 1 * * 1-5") WINDOW="reconcile" ;;
+              *) WINDOW="reconcile" ;;
+            esac
+          fi
+          TARGET_DATE="${{ inputs.target_date }}"
+          if [[ -z "$TARGET_DATE" ]]; then
+            TARGET_DATE="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
+          fi
+          if [[ ! "$TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Invalid target_date: $TARGET_DATE" >&2
+            exit 1
+          fi
+          RUN_KEY="daily-market-data:${TARGET_DATE}:${WINDOW}:v1"
+          LEASE_OWNER="github-watchdog:${GITHUB_RUN_ID}"
+          AUTH_ARGS=(
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+          )
+          ENCODED_RUN_KEY="$(jq -rn --arg value "$RUN_KEY" '$value|@uri')"
+          STATUS_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --output pipeline-window-status.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/status?runKey=$ENCODED_RUN_KEY")"
+          if [[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "404" ]]; then
+            echo "Watchdog status check failed with HTTP $STATUS_CODE; fail closed." >&2
+            jq . pipeline-window-status.json >&2 || true
+            exit 1
+          fi
+
+          NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+          if [[ "$STATUS_CODE" == "200" ]]; then
+            STATUS="$(jq -r '.status // empty' pipeline-window-status.json)"
+            case "$STATUS" in
+              COMPLETED|BLOCKED_QUALITY)
+                echo "Window $RUN_KEY is $STATUS; no dispatch needed."
+                ;;
+              DISPATCHED|RUNNING)
+                if jq -e --arg now "$NOW_ISO" '(.leaseExpiresAt // "") > $now' pipeline-window-status.json >/dev/null; then
+                  echo "Window $RUN_KEY has an active lease; no dispatch needed."
+                else
+                  echo "Window $RUN_KEY has an expired lease; attempting takeover."
+                fi
+                ;;
+              FAILED_RETRYABLE)
+                echo "Window $RUN_KEY is retryable; attempting takeover."
+                ;;
+              "")
+                echo "Window status response omitted status; fail closed." >&2
+                exit 1
+                ;;
+              *)
+                echo "Unknown pipeline-window status $STATUS; fail closed." >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$STATUS" == "COMPLETED" || "$STATUS" == "BLOCKED_QUALITY" ]] || \
+               { [[ "$STATUS" == "DISPATCHED" || "$STATUS" == "RUNNING" ]] && jq -e --arg now "$NOW_ISO" '(.leaseExpiresAt // "") > $now' pipeline-window-status.json >/dev/null; }; then
+              jq -n --arg runKey "$RUN_KEY" --arg status "$STATUS" --arg decision "skip" \
+                --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+                '{stage:"scheduler",runKey:$runKey,status:$status,decision:$decision,d1RowsRead:1,d1RowsWritten:0,r2Bytes:0,actionsMinutes:0,actionsRunAttempt:($attempt|tonumber)}' \
+                >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          jq -n \
+            --arg runKey "$RUN_KEY" \
+            --arg pipeline "daily-market-data" \
+            --arg windowDate "$TARGET_DATE" \
+            --arg windowName "$WINDOW" \
+            --arg contractVersion "v1" \
+            --arg targetDate "$TARGET_DATE" \
+            --arg leaseOwner "$LEASE_OWNER" \
+            --arg githubRunId "$GITHUB_RUN_ID" \
+            '{runKey:$runKey,pipeline:$pipeline,windowDate:$windowDate,windowName:$windowName,contractVersion:$contractVersion,targetDate:$targetDate,leaseOwner:$leaseOwner,githubRunId:$githubRunId}' \
+            > pipeline-window-claim-request.json
+          CLAIM_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --header 'Content-Type: application/json' \
+            --data-binary @pipeline-window-claim-request.json \
+            --output pipeline-window-claim.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/claim")"
+          if [[ "$CLAIM_CODE" != "200" ]]; then
+            echo "Watchdog claim failed with HTTP $CLAIM_CODE; no dispatch." >&2
+            jq . pipeline-window-claim.json >&2 || true
+            exit 1
+          fi
+          DECISION="$(jq -r '.decision // empty' pipeline-window-claim.json)"
+          if [[ "$DECISION" != "acquired" && "$DECISION" != "takeover" ]]; then
+            echo "Watchdog claim decision=$DECISION; no dispatch."
+            jq -n --arg runKey "$RUN_KEY" --arg decision "$DECISION" \
+              --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+              '{stage:"scheduler",runKey:$runKey,decision:$decision,d1RowsRead:1,d1RowsWritten:0,r2Bytes:0,actionsMinutes:0,actionsRunAttempt:($attempt|tonumber)}' \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          jq -n \
+            --arg ref "main" \
+            --arg dates "" \
+            --arg window "$WINDOW" \
+            --arg runKey "$RUN_KEY" \
+            --arg windowName "$WINDOW" \
+            --arg targetDate "$TARGET_DATE" \
+            --arg leaseOwner "$LEASE_OWNER" \
+            --arg contractVersion "v1" \
+            '{ref:$ref,inputs:{dates:$dates,collection_window:$window,run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,contract_version:$contractVersion,run_pcf_shadow:"false",delegate_publish:"true"}}' \
+            > collect-dispatch-request.json
+          DISPATCH_CODE="$(curl --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2026-03-10" \
+            --header "Content-Type: application/json" \
+            --data-binary @collect-dispatch-request.json \
+            --output collect-dispatch-response.json \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/xiaoker/flow/actions/workflows/market-data-collect.yml/dispatches")"
+          if [[ "$DISPATCH_CODE" != "204" ]]; then
+            echo "Watchdog collect dispatch failed with HTTP $DISPATCH_CODE; marking retryable." >&2
+            jq -n \
+              --arg runKey "$RUN_KEY" \
+              --arg leaseOwner "$LEASE_OWNER" \
+              --arg githubRunId "$GITHUB_RUN_ID" \
+              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:"FAILED_RETRYABLE",errorCode:"collect_dispatch_failed"}' \
+              > pipeline-window-failed.json
+            curl --silent --show-error --fail-with-body "${AUTH_ARGS[@]}" \
+              --header 'Content-Type: application/json' \
+              --data-binary @pipeline-window-failed.json \
+              "$FLOW_PIPELINE_WINDOW_URL/status" >/dev/null || true
+            jq . collect-dispatch-response.json >&2 || true
+            exit 1
+          fi
+          echo "Dispatched market-data-collect.yml for $RUN_KEY."
+          jq -n --arg runKey "$RUN_KEY" --arg decision "$DECISION" \
+            --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+            '{stage:"scheduler",runKey:$runKey,decision:$decision,dispatch:"market-data-collect.yml",d1RowsRead:2,d1RowsWritten:1,r2Bytes:0,actionsMinutes:0,actionsRunAttempt:($attempt|tonumber)}' \
+            >> "$GITHUB_STEP_SUMMARY"

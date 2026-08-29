@@ -38,7 +38,7 @@ Cloudflare Worker
 
 ## 采集触发
 
-Cloudflare Cron 仍是主调度器，按晚间、早间和 reconciliation 三个窗口 dispatch `daily-data.yml`。GitHub schedule 在稍后时间作为 failover。相同 GitHub run 重试由 `ingest_run` 幂等预检拦截；新一轮发布必须通过新的质量门禁。
+Cloudflare Cron 仍是主调度器，按晚间、早间和 reconciliation 三个窗口 dispatch `market-data-collect.yml`。GitHub schedule 只运行 `market-data-watchdog.yml`，在 `pipeline_window` 缺失或可恢复时补发重任务。相同 GitHub run 重试由 `ingest_run` 幂等预检拦截；新一轮发布必须通过新的质量门禁。
 
 日任务的发布顺序固定为：先归档完整原始证据，再探测 Worker capabilities；只有 v3 合同可用时才按精确 `releaseId` 续接 pressure 历史、构建读模型并逐 artifact 发布。最后由受保护的 canary 校验当前指针、历史日期、全部核心视图、搜索分片和 ETag；任何门禁失败都保留上一份完整 active release。
 

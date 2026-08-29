@@ -39,13 +39,24 @@ npm run dev
 
 ## 每日自动采集
 
-GitHub Actions 工作流位于 `.github/workflows/daily-data.yml`：
+数据管线按职责拆分在 `.github/workflows/`：
+
+- `market-data-watchdog.yml`：GitHub 的轻量兜底定时器，只检查 `pipeline_window`，确认窗口缺失、租约过期或可重试失败后才补发任务；正常情况下不 checkout、不安装依赖、不运行测试；
+- `market-data-collect.yml`：仅接受 `workflow_dispatch`，负责一次来源采集、R2 证据归档和 readiness 更新，并把已确认的来源工件交给独立发布任务；
+- `market-data-publish.yml`：下载采集工件，离线构建/校验候选 read model，并执行 candidate canary 与单调激活；
+- `pcf-v2-capture.yml`：独立按官方精确日期捕获 PCF v2，并以 D1 checkpoint 做有界恢复和影子门禁摘要，不触发核心市场采集或发布；
+- `ci.yml`：PR/main 的完整 Python、Web build/test/lint 与 workflow contract 检查；
+- `daily-data.yml`：保留旧 Actions 手动入口的兼容 wrapper，只转发到 `market-data-collect.yml`，不再承载重任务或 schedule。
+
+Cloudflare Cron 是主触发器；GitHub 只运行 watchdog。`concurrency` 仅用于串行化，跨调度器去重由 `pipeline_window` 的原子 claim/status 负责。
+
+旧版完整管线的运行参数仍可在兼容入口中手动传入。以下窗口说明描述业务目标，不代表 GitHub 重任务 schedule：
 
 - Cloudflare Cron 主触发按来源发布时间分三个窗口运行：北京时间 18:30（上交所/港交所）、次日 07:45（深交所晨间数据）和 08:45（PCF 归档与完整日期核验）；GitHub Actions 在 18:45、08:00、08:55 作为错峰故障转移；同一交易日只有全部核心来源到齐才会发布；
-- 如果某个官方源临时失败，已到达的原始数据仍会归档，但任务会以失败状态结束并保留错误摘要，后续窗口自动重试，不会把半份数据伪装成成功快照；
+- 如果某个官方源临时失败，已到达的原始数据仍会归档，但任务会以失败状态结束并保留错误摘要，后续 watchdog/Cloudflare 窗口自动重试，不会把半份数据伪装成成功快照；
 - 也可在 Actions 页面手动执行，并可选传入三个 ISO 日期；
 - 每次运行保留快照、采集清单和质量摘要 14 天，便于追溯；
-- 每次发布前自动运行单元/字段契约测试和发布级 Data QA；
+- 完整单元/字段契约测试由 `ci.yml` 在 PR/main 上运行；定时采集只执行目标 source/parser/date smoke，数据 QA 仍在每次采集窗口执行；
 - 每个原始工件独立提交到 Worker，先写入 R2 不可变对象和状态检查点，最后一次请求才校验完整工件集合并建立历史快照；因此单个交易所延迟不会让整包请求超时或覆盖半成品；
 - ETF→个股穿透的 PCF 规范化 CSV 只在传输层 gzip 压缩，Worker 校验哈希后以普通 CSV 归档；PCF 可同日对齐，或按官方 `PRE_TRADING_DAY` 对齐到次日披露的前一交易日，避免宽成分篮子触碰 12 MB 请求上限；
 - 深交所 ETF 用列表页发布日和“当前规模”列标注日校验前一交易日；港交所使用简体中文历史每日页的中文数据文件；

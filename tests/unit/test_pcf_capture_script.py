@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from scripts.build_pcf_v2_plan import build_current_official_plan
+from scripts.build_pcf_v2_plan import build_current_official_plan, build_live_official_plan
 from scripts.capture_sse_pcf_v2 import capture_plan, fetch_xml, upload_xml
 from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
@@ -184,6 +184,37 @@ def test_current_plan_uses_live_pcf_dates_and_matching_official_share_snapshots(
     assert plan["items"][0]["shareDelta"] == 10_000
     assert (evidence_dir / "2026-08-21-date-evidence.json").is_file()
     assert (evidence_dir / "2026-08-21-pcf-probe-510300.xml").read_bytes() == FIXTURE.read_bytes()
+
+
+def test_live_plan_fetches_complete_universe_without_market_run_artifact(tmp_path: Path) -> None:
+    current = {
+        "result": [
+            {"STAT_DATE": "2026-08-21", "SEC_CODE": "510300", "SEC_NAME": "300ETF", "TOT_VOL": "2"}
+        ]
+    }
+    previous = {
+        "result": [
+            {"STAT_DATE": "2026-08-20", "SEC_CODE": "510300", "SEC_NAME": "300ETF", "TOT_VOL": "1"}
+        ]
+    }
+    session = FakeSession(
+        [
+            FakeResponse(200, FIXTURE.read_bytes(), "application/xml"),
+            FakeResponse(200, json.dumps(current, ensure_ascii=False).encode()),
+            FakeResponse(200, json.dumps(previous, ensure_ascii=False).encode()),
+        ]
+    )
+    evidence_dir = tmp_path / "evidence"
+
+    plan = build_live_official_plan(evidence_dir=evidence_dir, session=session)
+
+    assert plan["targetDate"] == "2026-08-21"
+    assert plan["previousDate"] == "2026-08-20"
+    assert plan["counts"]["required"] == 1
+    assert plan["items"][0]["shareDelta"] == 10_000
+    evidence = json.loads((evidence_dir / "2026-08-21-date-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["universeSource"] == "live_sse_scale_snapshot"
+    assert len(session.get_calls) == 3
 
 
 def test_capture_plan_skips_items_already_checkpointed_by_control_plane() -> None:

@@ -2,28 +2,40 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS = REPOSITORY_ROOT / ".github/workflows"
+LEGACY_WORKFLOW = WORKFLOWS / "daily-data.yml"
+COLLECT_WORKFLOW = WORKFLOWS / "market-data-collect.yml"
+PUBLISH_WORKFLOW = WORKFLOWS / "market-data-publish.yml"
+WATCHDOG_WORKFLOW = WORKFLOWS / "market-data-watchdog.yml"
+PCF_WORKFLOW = WORKFLOWS / "pcf-v2-capture.yml"
+CI_WORKFLOW = WORKFLOWS / "ci.yml"
 
 
-def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
-    workflow = (
-        REPOSITORY_ROOT / ".github/workflows/daily-data.yml"
-    ).read_text(encoding="utf-8")
+def test_market_data_split_has_watchdog_and_cloudflare_dispatch() -> None:
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+    legacy = LEGACY_WORKFLOW.read_text(encoding="utf-8")
     wrangler = (REPOSITORY_ROOT / "web/wrangler.jsonc").read_text(encoding="utf-8")
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
 
-    assert "schedule:" in workflow
-    assert '- cron: "45 10 * * 1-5"' in workflow
-    assert '- cron: "0 0 * * 1-5"' in workflow
-    assert '- cron: "55 0 * * 1-5"' in workflow
+    assert "schedule:" not in workflow
+    assert "schedule:" in watchdog
+    assert '- cron: "45 10 * * 1-5"' in watchdog
+    assert '- cron: "0 0 * * 1-5"' in watchdog
+    assert '- cron: "55 0 * * 1-5"' in watchdog
     assert "workflow_dispatch:" in workflow
+    assert "workflow_dispatch:" in legacy
     assert "cancel-in-progress: false" in workflow
+    assert "cancel-in-progress: false" in watchdog
     assert '"30 10 * * mon-fri"' in wrangler
     assert '"45 23 * * sun-thu"' in wrangler
     assert '"45 0 * * mon-fri"' in wrangler
     assert '"15 11 * * mon-fri"' in wrangler
     assert 'cron.startsWith("15 1")' in worker
     assert "GITHUB_ACTIONS_TOKEN" in worker
-    assert "daily-data.yml/dispatches" in worker
+    assert "market-data-collect.yml/dispatches" in worker
+    assert "market-data-publish.yml/dispatches" in workflow
+    assert "market-data-collect.yml/dispatches" in legacy
     assert 'ref: "main"' in worker
     assert 'collection_window: window' in worker
     assert 'run_key: runKey' in worker
@@ -36,16 +48,16 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert 'console.warn("GitHub workflow dispatch will be retried"' in worker
 
 
-def test_pr0_baseline_makes_dual_full_schedule_explicit() -> None:
-    """Keep the pre-PR1 duplication evidence executable and reviewable."""
+def test_pr2_moves_full_schedules_to_a_lightweight_watchdog() -> None:
+    """The heavy workflow is dispatch-only; the watchdog owns failover schedules."""
 
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+    legacy = LEGACY_WORKFLOW.read_text(encoding="utf-8")
     wrangler = (REPOSITORY_ROOT / "web/wrangler.jsonc").read_text(encoding="utf-8")
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
 
-    github_schedules = [line for line in workflow.splitlines() if "- cron:" in line]
+    github_schedules = [line for line in watchdog.splitlines() if "- cron:" in line]
     cloudflare_schedules = [
         line
         for line in wrangler.splitlines()
@@ -53,14 +65,101 @@ def test_pr0_baseline_makes_dual_full_schedule_explicit() -> None:
     ]
     assert len(github_schedules) == 5
     assert len(cloudflare_schedules) == 5
-    assert "group: daily-market-data" in workflow
+    assert "group: market-data-collect" in workflow
+    assert "group: market-data-watchdog" in watchdog
     assert "cancel-in-progress: false" in workflow
-    assert "daily-data.yml/dispatches" in worker
+    assert "schedule:" not in workflow
+    assert "schedule:" not in legacy
     assert "concurrency" in workflow
 
 
+def test_pr2_collect_hands_off_an_immutable_source_artifact() -> None:
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "delegate_publish:" in workflow
+    assert "default: true" in workflow
+    assert "Upload immutable collection source bundle" in workflow
+    assert "market-data-collection-source-${{ github.run_id }}" in workflow
+    assert "Dispatch resumable market-data publish workflow" in workflow
+    assert "market-data-publish.yml/dispatches" in workflow
+    assert "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f" in workflow
+    assert "needs.pipeline_window_gate.outputs.delegate_publish == 'true'" in workflow
+    assert "needs.pipeline_window_gate.outputs.delegate_publish != 'true'" in workflow
+    assert "Record collection resource budget" in workflow
+    assert "report_stage_budget.py" in workflow
+    assert "python -m pytest\n" not in workflow
+    assert "python -m pytest -q" in workflow
+
+
+def test_pr2_publish_is_dispatch_only_and_uses_targeted_smoke() -> None:
+    workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "schedule:" not in workflow
+    assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
+    assert "run-id: ${{ inputs.source_run_id }}" in workflow
+    assert "tests/unit/test_publish_read_models.py" in workflow
+    assert "tests/unit/test_read_models.py" in workflow
+    assert "python -m pytest -q" in workflow
+    assert "Mark pipeline window terminal status" in workflow
+    assert "report_stage_budget.py" in workflow
+    assert "market-data-collect.yml/dispatches" not in workflow
+    assert "leaseExpiresAt" in workflow
+    assert "Publish lease has expired" in workflow
+
+
+def test_pr2_watchdog_is_lightweight_and_dispatches_only_after_claim() -> None:
+    workflow = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+
+    assert workflow.count("- cron:") == 5
+    assert "pipeline-window-status.json" in workflow
+    assert "pipeline-window-claim-request.json" in workflow
+    assert "market-data-collect.yml/dispatches" in workflow
+    assert "delegate_publish:\"true\"" in workflow
+    assert "actions/checkout" not in workflow
+    assert "setup-python" not in workflow
+    assert "npm ci" not in workflow
+    assert "pytest" not in workflow
+    assert "timeout-minutes: 2" in workflow
+    assert "fail closed" in workflow
+    assert "actionsRunAttempt" in workflow
+    assert "r2Bytes:0" in workflow
+
+
+def test_pr2_pcf_workflow_is_independent_and_checkpoint_resumable() -> None:
+    workflow = PCF_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "schedule:" not in workflow
+    assert "Build independent exact-date PCF v2 plan" in workflow
+    assert "--official-live" in workflow
+    assert "Capture exact PCF v2 items with D1 checkpoints" in workflow
+    assert "capture_sse_pcf_v2" in workflow
+    assert "Finalize independent PCF v2 canonical checkpoint" in workflow
+    assert "finalize_sse_pcf_v2" in workflow
+    assert "summarize_pcf_v2_history" in workflow
+    assert "Fail PCF workflow on unresolved checkpoint state" in workflow
+    assert "penetration capability remains unchanged" in workflow
+    assert "/api/v1/admin/pcf-capture" not in workflow
+    assert "market-data-collect.yml" not in workflow
+    assert "market-data-publish.yml" not in workflow
+    assert "report_stage_budget.py" in workflow
+
+
+def test_pr2_ci_covers_python_and_web_without_schedules() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "pull_request:" in workflow
+    assert "push:" in workflow
+    assert "web-ci:" in workflow
+    assert "npm ci" in workflow
+    assert "npm test" in workflow
+    assert "npm run lint" in workflow
+    assert "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38" in workflow
+
+
 def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
     claim_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/claim/route.ts").read_text(encoding="utf-8")
     status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/status/route.ts").read_text(encoding="utf-8")
@@ -170,9 +269,7 @@ def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
 
 
 def test_daily_collection_retries_network_failures_and_archives_pending_sources() -> None:
-    workflow = (
-        REPOSITORY_ROOT / ".github/workflows/daily-data.yml"
-    ).read_text(encoding="utf-8")
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
 
     assert "MAX_ATTEMPTS=3" in workflow
     assert "PCF_MAX_CODES=16" in workflow
@@ -230,7 +327,7 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
 
 
 def test_pcf_shadow_parity_is_explicitly_opt_in_and_never_published() -> None:
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     script = (REPOSITORY_ROOT / "scripts/run_pcf_shadow_parity.py").read_text(encoding="utf-8")
     summary = (REPOSITORY_ROOT / "scripts/summarize_pcf_shadow.py").read_text(encoding="utf-8")
     parity = (REPOSITORY_ROOT / "src/trading_desk/pcf_parity.py").read_text(encoding="utf-8")
@@ -247,35 +344,31 @@ def test_pcf_shadow_parity_is_explicitly_opt_in_and_never_published() -> None:
     assert "default=5" in summary
 
 
-def test_pcf_v2_exact_capture_is_automatic_but_stays_shadow_only() -> None:
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+def test_pcf_v2_exact_capture_is_owned_by_independent_workflow() -> None:
+    collect_workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    pcf_workflow = PCF_WORKFLOW.read_text(encoding="utf-8")
     capture = (REPOSITORY_ROOT / "scripts/capture_sse_pcf_v2.py").read_text(encoding="utf-8")
     finalize = (REPOSITORY_ROOT / "scripts/finalize_sse_pcf_v2.py").read_text(encoding="utf-8")
     object_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/object/route.ts").read_text(encoding="utf-8")
 
-    assert "Build automatic PCF v2 exact-date capture plan" in workflow
-    assert "Capture resumable PCF v2 exact-date XML" in workflow
-    assert "Finalize complete PCF v2 canonical shadow" in workflow
-    assert "steps.window.outputs.collection_window == 'evening'" in workflow
-    assert "steps.window.outputs.collection_window == 'morning'" in workflow
-    assert "reports/pcf-v2/*.json" in workflow
-    assert "reports/pcf-v2/*.xml" in workflow
-    assert "Summarize PCF v2 five-day shadow gate" in workflow
-    assert "--official-current" in workflow
-    assert "steps.pcf-v2-plan.outputs.target_date" in workflow
-    assert "steps.pcf-v2-plan.outputs.plan_path" in workflow
-    pcf_steps = workflow[
-        workflow.index("Build automatic PCF v2 exact-date capture plan"):
-        workflow.index("Record source readiness ledger")
-    ]
-    assert "steps.dates.outputs.latest" not in pcf_steps
-    assert "python -m scripts.capture_sse_pcf_v2" in workflow
-    assert "python -m scripts.finalize_sse_pcf_v2" in workflow
-    assert "python -m scripts.summarize_pcf_v2_history" in workflow
-    assert "reports/pcf-v2/gate-dates-candidates.txt" in workflow
-    assert 'PCF_TARGET="${{ steps.pcf-v2-plan.outputs.target_date }}"' in workflow
-    assert "sort -u reports/pcf-v2/gate-dates-candidates.txt | tail -5" in workflow
-    assert workflow.count('status: "EXECUTION_FAILED"') == 4
+    assert "Build automatic PCF v2 exact-date capture plan" not in collect_workflow
+    assert "Capture resumable PCF v2 exact-date XML" not in collect_workflow
+    assert "Finalize complete PCF v2 canonical shadow" not in collect_workflow
+    assert "Summarize PCF v2 five-day shadow gate" not in collect_workflow
+    assert "Dispatch independent PCF v2 checkpoint workflow" in collect_workflow
+    assert "steps.dates.outputs.latest" in collect_workflow
+    pcf_dispatch = collect_workflow[collect_workflow.index("Dispatch independent PCF v2 checkpoint workflow") :]
+    assert "continue-on-error: true" in pcf_dispatch
+    assert "pcf-dispatch-evidence.json" in collect_workflow
+    assert "Build independent exact-date PCF v2 plan" in pcf_workflow
+    assert "Capture exact PCF v2 items with D1 checkpoints" in pcf_workflow
+    assert "Finalize independent PCF v2 canonical checkpoint" in pcf_workflow
+    assert "--official-live" in pcf_workflow
+    assert "python -m scripts.capture_sse_pcf_v2" in pcf_workflow
+    assert "python -m scripts.finalize_sse_pcf_v2" in pcf_workflow
+    assert "python -m scripts.summarize_pcf_v2_history" in pcf_workflow
+    assert "reports/pcf-v2/checkpoint-summary.json" in pcf_workflow
+    assert '--arg requiredDays "1"' in collect_workflow
     assert "DATE_MISMATCH" in capture
     assert "market-data/pcf-v2/degraded" not in finalize
     assert "productionPublishCalls" in finalize
@@ -297,12 +390,12 @@ def test_production_canary_isolated_from_daily_collection() -> None:
 
 
 def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_index() -> None:
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
 
     assert "Check ETF stock-flow read-model readiness" in workflow
     assert "etfStockFlow.available == true" in workflow
     assert "((.etfStockFlow.coverage.stockCount // 0) > 0)" in workflow
-    assert 'steps.stock-flow.outputs.ready' in workflow
+    assert 'steps.stock_flow.outputs.ready' in workflow
     readiness_index = workflow.index("Check ETF stock-flow read-model readiness")
     build_index = workflow.index("Build immutable dashboard and penetration read models offline")
     stage_index = workflow.index("Stage immutable dashboard read-model candidate")
@@ -310,7 +403,7 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
 
 
 def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> None:
-    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(encoding="utf-8")
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
 
     assert "| .[-22:][]" in workflow
     assert "--require-current" in workflow
