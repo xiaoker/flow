@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-29T07:08:01Z",
+  "captureMode": "remote-read-only",
+  "repository": {
+    "branch": "codex/pcf-v2-production-fix",
+    "head": "41bac34a183657a489366477c3cb4046f7145a9b",
+    "originMainAtCapture": "e4b469a8fec79e037997cb9da41ac4e7f7a6af36"
+  },
+  "activeRelease": {
+    "slot": "dashboard",
+    "releaseId": "release:2026-08-27:fc0b93db4cf07286",
+    "asOf": "2026-08-27",
+    "manifestSha256": "6ef3ff8658158432ae312f9d55d9a244655e6df528d36084fbe0f5c2a60ac6f9",
+    "observedAt": "2026-08-28T14:00:41.000Z",
+    "activatedAt": "2026-08-28T14:02:31.127Z"
+  },
+  "r2": {
+    "bucket": "flow",
+    "manifestKey": "market-data/releases/2026-08-27/release:2026-08-27:fc0b93db4cf07286/manifest.json",
+    "artifactPrefix": "market-data/releases/2026-08-27/release:2026-08-27:fc0b93db4cf07286/",
+    "note": "Prefix and manifest identity are the rollback anchor; artifact inventory remains in the immutable manifest."
+  },
+  "d1TableCounts": {
+    "etf_daily": 245676,
+    "data_release": 170,
+    "release_manifest": 69,
+    "historical_snapshot": 498,
+    "market_history_daily": 498
+  },
+  "rollbackPoint": {
+    "type": "active-release-pointer",
+    "slot": "dashboard",
+    "releaseId": "release:2026-08-27:fc0b93db4cf07286",
+    "manifestSha256": "6ef3ff8658158432ae312f9d55d9a244655e6df528d36084fbe0f5c2a60ac6f9",
+    "activePointerChangedByPr0": false
+  },
+  "remoteEvidence": {
+    "statements": "SELECT only",
+    "changes": 0,
+    "rowsWritten": 0,
+    "d1SizeAfterBytes": 116793344
+  }
+}

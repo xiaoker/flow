@@ -35,6 +35,29 @@ def test_daily_collection_has_github_failover_and_cloudflare_dispatch() -> None:
     assert 'console.warn("GitHub workflow dispatch will be retried"' in worker
 
 
+def test_pr0_baseline_makes_dual_full_schedule_explicit() -> None:
+    """Keep the pre-PR1 duplication evidence executable and reviewable."""
+
+    workflow = (REPOSITORY_ROOT / ".github/workflows/daily-data.yml").read_text(
+        encoding="utf-8"
+    )
+    wrangler = (REPOSITORY_ROOT / "web/wrangler.jsonc").read_text(encoding="utf-8")
+    worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
+
+    github_schedules = [line for line in workflow.splitlines() if "- cron:" in line]
+    cloudflare_schedules = [
+        line
+        for line in wrangler.splitlines()
+        if "mon-fri" in line or "sun-thu" in line
+    ]
+    assert len(github_schedules) == 5
+    assert len(cloudflare_schedules) == 5
+    assert "group: daily-market-data" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "daily-data.yml/dispatches" in worker
+    assert "concurrency" in workflow
+
+
 def test_pcf_capture_control_plane_is_additive_and_worker_upload_is_streaming() -> None:
     capture = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/route.ts").read_text(encoding="utf-8")
     upload = (REPOSITORY_ROOT / "web/app/api/v1/admin/pcf-capture/object/route.ts").read_text(encoding="utf-8")

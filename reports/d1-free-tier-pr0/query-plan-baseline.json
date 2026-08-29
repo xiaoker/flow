@@ -1,0 +1,199 @@
+{
+  "asOf": "2026-08-28",
+  "declaredProductionScale": {
+    "etf_count": 1600,
+    "expected_rows": 2920000,
+    "revisions_per_business_key": 5,
+    "trading_days": 365
+  },
+  "fixture": {
+    "etf_count": 32,
+    "expected_rows": 1152,
+    "revisions_per_business_key": 3,
+    "trading_days": 12
+  },
+  "materialized": {
+    "etfDailyRows": 1152,
+    "previousWindowRows": 1056,
+    "tradingDateCount": 12
+  },
+  "plan": [
+    {
+      "detail": "CO-ROUTINE current_rows",
+      "id": 2,
+      "notused": 0,
+      "parent": 0
+    },
+    {
+      "detail": "CO-ROUTINE (subquery-8)",
+      "id": 5,
+      "notused": 0,
+      "parent": 2
+    },
+    {
+      "detail": "SEARCH etf_daily USING INDEX etf_daily_category_idx (trade_date=?)",
+      "id": 9,
+      "notused": 62,
+      "parent": 5
+    },
+    {
+      "detail": "USE TEMP B-TREE FOR ORDER BY",
+      "id": 26,
+      "notused": 0,
+      "parent": 5
+    },
+    {
+      "detail": "SCAN (subquery-8)",
+      "id": 46,
+      "notused": 49,
+      "parent": 2
+    },
+    {
+      "detail": "MATERIALIZE previous_rows",
+      "id": 97,
+      "notused": 0,
+      "parent": 0
+    },
+    {
+      "detail": "CO-ROUTINE (subquery-9)",
+      "id": 100,
+      "notused": 0,
+      "parent": 97
+    },
+    {
+      "detail": "SEARCH etf_daily USING INDEX etf_daily_category_idx (trade_date<?)",
+      "id": 104,
+      "notused": 205,
+      "parent": 100
+    },
+    {
+      "detail": "USE TEMP B-TREE FOR ORDER BY",
+      "id": 123,
+      "notused": 0,
+      "parent": 100
+    },
+    {
+      "detail": "SCAN (subquery-9)",
+      "id": 146,
+      "notused": 196,
+      "parent": 97
+    },
+    {
+      "detail": "MATERIALIZE expected_previous",
+      "id": 202,
+      "notused": 0,
+      "parent": 0
+    },
+    {
+      "detail": "CO-ROUTINE official_calendar",
+      "id": 204,
+      "notused": 0,
+      "parent": 202
+    },
+    {
+      "detail": "MERGE (UNION)",
+      "id": 206,
+      "notused": 0,
+      "parent": 204
+    },
+    {
+      "detail": "LEFT",
+      "id": 208,
+      "notused": 0,
+      "parent": 206
+    },
+    {
+      "detail": "MERGE (UNION)",
+      "id": 210,
+      "notused": 0,
+      "parent": 208
+    },
+    {
+      "detail": "LEFT",
+      "id": 212,
+      "notused": 0,
+      "parent": 210
+    },
+    {
+      "detail": "SEARCH etf_daily USING COVERING INDEX etf_daily_category_idx (trade_date<?)",
+      "id": 215,
+      "notused": 193,
+      "parent": 212
+    },
+    {
+      "detail": "RIGHT",
+      "id": 228,
+      "notused": 0,
+      "parent": 210
+    },
+    {
+      "detail": "SCAN margin_daily",
+      "id": 231,
+      "notused": 216,
+      "parent": 228
+    },
+    {
+      "detail": "USE TEMP B-TREE FOR ORDER BY",
+      "id": 241,
+      "notused": 0,
+      "parent": 228
+    },
+    {
+      "detail": "RIGHT",
+      "id": 283,
+      "notused": 0,
+      "parent": 206
+    },
+    {
+      "detail": "SCAN connect_daily",
+      "id": 286,
+      "notused": 216,
+      "parent": 283
+    },
+    {
+      "detail": "USE TEMP B-TREE FOR ORDER BY",
+      "id": 296,
+      "notused": 0,
+      "parent": 283
+    },
+    {
+      "detail": "SEARCH official_calendar",
+      "id": 339,
+      "notused": 212,
+      "parent": 202
+    },
+    {
+      "detail": "SCAN current_rows",
+      "id": 352,
+      "notused": 49,
+      "parent": 0
+    },
+    {
+      "detail": "BLOOM FILTER ON previous_rows (instrument_code=? AND market=? AND row_number=?)",
+      "id": 361,
+      "notused": 0,
+      "parent": 0
+    },
+    {
+      "detail": "SEARCH previous_rows USING AUTOMATIC PARTIAL COVERING INDEX (instrument_code=? AND market=? AND row_number=?) LEFT-JOIN",
+      "id": 377,
+      "notused": 53,
+      "parent": 0
+    },
+    {
+      "detail": "SCAN expected_previous",
+      "id": 390,
+      "notused": 16,
+      "parent": 0
+    }
+  ],
+  "query": "WITH current_rows AS (\n  SELECT instrument_code, market, shares,\n         ROW_NUMBER() OVER (\n           PARTITION BY instrument_code, market\n           ORDER BY observed_at DESC, release_id DESC\n         ) AS row_number\n  FROM etf_daily\n  WHERE trade_date = ?\n), previous_rows AS (\n  SELECT instrument_code, market, shares,\n         trade_date AS previous_trade_date,\n         ROW_NUMBER() OVER (\n           PARTITION BY instrument_code, market\n           ORDER BY trade_date DESC, observed_at DESC, release_id DESC\n         ) AS row_number\n  FROM etf_daily\n  WHERE trade_date < ?\n), expected_previous AS (\n  SELECT MAX(trade_date) AS expected_previous_trade_date\n  FROM (\n    SELECT trade_date FROM etf_daily\n    WHERE market = 'SSE' AND trade_date < ?\n    UNION\n    SELECT trade_date FROM margin_daily\n    WHERE market = 'SSE' AND trade_date < ?\n    UNION\n    SELECT trade_date FROM connect_daily\n    WHERE market = 'SSE' AND trade_date < ?\n  ) AS official_calendar\n)\nSELECT current_rows.instrument_code, current_rows.market,\n       current_rows.shares AS current_shares,\n       previous_rows.shares AS previous_shares,\n       previous_rows.previous_trade_date,\n       expected_previous.expected_previous_trade_date\nFROM current_rows\nLEFT JOIN previous_rows\n  ON previous_rows.instrument_code = current_rows.instrument_code\n AND previous_rows.market = current_rows.market\n AND previous_rows.row_number = 1\nCROSS JOIN expected_previous\nWHERE current_rows.row_number = 1",
+  "queryId": "loadOfficialEtfDailyChanges",
+  "schemaVersion": 1,
+  "signals": {
+    "estimatedProductionPreviousWindowRows": 2912000,
+    "hasHistoricalPredicate": true,
+    "referencesEtfDaily": true,
+    "usesRowNumber": true
+  }
+}
