@@ -33,7 +33,8 @@
   },
   "vars": {
     "PIPELINE_WINDOW_GATE_ENABLED": "0",
-    "PIPELINE_WINDOW_CONTRACT_VERSION": "v1"
+    "PIPELINE_WINDOW_CONTRACT_VERSION": "v1",
+    "HISTORY_IMPORT_ARCHIVE_ONLY": "0"
   },
   "d1_databases": [
     {

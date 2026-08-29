@@ -19,6 +19,7 @@ interface Env {
   INGEST_API_KEY: string;
   PIPELINE_WINDOW_GATE_ENABLED?: string;
   PIPELINE_WINDOW_CONTRACT_VERSION?: string;
+  HISTORY_IMPORT_ARCHIVE_ONLY?: string;
   PCF_CAPTURE_V2_READ_ENABLED?: string;
   IMAGES: {
     input(stream: ReadableStream): {
