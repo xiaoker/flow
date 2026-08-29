@@ -1,0 +1,21 @@
+{
+  "asOf": "2026-08-22",
+  "rows": [
+    {
+      "market": "SSE",
+      "code": "510300",
+      "previousTradeDate": "2026-08-21",
+      "currentShares": 130,
+      "previousShares": 100,
+      "value": 0.0000003
+    },
+    {
+      "market": "SZSE",
+      "code": "159919",
+      "previousTradeDate": "2026-08-21",
+      "currentShares": 250,
+      "previousShares": 200,
+      "value": 0.0000005
+    }
+  ]
+}

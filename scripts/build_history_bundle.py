@@ -31,6 +31,14 @@ def main() -> None:
                 "bytes": args.output.stat().st_size,
                 "artifacts": len(bundle["history"]["artifacts"]),
                 "asOf": bundle["history"]["asOf"],
+                "officialEtfDailyChanges": (
+                    {
+                        "rows": len(bundle["history"]["officialEtfDailyChanges"]["rows"]),
+                        "expectedPreviousDate": bundle["history"]["officialEtfDailyChanges"]["expectedPreviousDate"],
+                    }
+                    if bundle["history"].get("officialEtfDailyChanges")
+                    else None
+                ),
             },
             ensure_ascii=False,
         )

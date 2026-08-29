@@ -240,3 +240,91 @@ def test_history_bundle_accepts_sse_margin_security_source(tmp_path: Path) -> No
     assert artifact["releaseId"].startswith("margin_security_daily:sse:2026-08-17:")
     assert artifact["tradeDates"] == ["2026-08-17"]
     assert artifact["normalized"][0]["rowCount"] == 1
+
+
+def test_history_bundle_generates_offline_etf_adjacent_changes_from_canonical_parts(
+    tmp_path: Path,
+) -> None:
+    dates = ["2026-08-21", "2026-08-22"]
+    artifacts: list[dict[str, object]] = []
+    for source_id, code, previous, current, host in [
+        ("sse", "510300", 100, 130, "query.sse.com.cn"),
+        ("szse", "159919", 200, 250, "www.szse.cn"),
+    ]:
+        raw_path = tmp_path / f"data/raw/{source_id}/etf_scale/2026-08-22/{source_id}.json"
+        metadata_path = raw_path.with_name(f"{source_id}.metadata.json")
+        normalized_path = tmp_path / f"data/normalized/{source_id}_etf_scale/2026-08-22/{source_id}.csv"
+        raw_path.parent.mkdir(parents=True)
+        normalized_path.parent.mkdir(parents=True)
+        raw = f"{{\"source\":\"{source_id}\"}}".encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        raw_path.write_bytes(raw)
+        metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": dates[0],
+                    "market": "SSE" if source_id == "sse" else "SZSE",
+                    "instrument_code": code,
+                    "instrument_name": "测试ETF",
+                    "shares": previous,
+                },
+                {
+                    "trade_date": dates[1],
+                    "market": "SSE" if source_id == "sse" else "SZSE",
+                    "instrument_code": code,
+                    "instrument_name": "测试ETF",
+                    "shares": current,
+                },
+            ]
+        ).to_csv(normalized_path, index=False)
+        artifacts.append(
+            {
+                "source": {
+                    "source_id": source_id,
+                    "dataset": "etf_scale",
+                    "url": f"https://{host}/etf-scale",
+                    "date_semantics": "source_published",
+                },
+                "requested_date": "2026-08-22",
+                "observed_at": "2026-08-22T18:00:00+08:00",
+                "content_type": "application/json",
+                "raw_path": str(raw_path.relative_to(tmp_path)),
+                "metadata_path": str(metadata_path.relative_to(tmp_path)),
+                "normalized_path": str(normalized_path.relative_to(tmp_path)),
+                "sha256": digest,
+            }
+        )
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps({"asOf": dates[1]}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "adjacent-history-test",
+                "started_at": "2026-08-22T18:00:00+08:00",
+                "finished_at": "2026-08-22T18:01:00+08:00",
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = build_history_bundle_from_files(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+        workspace_root=tmp_path,
+    )
+
+    adjacent = bundle["history"]["officialEtfDailyChanges"]
+    assert adjacent["schemaVersion"] == 1
+    assert adjacent["asOf"] == dates[1]
+    assert adjacent["expectedPreviousDate"] == dates[0]
+    assert adjacent["sourceReleaseIds"] == [
+        next(item["releaseId"] for item in bundle["history"]["artifacts"] if item["sourceId"] == "sse"),
+        next(item["releaseId"] for item in bundle["history"]["artifacts"] if item["sourceId"] == "szse"),
+    ]
+    assert {(row["market"], row["code"], row["changeShares"]) for row in adjacent["rows"]} == {
+        ("SSE", "510300", 30),
+        ("SZSE", "159919", 50),
+    }

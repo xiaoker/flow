@@ -17,6 +17,7 @@ const MAX_BODY_BYTES = 12_000_000;
 const MAX_ARTIFACTS = 16;
 const MAX_EXPECTED_ARTIFACTS = 32;
 const MAX_NORMALIZED_FILES = 2;
+const MAX_ETF_DAILY_CHANGE_ROWS = 10_000;
 const HISTORY_RETENTION_DAYS = 0;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -54,6 +55,46 @@ type HistoryArtifact = {
   normalized: NormalizedFile[];
 };
 
+type OfficialEtfDailyChangeRow = {
+  market: "SSE" | "SZSE";
+  code: string;
+  previousTradeDate: string | null;
+  currentShares: number | null;
+  previousShares: number | null;
+  changeShares: number | null;
+  aligned: boolean;
+  alignmentReason?:
+    | "aligned"
+    | "new_listing"
+    | "missing_previous"
+    | "delisted"
+    | "delayed_market";
+};
+
+type OfficialEtfDailyChangesContract = {
+  schemaVersion: 1;
+  asOf: string;
+  expectedPreviousDate: string | null;
+  sourceReleaseIds: string[];
+  inputSha256: string;
+  rows: OfficialEtfDailyChangeRow[];
+  marketStatus?: Array<{
+    market: "SSE" | "SZSE";
+    status: "ready" | "delayed_market" | "missing_current" | "missing_previous";
+    latestAvailableDate: string | null;
+    currentDate: string | null;
+    expectedPreviousDate: string | null;
+  }>;
+  counts?: {
+    totalRows: number;
+    alignedRows: number;
+    newListingRows: number;
+    missingPreviousRows: number;
+    delistedRows: number;
+    delayedMarketRows: number;
+  };
+};
+
 type HistoryBundle = {
   version: 1;
   history: {
@@ -67,6 +108,12 @@ type HistoryBundle = {
     // publication and snapshot validation are performed.
     snapshot?: DashboardSnapshot;
     artifacts: HistoryArtifact[];
+    /**
+     * Offline, canonical ETF adjacent changes.  PR3 validates and archives
+     * this evidence only; the legacy D1 calculation remains authoritative
+     * until the separately reviewed archive-only PR4.
+     */
+    officialEtfDailyChanges?: OfficialEtfDailyChangesContract;
     /**
      * Chunked collection contract.  Each request may carry one artifact, and
      * the final request sets finalize=true.  The expected ids are persisted in
@@ -181,6 +228,211 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
   );
 }
 
+function isNullableIsoDate(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && ISO_DATE.test(value));
+}
+
+function isNullableSafeInteger(value: unknown, { nonNegative = false } = {}): value is number | null {
+  return (
+    value === null ||
+    (typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      (!nonNegative || value >= 0))
+  );
+}
+
+function rowReason(row: OfficialEtfDailyChangeRow): NonNullable<OfficialEtfDailyChangeRow["alignmentReason"]> {
+  if (row.alignmentReason) return row.alignmentReason;
+  if (row.aligned) return "aligned";
+  if (row.currentShares === null) return "delisted";
+  if (row.previousTradeDate === null) return "new_listing";
+  return "missing_previous";
+}
+
+function officialEtfDailyChangesFingerprintInput(
+  contract: OfficialEtfDailyChangesContract,
+): string {
+  const releaseIds = [...new Set(contract.sourceReleaseIds)].sort();
+  // Match Python's byte/Unicode ordering without locale-dependent
+  // collation.  The fingerprint is a cross-runtime contract, so the
+  // comparator must not vary with the Worker locale.
+  const rows = [...contract.rows].sort((left, right) => {
+    const leftKey = `${left.market}:${left.code}`;
+    const rightKey = `${right.market}:${right.code}`;
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  const nullable = (value: string | number | null): string =>
+    value === null || value === undefined ? "" : String(value);
+  const lines = [
+    contract.asOf,
+    contract.expectedPreviousDate ?? "",
+    releaseIds.join(","),
+    ...rows.map((row) =>
+      [
+        row.market,
+        row.code,
+        nullable(row.previousTradeDate),
+        nullable(row.currentShares),
+        nullable(row.previousShares),
+        nullable(row.changeShares),
+        row.aligned ? "1" : "0",
+        rowReason(row),
+      ].join(","),
+    ),
+  ];
+  return lines.join("\n");
+}
+
+function isOfficialEtfDailyChanges(
+  value: unknown,
+  history: HistoryBundle["history"],
+): value is OfficialEtfDailyChangesContract {
+  if (!isRecord(value) || value.schemaVersion !== 1) return false;
+  if (
+    typeof value.asOf !== "string" ||
+    !ISO_DATE.test(value.asOf) ||
+    value.asOf !== history.asOf ||
+    !isNullableIsoDate(value.expectedPreviousDate) ||
+    (value.expectedPreviousDate !== null && value.expectedPreviousDate >= value.asOf) ||
+    !Array.isArray(value.sourceReleaseIds) ||
+    value.sourceReleaseIds.length === 0 ||
+    value.sourceReleaseIds.length > MAX_EXPECTED_ARTIFACTS ||
+    new Set(value.sourceReleaseIds).size !== value.sourceReleaseIds.length ||
+    !value.sourceReleaseIds.every(
+      (item) =>
+        typeof item === "string" &&
+        /^etf_scale:(sse|szse):[0-9_-]{8,25}:[a-f0-9]{16}$/.test(item),
+    ) ||
+    typeof value.inputSha256 !== "string" ||
+    !SHA256.test(value.inputSha256) ||
+    !Array.isArray(value.rows) ||
+    value.rows.length > MAX_ETF_DAILY_CHANGE_ROWS
+  ) {
+    return false;
+  }
+
+  const availableReleaseIds = new Set([
+    ...history.artifacts.map((artifact) => artifact.releaseId),
+    ...(history.expectedArtifacts ?? []),
+  ]);
+  if (value.sourceReleaseIds.some((releaseId) => !availableReleaseIds.has(releaseId))) {
+    return false;
+  }
+
+  const keys = new Set<string>();
+  const reasonCounts = {
+    aligned: 0,
+    new_listing: 0,
+    missing_previous: 0,
+    delisted: 0,
+    delayed_market: 0,
+  };
+  for (const raw of value.rows) {
+    if (!isRecord(raw)) return false;
+    const row = raw as Partial<OfficialEtfDailyChangeRow>;
+    if (
+      (row.market !== "SSE" && row.market !== "SZSE") ||
+      typeof row.code !== "string" ||
+      !/^\d{6}$/.test(row.code) ||
+      !isNullableIsoDate(row.previousTradeDate) ||
+      !isNullableSafeInteger(row.currentShares, { nonNegative: true }) ||
+      !isNullableSafeInteger(row.previousShares, { nonNegative: true }) ||
+      !isNullableSafeInteger(row.changeShares) ||
+      typeof row.aligned !== "boolean"
+    ) {
+      return false;
+    }
+    const key = `${row.market}:${row.code}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+    if (row.previousTradeDate !== null && row.previousTradeDate >= value.asOf) {
+      return false;
+    }
+    const reason = rowReason(row as OfficialEtfDailyChangeRow);
+    if (!Object.prototype.hasOwnProperty.call(reasonCounts, reason)) return false;
+    reasonCounts[reason] += 1;
+    if (row.aligned) {
+      if (
+        value.expectedPreviousDate === null ||
+        row.previousTradeDate !== value.expectedPreviousDate ||
+        row.currentShares === null ||
+        row.previousShares === null ||
+        row.changeShares === null ||
+        row.currentShares - row.previousShares !== row.changeShares ||
+        reason !== "aligned"
+      ) {
+        return false;
+      }
+    } else {
+      // An unaligned row is evidence, not a guessed daily flow.  Its derived
+      // change must remain null regardless of whether a stale prior row is
+      // available.
+      if (row.changeShares !== null) return false;
+      if (reason === "aligned") return false;
+      if (reason === "new_listing") {
+        if (row.currentShares === null || row.previousTradeDate !== null || row.previousShares !== null) return false;
+      } else if (reason === "delisted") {
+        if (row.currentShares !== null || row.previousTradeDate === null || row.previousShares === null) return false;
+      } else if (reason === "delayed_market") {
+        if (row.currentShares === null && (row.previousTradeDate === null || row.previousShares === null)) return false;
+      } else if (row.currentShares === null) {
+        return false;
+      }
+    }
+  }
+
+  if (value.counts !== undefined) {
+    const counts = value.counts;
+    if (
+      !isRecord(counts) ||
+      counts.totalRows !== value.rows.length ||
+      counts.alignedRows !== reasonCounts.aligned ||
+      counts.newListingRows !== reasonCounts.new_listing ||
+      counts.missingPreviousRows !== reasonCounts.missing_previous ||
+      counts.delistedRows !== reasonCounts.delisted ||
+      counts.delayedMarketRows !== reasonCounts.delayed_market
+    ) {
+      return false;
+    }
+  }
+
+  if (value.marketStatus !== undefined) {
+    if (!Array.isArray(value.marketStatus) || value.marketStatus.length > 2) return false;
+    const markets = new Set<string>();
+    for (const rawStatus of value.marketStatus) {
+      if (!isRecord(rawStatus)) return false;
+      if (
+        (rawStatus.market !== "SSE" && rawStatus.market !== "SZSE") ||
+        markets.has(rawStatus.market) ||
+        !["ready", "delayed_market", "missing_current", "missing_previous"].includes(String(rawStatus.status)) ||
+        !isNullableIsoDate(rawStatus.latestAvailableDate) ||
+        !isNullableIsoDate(rawStatus.currentDate) ||
+        !isNullableIsoDate(rawStatus.expectedPreviousDate) ||
+        rawStatus.expectedPreviousDate !== value.expectedPreviousDate
+      ) {
+        return false;
+      }
+      if (rawStatus.status === "ready" || rawStatus.status === "missing_previous") {
+        if (rawStatus.currentDate !== value.asOf || rawStatus.latestAvailableDate !== value.asOf) return false;
+      }
+      if (rawStatus.status === "delayed_market" && rawStatus.currentDate === value.asOf) {
+        return false;
+      }
+      markets.add(rawStatus.market);
+    }
+  }
+  return true;
+}
+
+async function validateOfficialEtfDailyChangesHash(
+  contract: OfficialEtfDailyChangesContract,
+): Promise<boolean> {
+  const digest = await sha256Hex(
+    new TextEncoder().encode(officialEtfDailyChangesFingerprintInput(contract)),
+  );
+  return digest === contract.inputSha256;
+}
+
 function isHistoryBundle(value: unknown): value is HistoryBundle {
   if (!isRecord(value) || value.version !== 1 || !isRecord(value.history)) return false;
   const history = value.history;
@@ -211,6 +463,8 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
       history.artifacts.length > 0 &&
       history.artifacts.length <= MAX_ARTIFACTS &&
       history.artifacts.every(isHistoryArtifact) &&
+      (history.officialEtfDailyChanges === undefined ||
+        isOfficialEtfDailyChanges(history.officialEtfDailyChanges, history)) &&
       expectedArtifactsValid &&
       (history.finalize === undefined || typeof history.finalize === "boolean") &&
       (isDashboardSnapshot(history.snapshot) ||
@@ -780,9 +1034,19 @@ export async function POST(request: Request) {
   if (!isHistoryBundle(value)) {
     return NextResponse.json({ error: "invalid_history_bundle" }, { status: 422 });
   }
+  if (
+    value.history.officialEtfDailyChanges &&
+    !(await validateOfficialEtfDailyChangesHash(value.history.officialEtfDailyChanges))
+  ) {
+    return NextResponse.json(
+      { error: "invalid_official_etf_daily_changes_hash" },
+      { status: 422 },
+    );
+  }
 
   try {
     const { history } = value;
+    const officialEtfDailyChanges = history.officialEtfDailyChanges;
     const finalizeRequested = history.finalize !== false;
     const snapshot = history.snapshot;
     const etfQualityIssues = snapshot
@@ -983,6 +1247,7 @@ export async function POST(request: Request) {
         snapshotKey: shouldPublish ? snapshotKey : null,
         snapshotSha256,
         artifacts: manifestArtifacts,
+        officialEtfDailyChanges: officialEtfDailyChanges ?? null,
         expectedArtifacts: expectedArtifacts ?? history.artifacts.map((artifact) => artifact.releaseId),
         collectionStateKeys,
         pendingArtifacts: collection.pending,
@@ -1134,6 +1399,13 @@ export async function POST(request: Request) {
             sha256: statePointer.sha256,
           }
         : { status: "unchanged" },
+      officialEtfDailyChanges: officialEtfDailyChanges
+        ? {
+            status: "validated_shadow_only",
+            rows: officialEtfDailyChanges.rows.length,
+            inputSha256: officialEtfDailyChanges.inputSha256,
+          }
+        : { status: "not_provided" },
     });
   } catch (error) {
     console.error("history import failed", error);

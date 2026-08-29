@@ -10,6 +10,8 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from .etf_daily_changes import build_official_etf_daily_changes
+from .etf_facts import build_canonical_etf_daily_fact
 from .models import FetchArtifact
 
 
@@ -147,6 +149,108 @@ def serialize_history_artifact(
     }
 
 
+def _artifact_payload(artifact: FetchArtifact | dict[str, Any]) -> dict[str, Any]:
+    return artifact.to_dict() if isinstance(artifact, FetchArtifact) else artifact
+
+
+def _load_etf_scale_frame(
+    artifact: FetchArtifact | dict[str, Any], *, workspace_root: Path
+) -> pd.DataFrame:
+    """Read the normalized ETF scale parts used by the canonical writer.
+
+    The collector may keep several semicolon-separated parts for a source.
+    Reading those parts here, before they are encoded for transport, makes the
+    adjacent-change contract byte-independent and keeps its input identical to
+    the dashboard's canonical ETF frame.
+    """
+
+    payload = _artifact_payload(artifact)
+    normalized_path = str(payload.get("normalized_path") or "")
+    if not normalized_path:
+        raise ValueError("etf_scale_artifact_missing_normalized_path")
+    frames: list[pd.DataFrame] = []
+    for path_value in normalized_path.split(";"):
+        path = _relative_or_absolute(path_value, workspace_root)
+        if not path.is_file():
+            raise ValueError(f"Normalized ETF file does not exist: {path}")
+        try:
+            frames.append(
+                pd.read_csv(
+                    path,
+                    dtype={"instrument_code": str},
+                )
+            )
+        except pd.errors.EmptyDataError:
+            frames.append(pd.DataFrame())
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _build_official_etf_daily_changes_from_artifacts(
+    *,
+    artifacts: list[FetchArtifact | dict[str, Any]],
+    serialized: list[dict[str, Any]],
+    as_of: str,
+    workspace_root: Path,
+) -> dict[str, Any] | None:
+    scale_artifacts = [
+        artifact
+        for artifact in artifacts
+        if str((_artifact_payload(artifact).get("source") or {}).get("dataset") or "")
+        == "etf_scale"
+    ]
+    if not scale_artifacts:
+        return None
+
+    by_market: dict[str, list[pd.DataFrame]] = {"sse": [], "szse": []}
+    release_ids: list[str] = []
+    for artifact in scale_artifacts:
+        payload = _artifact_payload(artifact)
+        source_id = str((payload.get("source") or {}).get("source_id") or "")
+        if source_id not in by_market:
+            raise ValueError(f"Unsupported ETF scale source for adjacent changes: {source_id!r}")
+        frame = _load_etf_scale_frame(artifact, workspace_root=workspace_root)
+        if not frame.empty:
+            by_market[source_id].append(frame)
+        # Use the same release id that is sent over the wire, rather than a
+        # second hash implementation.  This lets the server verify source
+        # lineage without reading the normalized CSV again.
+        matching = [
+            item
+            for item in serialized
+            if item.get("dataset") == "etf_scale"
+            and item.get("sourceId") == source_id
+            and item.get("requestedDate") == str(payload.get("requested_date") or "")
+            and item.get("sha256") == str(payload.get("sha256") or "")
+        ]
+        if matching:
+            release_ids.append(str(matching[0]["releaseId"]))
+        elif str(payload.get("sha256") or ""):
+            # This branch is defensive for a malformed caller; normal bundle
+            # construction always has a matching serialized artifact.
+            raise ValueError("etf_scale_serialized_release_missing")
+
+    sse = pd.concat(by_market["sse"], ignore_index=True, sort=False) if by_market["sse"] else pd.DataFrame()
+    szse = pd.concat(by_market["szse"], ignore_index=True, sort=False) if by_market["szse"] else pd.DataFrame()
+    if sse.empty and szse.empty:
+        return None
+    dates = sorted(
+        {
+            str(value)
+            for frame in (sse, szse)
+            if not frame.empty and "trade_date" in frame.columns
+            for value in frame["trade_date"].dropna().astype(str).unique().tolist()
+        }
+    )
+    canonical = build_canonical_etf_daily_fact(sse, szse, dates)
+    return build_official_etf_daily_changes(
+        canonical,
+        as_of=as_of,
+        source_release_ids=release_ids,
+    )
+
+
 def build_history_bundle(
     *,
     snapshot: dict[str, Any],
@@ -156,23 +260,35 @@ def build_history_bundle(
     finished_at: str,
     workspace_root: Path,
 ) -> dict[str, Any]:
+    artifact_list = list(artifacts)
     serialized = [
         serialize_history_artifact(artifact, workspace_root=workspace_root)
-        for artifact in artifacts
+        for artifact in artifact_list
     ]
     if not serialized:
         raise ValueError("History bundle did not contain any source artifacts")
+    history: dict[str, Any] = {
+        "runId": run_id,
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "retentionDays": HISTORY_RETENTION_DAYS,
+        "asOf": str(snapshot.get("asOf") or ""),
+        "snapshot": snapshot,
+        "artifacts": serialized,
+    }
+    as_of = str(snapshot.get("asOf") or "")
+    if as_of:
+        adjacent = _build_official_etf_daily_changes_from_artifacts(
+            artifacts=artifact_list,
+            serialized=serialized,
+            as_of=as_of,
+            workspace_root=workspace_root,
+        )
+        if adjacent is not None:
+            history["officialEtfDailyChanges"] = adjacent
     return {
         "version": 1,
-        "history": {
-            "runId": run_id,
-            "startedAt": started_at,
-            "finishedAt": finished_at,
-            "retentionDays": HISTORY_RETENTION_DAYS,
-            "asOf": str(snapshot.get("asOf") or ""),
-            "snapshot": snapshot,
-            "artifacts": serialized,
-        },
+        "history": history,
     }
 
 
