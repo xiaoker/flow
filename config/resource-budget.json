@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "service": "flow",
+  "limits": {
+    "d1RowsReadPerDay": 5000000,
+    "d1RowsWrittenPerDay": 100000,
+    "workersRequestsPerDay": 100000,
+    "githubActionsMinutesPerMonth": 2000
+  },
+  "storage": {
+    "d1Bytes": 5368709120,
+    "hardD1Bytes": 2684354560,
+    "r2SoftBytes": 8053063680
+  },
+  "targets": {
+    "d1RowsReadPerDay": 500000,
+    "d1RowsWrittenPerDay": 20000,
+    "workersRequestsPerDay": 5000,
+    "githubActionsMinutesPerMonth": 900
+  },
+  "hardLimits": {
+    "d1RowsReadPerDay": 2500000,
+    "d1RowsWrittenPerDay": 50000,
+    "workersRequestsPerDay": 50000,
+    "githubActionsMinutesPerMonth": 1500
+  },
+  "stageBudgets": {
+    "scheduler": {"rowsRead": 25000, "rowsWritten": 1000},
+    "coreCollection": {"rowsRead": 100000, "rowsWritten": 3000},
+    "publish": {"rowsRead": 50000, "rowsWritten": 500},
+    "pcfExact": {"rowsRead": 150000, "rowsWritten": 12000},
+    "uiPointer": {"rowsRead": 100000, "rowsWritten": 100}
+  }
+}

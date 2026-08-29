@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "fixtureName": "legacy-etf-daily-production-scale",
+  "tradingDays": 365,
+  "etfCount": 1600,
+  "revisionsPerBusinessKey": 5,
+  "expectedRows": 2920000,
+  "materialization": "The default audit materializes a reduced sample; pass --production-scale for the full fixture.",
+  "purpose": "Baseline the legacy loadOfficialEtfDailyChanges window query before offline adjacent changes replace it."
+}
