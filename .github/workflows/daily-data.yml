@@ -89,8 +89,13 @@ jobs:
             --output dispatch-response.json \
             --write-out '%{http_code}' \
             "https://api.github.com/repos/xiaoker/flow/actions/workflows/market-data-collect.yml/dispatches")"
-          if [[ "$STATUS_CODE" != "204" ]]; then
+          if [[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]; then
             echo "market-data-collect dispatch failed with HTTP $STATUS_CODE" >&2
+            jq . dispatch-response.json >&2 || true
+            exit 1
+          fi
+          if [[ "$STATUS_CODE" == "200" ]] && ! jq -e '.workflow_run_id != null' dispatch-response.json >/dev/null; then
+            echo "market-data-collect dispatch returned HTTP 200 without a workflow_run_id." >&2
             jq . dispatch-response.json >&2 || true
             exit 1
           fi
