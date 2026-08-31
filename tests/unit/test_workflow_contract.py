@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +92,44 @@ def test_pr2_collect_hands_off_an_immutable_source_artifact() -> None:
     assert "report_stage_budget.py" in workflow
     assert "python -m pytest\n" not in workflow
     assert "python -m pytest -q" in workflow
+
+
+def test_dispatchers_accept_github_200_and_204_and_fail_closed_on_incomplete_artifact() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+    legacy = LEGACY_WORKFLOW.read_text(encoding="utf-8")
+
+    assert collect.count('[[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]') == 2
+    assert '[[ "$DISPATCH_CODE" != "200" && "$DISPATCH_CODE" != "204" ]]' in watchdog
+    assert '[[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]' in legacy
+    assert collect.count("workflow_run_id") >= 2
+    assert "workflow_run_id" in watchdog
+    assert "workflow_run_id" in legacy
+    assert "if: ${{ success() && steps.collection.outcome == 'success'" in collect
+
+
+def test_stage_budget_cli_runs_from_repository_root(tmp_path: Path) -> None:
+    output = tmp_path / "stage-budget.json"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/report_stage_budget.py",
+            "--stage",
+            "coreCollection",
+            "--output",
+            str(output),
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert output.is_file()
 
 
 def test_pr2_publish_is_dispatch_only_and_uses_targeted_smoke() -> None:

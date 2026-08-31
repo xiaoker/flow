@@ -487,8 +487,13 @@ jobs:
             --output pcf-dispatch-response.json \
             --write-out '%{http_code}' \
             "https://api.github.com/repos/xiaoker/flow/actions/workflows/pcf-v2-capture.yml/dispatches")"
-          if [[ "$STATUS_CODE" != "204" ]]; then
+          if [[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]; then
             echo "PCF v2 workflow dispatch failed with HTTP $STATUS_CODE; market publication remains independent." >&2
+            jq . pcf-dispatch-response.json >&2 || true
+            exit 1
+          fi
+          if [[ "$STATUS_CODE" == "200" ]] && ! jq -e '.workflow_run_id != null' pcf-dispatch-response.json >/dev/null; then
+            echo "PCF v2 workflow dispatch returned HTTP 200 without a workflow_run_id." >&2
             jq . pcf-dispatch-response.json >&2 || true
             exit 1
           fi
@@ -724,13 +729,21 @@ jobs:
             --actions-run-attempt "${GITHUB_RUN_ATTEMPT:-1}" \
             --output reports/budget/core-collection.json
 
+      - name: Verify immutable collection source bundle
+        id: source_bundle
+        if: ${{ success() && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
+        shell: bash
+        run: |
+          test -s dashboard-snapshot.json
+          jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null
+
       - name: Upload immutable collection source bundle
         id: source_artifact
-        if: ${{ !cancelled() && steps.collection.outcome == 'success' && steps.collection.outputs.pending != 'true' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
+        if: ${{ success() && steps.collection.outcome == 'success' && steps.source_bundle.outcome == 'success' && steps.collection.outputs.pending != 'true' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
         with:
           name: market-data-collection-source-${{ github.run_id }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 3
           path: |
             dashboard-snapshot.json
@@ -773,8 +786,13 @@ jobs:
             --output publish-dispatch-response.json \
             --write-out '%{http_code}' \
             "$PUBLISH_WORKFLOW_URL")"
-          if [[ "$STATUS_CODE" != "204" ]]; then
+          if [[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]; then
             echo "market-data-publish dispatch failed with HTTP $STATUS_CODE" >&2
+            jq . publish-dispatch-response.json >&2 || true
+            exit 1
+          fi
+          if [[ "$STATUS_CODE" == "200" ]] && ! jq -e '.workflow_run_id != null' publish-dispatch-response.json >/dev/null; then
+            echo "market-data-publish dispatch returned HTTP 200 without a workflow_run_id." >&2
             jq . publish-dispatch-response.json >&2 || true
             exit 1
           fi

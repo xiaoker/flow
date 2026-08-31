@@ -135,3 +135,36 @@ def test_canonical_future_dates_and_duplicates_are_rejected() -> None:
     duplicate = pd.concat([_frame(), _frame().iloc[[0]]], ignore_index=True)
     with pytest.raises(ValueError, match="duplicate"):
         build_official_etf_daily_changes(duplicate, as_of="2026-08-22")
+
+
+def test_canonical_shares_tolerate_official_sse_float_noise() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-08-21",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "shares": 6_826_266_800.000001,
+            },
+            {
+                "trade_date": "2026-08-22",
+                "market": "SSE",
+                "instrument_code": "510300",
+                "shares": 964_406_799.9999999,
+            },
+        ]
+    )
+
+    contract = build_official_etf_daily_changes(frame, as_of="2026-08-22")
+
+    assert contract["rows"][0]["previousShares"] == 6_826_266_800
+    assert contract["rows"][0]["currentShares"] == 964_406_800
+
+
+def test_canonical_shares_reject_material_fractional_values() -> None:
+    frame = _frame().copy()
+    frame["shares"] = frame["shares"].astype(float)
+    frame.loc[0, "shares"] = 100.25
+
+    with pytest.raises(ValueError, match="canonical_etf_shares_invalid"):
+        build_official_etf_daily_changes(frame, as_of="2026-08-22")

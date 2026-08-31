@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.check_d1_budget import build_report
+if __package__:
+    from .check_d1_budget import build_report
+else:
+    # GitHub Actions invokes this file directly (``python scripts/...``), so
+    # the script directory rather than the repository root is sys.path[0].
+    from check_d1_budget import build_report
 
 
 def _read_object(path: Path | None) -> dict[str, Any]:

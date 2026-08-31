@@ -14,6 +14,7 @@ import json
 import math
 import re
 from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -22,6 +23,7 @@ import pandas as pd
 OFFICIAL_ETF_DAILY_CHANGES_SCHEMA_VERSION = 1
 OFFICIAL_ETF_MARKETS = ("SSE", "SZSE")
 _ISO_DATE = r"^\d{4}-\d{2}-\d{2}$"
+_SHARE_ROUNDING_TOLERANCE = Decimal("0.001")
 
 
 def _iso_date(value: Any, *, field: str, allow_none: bool = False) -> str | None:
@@ -52,6 +54,32 @@ def _integer(value: Any, *, field: str, allow_none: bool = False) -> int | None:
     return result
 
 
+def _canonical_share(value: Any) -> int:
+    """Return an exact base-share integer without accepting real fractions.
+
+    SSE reports ETF scale in ten-thousand-share units.  Multiplying the
+    official decimal by 10,000 through a binary float can produce values such
+    as ``6826266800.000001``.  That is serialization noise, not a fractional
+    share.  Keep the quality gate strict by allowing only a sub-share residue
+    no larger than the tolerance already used by the PCF capture contract.
+    """
+
+    if value is None or isinstance(value, bool):
+        raise ValueError("canonical_etf_shares_invalid")
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("canonical_etf_shares_invalid") from exc
+    if not number.is_finite():
+        raise ValueError("canonical_etf_shares_invalid")
+    if number < 0:
+        raise ValueError("canonical_etf_shares_negative")
+    nearest = number.to_integral_value()
+    if abs(number - nearest) > _SHARE_ROUNDING_TOLERANCE:
+        raise ValueError("canonical_etf_shares_invalid")
+    return int(nearest)
+
+
 def _normalise_frame(canonical_frame: pd.DataFrame, *, as_of: str) -> pd.DataFrame:
     required = {"trade_date", "market", "instrument_code", "shares"}
     missing = required - set(canonical_frame.columns)
@@ -69,13 +97,7 @@ def _normalise_frame(canonical_frame: pd.DataFrame, *, as_of: str) -> pd.DataFra
         .str.replace(r"\.0$", "", regex=True)
         .str.zfill(6)
     )
-    value["shares"] = pd.to_numeric(value["shares"], errors="coerce")
-    if value["shares"].isna().any() or not value["shares"].map(
-        lambda number: math.isfinite(float(number)) and float(number).is_integer()
-    ).all():
-        raise ValueError("canonical_etf_shares_invalid")
-    if value["shares"].lt(0).any():
-        raise ValueError("canonical_etf_shares_negative")
+    value["shares"] = value["shares"].map(_canonical_share)
     if (~value["market"].isin(OFFICIAL_ETF_MARKETS)).any():
         raise ValueError("canonical_etf_market_invalid")
     if (~value["instrument_code"].str.fullmatch(r"\d{6}")).any():
@@ -85,7 +107,7 @@ def _normalise_frame(canonical_frame: pd.DataFrame, *, as_of: str) -> pd.DataFra
     key = ["trade_date", "market", "instrument_code"]
     if value.duplicated(key).any():
         raise ValueError("canonical_etf_duplicate_business_key")
-    value["shares"] = value["shares"].round().astype("int64")
+    value["shares"] = value["shares"].astype("int64")
     return value.sort_values(key, kind="mergesort").reset_index(drop=True)
 
 
