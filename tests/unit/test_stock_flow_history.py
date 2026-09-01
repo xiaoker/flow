@@ -42,6 +42,11 @@ def _current_catalog() -> dict:
     return {
         "schemaVersion": 1,
         "asOf": "2026-08-05",
+        "basis": {
+            "shareDate": "2026-08-05",
+            "previousShareDate": "2026-08-04",
+            "pcfDate": "2026-08-05",
+        },
         "coverage": {"stockCount": 1, "matchedEtfCount": 1},
         "items": [
             {
@@ -143,5 +148,93 @@ def test_merge_catalog_rejects_current_partition_value_mismatch() -> None:
     history["partitions"][-1]["items"][0]["netShares"] = 999.0
     history["partitions"][-1]["items"][0]["inflowShares"] = 999.0
 
-    with pytest.raises(StockFlowHistoryError, match="current_partition_value_mismatch"):
+    with pytest.raises(
+        StockFlowHistoryError,
+        match=(
+            r"current_partition_value_mismatch:101:688008:netShares:"
+            r"catalog=200\.0:partition=999\.0"
+        ),
+    ):
         merge_catalog_with_history(_current_catalog(), history)
+
+
+def test_merge_catalog_rejects_a_different_previous_share_anchor() -> None:
+    history = build_daily_partitions(
+        _shares(),
+        _pcf(),
+        ["2026-08-03", "2026-08-04", "2026-08-05"],
+        as_of="2026-08-05",
+    )
+    history["partitions"][-1]["sharePreviousDate"] = "2026-08-03"
+    history["partitions"][-1]["previousDate"] = "2026-08-03"
+    history["partitions"][-1]["basis"]["previousShareDate"] = "2026-08-03"
+
+    with pytest.raises(
+        StockFlowHistoryError,
+        match=(
+            r"current_partition_previous_date_mismatch:"
+            r"catalog=2026-08-04:partition=2026-08-03"
+        ),
+    ):
+        merge_catalog_with_history(_current_catalog(), history)
+
+
+def test_august_31_partition_uses_august_28_etf_anchor_not_global_history_gap() -> None:
+    shares = pd.DataFrame(
+        [
+            {"trade_date": "2026-08-27", "market": "SSE", "instrument_code": "510300", "shares": 23_578_687_700},
+            {"trade_date": "2026-08-28", "market": "SSE", "instrument_code": "510300", "shares": 23_295_187_700},
+            {"trade_date": "2026-08-31", "market": "SSE", "instrument_code": "510300", "shares": 23_503_987_700},
+            {"trade_date": "2026-08-27", "market": "SSE", "instrument_code": "510210", "shares": 15_209_192_600},
+            {"trade_date": "2026-08-28", "market": "SSE", "instrument_code": "510210", "shares": 14_912_192_600},
+            {"trade_date": "2026-08-31", "market": "SSE", "instrument_code": "510210", "shares": 14_621_192_600},
+        ]
+    )
+    pcf = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-08-31",
+                "market": "SSE",
+                "etf_code": "510300",
+                "etf_name": "300ETF",
+                "stock_code": "600000",
+                "stock_name": "浦发银行",
+                "quantity": 2_100,
+                "creation_unit": 900_000,
+                "listing_market": "101",
+            },
+            {
+                "trade_date": "2026-08-31",
+                "market": "SSE",
+                "etf_code": "510210",
+                "etf_name": "综指ETF",
+                "stock_code": "600000",
+                "stock_name": "浦发银行",
+                "quantity": 1_200,
+                "creation_unit": 3_000_000,
+                "listing_market": "101",
+            },
+        ]
+    )
+
+    correct = build_daily_partitions(
+        shares,
+        pcf,
+        ["2026-08-27", "2026-08-28", "2026-08-31"],
+        as_of="2026-08-31",
+    )
+    current = correct["partitions"][-1]
+    item = current["items"][0]
+
+    assert current["sharePreviousDate"] == "2026-08-28"
+    assert item["stockCode"] == "600000"
+    assert item["netShares"] == 370_800.0
+
+    wrong = build_daily_partitions(
+        shares,
+        pcf,
+        ["2026-08-27", "2026-08-31"],
+        as_of="2026-08-31",
+    )
+    assert wrong["partitions"][-1]["sharePreviousDate"] == "2026-08-27"
+    assert wrong["partitions"][-1]["items"][0]["netShares"] == -409_500.0

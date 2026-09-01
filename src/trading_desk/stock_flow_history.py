@@ -232,6 +232,25 @@ def validate_history_index(
             raise StockFlowHistoryError("partition_type_invalid")
         if partition.get("tradeDate") != partition_date:
             raise StockFlowHistoryError(f"partition_trade_date_mismatch:{partition_date}")
+        partition_previous_date = _date(
+            partition.get("sharePreviousDate"),
+            field="partition_previous_share_date",
+        )
+        if partition.get("previousDate") != partition_previous_date:
+            raise StockFlowHistoryError(
+                f"partition_previous_date_mismatch:{partition_date}"
+            )
+        partition_basis = partition.get("basis")
+        if not isinstance(partition_basis, dict):
+            raise StockFlowHistoryError("partition_basis_invalid")
+        basis_previous_date = _date(
+            partition_basis.get("previousShareDate"),
+            field="partition_basis_previous_share_date",
+        )
+        if basis_previous_date != partition_previous_date:
+            raise StockFlowHistoryError(
+                f"partition_basis_previous_date_mismatch:{partition_date}"
+            )
         if partition.get("calculationVersion") != CALCULATION_VERSION:
             raise StockFlowHistoryError("partition_calculation_version_invalid")
         if partition.get("available") is not True:
@@ -301,6 +320,22 @@ def merge_catalog_with_history(
         # and validation so a malformed index cannot make the current node
         # appear authoritative merely because the catalog has the same date.
         raise StockFlowHistoryError("current_partition_missing")
+    current_basis = current_catalog.get("basis")
+    if not isinstance(current_basis, dict):
+        raise StockFlowHistoryError("current_catalog_basis_invalid")
+    catalog_previous_date = _date(
+        current_basis.get("previousShareDate"),
+        field="catalog_previous_share_date",
+    )
+    partition_previous_date = _date(
+        current_partition.get("sharePreviousDate"),
+        field="current_partition_previous_share_date",
+    )
+    if catalog_previous_date != partition_previous_date:
+        raise StockFlowHistoryError(
+            "current_partition_previous_date_mismatch:"
+            f"catalog={catalog_previous_date}:partition={partition_previous_date}"
+        )
     current_partition_items = {
         _identity(item): item for item in current_partition["items"] if isinstance(item, dict)
     }
@@ -316,11 +351,20 @@ def merge_catalog_with_history(
             partition_value = partition_item.get(field)
             if current_value is None or partition_value is None:
                 if current_value is not None or partition_value is not None:
-                    raise StockFlowHistoryError(f"current_partition_value_mismatch:{identity}:{field}")
+                    raise StockFlowHistoryError(
+                        f"current_partition_value_mismatch:{identity}:{field}:"
+                        f"catalog={current_value}:partition={partition_value}"
+                    )
             elif abs(float(current_value) - float(partition_value)) > 0.01:
-                raise StockFlowHistoryError(f"current_partition_value_mismatch:{identity}:{field}")
+                raise StockFlowHistoryError(
+                    f"current_partition_value_mismatch:{identity}:{field}:"
+                    f"catalog={current_value}:partition={partition_value}"
+                )
         if int(item.get("etfCount", 0) or 0) != int(partition_item.get("etfCount", 0) or 0):
-            raise StockFlowHistoryError(f"current_partition_value_mismatch:{identity}:etfCount")
+            raise StockFlowHistoryError(
+                f"current_partition_value_mismatch:{identity}:etfCount:"
+                f"catalog={item.get('etfCount')}:partition={partition_item.get('etfCount')}"
+            )
         nodes = {node["date"]: node for node in by_identity.get(identity, [])}
         # Always derive the current node from the current catalog.  A stale or
         # missing current partition cannot overwrite the authoritative current

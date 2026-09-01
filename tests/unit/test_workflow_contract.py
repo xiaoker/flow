@@ -367,6 +367,20 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
 
 
+def test_stock_flow_history_uses_etf_snapshot_dates_for_previous_share_anchor() -> None:
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    history_step = workflow.split(
+        "Build ETF-to-stock daily partitions from archived R2 inputs",
+        maxsplit=1,
+    )[1].split("Publish ETF-to-stock daily partitions", maxsplit=1)[0]
+
+    assert "--slurpfile manifest reports/phase0/latest-manifest.json" in history_step
+    assert ".sourceSnapshots[]?.date" in history_step
+    assert '.source.source_id == "sse"' in history_step
+    assert '.source.dataset == "etf_scale"' in history_step
+    assert "market-history.json > stock-flow-dates.txt" not in history_step
+
+
 def test_pcf_shadow_parity_is_explicitly_opt_in_and_never_published() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     script = (REPOSITORY_ROOT / "scripts/run_pcf_shadow_parity.py").read_text(encoding="utf-8")

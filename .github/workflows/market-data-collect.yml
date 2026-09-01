@@ -673,12 +673,28 @@ jobs:
         shell: bash
         run: |
           AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
-          jq -r --arg asOf "$AS_OF" '
-            [.rows[]?.trade_date | select(type == "string" and . <= $asOf)]
+          # ETF penetration must use the ETF snapshot calendar. A complete
+          # market-history date can be absent even when the official SSE ETF
+          # anchor exists, so using the global calendar can silently skip the
+          # actual previous trading day and reverse the calculated flow.
+          jq -r --arg asOf "$AS_OF" \
+            --slurpfile manifest reports/phase0/latest-manifest.json '
+            (
+              [.sourceSnapshots[]?.date] +
+              [
+                $manifest[0].artifacts[]?
+                | select(
+                    .source.source_id == "sse" and
+                    .source.dataset == "etf_scale"
+                  )
+                | .requested_date
+              ]
+            )
+            | map(select(type == "string" and . <= $asOf))
             | unique | .[-22:][]
-          ' market-history.json > stock-flow-dates.txt
+          ' etf-flow-state.json > stock-flow-dates.txt
           if ! grep -qx "$AS_OF" stock-flow-dates.txt; then
-            echo "market history does not include the current as-of date; refusing to build stock-flow history." >&2
+            echo "ETF official snapshot dates do not include the current as-of date; refusing to build stock-flow history." >&2
             exit 1
           fi
           python scripts/fetch_stock_flow_history_inputs.py \
