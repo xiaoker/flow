@@ -57,16 +57,17 @@ PCF，并用 D1 checkpoint 做有界恢复和影子摘要；PCF 失败不会阻�
 `daily-data.yml` 仅是手动兼容 wrapper。
 
 完整 Python 与 Web build/test/lint 在 `ci.yml` 的 PR/main 检查中运行；定时采集
-只运行目标 smoke 和数据质量门禁。`PIPELINE_WINDOW_GATE_ENABLED` 仍须在
-Cloudflare Worker 与 GitHub repository variable 同时显式开启，PR2 不会自动
-切换生产开关。
+只运行目标 smoke 和数据质量门禁。`PIPELINE_WINDOW_GATE_ENABLED` 已在
+Cloudflare Worker 与 GitHub 调度入口同步启用；GitHub repository variable 应
+保持为 `1`，缺失时也按已启用处理，避免调度入口重新分裂。
 
 ### Daily pipeline window gate
 
 `pipeline_window` 是 Cloudflare Cron 与 GitHub schedule 之间的幂等边界。PR1
 提供受保护的 `/api/v1/admin/pipeline-window/claim` 和 `/status` 接口；claim
 只做单行条件写，不扫描历史市场或 ETF 数据。`PIPELINE_WINDOW_GATE_ENABLED`
-默认是 `0`，因此部署新代码不会改变生产调度行为。启用时必须同时设置：
+生产默认是 `1`。Cloudflare Cron、GitHub watchdog 与被调度的采集工作流都会先
+经过同一个 `pipeline_window` 租约边界。当前生产配置必须保持：
 
 - Cloudflare Worker 变量 `PIPELINE_WINDOW_GATE_ENABLED=1`；
 - GitHub Actions repository variable `PIPELINE_WINDOW_GATE_ENABLED=1`。
@@ -74,6 +75,10 @@ Cloudflare Worker 与 GitHub repository variable 同时显式开启，PR2 不会
 两者必须同时启用并先完成 canary；任一 claim/status 异常都会 fail closed，避免
 在不确定时启动重采集。`concurrency` 仍只负责串行化，不能替代 `pipeline_window`
 的跨调度器去重。
+
+如需紧急回退，必须在同一个维护窗口把 Cloudflare Worker 变量和 GitHub
+repository variable 同时设为 `0`；GitHub watchdog 在关闭时只退出，不会 claim
+或 dispatch。禁止只修改其中一处。
 
 ## Useful Commands
 

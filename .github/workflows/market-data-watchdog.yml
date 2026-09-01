@@ -37,6 +37,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     env:
+      # Keep the watchdog on the same repository-level rollback switch as the
+      # dispatched collector. Missing configuration must not recreate the old
+      # split-brain state, so the activated production default is 1.
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ vars.PIPELINE_WINDOW_GATE_ENABLED || '1' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -47,6 +51,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ]]; then
+            echo "Pipeline-window gate is disabled; watchdog will not claim or dispatch."
+            exit 0
+          fi
 
           if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
             echo "Watchdog requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
