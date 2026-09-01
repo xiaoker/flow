@@ -19,9 +19,10 @@ async function loadWorker() {
 }
 
 class D1Statement {
-  constructor(database, sql) {
+  constructor(database, sql, claimMeta) {
     this.database = database;
     this.sql = sql;
+    this.claimMeta = claimMeta;
     this.values = [];
   }
 
@@ -32,11 +33,15 @@ class D1Statement {
 
   async run() {
     const result = this.database.prepare(this.sql).run(...this.values);
+    const changes = Number(result.changes ?? 0);
+    const defaultMeta = {
+      changes,
+      rows_written: changes,
+    };
     return {
-      meta: {
-        changes: Number(result.changes ?? 0),
-        rows_written: Number(result.changes ?? 0),
-      },
+      meta: this.sql.includes("INSERT INTO pipeline_window") && this.claimMeta
+        ? this.claimMeta({ ...defaultMeta })
+        : defaultMeta,
     };
   }
 
@@ -46,12 +51,13 @@ class D1Statement {
 }
 
 class LocalD1 {
-  constructor() {
+  constructor({ claimMeta } = {}) {
     this.database = new DatabaseSync(":memory:");
+    this.claimMeta = claimMeta;
   }
 
   prepare(sql) {
-    return new D1Statement(this.database, sql);
+    return new D1Statement(this.database, sql, this.claimMeta);
   }
 
   close() {
@@ -59,8 +65,8 @@ class LocalD1 {
   }
 }
 
-async function createDatabase() {
-  const db = new LocalD1();
+async function createDatabase(options = {}) {
+  const db = new LocalD1(options);
   const migration = await readFile(new URL("../drizzle/0010_fair_jasper_sitwell.sql", import.meta.url), "utf8");
   for (const statement of migration.split("--> statement-breakpoint")) {
     const sql = statement.trim();
@@ -81,6 +87,13 @@ function input(runKey, windowName = "evening", owner = "runner:00000001", extras
   };
 }
 
+function indexedClaimMeta(rowsWritten) {
+  return ({ changes }) => ({
+    changes,
+    rows_written: changes === 1 ? rowsWritten : 0,
+  });
+}
+
 test("runKey is stable, parseable and uses Shanghai window dates", () => {
   const runKey = buildPipelineRunKey("2026-08-29", "evening");
   assert.equal(runKey, "daily-market-data:2026-08-29:evening:v1");
@@ -95,7 +108,7 @@ test("runKey is stable, parseable and uses Shanghai window dates", () => {
 });
 
 test("twenty concurrent claims produce exactly one winner", async () => {
-  const db = await createDatabase();
+  const db = await createDatabase({ claimMeta: indexedClaimMeta(2) });
   const now = new Date("2026-08-29T00:00:00.000Z");
   const runKey = buildPipelineRunKey("2026-08-29", "evening");
   const results = await Promise.all(
@@ -108,9 +121,53 @@ test("twenty concurrent claims produce exactly one winner", async () => {
   assert.equal(results.filter((result) => result.decision === "acquired").length, 1);
   assert.equal(results.filter((result) => result.decision === "takeover").length, 0);
   assert.equal(results.filter((result) => result.decision === "skip_leased").length, 19);
-  assert.ok(results.every((result) => result.rowsWritten <= 1));
-  assert.equal(results.find((result) => result.decision === "acquired").rowsWritten, 1);
+  assert.equal(results.find((result) => result.decision === "acquired").rowsWritten, 2);
+  assert.ok(results.every((result) => Number.isSafeInteger(result.rowsWritten) && result.rowsWritten >= 0));
   db.close();
+});
+
+test("claim accepts physical index writes while preserving one-row decisions", async () => {
+  const acquiredDb = await createDatabase({ claimMeta: indexedClaimMeta(2) });
+  const now = new Date("2026-08-29T00:00:00.000Z");
+  const acquiredKey = buildPipelineRunKey("2026-08-29", "morning");
+  const acquired = await claimPipelineWindow(acquiredDb, input(acquiredKey, "morning"), now);
+  assert.equal(acquired.decision, "acquired");
+  assert.equal(acquired.rowsWritten, 2);
+  acquiredDb.close();
+
+  const takeoverDb = await createDatabase({ claimMeta: indexedClaimMeta(3) });
+  const takeoverKey = buildPipelineRunKey("2026-08-29", "reconcile");
+  await claimPipelineWindow(takeoverDb, input(takeoverKey, "reconcile"), now);
+  const takeover = await claimPipelineWindow(
+    takeoverDb,
+    input(takeoverKey, "reconcile", "runner:00000002"),
+    new Date(now.getTime() + 15 * 60 * 1_000 + 1),
+  );
+  assert.equal(takeover.decision, "takeover");
+  assert.equal(takeover.rowsWritten, 3);
+  takeoverDb.close();
+});
+
+test("claim fails closed on malformed D1 write metadata", async () => {
+  const metadataCases = [
+    { name: "missing changes", meta: { rows_written: 2 }, error: /pipeline_window_change_meta_invalid/ },
+    { name: "negative changes", meta: { changes: -1, rows_written: 2 }, error: /pipeline_window_change_meta_invalid/ },
+    { name: "fractional changes", meta: { changes: 0.5, rows_written: 2 }, error: /pipeline_window_change_meta_invalid/ },
+    { name: "multiple logical changes", meta: { changes: 2, rows_written: 2 }, error: /pipeline_window_multirow_mutation/ },
+    { name: "missing rows written", meta: { changes: 1 }, error: /pipeline_window_write_meta_invalid/ },
+    { name: "negative rows written", meta: { changes: 1, rows_written: -1 }, error: /pipeline_window_write_meta_invalid/ },
+    { name: "fractional rows written", meta: { changes: 1, rows_written: 1.5 }, error: /pipeline_window_write_meta_invalid/ },
+  ];
+
+  for (const { name, meta, error } of metadataCases) {
+    const db = await createDatabase({ claimMeta: () => meta });
+    const runKey = buildPipelineRunKey("2026-08-29", "evening");
+    try {
+      await assert.rejects(claimPipelineWindow(db, input(runKey), new Date("2026-08-29T00:00:00.000Z")), error, name);
+    } finally {
+      db.close();
+    }
+  }
 });
 
 test("completed, retryable and blocked states are idempotent", async () => {
@@ -197,7 +254,7 @@ test("invalid identities and ownership cannot claim or update", async () => {
 
 test("protected claim and status routes expose bounded machine-readable responses", async () => {
   const worker = await loadWorker();
-  const db = await createDatabase();
+  const db = await createDatabase({ claimMeta: indexedClaimMeta(2) });
   const env = {
     DB: db,
     INGEST_API_KEY: "test-key",
@@ -240,7 +297,7 @@ test("protected claim and status routes expose bounded machine-readable response
   assert.equal(claimResponse.status, 200);
   const claimBody = await claimResponse.json();
   assert.equal(claimBody.decision, "acquired");
-  assert.equal(claimBody.rowsWritten, 1);
+  assert.equal(claimBody.rowsWritten, 2);
 
   const encoded = encodeURIComponent(runKey);
   const statusResponse = await worker.fetch(

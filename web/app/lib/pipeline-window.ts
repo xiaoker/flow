@@ -8,7 +8,6 @@ export const PIPELINE_NAME = "daily-market-data" as const;
 export const PIPELINE_WINDOW_CONTRACT_VERSION: string = "v1";
 export const PIPELINE_WINDOW_CONTRACT_VERSIONS = ["v1"] as const;
 export const PIPELINE_WINDOW_LEASE_MS = 15 * 60 * 1_000;
-const MAX_CLAIM_ROWS_WRITTEN = 1;
 
 export const PIPELINE_WINDOWS = [
   "evening",
@@ -75,7 +74,7 @@ export type PipelineWindowClaim = {
 };
 
 type D1Result = {
-  meta?: { changes?: number; rows_read?: number; rows_written?: number };
+  meta?: { changes?: unknown; rows_read?: unknown; rows_written?: unknown };
 };
 
 type D1Statement = {
@@ -163,6 +162,13 @@ export class PipelineWindowError extends Error {
     this.name = "PipelineWindowError";
     this.status = status;
   }
+}
+
+function requireD1NonNegativeInteger(value: unknown, errorCode: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new PipelineWindowError(errorCode, 503);
+  }
+  return value;
 }
 
 function validateDate(value: string, errorCode: string): void {
@@ -264,11 +270,22 @@ export async function claimPipelineWindow(
     nowIso,
     nowIso,
   ).run();
-  const rowsWritten = Number(result.meta?.rows_written ?? 0);
-  if (rowsWritten > MAX_CLAIM_ROWS_WRITTEN) {
-    throw new PipelineWindowError("pipeline_window_write_budget_exceeded", 503);
+  // D1 rows_written includes physical index writes.  The claim updates
+  // status/lease fields that have an index, so rows_written may be greater
+  // than one even though the atomic UPSERT changed exactly one business row.
+  // Use changes for the logical single-row invariant and keep rowsWritten as
+  // budget telemetry returned to callers.
+  const changes = requireD1NonNegativeInteger(
+    result.meta?.changes,
+    "pipeline_window_change_meta_invalid",
+  );
+  if (changes > 1) {
+    throw new PipelineWindowError("pipeline_window_multirow_mutation", 503);
   }
-  const changes = Number(result.meta?.changes ?? 0);
+  const rowsWritten = requireD1NonNegativeInteger(
+    result.meta?.rows_written,
+    "pipeline_window_write_meta_invalid",
+  );
   const row = await db.prepare(
     `SELECT run_key, pipeline, window_date, window_name, contract_version,
             target_date, status, lease_owner, lease_expires_at,
