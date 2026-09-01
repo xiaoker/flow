@@ -201,6 +201,8 @@ def test_pr2_ci_covers_python_and_web_without_schedules() -> None:
 
 def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+    wrangler = (REPOSITORY_ROOT / "web/wrangler.jsonc").read_text(encoding="utf-8")
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
     claim_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/claim/route.ts").read_text(encoding="utf-8")
     status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/status/route.ts").read_text(encoding="utf-8")
@@ -222,6 +224,15 @@ def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     assert "lease_owner:" in workflow
     assert "Concurrency is not cross-scheduler deduplication." in workflow
     assert "pipeline_window is the idempotency boundary" in workflow
+
+    # Production activation is a coordinated contract. A missing GitHub
+    # variable defaults to the enabled gate, while an explicit 0 remains the
+    # shared rollback switch for both GitHub entry points.
+    assert '"PIPELINE_WINDOW_GATE_ENABLED": "1"' in wrangler
+    assert "vars.PIPELINE_WINDOW_GATE_ENABLED || '1'" in workflow
+    assert "vars.PIPELINE_WINDOW_GATE_ENABLED || '1'" in watchdog
+    assert "watchdog will not claim or dispatch" in watchdog
+    assert watchdog.index("PIPELINE_WINDOW_GATE_ENABLED") < watchdog.index("FLOW_PIPELINE_WINDOW_URL/status?runKey=")
 
     assert "PIPELINE_WINDOW_GATE_ENABLED" in worker
     assert "claimPipelineWindow" in worker

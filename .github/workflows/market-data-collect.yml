@@ -85,7 +85,9 @@ jobs:
       contract_version: ${{ steps.gate.outputs.contract_version }}
       delegate_publish: ${{ steps.gate.outputs.delegate_publish }}
     env:
-      PIPELINE_WINDOW_GATE_ENABLED: ${{ vars.PIPELINE_WINDOW_GATE_ENABLED || '0' }}
+      # The gate is now the production default. An explicit repository value
+      # of 0 remains the coordinated rollback switch.
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ vars.PIPELINE_WINDOW_GATE_ENABLED || '1' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
