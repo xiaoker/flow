@@ -674,7 +674,27 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
+          set -euo pipefail
           AS_OF="$(jq -r '.asOf' dashboard-snapshot.json)"
+          write_history_status() {
+            local status="$1"
+            local error_code="${2:-}"
+            jq -n \
+              --arg status "$status" \
+              --arg errorCode "$error_code" \
+              --arg asOf "$AS_OF" \
+              '{schemaVersion:1,status:$status,asOf:$asOf,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              > stock-flow-history-status.json
+          }
+          write_history_status "RUNNING"
+          finalize_history_status() {
+            local exit_code="$?"
+            if (( exit_code != 0 )) && jq -e '.status == "RUNNING"' stock-flow-history-status.json >/dev/null 2>&1; then
+              write_history_status "FAILED_RETRYABLE" "stock_flow_history_unexpected_failure"
+            fi
+            exit "$exit_code"
+          }
+          trap finalize_history_status EXIT
           # ETF penetration must use the ETF snapshot calendar. A complete
           # market-history date can be absent even when the official SSE ETF
           # anchor exists, so using the global calendar can silently skip the
@@ -697,29 +717,41 @@ jobs:
           ' etf-flow-state.json > stock-flow-dates.txt
           if ! grep -qx "$AS_OF" stock-flow-dates.txt; then
             echo "ETF official snapshot dates do not include the current as-of date; refusing to build stock-flow history." >&2
+            write_history_status "BLOCKED_QUALITY" "stock_flow_history_current_anchor_missing"
             exit 1
           fi
-          python scripts/fetch_stock_flow_history_inputs.py \
-            --base-url "https://flow.xiaoker.com" \
-            --dates stock-flow-dates.txt \
-            --as-of "$AS_OF" \
-            --output-dir stock-flow-inputs \
-            --report stock-flow-fetch-report.json \
-            --inventory pcf-inventory.json \
-            --require-current
-          python scripts/build_stock_flow_history.py \
-            --shares stock-flow-inputs/shares.csv \
-            --pcf stock-flow-inputs/pcf.csv \
-            --dates stock-flow-dates.txt \
-            --as-of "$AS_OF" \
-            --output-dir stock-flow-partitions \
-            --output stock-flow-history.json \
-            --max-partitions 21 \
-            --lineage-report stock-flow-fetch-report.json
-          jq -e --arg asOf "$AS_OF" '
-            (.availableDates | index($asOf) != null) and
-            (.partitions | length > 0)
-          ' stock-flow-history.json >/dev/null
+          if ! python scripts/fetch_stock_flow_history_inputs.py \
+              --base-url "https://flow.xiaoker.com" \
+              --dates stock-flow-dates.txt \
+              --as-of "$AS_OF" \
+              --output-dir stock-flow-inputs \
+              --report stock-flow-fetch-report.json \
+              --inventory pcf-inventory.json \
+              --require-current; then
+            write_history_status "FAILED_RETRYABLE" "stock_flow_history_input_fetch_failed"
+            exit 1
+          fi
+          if ! python scripts/build_stock_flow_history.py \
+              --shares stock-flow-inputs/shares.csv \
+              --pcf stock-flow-inputs/pcf.csv \
+              --dates stock-flow-dates.txt \
+              --as-of "$AS_OF" \
+              --output-dir stock-flow-partitions \
+              --output stock-flow-history.json \
+              --max-partitions 21 \
+              --lineage-report stock-flow-fetch-report.json; then
+            write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_invalid"
+            exit 1
+          fi
+          if ! jq -e --arg asOf "$AS_OF" '
+              (.availableDates | index($asOf) != null) and
+              (.partitions | length > 0)
+            ' stock-flow-history.json >/dev/null; then
+            write_history_status "BLOCKED_QUALITY" "stock_flow_history_current_partition_missing"
+            exit 1
+          fi
+          write_history_status "READY"
+          trap - EXIT
 
       - name: Publish ETF-to-stock daily partitions
         id: stock_flow_publish
@@ -754,6 +786,11 @@ jobs:
         run: |
           test -s dashboard-snapshot.json
           jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null
+          if [[ -s stock-flow-catalog.json ]]; then
+            test -s stock-flow-history-status.json
+            jq -e '.status == "READY" or .status == "FAILED_RETRYABLE" or .status == "BLOCKED_QUALITY"' \
+              stock-flow-history-status.json >/dev/null
+          fi
 
       - name: Upload immutable collection source bundle
         id: source_artifact
@@ -767,6 +804,7 @@ jobs:
             dashboard-snapshot.json
             stock-flow-catalog.json
             stock-flow-history.json
+            stock-flow-history-status.json
             market-history.json
             previous-release.json
             source-readiness.json
@@ -1052,6 +1090,12 @@ jobs:
         if: always()
         shell: bash
         run: |
+          history_status="$(jq -r '.status // "NOT_REQUIRED"' stock-flow-history-status.json 2>/dev/null || echo "NOT_REQUIRED")"
+          if [[ "$history_status" == "BLOCKED_QUALITY" || "$history_status" == "FAILED_RETRYABLE" ]]; then
+            echo "ETF-to-stock history did not complete: $history_status" >&2
+            jq . stock-flow-history-status.json >&2
+            exit 1
+          fi
           errors="$(jq '.errors | length' reports/phase0/latest-quality-summary.json)"
           gate="$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)"
           collection_window="${{ steps.window.outputs.collection_window }}"
@@ -1081,7 +1125,17 @@ jobs:
           set -euo pipefail
           STATUS="COMPLETED"
           ERROR_CODE=""
-          if [[ "${{ job.status }}" != "success" ]]; then
+          HISTORY_STATUS="$(jq -r '.status // "NOT_REQUIRED"' stock-flow-history-status.json 2>/dev/null || echo "NOT_REQUIRED")"
+          if [[ "$HISTORY_STATUS" == "BLOCKED_QUALITY" ]]; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="stock_flow_history_incomplete"
+          elif [[ "$HISTORY_STATUS" == "FAILED_RETRYABLE" ]]; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="stock_flow_history_fetch_failed"
+          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]]; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="stock_flow_history_missing"
+          elif [[ "${{ job.status }}" != "success" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="workflow_failed"
           elif [[ "${{ steps.publish_dispatch.outcome }}" == "failure" ]]; then
@@ -1128,6 +1182,7 @@ jobs:
             stock-flow-inputs/**
             stock-flow-partitions/**
             stock-flow-history.json
+            stock-flow-history-status.json
             stock-flow-fetch-report.json
             pcf-inventory.json
             market-history.json

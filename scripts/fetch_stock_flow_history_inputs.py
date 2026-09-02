@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -37,16 +38,42 @@ def _fetch(
             if response.status_code == 409:
                 raise RuntimeError(f"ambiguous archived artifact: {params}")
             response.raise_for_status()
-            content = response.content
+            wire_content = response.content
+            content = wire_content
             if response.headers.get("content-type", "").startswith("application/gzip"):
                 content = gzip.decompress(content)
+            wire_sha256 = hashlib.sha256(wire_content).hexdigest()
+            content_sha256 = hashlib.sha256(content).hexdigest()
+            declared_sha256 = response.headers.get("x-flow-normalized-sha256", "").strip().lower()
+            if declared_sha256 and declared_sha256 not in {wire_sha256, content_sha256}:
+                raise RuntimeError(
+                    "archived artifact sha256 mismatch: "
+                    f"declared={declared_sha256}:wire={wire_sha256}:content={content_sha256}"
+                )
+            # Legacy normalized objects predate custom SHA metadata.  The R2
+            # object key is immutable, so hashing the exact response body here
+            # restores a verifiable lineage without rewriting or fabricating
+            # the archived source.  Newer history-import objects expose the
+            # normalized-content SHA, while PCF v2 pointers expose the stored
+            # gzip-object SHA; accept either only after byte-level verification.
+            lineage_sha256 = declared_sha256 or wire_sha256
+            sha256_source = (
+                "header-verified-object"
+                if declared_sha256 == wire_sha256
+                else "header-verified-content"
+                if declared_sha256 == content_sha256
+                else "computed-object-body"
+            )
             frame = pd.read_csv(io.BytesIO(content), dtype=str)
             if frame.empty:
                 return None, {"status": "empty", "code": response.status_code}
             return frame, {
                 "status": "ready",
                 "code": response.status_code,
-                "sha256": response.headers.get("x-flow-normalized-sha256"),
+                "sha256": lineage_sha256,
+                "sha256Source": sha256_source,
+                "wireSha256": wire_sha256,
+                "contentSha256": content_sha256,
                 "key": response.headers.get("x-flow-normalized-key"),
                 "candidateCount": int(response.headers.get("x-flow-normalized-candidate-count", "1")),
                 "selection": response.headers.get("x-flow-normalized-selection", "single"),
