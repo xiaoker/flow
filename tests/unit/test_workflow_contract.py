@@ -216,7 +216,7 @@ def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
 
     assert "pipeline_window_gate:" in workflow
     assert "needs: pipeline_window_gate" in workflow
-    assert "if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' }}" in workflow
+    assert "if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' && needs.pipeline_window_gate.outputs.recovery_id == '' }}" in workflow
     assert "FLOW_PIPELINE_WINDOW_URL/status?runKey=" in workflow
     assert "FLOW_PIPELINE_WINDOW_URL/claim" in workflow
     assert "Mark pipeline window running" in workflow
@@ -594,3 +594,55 @@ def test_stock_flow_inventory_is_metadata_only_and_does_not_publish() -> None:
     assert "metadata_only" in script
     assert "stream=True" in script
     assert "response.close()" in script
+
+
+def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_collector() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    receipt_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/receipt/route.ts").read_text(encoding="utf-8")
+    plan_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/plan/route.ts").read_text(encoding="utf-8")
+    receipt_helper = (REPOSITORY_ROOT / "web/app/lib/recovery-receipt.ts").read_text(encoding="utf-8")
+
+    assert "recovery_plan_sha256" in collect
+    assert "recovery_data_date" in publish
+    assert "recovery_stage" in publish
+    assert "recovery_execution_contract:" in collect
+    assert "scripts/execute_recovery_plan.py" in collect
+    assert "--expected-plan-hash" in collect
+    assert "R2 contract-only recovery stopped before any source request or publication." in collect
+    assert "needs.pipeline_window_gate.outputs.recovery_id == ''" in collect
+    assert "needs.pipeline_window_gate.outputs.recovery_id != ''" in collect
+    assert "dataDates | type == \"array\" and length >= 1 and length <= 3" in collect
+    assert "recovery_plan_sha256 must be a lowercase SHA-256 digest." in collect
+    assert collect.index("Approved recovery plan could not be verified before claim") < collect.index("pipeline-window-claim-request.json")
+    assert "recovery_plan_sha256" in publish
+    assert "recovery_data_date" in publish
+    assert "recovery_stage" in publish
+    assert "receipt" in receipt_route
+    assert "MAX_RECEIPT_BYTES" in receipt_route
+    assert "immutable_receipt_conflict" in receipt_route
+    assert "plan_object_not_verified" in plan_route
+    assert "plan_semantic_sha256_mismatch" in plan_route
+    assert "scope_sha256" in plan_route
+    assert "MAX_PLAN_BYTES" in plan_route
+    assert "verifyRecoveryReceipt" in receipt_helper
+    assert "receipt_output_date_mismatch" in receipt_helper
+    assert "receipt_scope_binding_mismatch" in receipt_helper
+    assert "parsePipelineRunKey" in receipt_helper
+    # A recovery plan can only write under its dedicated root; these paths are
+    # explicitly rejected by the Python contract and by the workflow guard.
+    assert "reports/phase0" in collect
+    assert "Protected recovery path" in collect
+
+
+def test_r2_recovery_contract_commands_are_offline_and_bounded() -> None:
+    executor = (REPOSITORY_ROOT / "scripts/execute_recovery_plan.py").read_text(encoding="utf-8")
+    module = (REPOSITORY_ROOT / "src/trading_desk/recovery_execution.py").read_text(encoding="utf-8")
+    assert "never calls D1/R2/GitHub" in executor
+    assert "execute_recovery_plan" in executor
+    assert "--max-requests" in executor
+    assert "recovery_stage_runner_not_configured" in module
+    assert "recovery_request_budget_exceeded" in module
+    assert "SOURCE_UNAVAILABLE" in module
+    assert "recovery_deadline_expired" in module
+    assert "retry_attempts < 1 or retry_attempts > 3" in module

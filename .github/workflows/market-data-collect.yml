@@ -42,6 +42,11 @@ on:
         required: false
         default: ""
         type: string
+      recovery_plan_sha256:
+        description: "Expected immutable recovery plan hash (required for recovery)"
+        required: false
+        default: ""
+        type: string
       contract_version:
         description: "Pipeline run-key contract version"
         required: false
@@ -91,6 +96,15 @@ jobs:
       delegate_publish: ${{ steps.gate.outputs.delegate_publish }}
       recovery_id: ${{ steps.gate.outputs.recovery_id }}
       recovery_attempt_count: ${{ steps.gate.outputs.recovery_attempt_count }}
+      recovery_plan_hash: ${{ steps.gate.outputs.recovery_plan_hash }}
+      recovery_data_dates: ${{ steps.gate.outputs.recovery_data_dates }}
+      recovery_required_stages: ${{ steps.gate.outputs.recovery_required_stages }}
+      recovery_artifact_root: ${{ steps.gate.outputs.recovery_artifact_root }}
+      recovery_state_dir: ${{ steps.gate.outputs.recovery_state_dir }}
+      recovery_max_dates: ${{ steps.gate.outputs.recovery_max_dates }}
+      recovery_max_requests: ${{ steps.gate.outputs.recovery_max_requests }}
+      recovery_deadline: ${{ steps.gate.outputs.recovery_deadline }}
+      recovery_budget_manifest: ${{ steps.gate.outputs.recovery_budget_manifest }}
     env:
       # The gate is now the production default. An explicit repository value
       # of 0 remains the coordinated rollback switch.
@@ -106,6 +120,7 @@ jobs:
       INPUT_LEASE_OWNER: ${{ inputs.lease_owner || '' }}
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
+      INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Claim or skip pipeline window
@@ -157,6 +172,15 @@ jobs:
             echo "delegate_publish=$DELEGATE_PUBLISH"
             echo "recovery_id=$INPUT_RECOVERY_ID"
             echo "recovery_attempt_count="
+            echo "recovery_plan_hash="
+            echo "recovery_data_dates="
+            echo "recovery_required_stages="
+            echo "recovery_artifact_root="
+            echo "recovery_state_dir="
+            echo "recovery_max_dates="
+            echo "recovery_max_requests="
+            echo "recovery_deadline="
+            echo "recovery_budget_manifest="
           } >> "$GITHUB_OUTPUT"
 
           # A recovery dispatch is a separate control-plane path. It must be
@@ -177,6 +201,39 @@ jobs:
               --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
               --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
             )
+            if [[ -z "$INPUT_RECOVERY_PLAN_SHA256" || ! "$INPUT_RECOVERY_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "recovery_plan_sha256 must be a lowercase SHA-256 digest." >&2
+              exit 1
+            fi
+            PLAN_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+              --output recovery-plan.json \
+              --write-out '%{http_code}' \
+              "$FLOW_PIPELINE_WINDOW_URL/recovery/plan?recoveryId=$(jq -rn --arg value "$INPUT_RECOVERY_ID" '$value|@uri')")"
+            if [[ "$PLAN_CODE" != "200" ]]; then
+              echo "Approved recovery plan could not be verified before claim (HTTP $PLAN_CODE); refusing to claim or run." >&2
+              jq . recovery-plan.json >&2 || true
+              exit 1
+            fi
+            jq -e --arg recoveryId "$INPUT_RECOVERY_ID" --arg runKey "$RUN_KEY" \
+              --arg expectedHash "$INPUT_RECOVERY_PLAN_SHA256" '
+              (.recoveryId == $recoveryId) and
+              (.planSha256 == .plan.planHash) and
+              (.plan.runKey == $runKey) and
+              ($expectedHash == "" or .plan.planHash == $expectedHash) and
+              (.plan.dataDates | type == "array" and length >= 1 and length <= 3) and
+              (.plan.requiredStages | type == "array" and length >= 1) and
+              (.plan.artifactRoot == ".recovery" or .plan.artifactRoot == "recovery" or (.plan.artifactRoot | startswith(".recovery/") or startswith("recovery/"))) and
+              (.plan.stateDir == ".recovery" or .plan.stateDir == "recovery" or (.plan.stateDir | startswith(".recovery/") or startswith("recovery/")))
+            ' recovery-plan.json >/dev/null
+            echo "recovery_plan_hash=$(jq -r '.plan.planHash' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_data_dates=$(jq -c '.plan.dataDates' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_required_stages=$(jq -c '.plan.requiredStages' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_artifact_root=$(jq -r '.plan.artifactRoot' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_state_dir=$(jq -r '.plan.stateDir' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_max_dates=$(jq -r '.plan.maxDates' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_max_requests=$(jq -r '.plan.maxRequests' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_deadline=$(jq -r '.plan.deadline' recovery-plan.json)" >> "$GITHUB_OUTPUT"
+            echo "recovery_budget_manifest=$(jq -c '.plan.budgetManifest' recovery-plan.json)" >> "$GITHUB_OUTPUT"
             jq -n \
               --arg recoveryId "$INPUT_RECOVERY_ID" \
               --arg runKey "$RUN_KEY" \
@@ -311,9 +368,92 @@ jobs:
           esac
           jq '{runKey,decision,status,leaseOwner,leaseExpiresAt,attemptCount,rowsWritten}' pipeline-window-claim.json
 
+  recovery_execution_contract:
+    needs: pipeline_window_gate
+    # R2 deliberately exercises only the immutable execution contract.  The
+    # live stage runner is enabled only in the post-R2 deployment stop point;
+    # this job proves that a recovery dispatch cannot enter the legacy
+    # three-date/latest-* collector by accident.
+    if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' && needs.pipeline_window_gate.outputs.recovery_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      INPUT_RUN_KEY: ${{ needs.pipeline_window_gate.outputs.run_key }}
+      INPUT_RECOVERY_ID: ${{ needs.pipeline_window_gate.outputs.recovery_id }}
+      INPUT_RECOVERY_ATTEMPT_COUNT: ${{ needs.pipeline_window_gate.outputs.recovery_attempt_count }}
+      INPUT_RECOVERY_PLAN_HASH: ${{ needs.pipeline_window_gate.outputs.recovery_plan_hash }}
+      INPUT_RECOVERY_DATA_DATES: ${{ needs.pipeline_window_gate.outputs.recovery_data_dates }}
+      INPUT_RECOVERY_REQUIRED_STAGES: ${{ needs.pipeline_window_gate.outputs.recovery_required_stages }}
+      RECOVERY_ARTIFACT_ROOT: ${{ needs.pipeline_window_gate.outputs.recovery_artifact_root }}
+      RECOVERY_STATE_DIR: ${{ needs.pipeline_window_gate.outputs.recovery_state_dir }}
+      RECOVERY_MAX_DATES: ${{ needs.pipeline_window_gate.outputs.recovery_max_dates }}
+      RECOVERY_MAX_REQUESTS: ${{ needs.pipeline_window_gate.outputs.recovery_max_requests }}
+      RECOVERY_DEADLINE: ${{ needs.pipeline_window_gate.outputs.recovery_deadline }}
+      FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Validate immutable plan and run offline recovery contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$INPUT_RECOVERY_ID"
+          test -n "$INPUT_RECOVERY_PLAN_HASH"
+          test -n "$INPUT_RECOVERY_ATTEMPT_COUNT"
+          case "$RECOVERY_ARTIFACT_ROOT" in
+            .recovery/*|recovery/*) ;;
+            *) echo "Recovery artifact root is not isolated: $RECOVERY_ARTIFACT_ROOT" >&2; exit 1 ;;
+          esac
+          case "$RECOVERY_STATE_DIR" in
+            .recovery/*|recovery/*) ;;
+            *) echo "Recovery state directory is not isolated: $RECOVERY_STATE_DIR" >&2; exit 1 ;;
+          esac
+          mkdir -p "$RECOVERY_ARTIFACT_ROOT" "$RECOVERY_STATE_DIR"
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            "$FLOW_PIPELINE_WINDOW_URL/recovery/plan?recoveryId=$(jq -rn --arg value "$INPUT_RECOVERY_ID" '$value|@uri')" \
+            --output recovery-plan-response.json
+          jq -e '.plan' recovery-plan-response.json > recovery-plan.json
+          PYTHONPATH=src:. python scripts/validate_recovery_plan.py \
+            --plan recovery-plan.json \
+            --expected-plan-hash "$INPUT_RECOVERY_PLAN_HASH" \
+            --output "$RECOVERY_STATE_DIR/validated-plan.json"
+          PYTHONPATH=src:. python scripts/execute_recovery_plan.py \
+            --plan recovery-plan.json \
+            --attempt "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+            --max-requests "$RECOVERY_MAX_REQUESTS" \
+            --output "$RECOVERY_ARTIFACT_ROOT/execution.json"
+          jq -e '
+            (.offline == true) and
+            (.closed == false) and
+            (.status != "COMPLETED") and
+            (.dataDates | type == "array" and length >= 1 and length <= 3)
+          ' "$RECOVERY_ARTIFACT_ROOT/execution.json" >/dev/null
+          echo "R2 contract-only recovery stopped before any source request or publication."
+
+      - name: Preserve offline recovery contract evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
+        with:
+          name: recovery-contract-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 3
+          path: |
+            recovery-plan-response.json
+            recovery-plan.json
+            .recovery/
+
   collect:
     needs: pipeline_window_gate
-    if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' }}
+    # The legacy collector writes the ordinary latest-* layout and requires
+    # exactly three dates.  A recovery plan must never fall through to that
+    # interface; the date-major recovery runner owns recovery executions.
+    if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' && needs.pipeline_window_gate.outputs.recovery_id == '' }}
     runs-on: ubuntu-latest
     # Each window performs one bounded collection. Source timing is represented
     # as pending and reconciled by the next window, not by a long-running job.
@@ -328,6 +468,15 @@ jobs:
       INPUT_CONTRACT_VERSION: ${{ needs.pipeline_window_gate.outputs.contract_version }}
       INPUT_RECOVERY_ID: ${{ needs.pipeline_window_gate.outputs.recovery_id }}
       INPUT_RECOVERY_ATTEMPT_COUNT: ${{ needs.pipeline_window_gate.outputs.recovery_attempt_count }}
+      INPUT_RECOVERY_PLAN_HASH: ${{ needs.pipeline_window_gate.outputs.recovery_plan_hash }}
+      INPUT_RECOVERY_DATA_DATES: ${{ needs.pipeline_window_gate.outputs.recovery_data_dates }}
+      INPUT_RECOVERY_REQUIRED_STAGES: ${{ needs.pipeline_window_gate.outputs.recovery_required_stages }}
+      RECOVERY_ARTIFACT_ROOT: ${{ needs.pipeline_window_gate.outputs.recovery_artifact_root }}
+      RECOVERY_STATE_DIR: ${{ needs.pipeline_window_gate.outputs.recovery_state_dir }}
+      RECOVERY_MAX_DATES: ${{ needs.pipeline_window_gate.outputs.recovery_max_dates }}
+      RECOVERY_MAX_REQUESTS: ${{ needs.pipeline_window_gate.outputs.recovery_max_requests }}
+      RECOVERY_DEADLINE: ${{ needs.pipeline_window_gate.outputs.recovery_deadline }}
+      RECOVERY_BUDGET_MANIFEST: ${{ needs.pipeline_window_gate.outputs.recovery_budget_manifest }}
       INPUT_DELEGATE_PUBLISH: ${{ needs.pipeline_window_gate.outputs.delegate_publish }}
       PIPELINE_WINDOW_GATE_ENABLED: ${{ needs.pipeline_window_gate.outputs.gate_enabled }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
@@ -340,6 +489,49 @@ jobs:
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Prepare isolated bounded recovery workspace
+        if: ${{ needs.pipeline_window_gate.outputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            "$FLOW_PIPELINE_WINDOW_URL/recovery/plan?recoveryId=$(jq -rn --arg value "$INPUT_RECOVERY_ID" '$value|@uri')" \
+            --output recovery-plan.json
+          test -n "$INPUT_RECOVERY_PLAN_HASH"
+          test "$RECOVERY_MAX_DATES" -ge 1
+          test "$RECOVERY_MAX_DATES" -le 3
+          test "$RECOVERY_MAX_REQUESTS" -gt 0
+          test -n "$RECOVERY_DEADLINE"
+          case "$RECOVERY_ARTIFACT_ROOT" in
+            .recovery/*|recovery/*) ;;
+            *) echo "Recovery artifact root is not isolated: $RECOVERY_ARTIFACT_ROOT" >&2; exit 1 ;;
+          esac
+          case "$RECOVERY_STATE_DIR" in
+            .recovery/*|recovery/*) ;;
+            *) echo "Recovery state directory is not isolated: $RECOVERY_STATE_DIR" >&2; exit 1 ;;
+          esac
+          case "$RECOVERY_ARTIFACT_ROOT" in
+            reports/phase0/*|memory*|*/reports/phase0/*|*/memory*) echo "Protected recovery path" >&2; exit 1 ;;
+          esac
+          mkdir -p "$RECOVERY_ARTIFACT_ROOT" "$RECOVERY_STATE_DIR"
+          jq -n \
+            --arg campaignId "$(jq -r '.plan.campaignId' recovery-plan.json)" \
+            --arg recoveryId "$INPUT_RECOVERY_ID" \
+            --arg planHash "$INPUT_RECOVERY_PLAN_HASH" \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg artifactRoot "$RECOVERY_ARTIFACT_ROOT" \
+            --arg stateDir "$RECOVERY_STATE_DIR" \
+            --arg deadline "$RECOVERY_DEADLINE" \
+            --argjson dataDates "$INPUT_RECOVERY_DATA_DATES" \
+            --argjson requiredStages "$INPUT_RECOVERY_REQUIRED_STAGES" \
+            '{campaignId:$campaignId,recoveryId:$recoveryId,planHash:$planHash,runKey:$runKey,dataDates:$dataDates,requiredStages:$requiredStages,artifactRoot:$artifactRoot,stateDir:$stateDir,deadline:$deadline,maxDates:($ENV.RECOVERY_MAX_DATES|tonumber),maxRequests:($ENV.RECOVERY_MAX_REQUESTS|tonumber),budgetManifest:($ENV.RECOVERY_BUDGET_MANIFEST|try fromjson catch .)}' \
+            > "$RECOVERY_ARTIFACT_ROOT/recovery-execution.json"
+          cp recovery-plan.json "$RECOVERY_ARTIFACT_ROOT/approved-recovery-plan.json"
+          echo "Recovery scope is fixed by the approved R2 plan; no workflow input may expand it."
 
       - name: Mark pipeline window running
         if: ${{ needs.pipeline_window_gate.outputs.gate_enabled == 'true' }}
@@ -403,17 +595,30 @@ jobs:
         id: dates
         shell: bash
         run: |
-          if [[ -n "$INPUT_DATES" ]]; then
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            # Recovery dates come only from the verified, immutable plan.  The
+            # old three-date collector interface is not fed a comma/space
+            # joined string; each approved date is iterated explicitly below.
+            mapfile -t RECOVERY_DATES < <(jq -r '.plan.dataDates[]' recovery-plan.json)
+            if (( ${#RECOVERY_DATES[@]} < 1 || ${#RECOVERY_DATES[@]} > RECOVERY_MAX_DATES )); then
+              echo "Recovery plan date count exceeds its bound." >&2
+              exit 1
+            fi
+            DATES="${RECOVERY_DATES[*]}"
+            LATEST="${RECOVERY_DATES[${#RECOVERY_DATES[@]}-1]}"
+          elif [[ -n "$INPUT_DATES" ]]; then
             DATES="$INPUT_DATES"
+            LATEST="${DATES##* }"
           else
             DATES="$(python scripts/select_recent_trading_dates.py --count 3)"
+            LATEST="${DATES##* }"
           fi
-          if [[ ! "$DATES" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+          if [[ -z "$INPUT_RECOVERY_ID" && ! "$DATES" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
             echo "Expected exactly three ISO dates, got: $DATES" >&2
             exit 1
           fi
           echo "dates=$DATES" >> "$GITHUB_OUTPUT"
-          echo "latest=${DATES##* }" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
 
       - name: Resolve source release window
         id: window
@@ -502,7 +707,9 @@ jobs:
 
       - name: Run opt-in PCF shadow parity (never published)
         id: pcf-shadow
-        if: ${{ inputs.run_pcf_shadow == true && steps.collection.outcome == 'success' }}
+        # Recovery runs consume only the approved PCF evidence in their plan.
+        # They must not start the independent daily v2/shadow collector.
+        if: ${{ inputs.run_pcf_shadow == true && inputs.recovery_id == '' && steps.collection.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         run: |
@@ -570,7 +777,10 @@ jobs:
 
       - name: Dispatch independent PCF v2 checkpoint workflow
         id: pcf_dispatch
-        if: ${{ success() && steps.collection.outputs.pending != 'true' && (steps.window.outputs.collection_window == 'evening' || steps.window.outputs.collection_window == 'morning') }}
+        # A bounded recovery never piggybacks a PCF v2 capture.  The recovery
+        # plan may consume an already verified PCF object, but it cannot
+        # silently expand scope by dispatching another workflow.
+        if: ${{ success() && inputs.recovery_id == '' && steps.collection.outputs.pending != 'true' && (steps.window.outputs.collection_window == 'evening' || steps.window.outputs.collection_window == 'morning') }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_ACTIONS_TOKEN || github.token }}
@@ -949,7 +1159,10 @@ jobs:
             --arg gateEnabled "$PIPELINE_WINDOW_GATE_ENABLED" \
             --arg recoveryId "$INPUT_RECOVERY_ID" \
             --arg recoveryAttemptCount "$INPUT_RECOVERY_ATTEMPT_COUNT" \
-            '{ref:$ref,inputs:{run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,contract_version:$contractVersion,source_run_id:$sourceRunId,artifact_name:$artifactName,gate_enabled:$gateEnabled,recovery_id:$recoveryId,recovery_attempt_count:$recoveryAttemptCount}}' \
+            --arg recoveryPlanSha256 "$INPUT_RECOVERY_PLAN_HASH" \
+            --arg recoveryDataDate "${{ steps.dates.outputs.latest }}" \
+            --arg recoveryStage "publish" \
+            '{ref:$ref,inputs:{run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,contract_version:$contractVersion,source_run_id:$sourceRunId,artifact_name:$artifactName,gate_enabled:$gateEnabled,recovery_id:$recoveryId,recovery_attempt_count:$recoveryAttemptCount,recovery_plan_sha256:$recoveryPlanSha256,recovery_data_date:$recoveryDataDate,recovery_stage:$recoveryStage}}' \
             > publish-dispatch-request.json
           STATUS_CODE="$(curl --silent --show-error \
             --header "Accept: application/vnd.github+json" \
