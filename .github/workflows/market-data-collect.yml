@@ -720,15 +720,21 @@ jobs:
             write_history_status "BLOCKED_QUALITY" "stock_flow_history_current_anchor_missing"
             exit 1
           fi
-          if ! python scripts/fetch_stock_flow_history_inputs.py \
+          FETCH_STATUS=0
+          python scripts/fetch_stock_flow_history_inputs.py \
               --base-url "https://flow.xiaoker.com" \
               --dates stock-flow-dates.txt \
               --as-of "$AS_OF" \
               --output-dir stock-flow-inputs \
               --report stock-flow-fetch-report.json \
               --inventory pcf-inventory.json \
-              --require-current; then
-            write_history_status "FAILED_RETRYABLE" "stock_flow_history_input_fetch_failed"
+              --require-current || FETCH_STATUS=$?
+          if (( FETCH_STATUS != 0 )); then
+            if (( FETCH_STATUS == 42 )); then
+              write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_mismatch"
+            else
+              write_history_status "FAILED_RETRYABLE" "stock_flow_history_input_fetch_failed"
+            fi
             exit 1
           fi
           if ! python scripts/build_stock_flow_history.py \
@@ -786,10 +792,13 @@ jobs:
         run: |
           test -s dashboard-snapshot.json
           jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null
-          if [[ -s stock-flow-catalog.json ]]; then
+          if [[ -s stock-flow-catalog.json || -s stock-flow-history.json || -s stock-flow-history-status.json ]]; then
             test -s stock-flow-history-status.json
-            jq -e '.status == "READY" or .status == "FAILED_RETRYABLE" or .status == "BLOCKED_QUALITY"' \
-              stock-flow-history-status.json >/dev/null
+            HISTORY_STATUS="$(jq -er '.status | select(. == "READY" or . == "FAILED_RETRYABLE" or . == "BLOCKED_QUALITY")' stock-flow-history-status.json)"
+            if [[ "$HISTORY_STATUS" == "READY" ]]; then
+              test -s stock-flow-catalog.json
+              test -s stock-flow-history.json
+            fi
           fi
 
       - name: Upload immutable collection source bundle
@@ -1126,13 +1135,14 @@ jobs:
           STATUS="COMPLETED"
           ERROR_CODE=""
           HISTORY_STATUS="$(jq -r '.status // "NOT_REQUIRED"' stock-flow-history-status.json 2>/dev/null || echo "NOT_REQUIRED")"
+          HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           if [[ "$HISTORY_STATUS" == "BLOCKED_QUALITY" ]]; then
             STATUS="BLOCKED_QUALITY"
-            ERROR_CODE="stock_flow_history_incomplete"
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
           elif [[ "$HISTORY_STATUS" == "FAILED_RETRYABLE" ]]; then
             STATUS="FAILED_RETRYABLE"
-            ERROR_CODE="stock_flow_history_fetch_failed"
-          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]]; then
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"
+          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]] || [[ ! -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="stock_flow_history_missing"
           elif [[ "${{ job.status }}" != "success" ]]; then

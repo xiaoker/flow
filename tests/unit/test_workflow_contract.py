@@ -492,6 +492,7 @@ def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocki
     # dashboard slot, but it must preserve a machine-readable failure state.
     assert "continue-on-error: true" in history_step
     assert 'write_history_status "FAILED_RETRYABLE" "stock_flow_history_input_fetch_failed"' in history_step
+    assert 'write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_mismatch"' in history_step
     assert 'write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_invalid"' in history_step
     assert 'write_history_status "READY"' in history_step
     assert "stock-flow-history-status.json" in collect
@@ -500,15 +501,17 @@ def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocki
     # Both the local rollback path and delegated publisher prefer the explicit
     # history state over the generic workflow result.
     assert collect_terminal.index('HISTORY_STATUS=') < collect_terminal.index('${{ job.status }}')
-    assert 'ERROR_CODE="stock_flow_history_incomplete"' in collect_terminal
-    assert 'ERROR_CODE="stock_flow_history_fetch_failed"' in collect_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"' in collect_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"' in collect_terminal
     assert "stock-flow-history-status.json" in publish
-    assert 'echo "penetration_status=BLOCKED_QUALITY"' in publish
+    assert 'echo "penetration_status=$HISTORY_STATUS"' in publish
     assert publish_terminal.index('PENETRATION_STATUS=') < publish_terminal.index('${{ job.status }}')
-    assert 'ERROR_CODE="stock_flow_history_incomplete"' in publish_terminal
-    assert 'ERROR_CODE="stock_flow_history_fetch_failed"' in publish_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"' in publish_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"' in publish_terminal
     assert 'if [[ "$STATUS" != "COMPLETED" ]]' in publish_terminal
     assert 'exit 1' in publish_terminal
+    assert 'if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]' in publish
+    assert 'HISTORY_STATUS="BLOCKED_QUALITY"' in publish
 
     # Core dashboard publication remains available while penetration is
     # blocked, preserving the intentional slot separation.

@@ -5,7 +5,7 @@ import hashlib
 
 import pytest
 
-from scripts.fetch_stock_flow_history_inputs import _fetch
+from scripts.fetch_stock_flow_history_inputs import LineageIntegrityError, _fetch
 
 
 class FakeResponse:
@@ -83,7 +83,7 @@ def test_fetch_verifies_both_supported_gzip_sha_scopes(declared_scope: str) -> N
 
 
 def test_fetch_rejects_declared_sha_that_matches_neither_object_nor_content() -> None:
-    with pytest.raises(RuntimeError, match="archived artifact sha256 mismatch"):
+    with pytest.raises(LineageIntegrityError, match="archived artifact sha256 mismatch"):
         _fetch(
             FakeSession(
                 FakeResponse(

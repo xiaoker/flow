@@ -13,12 +13,17 @@ import hashlib
 import io
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
+
+
+class LineageIntegrityError(RuntimeError):
+    """Raised when archived bytes disagree with their declared lineage."""
 
 
 def _fetch(
@@ -46,7 +51,7 @@ def _fetch(
             content_sha256 = hashlib.sha256(content).hexdigest()
             declared_sha256 = response.headers.get("x-flow-normalized-sha256", "").strip().lower()
             if declared_sha256 and declared_sha256 not in {wire_sha256, content_sha256}:
-                raise RuntimeError(
+                raise LineageIntegrityError(
                     "archived artifact sha256 mismatch: "
                     f"declared={declared_sha256}:wire={wire_sha256}:content={content_sha256}"
                 )
@@ -79,6 +84,12 @@ def _fetch(
                 "selection": response.headers.get("x-flow-normalized-selection", "single"),
                 "rows": len(frame),
             }
+        except LineageIntegrityError as exc:
+            last_detail = str(exc)
+            if attempt + 1 < attempts:
+                time.sleep(2**attempt)
+                continue
+            raise
         except Exception as exc:
             last_detail = str(exc)
             if attempt + 1 < attempts:
@@ -186,4 +197,18 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except LineageIntegrityError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "BLOCKED_QUALITY",
+                    "errorCode": "stock_flow_history_lineage_mismatch",
+                    "detail": str(exc),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(42) from exc

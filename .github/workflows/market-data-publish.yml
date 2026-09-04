@@ -198,19 +198,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "penetration_status=NOT_REQUIRED" >> "$GITHUB_OUTPUT"
           if ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
             echo "Source snapshot is pending; no read-model candidate will be built."
+            echo "penetration_status=NOT_REQUIRED" >> "$GITHUB_OUTPUT"
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           HISTORY_ARGS=()
           if [[ -s market-history.json ]]; then HISTORY_ARGS+=(--market-history market-history.json); fi
           if [[ -s previous-release.json ]]; then HISTORY_ARGS+=(--previous-manifest previous-release.json); fi
-          if [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
-            if [[ -s stock-flow-history-status.json ]]; then
-              jq -e '.status == "READY"' stock-flow-history-status.json >/dev/null
-            fi
+          HISTORY_STATUS="NOT_REQUIRED"
+          if [[ -s stock-flow-history-status.json ]]; then
+            HISTORY_STATUS="$(jq -er '.status | select(. == "READY" or . == "FAILED_RETRYABLE" or . == "BLOCKED_QUALITY")' stock-flow-history-status.json 2>/dev/null || echo "BLOCKED_QUALITY")"
+          elif [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+            # Keep a bounded compatibility path for a source artifact created
+            # immediately before the status-marker rollout.
+            HISTORY_STATUS="READY"
+          elif [[ -s stock-flow-catalog.json || -s stock-flow-history.json ]]; then
+            HISTORY_STATUS="BLOCKED_QUALITY"
+          fi
+          if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
             python scripts/build_stock_pressure_state.py \
               --catalog stock-flow-catalog.json \
               --output stock-pressure-catalog.json \
@@ -225,8 +232,10 @@ jobs:
             python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-dashboard --slot dashboard
             python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
             python scripts/report_read_model_sizes.py --read-model-dir read-models-full --output artifact-size-report.json
-            echo "penetration_status=READY" >> "$GITHUB_OUTPUT"
           else
+            if [[ "$HISTORY_STATUS" == "READY" ]]; then
+              HISTORY_STATUS="BLOCKED_QUALITY"
+            fi
             python scripts/build_read_models.py \
               --slot dashboard \
               --snapshot dashboard-snapshot.json \
@@ -235,13 +244,8 @@ jobs:
               --producer-build-sha "${GITHUB_SHA}" \
               "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
-            if [[ -s stock-flow-history-status.json ]]; then
-              HISTORY_STATUS="$(jq -r '.status // "BLOCKED_QUALITY"' stock-flow-history-status.json)"
-              echo "penetration_status=$HISTORY_STATUS" >> "$GITHUB_OUTPUT"
-            elif [[ -s stock-flow-catalog.json || -s stock-flow-history.json ]]; then
-              echo "penetration_status=BLOCKED_QUALITY" >> "$GITHUB_OUTPUT"
-            fi
           fi
+          echo "penetration_status=$HISTORY_STATUS" >> "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Check dashboard capability contract
@@ -351,13 +355,14 @@ jobs:
           STATUS="COMPLETED"
           ERROR_CODE=""
           PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
+          HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           if [[ "$PENETRATION_STATUS" == "BLOCKED_QUALITY" ]]; then
             STATUS="BLOCKED_QUALITY"
-            ERROR_CODE="stock_flow_history_incomplete"
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
           elif [[ "$PENETRATION_STATUS" == "FAILED_RETRYABLE" ]]; then
             STATUS="FAILED_RETRYABLE"
-            ERROR_CODE="stock_flow_history_fetch_failed"
-          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]]; then
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"
+          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]] || [[ ! -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="stock_flow_history_missing"
           elif [[ "${{ job.status }}" != "success" ]]; then
