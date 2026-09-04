@@ -15,6 +15,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const IDENTIFIER = /^[A-Za-z0-9:_./-]{1,220}$/;
+const RUN_ID = /^[A-Za-z0-9:+._/-]{1,220}$/;
 const RECEIPT_KEY = /^market-data\/recovery\/receipts\/[A-Za-z0-9._:-]{1,120}\/\d{4}-\d{2}-\d{2}\/[a-z_]{1,64}\/[0-9]{1,12}\.json$/;
 const MAX_RECEIPT_BYTES = 256 * 1024;
 const RECOVERY_STAGES = new Set([
@@ -90,6 +91,13 @@ function isRecord(value: unknown): value is RecordValue {
 
 function requiredString(value: unknown, code: string): string {
   if (typeof value !== "string" || value.length === 0 || !IDENTIFIER.test(value)) {
+    throw new PipelineWindowError(code, 422);
+  }
+  return value;
+}
+
+function requiredRunId(value: unknown, code: string): string {
+  if (typeof value !== "string" || value.length === 0 || !RUN_ID.test(value)) {
     throw new PipelineWindowError(code, 422);
   }
   return value;
@@ -214,7 +222,7 @@ export function validateRecoveryReceipt(
     inputObjects: inputObjects(value.inputObjects),
     versions: versions(value.versions),
     producerBuildSha: hash(value.producerBuildSha, "invalid_receipt_producer_build_sha"),
-    collectorRunId: requiredString(value.collectorRunId, "invalid_receipt_collector_run_id"),
+    collectorRunId: requiredRunId(value.collectorRunId, "invalid_receipt_collector_run_id"),
     publishRunId: value.publishRunId === null || value.publishRunId === undefined ? null : requiredString(value.publishRunId, "invalid_receipt_publish_run_id"),
     output: value.output === null || value.output === undefined ? null : output(value.output),
     qa: qa(value.qa),

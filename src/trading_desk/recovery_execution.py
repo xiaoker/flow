@@ -35,6 +35,7 @@ ISO_INSTANT_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3,6})?Z$"
 )
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9:_./-]{1,220}$")
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9:+._/-]{1,220}$")
 RECEIPT_KEY_RE = re.compile(
     r"^market-data/recovery/receipts/[A-Za-z0-9._:-]{1,120}/"
     r"\d{4}-\d{2}-\d{2}/[a-z_]{1,64}/[0-9]{1,12}\.json$"
@@ -806,7 +807,7 @@ def validate_recovery_receipt(
     inputs = _input_objects(payload.get("inputObjects", payload.get("input_objects")))
     versions = _versions(payload.get("versions"))
     producer_sha = _hash(payload.get("producerBuildSha", payload.get("producer_build_sha")), "producer_build_sha")
-    collector_run_id = _string(payload.get("collectorRunId", payload.get("collector_run_id")), "collector_run_id", pattern=IDENTIFIER_RE)
+    collector_run_id = _string(payload.get("collectorRunId", payload.get("collector_run_id")), "collector_run_id", pattern=RUN_ID_RE)
     publish_run_id = payload.get("publishRunId", payload.get("publish_run_id"))
     if publish_run_id is not None:
         publish_run_id = _string(publish_run_id, "publish_run_id", pattern=IDENTIFIER_RE)

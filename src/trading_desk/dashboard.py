@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 
 from .adapters import OfficialMarketAdapters
 from .etf_classification import CLASSIFICATION_VERSION, classify_etf
@@ -20,13 +21,18 @@ from .http import build_session
 from .storage import new_run_id
 
 
-def discover_recent_trading_dates(*, end_date: date, count: int = 3) -> list[str]:
+def discover_recent_trading_dates(
+    *,
+    end_date: date,
+    count: int = 3,
+    session: requests.Session | None = None,
+) -> list[str]:
     if count < 2:
         raise ValueError("count must be at least 2")
     start_date = end_date - timedelta(days=max(21, count * 5))
     with tempfile.TemporaryDirectory(prefix="flow-date-discovery-") as directory:
         adapter = OfficialMarketAdapters(
-            session=build_session(),
+            session=session or build_session(),
             data_root=Path(directory),
             run_id=new_run_id(),
         )

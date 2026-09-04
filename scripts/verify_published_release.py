@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -205,6 +206,7 @@ def verify_candidate(
         "slot": slot,
         "buildSha": expected_build_sha,
         "checkedArtifacts": len(artifacts),
+        "requests": len(artifacts),
     }
 
 
@@ -232,6 +234,11 @@ def main() -> None:
         action="store_true",
         help="Verify an explicit STAGED candidate via the admin artifact endpoint; never reads active routes",
     )
+    parser.add_argument(
+        "--metrics-output",
+        type=Path,
+        help="Optional measured Worker request counter",
+    )
     args = parser.parse_args()
     verifier = verify_candidate if args.candidate else verify
     if args.candidate:
@@ -253,9 +260,24 @@ def main() -> None:
             "timeout": args.timeout,
             "slot": args.slot,
         }
-    print(
-        json.dumps(verifier(**verifier_kwargs))
-    )
+    result = verifier(**verifier_kwargs)
+    if args.metrics_output:
+        args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        args.metrics_output.write_text(
+            json.dumps(
+                {
+                    "workerRequests": int(result.get("requests") or 0),
+                    "r2Bytes": 0,
+                    "r2ClassA": 0,
+                    "r2ClassB": 0,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ export type PipelineRecoveryClaim = {
   leaseExpiresAt: string | null;
   attemptCount: number;
   rowsWritten: number;
+  rowsRead: number;
   recovery: PipelineWindowRecoveryRow;
   row: PipelineWindowRow;
 };
@@ -148,6 +149,20 @@ function requireChanges(result: D1Result, errorCode = "pipeline_recovery_change_
 
 function rowsWritten(result: D1Result): number {
   return requireMetaInteger(result.meta?.rows_written, "pipeline_recovery_write_meta_invalid");
+}
+
+function rowsRead(result: D1Result): number {
+  // Local SQLite test doubles do not expose D1 physical-read metadata.  Keep
+  // that adapter compatible, while production D1 responses contribute their
+  // measured rows_read value to the recovery receipt.
+  if (result.meta?.rows_read === undefined) return 0;
+  return requireMetaInteger(result.meta.rows_read, "pipeline_recovery_read_meta_invalid");
+}
+
+function sumRowsRead(results: D1Result[]): number {
+  const total = results.reduce((sum, result) => sum + rowsRead(result), 0);
+  if (total > 10_000) throw new PipelineWindowError("pipeline_recovery_read_budget_exceeded", 503);
+  return total;
 }
 
 function sumRowsWritten(results: D1Result[]): number {
@@ -316,6 +331,7 @@ function leaseExpired(row: PipelineWindowRow, nowIso: string): boolean {
 type AtomicPairResult = {
   changes: [number, number];
   rowsWritten: number;
+  rowsRead: number;
 };
 
 /**
@@ -380,6 +396,7 @@ async function runAtomicPair(
     return {
       changes: [pipelineChanges, recoveryChanges],
       rowsWritten: sumRowsWritten(results),
+      rowsRead: sumRowsRead(results),
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -492,6 +509,7 @@ function makeClaimResult(
   row: PipelineWindowRow,
   decision: PipelineRecoveryClaimDecision,
   rows: number,
+  readRows = 0,
 ): PipelineRecoveryClaim {
   return {
     recoveryId: recovery.recovery_id,
@@ -503,6 +521,7 @@ function makeClaimResult(
     leaseExpiresAt: row.lease_expires_at,
     attemptCount: Number(row.attempt_count),
     rowsWritten: rows,
+    rowsRead: readRows,
     recovery,
     row,
   };
@@ -600,16 +619,17 @@ export async function claimPipelineWindowRecovery(
       ).bind(nowIso, recovery.recovery_id, nowIso, input.runKey, recovery.recovery_id, input.leaseOwner, nowIso),
     );
     const written = transaction?.rowsWritten ?? 0;
+    const read = transaction?.rowsRead ?? 0;
     if (transaction) {
       const nextRow = await readPipelineWindow(db, input.runKey);
       const nextRecovery = await getPipelineWindowRecovery(db, input.recoveryId);
       if (!nextRow || !nextRecovery) throw new PipelineWindowError("recovery_claim_not_found", 503);
-      return makeClaimResult(nextRecovery, nextRow, "takeover", written);
+      return makeClaimResult(nextRecovery, nextRow, "takeover", written, read);
     }
     const latestRow = await readPipelineWindow(db, input.runKey);
     const latestRecovery = await getPipelineWindowRecovery(db, input.recoveryId);
     if (!latestRow || !latestRecovery) throw new PipelineWindowError("recovery_claim_not_found", 503);
-    if (activeLease(latestRow, nowIso)) return makeClaimResult(latestRecovery, latestRow, "skip_leased", written);
+    if (activeLease(latestRow, nowIso)) return makeClaimResult(latestRecovery, latestRow, "skip_leased", written, read);
     throw new PipelineWindowError("recovery_claim_conflict", 409);
   }
 
@@ -693,19 +713,20 @@ export async function claimPipelineWindowRecovery(
     ),
   );
   const written = transaction?.rowsWritten ?? 0;
+  const read = transaction?.rowsRead ?? 0;
   if (transaction) {
     const nextRow = await readPipelineWindow(db, input.runKey);
     const nextRecovery = await getPipelineWindowRecovery(db, input.recoveryId);
     if (!nextRow || !nextRecovery) throw new PipelineWindowError("recovery_claim_not_found", 503);
-    return makeClaimResult(nextRecovery, nextRow, "acquired", written);
+    return makeClaimResult(nextRecovery, nextRow, "acquired", written, read);
   }
 
   const latestRow = await readPipelineWindow(db, input.runKey);
   const latestRecovery = await getPipelineWindowRecovery(db, input.recoveryId);
   if (!latestRow || !latestRecovery) throw new PipelineWindowError("recovery_claim_not_found", 503);
-  if (latestRecovery.status === "COMPLETED") return makeClaimResult(latestRecovery, latestRow, "already_satisfied", written);
-  if (activeLease(latestRow, nowIso)) return makeClaimResult(latestRecovery, latestRow, "skip_leased", written);
-  if (latestRow.status === "BLOCKED_QUALITY") return makeClaimResult(latestRecovery, latestRow, "skip_blocked", written);
+  if (latestRecovery.status === "COMPLETED") return makeClaimResult(latestRecovery, latestRow, "already_satisfied", written, read);
+  if (activeLease(latestRow, nowIso)) return makeClaimResult(latestRecovery, latestRow, "skip_leased", written, read);
+  if (latestRow.status === "BLOCKED_QUALITY") return makeClaimResult(latestRecovery, latestRow, "skip_blocked", written, read);
   throw new PipelineWindowError("recovery_claim_conflict", 409);
 }
 
@@ -720,6 +741,8 @@ export type PipelineRecoveryMarkInput = {
   githubRunId?: string | null;
   latestReceiptKey?: string | null;
   latestReceiptSha256?: string | null;
+  /** Extend the active lease when a long-running runner is still healthy. */
+  renewLease?: boolean;
 };
 
 function recoveryStatusForPipeline(status: PipelineRecoveryMarkInput["status"]): PipelineRecoveryStatus {
@@ -734,7 +757,7 @@ export async function markPipelineWindowRecovery(
   db: D1Like,
   input: PipelineRecoveryMarkInput,
   now = new Date(),
-): Promise<{ recovery: PipelineWindowRecoveryRow; row: PipelineWindowRow; rowsWritten: number }> {
+): Promise<{ recovery: PipelineWindowRecoveryRow; row: PipelineWindowRow; rowsWritten: number; rowsRead: number }> {
   validateClaim({ recoveryId: input.recoveryId, runKey: input.runKey, leaseOwner: input.leaseOwner, sourceFingerprint: input.sourceFingerprint, githubRunId: input.githubRunId });
   requireSafeNonNegativeInteger(input.expectedAttemptCount, "invalid_expected_attempt_count");
   if (input.errorCode !== undefined && input.errorCode !== null && !ERROR_CODE.test(input.errorCode)) {
@@ -743,6 +766,12 @@ export async function markPipelineWindowRecovery(
   if (input.latestReceiptSha256 !== undefined && input.latestReceiptSha256 !== null && !SHA256.test(input.latestReceiptSha256)) {
     throw new PipelineWindowError("invalid_receipt_sha256", 422);
   }
+  if (input.renewLease !== undefined && typeof input.renewLease !== "boolean") {
+    throw new PipelineWindowError("invalid_renew_lease", 422);
+  }
+  if (input.renewLease === true && input.status !== "RUNNING") {
+    throw new PipelineWindowError("invalid_renew_lease", 422);
+  }
   const nowIso = now.toISOString();
   const recovery = await getPipelineWindowRecovery(db, input.recoveryId);
   if (!recovery) throw new PipelineWindowError("recovery_not_found", 404);
@@ -750,7 +779,7 @@ export async function markPipelineWindowRecovery(
   const row = await readPipelineWindow(db, input.runKey);
   if (!row) throw new PipelineWindowError("pipeline_window_not_found", 404);
   if (recovery.status === "COMPLETED" && row.status === "COMPLETED") {
-    return { recovery, row, rowsWritten: 0 };
+    return { recovery, row, rowsWritten: 0, rowsRead: 0 };
   }
   if (row.recovery_id !== input.recoveryId || row.lease_owner !== input.leaseOwner || Number(row.attempt_count) !== input.expectedAttemptCount) {
     throw new PipelineWindowError("recovery_status_conflict", 409);
@@ -761,6 +790,8 @@ export async function markPipelineWindowRecovery(
   const terminal = input.status === "COMPLETED" || input.status === "BLOCKED_QUALITY" || input.status === "FAILED_RETRYABLE";
   const nextRecoveryStatus = recoveryStatusForPipeline(input.status);
   const completed = input.status === "COMPLETED" ? nowIso : null;
+  const renewLease = input.status === "RUNNING" && input.renewLease === true;
+  const renewedLeaseExpiresAt = new Date(now.getTime() + PIPELINE_RECOVERY_LEASE_MS).toISOString();
   const transaction = await runAtomicPair(
     db,
     input.runKey,
@@ -771,7 +802,11 @@ export async function markPipelineWindowRecovery(
               source_fingerprint = COALESCE(NULLIF(?, ''), source_fingerprint),
               github_run_id = COALESCE(NULLIF(?, ''), github_run_id),
               lease_owner = CASE WHEN ? = 1 THEN NULL ELSE lease_owner END,
-              lease_expires_at = CASE WHEN ? = 1 THEN NULL ELSE lease_expires_at END,
+              lease_expires_at = CASE
+                WHEN ? = 1 THEN NULL
+                WHEN ? = 1 THEN ?
+                ELSE lease_expires_at
+              END,
               completed_at = CASE WHEN ? = 1 THEN ? ELSE completed_at END,
               updated_at = ?
         WHERE run_key = ? AND recovery_id = ? AND lease_owner = ?
@@ -784,6 +819,8 @@ export async function markPipelineWindowRecovery(
       input.githubRunId ?? null,
       terminal ? 1 : 0,
       terminal ? 1 : 0,
+      renewLease ? 1 : 0,
+      renewedLeaseExpiresAt,
       input.status === "COMPLETED" ? 1 : 0,
       completed,
       nowIso,
@@ -822,9 +859,10 @@ export async function markPipelineWindowRecovery(
     ),
   );
   const written = transaction?.rowsWritten ?? 0;
+  const read = transaction?.rowsRead ?? 0;
   if (!transaction) throw new PipelineWindowError("recovery_status_conflict", 409);
   const nextRow = await readPipelineWindow(db, input.runKey);
   const nextRecovery = await getPipelineWindowRecovery(db, input.recoveryId);
   if (!nextRow || !nextRecovery) throw new PipelineWindowError("recovery_status_not_found", 503);
-  return { recovery: nextRecovery, row: nextRow, rowsWritten: written };
+  return { recovery: nextRecovery, row: nextRow, rowsWritten: written, rowsRead: read };
 }

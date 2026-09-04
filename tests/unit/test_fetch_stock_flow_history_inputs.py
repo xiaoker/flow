@@ -5,7 +5,12 @@ import hashlib
 
 import pytest
 
-from scripts.fetch_stock_flow_history_inputs import LineageIntegrityError, _fetch
+from scripts.fetch_stock_flow_history_inputs import (
+    LineageIntegrityError,
+    OfficialSourceUnavailableError,
+    RequestBudget,
+    _fetch,
+)
 
 
 class FakeResponse:
@@ -99,4 +104,36 @@ def test_fetch_rejects_declared_sha_that_matches_neither_object_nor_content() ->
             params={"date": "2026-08-31"},
             headers={},
             attempts=1,
+        )
+
+
+def test_request_budget_exhaustion_is_not_retried() -> None:
+    budget = RequestBudget(1)
+    budget.consume()
+    with pytest.raises(RuntimeError, match="recovery_request_budget_exceeded"):
+        _fetch(
+            FakeSession(
+                FakeResponse(
+                    _csv(),
+                    headers={"content-type": "text/csv; charset=utf-8"},
+                )
+            ),
+            url="https://example.test/history-artifact",
+            params={"date": "2026-08-31"},
+            headers={},
+            attempts=3,
+            budget=budget,
+        )
+
+
+@pytest.mark.parametrize("status_code", [403, 429])
+def test_source_rejection_fails_closed_without_retry(status_code: int) -> None:
+    response = FakeResponse(b"blocked", headers={}, status_code=status_code)
+    with pytest.raises(OfficialSourceUnavailableError, match=f"HTTP {status_code}"):
+        _fetch(
+            FakeSession(response),
+            url="https://example.test/history-artifact",
+            params={"date": "2026-08-31"},
+            headers={},
+            attempts=3,
         )

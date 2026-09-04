@@ -79,6 +79,13 @@ function optionalString(body: Record<string, unknown>, key: string): string | nu
   return value;
 }
 
+function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") throw new PipelineWindowError(`invalid_${key}`, 422);
+  return value;
+}
+
 function requiredInteger(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
@@ -101,6 +108,7 @@ export async function POST(request: Request): Promise<Response> {
     const expectedAttemptCount = requiredInteger(body, "expectedAttemptCount");
     const latestReceiptKey = optionalString(body, "latestReceiptKey");
     const latestReceiptSha256 = optionalString(body, "latestReceiptSha256");
+    const renewLease = optionalBoolean(body, "renewLease");
     if (status === "COMPLETED" && (!latestReceiptKey || !latestReceiptSha256)) {
       throw new PipelineWindowError("completion_receipt_required", 422);
     }
@@ -129,6 +137,7 @@ export async function POST(request: Request): Promise<Response> {
       githubRunId: optionalString(body, "githubRunId"),
       latestReceiptKey,
       latestReceiptSha256,
+      renewLease,
     });
     return response({
       recoveryId: result.recovery.recovery_id,
@@ -139,6 +148,7 @@ export async function POST(request: Request): Promise<Response> {
       leaseExpiresAt: result.row.lease_expires_at,
       attemptCount: result.row.attempt_count,
       rowsWritten: result.rowsWritten,
+      rowsRead: result.rowsRead,
     });
   } catch (error: unknown) {
     if (error instanceof PipelineWindowError) return response({ error: error.message }, error.status);

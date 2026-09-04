@@ -266,6 +266,70 @@ test("completed recovery claims are idempotent and a valid lease cannot be stole
   }
 });
 
+test("running recovery can renew its lease without changing the attempt", async () => {
+  const db = await createDatabase();
+  try {
+    const setup = await registerCompleted(db);
+    await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner01"),
+      new Date("2026-09-03T03:00:00.000Z"),
+    );
+    const renewed = await markPipelineWindowRecovery(
+      db,
+      {
+        recoveryId: setup.registration.recovery.recovery_id,
+        runKey: setup.runKey,
+        leaseOwner: "recovery:owner01",
+        expectedAttemptCount: 2,
+        status: "RUNNING",
+        renewLease: true,
+      },
+      new Date("2026-09-03T03:05:00.000Z"),
+    );
+    assert.equal(renewed.row.status, "RUNNING");
+    assert.equal(renewed.row.attempt_count, 2);
+    assert.equal(renewed.row.lease_expires_at, "2026-09-03T03:20:00.000Z");
+    const lateOwner = await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner02"),
+      new Date("2026-09-03T03:16:00.000Z"),
+    );
+    assert.equal(lateOwner.decision, "skip_leased");
+  } finally {
+    db.close();
+  }
+});
+
+test("renewLease is rejected for terminal recovery status", async () => {
+  const db = await createDatabase();
+  try {
+    const setup = await registerCompleted(db);
+    await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner01"),
+      new Date("2026-09-03T03:00:00.000Z"),
+    );
+    await assert.rejects(
+      markPipelineWindowRecovery(
+        db,
+        {
+          recoveryId: setup.registration.recovery.recovery_id,
+          runKey: setup.runKey,
+          leaseOwner: "recovery:owner01",
+          expectedAttemptCount: 2,
+          status: "FAILED_RETRYABLE",
+          renewLease: true,
+        },
+        new Date("2026-09-03T03:05:00.000Z"),
+      ),
+      /invalid_renew_lease/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test("expired recovery lease can be taken over and late callbacks are rejected", async () => {
   const db = await createDatabase();
   try {

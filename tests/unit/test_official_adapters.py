@@ -264,6 +264,30 @@ def test_sse_etf_nav_aligns_exact_publication_to_share_date(
     assert "sse_etf_nav" in str(artifact.normalized_path)
 
 
+@pytest.mark.parametrize(
+    "code",
+    ["live_recovery_request_budget_exceeded", "live_recovery_source_unavailable"],
+)
+def test_live_recovery_stop_errors_escape_pcf_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    adapters: OfficialMarketAdapters,
+    code: str,
+) -> None:
+    class LiveRecoveryStop(RuntimeError):
+        pass
+
+    error = LiveRecoveryStop(code)
+    error.code = code  # type: ignore[attr-defined]
+
+    def raise_stop(*_args: object, **_kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr(official, "get", raise_stop)
+
+    with pytest.raises(LiveRecoveryStop):
+        adapters.fetch_sse_etf_pcf(["588000"], "2026-07-15")
+
+
 def test_sse_etf_nav_aligns_next_publication_to_latest_share_date(
     monkeypatch: pytest.MonkeyPatch, adapters: OfficialMarketAdapters
 ) -> None:

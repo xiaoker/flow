@@ -99,7 +99,9 @@ def test_dispatchers_accept_github_200_and_204_and_fail_closed_on_incomplete_art
     watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
     legacy = LEGACY_WORKFLOW.read_text(encoding="utf-8")
 
-    assert collect.count('[[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]') == 2
+    # The recovery publish dispatch adds a third GitHub 200/204 guard while
+    # preserving the ordinary PCF and publish dispatch guards.
+    assert collect.count('[[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]') >= 3
     assert '[[ "$DISPATCH_CODE" != "200" && "$DISPATCH_CODE" != "204" ]]' in watchdog
     assert '[[ "$STATUS_CODE" != "200" && "$STATUS_CODE" != "204" ]]' in legacy
     assert collect.count("workflow_run_id") >= 2
@@ -515,6 +517,7 @@ def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> No
 def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocking_dashboard() -> None:
     collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    live_runner = (REPOSITORY_ROOT / "scripts/run_live_recovery.py").read_text(encoding="utf-8")
     history_step = collect.split(
         "Build ETF-to-stock daily partitions from archived R2 inputs",
         maxsplit=1,
@@ -599,6 +602,7 @@ def test_stock_flow_inventory_is_metadata_only_and_does_not_publish() -> None:
 def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_collector() -> None:
     collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    live_runner = (REPOSITORY_ROOT / "scripts/run_live_recovery.py").read_text(encoding="utf-8")
     receipt_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/receipt/route.ts").read_text(encoding="utf-8")
     plan_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/plan/route.ts").read_text(encoding="utf-8")
     receipt_helper = (REPOSITORY_ROOT / "web/app/lib/recovery-receipt.ts").read_text(encoding="utf-8")
@@ -607,9 +611,13 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     assert "recovery_data_date" in publish
     assert "recovery_stage" in publish
     assert "recovery_execution_contract:" in collect
-    assert "scripts/execute_recovery_plan.py" in collect
+    assert "scripts/run_live_recovery.py" in collect
+    assert "scripts/recovery_lease_renew.py" in collect
     assert "--expected-plan-hash" in collect
-    assert "R2 contract-only recovery stopped before any source request or publication." in collect
+    assert "live_recovery_multi_date_requires_date_major_dispatch" in live_runner
+    assert "live_recovery_request_budget_exceeded" in live_runner
+    assert "post_child_request_reserve" in live_runner
+    assert "--inventory" in live_runner
     assert "needs.pipeline_window_gate.outputs.recovery_id == ''" in collect
     assert "needs.pipeline_window_gate.outputs.recovery_id != ''" in collect
     assert "dataDates | type == \"array\" and length >= 1 and length <= 3" in collect
@@ -629,6 +637,8 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     assert "receipt_output_date_mismatch" in receipt_helper
     assert "receipt_scope_binding_mismatch" in receipt_helper
     assert "parsePipelineRunKey" in receipt_helper
+    assert "recovery-resource-metrics.json" in publish
+    assert "recovery_completion_receipt_missing" in publish
     # A recovery plan can only write under its dedicated root; these paths are
     # explicitly rejected by the Python contract and by the workflow guard.
     assert "reports/phase0" in collect
