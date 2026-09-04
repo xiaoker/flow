@@ -32,6 +32,21 @@ on:
         required: false
         default: ""
         type: string
+      recovery_plan_sha256:
+        description: "Expected immutable recovery plan hash"
+        required: false
+        default: ""
+        type: string
+      recovery_data_date:
+        description: "One approved recovery data date; recovery is date-major"
+        required: false
+        default: ""
+        type: string
+      recovery_stage:
+        description: "One approved recovery stage"
+        required: false
+        default: "publish"
+        type: string
       contract_version:
         description: "Pipeline run-key contract version"
         required: false
@@ -72,6 +87,9 @@ jobs:
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
       INPUT_RECOVERY_ATTEMPT_COUNT: ${{ inputs.recovery_attempt_count || '' }}
+      INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
+      INPUT_RECOVERY_DATA_DATE: ${{ inputs.recovery_data_date || '' }}
+      INPUT_RECOVERY_STAGE: ${{ inputs.recovery_stage || 'publish' }}
       INPUT_LEASE_OWNER: ${{ inputs.lease_owner }}
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -122,6 +140,18 @@ jobs:
               echo "Recovery publish input is missing a valid attempt generation; refusing to publish." >&2
               exit 1
             fi
+            if [[ -z "$INPUT_RECOVERY_PLAN_SHA256" || ! "$INPUT_RECOVERY_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "recovery_plan_sha256 must be a lowercase SHA-256 digest." >&2
+              exit 1
+            fi
+            if [[ ! "$INPUT_RECOVERY_DATA_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+              echo "Recovery publish requires one explicit YYYY-MM-DD recovery_data_date." >&2
+              exit 1
+            fi
+            if [[ ! "$INPUT_RECOVERY_STAGE" =~ ^[a-z_]{1,64}$ ]]; then
+              echo "Recovery publish stage is invalid." >&2
+              exit 1
+            fi
             if [[ "$(jq -r '.pipeline.attemptCount // empty' pipeline-recovery-status.json)" != "$INPUT_RECOVERY_ATTEMPT_COUNT" ]]; then
               echo "Recovery attempt generation mismatch; refusing to publish." >&2
               exit 1
@@ -136,6 +166,25 @@ jobs:
               echo "Recovery publish lease has expired; refusing to build or activate." >&2
               exit 1
             fi
+            PLAN_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+              --output recovery-plan.json \
+              --write-out '%{http_code}' \
+              "$FLOW_PIPELINE_WINDOW_URL/recovery/plan?recoveryId=$ENCODED_RECOVERY_ID")"
+            if [[ "$PLAN_CODE" != "200" ]]; then
+              echo "Approved recovery plan could not be verified (HTTP $PLAN_CODE); refusing to publish." >&2
+              jq . recovery-plan.json >&2 || true
+              exit 1
+            fi
+            jq -e --arg recoveryId "$RECOVERY_ID" --arg runKey "$RUN_KEY" \
+              --arg dataDate "$INPUT_RECOVERY_DATA_DATE" --arg stage "$INPUT_RECOVERY_STAGE" \
+              --arg expectedHash "$INPUT_RECOVERY_PLAN_SHA256" '
+              (.recoveryId == $recoveryId) and
+              (.planSha256 == .plan.planHash) and
+              (.plan.runKey == $runKey) and
+              ($expectedHash == "" or .plan.planHash == $expectedHash) and
+              (.plan.dataDates | index($dataDate) != null) and
+              (.plan.requiredStages | index($stage) != null)
+            ' recovery-plan.json >/dev/null
             echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "Approved recovery publish lease is valid."
@@ -209,10 +258,50 @@ jobs:
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
       INPUT_RECOVERY_ATTEMPT_COUNT: ${{ inputs.recovery_attempt_count || '' }}
+      INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
+      INPUT_RECOVERY_DATA_DATE: ${{ inputs.recovery_data_date || '' }}
+      INPUT_RECOVERY_STAGE: ${{ inputs.recovery_stage || 'publish' }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Checkout producer
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Materialize approved recovery execution contract
+        if: ${{ inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH_ARGS=(
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+          )
+          RECOVERY_ID="$INPUT_RECOVERY_ID"
+          PLAN_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+            --output recovery-plan.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/recovery/plan?recoveryId=$(jq -rn --arg value "$RECOVERY_ID" '$value|@uri')")"
+          if [[ "$PLAN_CODE" != "200" ]]; then
+            echo "Approved recovery plan could not be read (HTTP $PLAN_CODE)." >&2
+            jq . recovery-plan.json >&2 || true
+            exit 1
+          fi
+          if [[ -z "$INPUT_RECOVERY_PLAN_SHA256" || ! "$INPUT_RECOVERY_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Recovery publish requires a lowercase recovery_plan_sha256." >&2
+            exit 1
+          fi
+          jq -e --arg recoveryId "$RECOVERY_ID" --arg runKey "$INPUT_RUN_KEY" \
+            --arg dataDate "$INPUT_RECOVERY_DATA_DATE" --arg stage "$INPUT_RECOVERY_STAGE" \
+            --arg expectedHash "$INPUT_RECOVERY_PLAN_SHA256" '
+            (.recoveryId == $recoveryId) and
+            (.planSha256 == .plan.planHash) and
+            (.plan.runKey == $runKey) and
+            ($expectedHash == "" or .plan.planHash == $expectedHash) and
+            (.plan.dataDates | index($dataDate) != null) and
+            (.plan.requiredStages | index($stage) != null)
+          ' recovery-plan.json >/dev/null
+          cp recovery-plan.json recovery-execution.json
+          echo "Recovery publish scope is fixed to one approved date/stage."
 
       - name: Download immutable collection source bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -227,11 +316,19 @@ jobs:
         run: |
           set -euo pipefail
           test -s .collection-source/dashboard-snapshot.json
-          jq -e --arg targetDate "$INPUT_TARGET_DATE" '
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            jq -e --arg targetDate "$INPUT_RECOVERY_DATA_DATE" '
+              (.asOf | type == "string") and
+              (.asOf == $targetDate) and
+              (.publication.status == "confirmed")
+            ' .collection-source/dashboard-snapshot.json >/dev/null
+          else
+            jq -e --arg targetDate "$INPUT_TARGET_DATE" '
             (.asOf | type == "string") and
             (.publication.status == "confirmed" or .publication.status == "pending") and
             (.asOf <= $targetDate or $targetDate == "")
-          ' .collection-source/dashboard-snapshot.json >/dev/null
+            ' .collection-source/dashboard-snapshot.json >/dev/null
+          fi
           if [[ -s .collection-source/market-history.json ]]; then
             jq -e '(.rows | type == "array") and all(.rows[]?; .trade_date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
               .collection-source/market-history.json >/dev/null

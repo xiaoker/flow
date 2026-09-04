@@ -3,7 +3,9 @@ import {
   markPipelineWindowRecovery,
   PipelineWindowError,
   type PipelineRecoveryMarkInput,
+  getPipelineWindowRecovery,
 } from "@/app/lib/pipeline-window-recovery";
+import { verifyRecoveryReceipt } from "@/app/lib/recovery-receipt";
 
 export const dynamic = "force-dynamic";
 
@@ -94,17 +96,39 @@ export async function POST(request: Request): Promise<Response> {
     const body = await readBody(request);
     const status = requiredString(body, "status") as PipelineRecoveryMarkInput["status"];
     if (!ALLOWED_STATUSES.includes(status)) throw new PipelineWindowError("invalid_status", 422);
+    const recoveryId = requiredString(body, "recoveryId");
+    const runKey = requiredString(body, "runKey");
+    const expectedAttemptCount = requiredInteger(body, "expectedAttemptCount");
+    const latestReceiptKey = optionalString(body, "latestReceiptKey");
+    const latestReceiptSha256 = optionalString(body, "latestReceiptSha256");
+    if (status === "COMPLETED" && (!latestReceiptKey || !latestReceiptSha256)) {
+      throw new PipelineWindowError("completion_receipt_required", 422);
+    }
+    if ((latestReceiptKey && !latestReceiptSha256) || (!latestReceiptKey && latestReceiptSha256)) {
+      throw new PipelineWindowError("completion_receipt_pair_required", 422);
+    }
+    if (latestReceiptKey && latestReceiptSha256) {
+      if (!runtime.RAW_BUCKET) throw new PipelineWindowError("receipt_storage_unavailable", 503);
+      const recovery = await getPipelineWindowRecovery(runtime.DB, recoveryId);
+      if (!recovery) throw new PipelineWindowError("recovery_not_found", 404);
+      await verifyRecoveryReceipt(runtime.RAW_BUCKET, latestReceiptKey, latestReceiptSha256, {
+        recoveryId,
+        runKey,
+        planSha256: recovery.plan_sha256,
+        attemptCount: expectedAttemptCount,
+      });
+    }
     const result = await markPipelineWindowRecovery(runtime.DB, {
-      recoveryId: requiredString(body, "recoveryId"),
-      runKey: requiredString(body, "runKey"),
+      recoveryId,
+      runKey,
       leaseOwner: requiredString(body, "leaseOwner"),
-      expectedAttemptCount: requiredInteger(body, "expectedAttemptCount"),
+      expectedAttemptCount,
       status,
       errorCode: optionalString(body, "errorCode"),
       sourceFingerprint: optionalString(body, "sourceFingerprint"),
       githubRunId: optionalString(body, "githubRunId"),
-      latestReceiptKey: optionalString(body, "latestReceiptKey"),
-      latestReceiptSha256: optionalString(body, "latestReceiptSha256"),
+      latestReceiptKey,
+      latestReceiptSha256,
     });
     return response({
       recoveryId: result.recovery.recovery_id,
