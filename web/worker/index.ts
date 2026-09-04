@@ -18,6 +18,8 @@ interface Env {
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
   PIPELINE_WINDOW_GATE_ENABLED?: string;
+  /** Recovery control-plane gate; intentionally unset/disabled in production during R1. */
+  PIPELINE_RECOVERY_ENABLED?: string;
   PIPELINE_WINDOW_CONTRACT_VERSION?: string;
   HISTORY_IMPORT_ARCHIVE_ONLY?: string;
   PCF_CAPTURE_V2_READ_ENABLED?: string;

@@ -206,7 +206,12 @@ def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
     claim_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/claim/route.ts").read_text(encoding="utf-8")
     status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/status/route.ts").read_text(encoding="utf-8")
+    recovery_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/route.ts").read_text(encoding="utf-8")
+    recovery_claim_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/claim/route.ts").read_text(encoding="utf-8")
+    recovery_status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/status/route.ts").read_text(encoding="utf-8")
     migration = (REPOSITORY_ROOT / "web/drizzle/0010_fair_jasper_sitwell.sql").read_text(encoding="utf-8")
+    recovery_migration = (REPOSITORY_ROOT / "web/drizzle/0011_futuristic_namora.sql").read_text(encoding="utf-8")
+    recovery_index_migration = (REPOSITORY_ROOT / "web/drizzle/0012_boring_tyger_tiger.sql").read_text(encoding="utf-8")
     pipeline_window = (REPOSITORY_ROOT / "web/app/lib/pipeline-window.ts").read_text(encoding="utf-8")
 
     assert "pipeline_window_gate:" in workflow
@@ -246,10 +251,39 @@ def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     assert "CREATE INDEX `pipeline_window_status_lease_idx`" in migration
     assert "ALTER TABLE" not in migration
     assert "ON CONFLICT(run_key) DO UPDATE" in pipeline_window
-    assert "WHERE pipeline_window.status" in pipeline_window
+    assert "WHERE pipeline_window.recovery_id IS NULL" in pipeline_window
+    assert "pipeline_window.status NOT IN" in pipeline_window
     assert "SELECT-then-UPDATE" in pipeline_window
     assert "pipeline_window_not_found" in status_route
     assert "secureEqual" in claim_route
+
+    # R1 recovery is opt-in and must gate before any heavyweight runner setup.
+    assert "recovery_id:" in workflow
+    assert "PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}" in workflow
+    assert "/recovery/claim" in workflow
+    assert "/recovery/status" in workflow
+    assert workflow.index("/recovery/claim") < workflow.index("setup-python")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert "recovery_id:" in publish
+    assert "PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}" in publish
+    assert "/recovery?recoveryId=" in publish
+    assert publish.index("/recovery?recoveryId=") < publish.index("Checkout producer")
+    assert "missing a valid attempt generation" in publish
+    assert "Recovery claim response identity or attempt generation is invalid" in workflow
+    assert "pipeline_window_recovery" in recovery_migration
+    assert "ALTER TABLE `pipeline_window` ADD `recovery_id`" in recovery_migration
+    assert "pipeline_window_recovery_active_run_uq" in recovery_index_migration
+    assert "WHERE status IN ('ACTIVE', 'PAUSED')" in recovery_index_migration
+    assert "DROP" not in recovery_migration.upper()
+    assert "DELETE" not in recovery_migration.upper()
+    assert "TRUNCATE" not in recovery_migration.upper()
+    assert "DROP" not in recovery_index_migration.upper()
+    assert "DELETE" not in recovery_index_migration.upper()
+    assert "TRUNCATE" not in recovery_index_migration.upper()
+    assert "secureEqual" in recovery_route
+    assert "secureEqual" in recovery_claim_route
+    assert "secureEqual" in recovery_status_route
+    assert "PIPELINE_RECOVERY_ENABLED" not in wrangler
 
 
 def test_pcf_capture_control_plane_is_additive_and_worker_upload_is_streaming() -> None:
