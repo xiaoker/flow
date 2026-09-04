@@ -266,6 +266,18 @@ jobs:
       - name: Checkout producer
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
 
+      - name: Record publish start and producer identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          date +%s > publish-start-epoch.txt
+          PRODUCER_BUILD_SHA="$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
+          if [[ ! "$PRODUCER_BUILD_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Could not derive a canonical producer build digest." >&2
+            exit 1
+          fi
+          echo "PRODUCER_BUILD_SHA=$PRODUCER_BUILD_SHA" >> "$GITHUB_ENV"
+
       - name: Materialize approved recovery execution contract
         if: ${{ inputs.recovery_id != '' }}
         shell: bash
@@ -303,6 +315,31 @@ jobs:
           cp recovery-plan.json recovery-execution.json
           echo "Recovery publish scope is fixed to one approved date/stage."
 
+      - name: Mark recovery publish running and renew lease
+        if: ${{ inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg recoveryId "$INPUT_RECOVERY_ID" \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg leaseOwner "$INPUT_LEASE_OWNER" \
+            --arg expectedAttemptCount "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+            --arg githubRunId "${{ github.run_id }}" \
+            '{recoveryId:$recoveryId,runKey:$runKey,leaseOwner:$leaseOwner,expectedAttemptCount:($expectedAttemptCount|tonumber),githubRunId:$githubRunId,status:"RUNNING",renewLease:true}' \
+            > pipeline-recovery-publish-running.json
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header 'Content-Type: application/json' \
+            --data-binary @pipeline-recovery-publish-running.json \
+            "$FLOW_PIPELINE_WINDOW_URL/recovery/status" \
+            --output pipeline-recovery-publish-running-response.json
+          jq -e --arg attempt "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+            '.status == "RUNNING" and (.attemptCount|tostring) == $attempt and (.leaseExpiresAt|type == "string")' \
+            pipeline-recovery-publish-running-response.json >/dev/null
+
       - name: Download immutable collection source bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -310,6 +347,32 @@ jobs:
           path: .collection-source
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run_id }}
+
+      - name: Normalize source artifact layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=".collection-source"
+          SNAPSHOT="$ROOT/dashboard-snapshot.json"
+          if [[ ! -s "$SNAPSHOT" ]]; then
+            mapfile -t SNAPSHOTS < <(find "$ROOT" -type f -path '*/source-bundle/dashboard-snapshot.json' -print)
+            if [[ "${#SNAPSHOTS[@]}" -ne 1 ]]; then
+              echo "Expected exactly one nested recovery source snapshot; found ${#SNAPSHOTS[@]}." >&2
+              exit 1
+            fi
+            SOURCE_ROOT="$(dirname "${SNAPSHOTS[0]}")"
+            cp "${SNAPSHOTS[0]}" "$SNAPSHOT"
+            for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json stock-flow-fetch-report.json pcf-inventory.json market-history.json previous-release.json recovery-evidence.json; do
+              if [[ -s "$SOURCE_ROOT/$file" ]]; then cp "$SOURCE_ROOT/$file" "$ROOT/$file"; fi
+            done
+            if [[ -d "$SOURCE_ROOT/stock-flow-partitions" ]]; then
+              cp -R "$SOURCE_ROOT/stock-flow-partitions" "$ROOT/stock-flow-partitions"
+            fi
+          fi
+          if [[ ! -s "$ROOT/recovery-evidence.json" ]]; then
+            mapfile -t EVIDENCE < <(find "$ROOT" -type f -name recovery-evidence.json -print)
+            if [[ "${#EVIDENCE[@]}" -eq 1 ]]; then cp "${EVIDENCE[0]}" "$ROOT/recovery-evidence.json"; fi
+          fi
 
       - name: Verify source artifact identity
         shell: bash
@@ -395,7 +458,7 @@ jobs:
               --output-dir read-models-full \
               --stock-catalog stock-pressure-catalog.json \
               --require-materialized \
-              --producer-build-sha "${GITHUB_SHA}" \
+              --producer-build-sha "${PRODUCER_BUILD_SHA}" \
               "${HISTORY_ARGS[@]}"
             python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-dashboard --slot dashboard
             python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
@@ -409,7 +472,7 @@ jobs:
               --snapshot dashboard-snapshot.json \
               --output-dir read-models-dashboard \
               --require-materialized \
-              --producer-build-sha "${GITHUB_SHA}" \
+              --producer-build-sha "${PRODUCER_BUILD_SHA}" \
               "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
           fi
@@ -431,7 +494,8 @@ jobs:
             --read-model-dir read-models-dashboard \
             --slot dashboard \
             --stage-only \
-            --result-output dashboard-read-model-publish.json
+            --result-output dashboard-read-model-publish.json \
+            --metrics-output dashboard-publish-metrics.json
 
       - name: Verify and activate dashboard candidate
         if: ${{ steps.build_models.outputs.ready == 'true' }}
@@ -449,11 +513,13 @@ jobs:
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
             --slot dashboard \
-            --candidate > dashboard-release-canary.json
+            --candidate \
+            --metrics-output dashboard-canary-metrics.json > dashboard-release-canary.json
           python scripts/activate_read_models.py \
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
-            --slot dashboard > dashboard-read-model-activation.json
+            --slot dashboard \
+            --metrics-output dashboard-activation-metrics.json > dashboard-read-model-activation.json
           jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
             '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
             dashboard-read-model-activation.json >/dev/null
@@ -472,7 +538,8 @@ jobs:
             --read-model-dir read-models-penetration \
             --slot etf_penetration \
             --stage-only \
-            --result-output penetration-read-model-publish.json
+            --result-output penetration-read-model-publish.json \
+            --metrics-output penetration-publish-metrics.json
 
       - name: Verify and activate ETF penetration candidate
         if: ${{ success() && hashFiles('read-models-penetration/manifest.json') != '' }}
@@ -490,14 +557,109 @@ jobs:
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
             --slot etf_penetration \
-            --candidate > penetration-release-canary.json
+            --candidate \
+            --metrics-output penetration-canary-metrics.json > penetration-release-canary.json
           python scripts/activate_read_models.py \
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
-            --slot etf_penetration > penetration-read-model-activation.json
+            --slot etf_penetration \
+            --metrics-output penetration-activation-metrics.json > penetration-read-model-activation.json
           jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
             '.releaseId == $releaseId and .asOf == $asOf and .slot == "etf_penetration" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
             penetration-read-model-activation.json >/dev/null
+
+      - name: Record measured recovery resource metrics
+        if: ${{ always() && inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          METRIC_ARGS=()
+          for file in dashboard-publish-metrics.json dashboard-canary-metrics.json dashboard-activation-metrics.json penetration-publish-metrics.json penetration-canary-metrics.json penetration-activation-metrics.json; do
+            if [[ -s "$file" ]]; then METRIC_ARGS+=(--metrics "$file"); fi
+          done
+          mkdir -p .recovery/recovery-resource
+          python scripts/measure_recovery_resources.py \
+            --start-epoch publish-start-epoch.txt \
+            --source-evidence .collection-source/recovery-evidence.json \
+            --control-response pipeline-recovery-publish-running-response.json \
+            "${METRIC_ARGS[@]}" \
+            --output .recovery/recovery-resource/recovery-resource-metrics.json
+
+      - name: Create canonical recovery receipts
+        if: ${{ success() && inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTIVE_AFTER="dashboard-read-model-activation.json"
+          if [[ -s penetration-read-model-activation.json ]]; then ACTIVE_AFTER="penetration-read-model-activation.json"; fi
+          python scripts/create_live_recovery_receipts.py \
+            --plan recovery-execution.json \
+            --expected-plan-hash "$INPUT_RECOVERY_PLAN_SHA256" \
+            --attempt "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+            --producer-build-sha "$PRODUCER_BUILD_SHA" \
+            --source-dir .collection-source \
+            --models-dir . \
+            --evidence-dir . \
+            --resource-metrics .recovery/recovery-resource/recovery-resource-metrics.json \
+            --publish-run-id "${{ github.run_id }}" \
+            --active-before .collection-source/previous-release.json \
+            --active-after "$ACTIVE_AFTER" \
+            --output-dir .recovery/recovery-receipts
+
+      - name: Upload immutable recovery receipts
+        if: ${{ success() && inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Recovery receipt upload requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+            exit 1
+          fi
+          ENCODED_RECOVERY_ID="$(jq -rn --arg value "$INPUT_RECOVERY_ID" '$value|@uri')"
+          shopt -s nullglob
+          METAS=(.recovery/recovery-receipts/*.meta.json)
+          if (( ${#METAS[@]} == 0 )); then
+            echo "Recovery receipt upload found no receipt metadata files." >&2
+            exit 1
+          fi
+          for META in "${METAS[@]}"; do
+            RECEIPT="${META%.meta.json}.json"
+            if [[ ! -s "$RECEIPT" ]]; then
+              echo "Recovery receipt payload is missing or empty for $META." >&2
+              exit 1
+            fi
+            KEY="$(jq -er '.key' "$META")"
+            SHA="$(jq -er '.sha256' "$META")"
+            STAGE="$(jq -er '.stage' "$META")"
+            if [[ ! "$STAGE" =~ ^[a-z_]{1,64}$ || ! "$KEY" =~ ^market-data/recovery/receipts/ || ! "$SHA" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Recovery receipt metadata failed the upload contract." >&2
+              exit 1
+            fi
+            ACTUAL_SHA="$(sha256sum "$RECEIPT" | awk '{print $1}')"
+            if [[ "$ACTUAL_SHA" != "$SHA" ]]; then
+              echo "Recovery receipt SHA-256 does not match its metadata." >&2
+              exit 1
+            fi
+            RESPONSE=".recovery/recovery-receipts/upload-${STAGE}.json"
+            CODE="$(curl --silent --show-error \
+              --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              --header "X-Flow-Recovery-Receipt-Key: $KEY" \
+              --header "X-Flow-Recovery-Receipt-Sha256: $SHA" \
+              --header "Content-Type: application/json" \
+              --data-binary "@$RECEIPT" \
+              --output "$RESPONSE" \
+              --write-out '%{http_code}' \
+              "$FLOW_PIPELINE_WINDOW_URL/recovery/receipt?recoveryId=$ENCODED_RECOVERY_ID")"
+            if [[ "$CODE" != "200" && "$CODE" != "201" ]]; then
+              jq '{error,status,key,sha256,idempotent}' "$RESPONSE" >&2 || true
+              exit 1
+            fi
+            jq -e --arg key "$KEY" --arg sha "$SHA" \
+              '(.status == "stored") and (.key == $key) and (.sha256 == $sha)' \
+              "$RESPONSE" >/dev/null
+          done
 
       - name: Record publish resource budget
         if: ${{ always() }}
@@ -522,6 +684,9 @@ jobs:
           set -euo pipefail
           STATUS="COMPLETED"
           ERROR_CODE=""
+          LATEST_RECEIPT_KEY=""
+          LATEST_RECEIPT_SHA256=""
+          SOURCE_FINGERPRINT=""
           PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           if [[ "$PENETRATION_STATUS" == "BLOCKED_QUALITY" ]]; then
@@ -543,6 +708,26 @@ jobs:
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
           fi
+          if [[ -n "$INPUT_RECOVERY_ID" && "$STATUS" == "COMPLETED" ]]; then
+            SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json 2>/dev/null || true)"
+            if [[ ! "$SOURCE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]; then
+              STATUS="BLOCKED_QUALITY"
+              ERROR_CODE="recovery_source_fingerprint_missing"
+            fi
+          fi
+          if [[ -n "$INPUT_RECOVERY_ID" && "$STATUS" == "COMPLETED" ]]; then
+            if [[ ! -s .recovery/recovery-receipts/publish.meta.json ]]; then
+              STATUS="BLOCKED_QUALITY"
+              ERROR_CODE="recovery_completion_receipt_missing"
+            else
+              LATEST_RECEIPT_KEY="$(jq -r '.key' .recovery/recovery-receipts/publish.meta.json)"
+              LATEST_RECEIPT_SHA256="$(jq -r '.sha256' .recovery/recovery-receipts/publish.meta.json)"
+              if [[ ! "$LATEST_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ || -z "$LATEST_RECEIPT_KEY" ]]; then
+                STATUS="BLOCKED_QUALITY"
+                ERROR_CODE="recovery_completion_receipt_metadata_invalid"
+              fi
+            fi
+          fi
           if [[ -n "$INPUT_RECOVERY_ID" ]]; then
             if [[ "$PIPELINE_RECOVERY_ENABLED" != "1" && "$PIPELINE_RECOVERY_ENABLED" != "true" ]]; then
               echo "PIPELINE_RECOVERY_ENABLED is disabled; refusing recovery terminal update." >&2
@@ -560,7 +745,10 @@ jobs:
               --arg githubRunId "${{ github.run_id }}" \
               --arg status "$STATUS" \
               --arg errorCode "$ERROR_CODE" \
-              '{recoveryId:$recoveryId,runKey:$runKey,leaseOwner:$leaseOwner,expectedAttemptCount:($expectedAttemptCount|tonumber),githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              --arg latestReceiptKey "$LATEST_RECEIPT_KEY" \
+              --arg latestReceiptSha256 "$LATEST_RECEIPT_SHA256" \
+              --arg sourceFingerprint "$SOURCE_FINGERPRINT" \
+              '{recoveryId:$recoveryId,runKey:$runKey,leaseOwner:$leaseOwner,expectedAttemptCount:($expectedAttemptCount|tonumber),githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end),sourceFingerprint:(if $sourceFingerprint == "" then null else $sourceFingerprint end),latestReceiptKey:(if $latestReceiptKey == "" then null else $latestReceiptKey end),latestReceiptSha256:(if $latestReceiptSha256 == "" then null else $latestReceiptSha256 end)}' \
               > pipeline-recovery-terminal.json
             TERMINAL_URL="$FLOW_PIPELINE_WINDOW_URL/recovery/status"
             TERMINAL_PAYLOAD="pipeline-recovery-terminal.json"
@@ -601,6 +789,8 @@ jobs:
             pipeline-window-terminal.json
             pipeline-window-terminal-response.json
             pipeline-recovery-status.json
+            pipeline-recovery-publish-running.json
+            pipeline-recovery-publish-running-response.json
             pipeline-recovery-terminal.json
             pipeline-recovery-terminal-response.json
             dashboard-snapshot.json
@@ -618,6 +808,16 @@ jobs:
             penetration-read-model-publish.json
             penetration-release-canary.json
             penetration-read-model-activation.json
+            .recovery/recovery-receipts
             reports/budget/publish.json
+            publish-start-epoch.txt
+            dashboard-publish-metrics.json
+            dashboard-canary-metrics.json
+            dashboard-activation-metrics.json
+            penetration-publish-metrics.json
+            penetration-canary-metrics.json
+            penetration-activation-metrics.json
+            .recovery/recovery-resource/
+            .recovery/recovery-receipts/
             read-models-dashboard/
             read-models-penetration/

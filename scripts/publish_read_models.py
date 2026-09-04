@@ -24,11 +24,19 @@ def required_env(name: str) -> str:
     return value
 
 
-def post(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def post(
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    *,
+    metrics: dict[str, int] | None = None,
+) -> dict[str, Any]:
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     last_error: Exception | None = None
     for attempt in range(4):
         try:
+            if metrics is not None:
+                metrics["workerRequests"] = metrics.get("workerRequests", 0) + 1
             response = requests.post(url, data=encoded, headers=headers, timeout=(10, 90))
             if response.ok:
                 result = response.json()
@@ -46,9 +54,17 @@ def post(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, A
     raise RuntimeError(f"read model import failed after retries: {last_error}")
 
 
-def check_capabilities(url: str, headers: dict[str, str], *, slot: str = "full") -> None:
+def check_capabilities(
+    url: str,
+    headers: dict[str, str],
+    *,
+    slot: str = "full",
+    metrics: dict[str, int] | None = None,
+) -> None:
     if slot not in {"dashboard", "etf_penetration", "full"}:
         raise ValueError(f"unsupported release slot: {slot}")
+    if metrics is not None:
+        metrics["workerRequests"] = metrics.get("workerRequests", 0) + 1
     response = requests.get(
         url,
         headers={key: value for key, value in headers.items() if key != "Content-Type"},
@@ -134,7 +150,13 @@ def main() -> None:
         choices=("dashboard", "etf_penetration", "full"),
         help="Release slot to validate; omitted uses the manifest slot or the legacy full contract",
     )
+    parser.add_argument(
+        "--metrics-output",
+        type=Path,
+        help="Optional measured Worker request/R2 byte counters for recovery receipts",
+    )
     args = parser.parse_args()
+    metrics: dict[str, int] = {"workerRequests": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}
 
     manifest = json.loads((args.read_model_dir / "manifest.json").read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("artifacts"), dict):
@@ -149,7 +171,7 @@ def main() -> None:
         "CF-Access-Client-Secret": required_env("FLOW_CF_ACCESS_CLIENT_SECRET"),
         "Content-Type": "application/json",
     }
-    check_capabilities(args.capabilities_url, headers, slot=effective_slot)
+    check_capabilities(args.capabilities_url, headers, slot=effective_slot, metrics=metrics)
     names = list(manifest["artifacts"])
     if not names:
         raise ValueError("read-model manifest has no artifacts")
@@ -186,7 +208,9 @@ def main() -> None:
             raise RuntimeError(
                 f"read model upload exceeds free Worker request budget: {name} {request_bytes} >= {MAX_REQUEST_BYTES}"
             )
-        result = post(args.url, body, headers)
+        result = post(args.url, body, headers, metrics=metrics)
+        metrics["r2Bytes"] += len(content)
+        metrics["r2ClassA"] += 1
         print(json.dumps({"name": name, **result}, ensure_ascii=False))
         if index == len(names) - 1:
             final_result = result
@@ -202,6 +226,18 @@ def main() -> None:
     if args.result_output and final_result is not None:
         args.result_output.write_text(
             json.dumps(final_result, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    # The Worker writes one immutable object per artifact plus one manifest;
+    # it also performs one bounded HEAD verification per artifact.  These
+    # counters are deliberately emitted separately from the release response
+    # so callers cannot mistake a logical row count for physical usage.
+    metrics["r2ClassA"] += 1
+    metrics["r2ClassB"] += len(names)
+    if args.metrics_output:
+        args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        args.metrics_output.write_text(
+            json.dumps(metrics, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 

@@ -123,6 +123,23 @@ SSE_ETF_NAV_CLASSES = (
 )
 
 
+def _is_live_recovery_control_error(exc: BaseException) -> bool:
+    """Keep the bounded recovery runner's stop decisions fail-closed.
+
+    The ordinary collector intentionally records independent-source errors as
+    quality findings.  A recovery transport, however, uses typed errors for a
+    spent request budget or an official 403/429 response.  Those decisions
+    must escape adapter-level best-effort catches (including PCF worker
+    futures), otherwise the collector could issue more requests after the
+    approved stop condition.
+    """
+
+    return getattr(exc, "code", None) in {
+        "live_recovery_request_budget_exceeded",
+        "live_recovery_source_unavailable",
+    }
+
+
 def parse_hkex_tab_data(text: str) -> list[dict[str, Any]]:
     r"""Parse HKEX's JavaScript assignment while retaining the original raw bytes.
 
@@ -393,6 +410,8 @@ class OfficialMarketAdapters:
                     headers=self._headers("https://www.sse.com.cn/disclosure/fund/etflist/"),
                 )
             except Exception as exc:
+                if _is_live_recovery_control_error(exc):
+                    raise
                 warnings.append(f"ETF_CLASS={etf_class} 请求失败：{type(exc).__name__}")
                 continue
             try:
@@ -636,6 +655,8 @@ class OfficialMarketAdapters:
                     try:
                         results.append(future.result())
                     except Exception as exc:
+                        if _is_live_recovery_control_error(exc):
+                            raise
                         warnings.append(f"{code} PCF 请求失败：{type(exc).__name__}")
 
         for result in sorted(results, key=lambda item: item["code"]):
@@ -889,6 +910,8 @@ class OfficialMarketAdapters:
                     }
                 )
             except Exception as exc:
+                if _is_live_recovery_control_error(exc):
+                    raise
                 warnings.append(f"{code} PCF XML 请求或解析失败：{type(exc).__name__}")
                 request_log.append({"code": code, "accepted": False, "error": type(exc).__name__})
 

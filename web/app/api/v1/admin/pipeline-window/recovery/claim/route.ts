@@ -93,6 +93,7 @@ export async function POST(request: Request): Promise<Response> {
       leaseExpiresAt: result.leaseExpiresAt,
       attemptCount: result.attemptCount,
       rowsWritten: result.rowsWritten,
+      rowsRead: result.rowsRead,
     });
   } catch (error: unknown) {
     if (error instanceof PipelineWindowError) return response({ error: error.message }, error.status);

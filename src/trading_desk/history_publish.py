@@ -14,12 +14,14 @@ def _post_chunk(
     headers: dict[str, str],
     timeout: tuple[int, int],
     max_attempts: int = 3,
+    session: Any | None = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    transport = session if session is not None else requests
     last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            response = requests.post(url, data=body, headers=headers, timeout=timeout)
+            response = transport.post(url, data=body, headers=headers, timeout=timeout)
             if response.ok:
                 result = response.json()
                 if not isinstance(result, dict):
@@ -34,6 +36,15 @@ def _post_chunk(
             if response.status_code < 500 and response.status_code not in {408, 429}:
                 break
         except Exception as exc:
+            # The live recovery transport raises a typed budget error before
+            # sending a request.  Retrying it here would only burn time and
+            # obscure the fail-closed decision; the caller must persist a
+            # retryable checkpoint instead.
+            if getattr(exc, "code", None) in {
+                "live_recovery_request_budget_exceeded",
+                "live_recovery_source_unavailable",
+            }:
+                raise
             last_error = exc
         if attempt < max_attempts - 1:
             time.sleep(2**attempt)
@@ -47,6 +58,8 @@ def publish_history_bundle(
     ingest_key: str,
     access_client_id: str,
     access_client_secret: str,
+    session: Any | None = None,
+    max_attempts: int = 8,
 ) -> dict[str, Any]:
     """Upload one history artifact at a time and publish only after all pass.
 
@@ -56,6 +69,8 @@ def publish_history_bundle(
     artifact asks the Worker to verify the expected set and atomically publish
     the date.
     """
+    if not isinstance(max_attempts, int) or max_attempts <= 0 or max_attempts > 8:
+        raise ValueError("max_attempts must be between 1 and 8")
     history = bundle.get("history")
     if not isinstance(history, dict):
         # Keep the lower-level helper backwards compatible for callers/tests
@@ -71,7 +86,8 @@ def publish_history_bundle(
                 "Content-Type": "application/json",
             },
             timeout=(10, 90),
-            max_attempts=8,
+            max_attempts=max_attempts,
+            session=session,
         )
     artifacts = history.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -116,6 +132,8 @@ def publish_history_bundle(
             },
             headers=headers,
             timeout=(10, 90),
+            max_attempts=max_attempts,
+            session=session,
         )
 
     # The last artifact is intentionally idempotent.  It lets the server use
@@ -139,4 +157,6 @@ def publish_history_bundle(
         },
         headers=headers,
         timeout=(10, 90),
+        max_attempts=max_attempts,
+        session=session,
     )

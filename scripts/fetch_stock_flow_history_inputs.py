@@ -15,8 +15,10 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -26,6 +28,41 @@ class LineageIntegrityError(RuntimeError):
     """Raised when archived bytes disagree with their declared lineage."""
 
 
+class OfficialSourceUnavailableError(RuntimeError):
+    """Raised when the archive/source boundary rejects a request."""
+
+
+@dataclass
+class RequestBudget:
+    """Count every archive request and fail closed at the approved limit."""
+
+    maximum: int
+    min_interval_seconds: float = 0.0
+    count: int = 0
+    last_by_host: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.maximum <= 0:
+            raise ValueError("max_requests must be positive")
+        if self.min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must be non-negative")
+        if self.last_by_host is None:
+            self.last_by_host = {}
+
+    def consume(self, url: str | None = None) -> None:
+        if self.count >= self.maximum:
+            raise RuntimeError("recovery_request_budget_exceeded")
+        if url and self.min_interval_seconds:
+            host = (urlparse(url).hostname or "unknown").lower()
+            previous = (self.last_by_host or {}).get(host)
+            if previous is not None:
+                delay = self.min_interval_seconds - (time.monotonic() - previous)
+                if delay > 0:
+                    time.sleep(delay)
+            (self.last_by_host or {})[host] = time.monotonic()
+        self.count += 1
+
+
 def _fetch(
     session: requests.Session,
     *,
@@ -33,13 +70,18 @@ def _fetch(
     params: dict[str, str],
     headers: dict[str, str],
     attempts: int,
+    budget: RequestBudget | None = None,
 ) -> tuple[pd.DataFrame | None, dict[str, Any]]:
     last_detail = "not_requested"
     for attempt in range(attempts):
         try:
+            if budget is not None:
+                budget.consume(url)
             response = session.get(url, params=params, headers=headers, timeout=(10, 90))
             if response.status_code == 404:
                 return None, {"status": "missing", "code": 404}
+            if response.status_code in {403, 429}:
+                raise OfficialSourceUnavailableError(f"archive endpoint returned HTTP {response.status_code}")
             if response.status_code == 409:
                 raise RuntimeError(f"ambiguous archived artifact: {params}")
             response.raise_for_status()
@@ -90,6 +132,21 @@ def _fetch(
                 time.sleep(2**attempt)
                 continue
             raise
+        except OfficialSourceUnavailableError:
+            # A source/WAF rate-limit response is a hard stop for this
+            # bounded invocation.  Retrying would violate the official-host
+            # pacing contract and could turn a single canary into a burst.
+            raise
+        except RuntimeError as exc:
+            # Budget exhaustion is a control-plane decision, not a transient
+            # source failure.  Retrying it would overspend the approved
+            # allocation and could turn one date-major run into an unbounded
+            # loop, so propagate it immediately.
+            if str(exc) == "recovery_request_budget_exceeded":
+                raise
+            last_detail = str(exc)
+            if attempt + 1 < attempts:
+                time.sleep(2**attempt)
         except Exception as exc:
             last_detail = str(exc)
             if attempt + 1 < attempts:
@@ -115,10 +172,17 @@ def main() -> None:
     parser.add_argument("--report", type=Path, default=Path("stock-flow-fetch-report.json"))
     parser.add_argument("--inventory", type=Path, default=Path("pcf-inventory.json"))
     parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument(
+        "--max-requests",
+        type=int,
+        help="Maximum archive HTTP attempts for this invocation; fail closed when exhausted",
+    )
     parser.add_argument("--require-current", action="store_true")
     args = parser.parse_args()
     if args.attempts <= 0:
         raise ValueError("attempts must be positive")
+    if args.max_requests is not None and args.max_requests <= 0:
+        raise ValueError("max_requests must be positive")
 
     dates = sorted({line.strip() for line in args.dates.read_text(encoding="utf-8").splitlines() if line.strip()})
     if not dates or args.as_of not in dates:
@@ -130,9 +194,23 @@ def main() -> None:
     }
     endpoint = args.base_url.rstrip("/") + "/api/v1/admin/history-artifact"
     session = requests.Session()
+    min_interval = float(os.environ.get("FLOW_RECOVERY_MIN_INTERVAL_SECONDS", "2"))
+    if min_interval < 2:
+        raise ValueError("FLOW_RECOVERY_MIN_INTERVAL_SECONDS must be at least 2 seconds")
+    budget = (
+        RequestBudget(args.max_requests, min_interval_seconds=min_interval)
+        if args.max_requests is not None
+        else None
+    )
     shares: list[pd.DataFrame] = []
     pcfs: list[pd.DataFrame] = []
-    report: dict[str, Any] = {"asOf": args.as_of, "dates": {}, "availableDates": []}
+    report: dict[str, Any] = {
+        "asOf": args.as_of,
+        "dates": {},
+        "availableDates": [],
+        "requestCount": 0,
+        "maxRequests": args.max_requests,
+    }
     pcf_inventory: list[dict[str, Any]] = []
     for trade_date in dates:
         date_report: dict[str, Any] = {}
@@ -143,6 +221,7 @@ def main() -> None:
                 params={"date": trade_date, "source": source, "dataset": "etf_scale", "file": "data"},
                 headers=headers,
                 attempts=args.attempts,
+                budget=budget,
             )
             date_report[f"{source}_etf_scale"] = status
             if frame is not None:
@@ -153,6 +232,7 @@ def main() -> None:
             params={"date": trade_date, "source": "sse", "dataset": "etf_pcf", "file": "data"},
             headers=headers,
             attempts=args.attempts,
+            budget=budget,
         )
         date_report["sse_etf_pcf"] = pcf_status
         pcf_inventory.append(
@@ -176,6 +256,7 @@ def main() -> None:
     pcf_frame.to_csv(args.output_dir / "pcf.csv", index=False)
     report["shareRows"] = len(share_frame)
     report["pcfRows"] = len(pcf_frame)
+    report["requestCount"] = budget.count if budget is not None else None
     report["availableDates"] = sorted(set(report["availableDates"]))
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     args.inventory.write_text(
@@ -193,7 +274,18 @@ def main() -> None:
     )
     if args.require_current and args.as_of not in report["availableDates"]:
         raise RuntimeError("current ETF/PCF archived inputs are incomplete")
-    print(json.dumps({"outputDir": str(args.output_dir), "availableDates": len(report["availableDates"]), "shareRows": len(share_frame), "pcfRows": len(pcf_frame)}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "outputDir": str(args.output_dir),
+                "availableDates": len(report["availableDates"]),
+                "shareRows": len(share_frame),
+                "pcfRows": len(pcf_frame),
+                "requestCount": report["requestCount"],
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":
@@ -212,3 +304,31 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise SystemExit(42) from exc
+    except OfficialSourceUnavailableError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "FAILED_RETRYABLE",
+                    "errorCode": "official_source_unavailable",
+                    "detail": str(exc),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(44) from exc
+    except RuntimeError as exc:
+        if str(exc) == "recovery_request_budget_exceeded":
+            print(
+                json.dumps(
+                    {
+                        "status": "FAILED_RETRYABLE",
+                        "errorCode": "recovery_request_budget_exceeded",
+                        "detail": "approved archive request budget exhausted",
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            raise SystemExit(43) from exc
+        raise

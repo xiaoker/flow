@@ -5,6 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+import requests
+
 import pandas as pd
 
 from .adapters import OfficialMarketAdapters
@@ -145,6 +147,8 @@ def collect_phase0(
     workspace_root: Path,
     collection_window: str = "auto",
     pcf_max_codes: int = DEFAULT_PCF_MAX_CODES,
+    session: requests.Session | None = None,
+    pcf_max_workers: int = 4,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -152,11 +156,13 @@ def collect_phase0(
         raise ValueError(f"unsupported collection window: {collection_window}")
     if not isinstance(pcf_max_codes, int) or pcf_max_codes < 0:
         raise ValueError("pcf_max_codes must be a non-negative integer")
+    if not isinstance(pcf_max_workers, int) or pcf_max_workers <= 0:
+        raise ValueError("pcf_max_workers must be a positive integer")
     dates = sorted(dates)
     run_id = new_run_id()
     started_at = now_iso()
-    session = build_session()
-    adapters = OfficialMarketAdapters(session=session, data_root=data_root, run_id=run_id)
+    collection_session = session or build_session()
+    adapters = OfficialMarketAdapters(session=collection_session, data_root=data_root, run_id=run_id)
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
     artifacts: list[FetchArtifact] = []
     errors: list[dict[str, Any]] = []
@@ -168,6 +174,15 @@ def collect_phase0(
         try:
             return operation()
         except Exception as exc:  # keep independent data domains observable
+            # A bounded recovery transport uses this typed error to signal a
+            # hard request-budget stop.  Do not turn that control decision
+            # into a generic quality finding and continue issuing requests
+            # for every remaining dataset.
+            if getattr(exc, "code", None) in {
+                "live_recovery_request_budget_exceeded",
+                "live_recovery_source_unavailable",
+            }:
+                raise
             error = {
                 "step": name,
                 "error_type": type(exc).__name__,
@@ -223,6 +238,7 @@ def collect_phase0(
                 changed_codes,
                 dates[-1],
                 max_codes=pcf_max_codes,
+                max_workers=pcf_max_workers,
             ),
         )
         if result:

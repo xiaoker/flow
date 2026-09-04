@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -25,6 +26,7 @@ def activate(
     as_of: str,
     slot: str = "dashboard",
     timeout: float = 30.0,
+    metrics: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     root = base_url.rstrip("/")
     headers = {
@@ -33,6 +35,8 @@ def activate(
         "CF-Access-Client-Secret": required_env("FLOW_CF_ACCESS_CLIENT_SECRET"),
         "Content-Type": "application/json",
     }
+    if metrics is not None:
+        metrics["workerRequests"] = metrics.get("workerRequests", 0) + 1
     response = requests.post(
         f"{root}/api/v1/admin/read-model-activate",
         headers=headers,
@@ -58,11 +62,24 @@ def main() -> None:
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--slot", choices=("dashboard", "etf_penetration"), default="dashboard")
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--metrics-output", type=Path, help="Optional measured Worker request counter")
     args = parser.parse_args()
     last_error: Exception | None = None
+    metrics: dict[str, int] = {"workerRequests": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}
     for attempt in range(3):
         try:
-            print(json.dumps(activate(args.base_url, release_id=args.release_id, as_of=args.as_of, slot=args.slot, timeout=args.timeout)))
+            result = activate(
+                args.base_url,
+                release_id=args.release_id,
+                as_of=args.as_of,
+                slot=args.slot,
+                timeout=args.timeout,
+                metrics=metrics,
+            )
+            if args.metrics_output:
+                args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+                args.metrics_output.write_text(json.dumps(metrics, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(json.dumps(result))
             return
         except Exception as exc:
             last_error = exc
