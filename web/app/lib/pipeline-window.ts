@@ -49,6 +49,8 @@ export type PipelineWindowRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** Added by the additive recovery migration; absent on pre-R1 schemas. */
+  recovery_id?: string | null;
 };
 
 export type PipelineWindowInput = {
@@ -240,20 +242,25 @@ export async function claimPipelineWindow(
       last_error_code = NULL,
       updated_at = excluded.updated_at,
       completed_at = NULL
-    WHERE pipeline_window.status NOT IN ('COMPLETED', 'BLOCKED_QUALITY')
+    WHERE pipeline_window.recovery_id IS NULL
       AND (
-        pipeline_window.status NOT IN ('DISPATCHED', 'RUNNING')
-        OR pipeline_window.lease_expires_at IS NULL
-        OR pipeline_window.lease_expires_at <= excluded.updated_at
-        OR (
-          pipeline_window.status = 'FAILED_RETRYABLE'
-          AND (pipeline_window.lease_expires_at IS NULL OR pipeline_window.lease_expires_at <= excluded.updated_at)
+        (
+          pipeline_window.status NOT IN ('COMPLETED', 'BLOCKED_QUALITY')
+          AND (
+            pipeline_window.status NOT IN ('DISPATCHED', 'RUNNING')
+            OR pipeline_window.lease_expires_at IS NULL
+            OR pipeline_window.lease_expires_at <= excluded.updated_at
+            OR (
+              pipeline_window.status = 'FAILED_RETRYABLE'
+              AND (pipeline_window.lease_expires_at IS NULL OR pipeline_window.lease_expires_at <= excluded.updated_at)
+            )
+          )
         )
-      )
-      OR (
-        pipeline_window.status = 'BLOCKED_QUALITY'
-        AND NULLIF(excluded.source_fingerprint, '') IS NOT NULL
-        AND NULLIF(excluded.source_fingerprint, '') <> COALESCE(NULLIF(pipeline_window.source_fingerprint, ''), '')
+        OR (
+          pipeline_window.status = 'BLOCKED_QUALITY'
+          AND NULLIF(excluded.source_fingerprint, '') IS NOT NULL
+          AND NULLIF(excluded.source_fingerprint, '') <> COALESCE(NULLIF(pipeline_window.source_fingerprint, ''), '')
+        )
       )
   `;
   const result = await db.prepare(insertSql).bind(
@@ -290,7 +297,7 @@ export async function claimPipelineWindow(
     `SELECT run_key, pipeline, window_date, window_name, contract_version,
             target_date, status, lease_owner, lease_expires_at,
             source_fingerprint, github_run_id, attempt_count, last_error_code,
-            created_at, updated_at, completed_at
+            created_at, updated_at, completed_at, recovery_id
        FROM pipeline_window
       WHERE run_key = ?
       LIMIT 1`,
@@ -328,7 +335,7 @@ export async function getPipelineWindow(db: D1Like, runKey: string): Promise<Pip
     `SELECT run_key, pipeline, window_date, window_name, contract_version,
             target_date, status, lease_owner, lease_expires_at,
             source_fingerprint, github_run_id, attempt_count, last_error_code,
-            created_at, updated_at, completed_at
+            created_at, updated_at, completed_at, recovery_id
        FROM pipeline_window
       WHERE run_key = ?
       LIMIT 1`,
@@ -374,7 +381,7 @@ export async function markPipelineWindow(
             lease_expires_at = CASE WHEN ? = 1 THEN NULL ELSE lease_expires_at END,
             completed_at = CASE WHEN ? = 1 THEN ? ELSE completed_at END,
             updated_at = ?
-      WHERE run_key = ? AND lease_owner = ?
+      WHERE run_key = ? AND lease_owner = ? AND recovery_id IS NULL
         AND status <> 'COMPLETED'
         AND (lease_expires_at IS NULL OR lease_expires_at > ?)`,
   ).bind(

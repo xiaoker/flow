@@ -36,6 +36,11 @@ on:
         required: false
         default: ""
         type: string
+      recovery_id:
+        description: "Approved recovery authorization id (optional)"
+        required: false
+        default: ""
+        type: string
       contract_version:
         description: "Pipeline run-key contract version"
         required: false
@@ -75,10 +80,11 @@ jobs:
             --arg windowName "${{ inputs.window_name }}" \
             --arg targetDate "${{ inputs.target_date }}" \
             --arg leaseOwner "${{ inputs.lease_owner }}" \
+            --arg recoveryId "${{ inputs.recovery_id }}" \
             --arg contractVersion "${{ inputs.contract_version || 'v1' }}" \
             --arg runPcfShadow "${{ inputs.run_pcf_shadow == true && 'true' || 'false' }}" \
             --arg delegatePublish "${{ inputs.delegate_publish != false && 'true' || 'false' }}" \
-            '{ref:$ref,inputs:{dates:$dates,collection_window:$window,run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,contract_version:$contractVersion,run_pcf_shadow:$runPcfShadow,delegate_publish:$delegatePublish}}' \
+            '{ref:$ref,inputs:{dates:$dates,collection_window:$window,run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,recovery_id:$recoveryId,contract_version:$contractVersion,run_pcf_shadow:$runPcfShadow,delegate_publish:$delegatePublish}}' \
             > dispatch-request.json
           STATUS_CODE="$(curl --silent --show-error \
             --header "Accept: application/vnd.github+json" \

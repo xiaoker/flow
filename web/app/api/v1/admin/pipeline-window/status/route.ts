@@ -55,6 +55,7 @@ function serialize(row: Record<string, unknown>): Record<string, unknown> {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
+    recoveryId: row.recovery_id ?? null,
   };
 }
 

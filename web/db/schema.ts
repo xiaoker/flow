@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const dataSources = sqliteTable("data_source", {
@@ -165,8 +166,45 @@ export const pipelineWindow = sqliteTable("pipeline_window", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   completedAt: text("completed_at"),
+  recoveryId: text("recovery_id"),
 }, (table) => [
   index("pipeline_window_status_lease_idx").on(table.status, table.leaseExpiresAt),
+  index("pipeline_window_recovery_idx").on(table.recoveryId),
+]);
+
+/**
+ * Audited authorization for repairing a pipeline window that was previously
+ * marked complete or otherwise became inconsistent.  Registration is
+ * intentionally separate from claiming the execution lease: this table holds
+ * the immutable plan/scope and the exact pre-recovery row evidence, while the
+ * pipeline_window row remains untouched until a guarded recovery claim wins.
+ */
+export const pipelineWindowRecovery = sqliteTable("pipeline_window_recovery", {
+  recoveryId: text("recovery_id").primaryKey(),
+  runKey: text("run_key").notNull(),
+  planKey: text("plan_key").notNull(),
+  planSha256: text("plan_sha256").notNull(),
+  scopeSha256: text("scope_sha256").notNull(),
+  expectedAttemptCount: integer("expected_attempt_count").notNull(),
+  expectedUpdatedAt: text("expected_updated_at").notNull(),
+  previousStateJson: text("previous_state_json").notNull(),
+  reasonCode: text("reason_code").notNull(),
+  approvalReference: text("approval_reference").notNull(),
+  authorizedAt: text("authorized_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  status: text("status").notNull(),
+  latestReceiptKey: text("latest_receipt_key"),
+  latestReceiptSha256: text("latest_receipt_sha256"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [
+  uniqueIndex("pipeline_window_recovery_run_plan_uq").on(table.runKey, table.planSha256),
+  uniqueIndex("pipeline_window_recovery_active_run_uq")
+    .on(table.runKey)
+    .where(sql`status IN ('ACTIVE', 'PAUSED')`),
+  index("pipeline_window_recovery_status_expiry_idx").on(table.status, table.expiresAt),
+  index("pipeline_window_recovery_run_status_idx").on(table.runKey, table.status),
 ]);
 
 /**

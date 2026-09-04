@@ -67,10 +67,12 @@ class LocalD1 {
 
 async function createDatabase(options = {}) {
   const db = new LocalD1(options);
-  const migration = await readFile(new URL("../drizzle/0010_fair_jasper_sitwell.sql", import.meta.url), "utf8");
-  for (const statement of migration.split("--> statement-breakpoint")) {
-    const sql = statement.trim();
-    if (sql) db.database.exec(sql);
+  for (const migrationName of ["0010_fair_jasper_sitwell.sql", "0011_futuristic_namora.sql", "0012_boring_tyger_tiger.sql"]) {
+    const migration = await readFile(new URL(`../drizzle/${migrationName}`, import.meta.url), "utf8");
+    for (const statement of migration.split("--> statement-breakpoint")) {
+      const sql = statement.trim();
+      if (sql) db.database.exec(sql);
+    }
   }
   return db;
 }

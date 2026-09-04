@@ -16,6 +16,7 @@ type RuntimeEnv = {
   INGEST_API_KEY?: string;
   HISTORY_IMPORT_ARCHIVE_ONLY?: string;
   PCF_CAPTURE_V2_READ_ENABLED?: string;
+  PIPELINE_RECOVERY_ENABLED?: string;
   FLOW_BUILD_SHA?: string;
   FLOW_DEPLOYED_AT?: string;
 };

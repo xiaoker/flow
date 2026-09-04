@@ -22,6 +22,16 @@ on:
         description: "Pipeline-window lease owner"
         required: true
         type: string
+      recovery_id:
+        description: "Approved recovery authorization id (optional)"
+        required: false
+        default: ""
+        type: string
+      recovery_attempt_count:
+        description: "Attempt count returned by the recovery claim"
+        required: false
+        default: ""
+        type: string
       contract_version:
         description: "Pipeline run-key contract version"
         required: false
@@ -59,6 +69,10 @@ jobs:
     env:
       PIPELINE_WINDOW_GATE_ENABLED: ${{ inputs.gate_enabled || 'false' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
+      PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
+      INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
+      INPUT_RECOVERY_ATTEMPT_COUNT: ${{ inputs.recovery_attempt_count || '' }}
+      INPUT_LEASE_OWNER: ${{ inputs.lease_owner }}
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
@@ -72,6 +86,60 @@ jobs:
           if [[ ! "$RUN_KEY" =~ ^daily-market-data:[0-9]{4}-[0-9]{2}-[0-9]{2}:[a-z_]+:v[0-9]+$ ]]; then
             echo "Invalid run_key input: $RUN_KEY" >&2
             exit 1
+          fi
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            if [[ "$PIPELINE_RECOVERY_ENABLED" != "1" && "$PIPELINE_RECOVERY_ENABLED" != "true" ]]; then
+              echo "PIPELINE_RECOVERY_ENABLED is disabled; refusing recovery publish." >&2
+              exit 1
+            fi
+            if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+              echo "Recovery publish gate requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+              exit 1
+            fi
+            AUTH_ARGS=(
+              --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+            )
+            RECOVERY_ID="$INPUT_RECOVERY_ID"
+            ENCODED_RECOVERY_ID="$(jq -rn --arg value "$RECOVERY_ID" '$value|@uri')"
+            RECOVERY_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
+              --output pipeline-recovery-status.json \
+              --write-out '%{http_code}' \
+              "$FLOW_PIPELINE_WINDOW_URL/recovery?recoveryId=$ENCODED_RECOVERY_ID")"
+            if [[ "$RECOVERY_CODE" != "200" ]]; then
+              echo "Recovery publish status failed with HTTP $RECOVERY_CODE; fail closed." >&2
+              jq . pipeline-recovery-status.json >&2 || true
+              exit 1
+            fi
+            if [[ "$(jq -r '.runKey // empty' pipeline-recovery-status.json)" != "$RUN_KEY" ]] || \
+               [[ "$(jq -r '.status // empty' pipeline-recovery-status.json)" != "ACTIVE" ]]; then
+              echo "Recovery authorization is not active for this publish run; refusing to build or activate." >&2
+              jq '{recoveryId,runKey,status,pipeline}' pipeline-recovery-status.json >&2 || true
+              exit 1
+            fi
+            if [[ -z "$INPUT_RECOVERY_ATTEMPT_COUNT" || ! "$INPUT_RECOVERY_ATTEMPT_COUNT" =~ ^[0-9]+$ ]]; then
+              echo "Recovery publish input is missing a valid attempt generation; refusing to publish." >&2
+              exit 1
+            fi
+            if [[ "$(jq -r '.pipeline.attemptCount // empty' pipeline-recovery-status.json)" != "$INPUT_RECOVERY_ATTEMPT_COUNT" ]]; then
+              echo "Recovery attempt generation mismatch; refusing to publish." >&2
+              exit 1
+            fi
+            if [[ "$(jq -r '.pipeline.leaseOwner // empty' pipeline-recovery-status.json)" != "$INPUT_LEASE_OWNER" ]] || \
+               [[ "$(jq -r '.pipeline.status // empty' pipeline-recovery-status.json)" != "RUNNING" ]]; then
+              echo "Recovery pipeline owner/status mismatch; refusing to publish." >&2
+              exit 1
+            fi
+            NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+            if ! jq -e --arg now "$NOW_ISO" '(.pipeline.leaseExpiresAt // "") > $now' pipeline-recovery-status.json >/dev/null; then
+              echo "Recovery publish lease has expired; refusing to build or activate." >&2
+              exit 1
+            fi
+            echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Approved recovery publish lease is valid."
+            exit 0
           fi
           if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ]]; then
             echo "gate_enabled=false" >> "$GITHUB_OUTPUT"
@@ -139,6 +207,9 @@ jobs:
       INPUT_TARGET_DATE: ${{ inputs.target_date }}
       INPUT_LEASE_OWNER: ${{ inputs.lease_owner }}
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
+      INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
+      INPUT_RECOVERY_ATTEMPT_COUNT: ${{ inputs.recovery_attempt_count || '' }}
+      PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Checkout producer
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
@@ -375,21 +446,46 @@ jobs:
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
           fi
-          jq -n \
-            --arg runKey "$INPUT_RUN_KEY" \
-            --arg leaseOwner "$INPUT_LEASE_OWNER" \
-            --arg githubRunId "${{ github.run_id }}" \
-            --arg status "$STATUS" \
-            --arg errorCode "$ERROR_CODE" \
-            '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
-            > pipeline-window-terminal.json
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            if [[ "$PIPELINE_RECOVERY_ENABLED" != "1" && "$PIPELINE_RECOVERY_ENABLED" != "true" ]]; then
+              echo "PIPELINE_RECOVERY_ENABLED is disabled; refusing recovery terminal update." >&2
+              exit 1
+            fi
+            if [[ -z "$INPUT_RECOVERY_ATTEMPT_COUNT" || ! "$INPUT_RECOVERY_ATTEMPT_COUNT" =~ ^[0-9]+$ ]]; then
+              echo "Recovery terminal update is missing a valid attempt count." >&2
+              exit 1
+            fi
+            jq -n \
+              --arg recoveryId "$INPUT_RECOVERY_ID" \
+              --arg runKey "$INPUT_RUN_KEY" \
+              --arg leaseOwner "$INPUT_LEASE_OWNER" \
+              --arg expectedAttemptCount "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+              --arg githubRunId "${{ github.run_id }}" \
+              --arg status "$STATUS" \
+              --arg errorCode "$ERROR_CODE" \
+              '{recoveryId:$recoveryId,runKey:$runKey,leaseOwner:$leaseOwner,expectedAttemptCount:($expectedAttemptCount|tonumber),githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              > pipeline-recovery-terminal.json
+            TERMINAL_URL="$FLOW_PIPELINE_WINDOW_URL/recovery/status"
+            TERMINAL_PAYLOAD="pipeline-recovery-terminal.json"
+          else
+            jq -n \
+              --arg runKey "$INPUT_RUN_KEY" \
+              --arg leaseOwner "$INPUT_LEASE_OWNER" \
+              --arg githubRunId "${{ github.run_id }}" \
+              --arg status "$STATUS" \
+              --arg errorCode "$ERROR_CODE" \
+              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              > pipeline-window-terminal.json
+            TERMINAL_URL="$FLOW_PIPELINE_WINDOW_URL/status"
+            TERMINAL_PAYLOAD="pipeline-window-terminal.json"
+          fi
           curl --fail-with-body --silent --show-error \
             --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
             --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
             --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
             --header "Content-Type: application/json" \
-            --data-binary @pipeline-window-terminal.json \
-            "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --data-binary "@$TERMINAL_PAYLOAD" \
+            "$TERMINAL_URL" \
             --output pipeline-window-terminal-response.json
           if [[ "$STATUS" != "COMPLETED" ]]; then
             echo "Pipeline window closed as $STATUS ($ERROR_CODE)." >&2
@@ -407,6 +503,9 @@ jobs:
             pipeline-window-status.json
             pipeline-window-terminal.json
             pipeline-window-terminal-response.json
+            pipeline-recovery-status.json
+            pipeline-recovery-terminal.json
+            pipeline-recovery-terminal-response.json
             dashboard-snapshot.json
             market-history.json
             previous-release.json
