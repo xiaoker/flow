@@ -639,6 +639,11 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     assert "parsePipelineRunKey" in receipt_helper
     assert "recovery-resource-metrics.json" in publish
     assert "recovery_completion_receipt_missing" in publish
+    assert "Upload immutable recovery receipts" in publish
+    assert "X-Flow-Recovery-Receipt-Key" in publish
+    assert "X-Flow-Recovery-Receipt-Sha256" in publish
+    assert "sha256sum" in publish
+    assert publish.index("Create canonical recovery receipts") < publish.index("Upload immutable recovery receipts") < publish.index("Mark pipeline window terminal status")
     # A recovery plan can only write under its dedicated root; these paths are
     # explicitly rejected by the Python contract and by the workflow guard.
     assert "reports/phase0" in collect

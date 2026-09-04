@@ -606,6 +606,61 @@ jobs:
             --active-after "$ACTIVE_AFTER" \
             --output-dir .recovery/recovery-receipts
 
+      - name: Upload immutable recovery receipts
+        if: ${{ success() && inputs.recovery_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Recovery receipt upload requires FLOW_INGEST_API_KEY and both FLOW_CF_ACCESS_* secrets." >&2
+            exit 1
+          fi
+          ENCODED_RECOVERY_ID="$(jq -rn --arg value "$INPUT_RECOVERY_ID" '$value|@uri')"
+          shopt -s nullglob
+          METAS=(.recovery/recovery-receipts/*.meta.json)
+          if (( ${#METAS[@]} == 0 )); then
+            echo "Recovery receipt upload found no receipt metadata files." >&2
+            exit 1
+          fi
+          for META in "${METAS[@]}"; do
+            RECEIPT="${META%.meta.json}.json"
+            if [[ ! -s "$RECEIPT" ]]; then
+              echo "Recovery receipt payload is missing or empty for $META." >&2
+              exit 1
+            fi
+            KEY="$(jq -er '.key' "$META")"
+            SHA="$(jq -er '.sha256' "$META")"
+            STAGE="$(jq -er '.stage' "$META")"
+            if [[ ! "$STAGE" =~ ^[a-z_]{1,64}$ || ! "$KEY" =~ ^market-data/recovery/receipts/ || ! "$SHA" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Recovery receipt metadata failed the upload contract." >&2
+              exit 1
+            fi
+            ACTUAL_SHA="$(sha256sum "$RECEIPT" | awk '{print $1}')"
+            if [[ "$ACTUAL_SHA" != "$SHA" ]]; then
+              echo "Recovery receipt SHA-256 does not match its metadata." >&2
+              exit 1
+            fi
+            RESPONSE=".recovery/recovery-receipts/upload-${STAGE}.json"
+            CODE="$(curl --silent --show-error \
+              --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+              --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+              --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+              --header "X-Flow-Recovery-Receipt-Key: $KEY" \
+              --header "X-Flow-Recovery-Receipt-Sha256: $SHA" \
+              --header "Content-Type: application/json" \
+              --data-binary "@$RECEIPT" \
+              --output "$RESPONSE" \
+              --write-out '%{http_code}' \
+              "$FLOW_PIPELINE_WINDOW_URL/recovery/receipt?recoveryId=$ENCODED_RECOVERY_ID")"
+            if [[ "$CODE" != "200" && "$CODE" != "201" ]]; then
+              jq '{error,status,key,sha256,idempotent}' "$RESPONSE" >&2 || true
+              exit 1
+            fi
+            jq -e --arg key "$KEY" --arg sha "$SHA" \
+              '(.status == "stored") and (.key == $key) and (.sha256 == $sha)' \
+              "$RESPONSE" >/dev/null
+          done
+
       - name: Record publish resource budget
         if: ${{ always() }}
         shell: bash
@@ -753,6 +808,7 @@ jobs:
             penetration-read-model-publish.json
             penetration-release-canary.json
             penetration-read-model-activation.json
+            .recovery/recovery-receipts
             reports/budget/publish.json
             publish-start-epoch.txt
             dashboard-publish-metrics.json
