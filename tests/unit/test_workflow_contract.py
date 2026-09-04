@@ -478,6 +478,47 @@ def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> No
     assert "availableDates | index($asOf) != null" in workflow
 
 
+def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocking_dashboard() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    history_step = collect.split(
+        "Build ETF-to-stock daily partitions from archived R2 inputs",
+        maxsplit=1,
+    )[1].split("Publish ETF-to-stock daily partitions", maxsplit=1)[0]
+    collect_terminal = collect.split("Mark pipeline window terminal status", maxsplit=1)[1]
+    publish_terminal = publish.split("Mark pipeline window terminal status", maxsplit=1)[1]
+
+    # The collector may continue far enough to publish the independent
+    # dashboard slot, but it must preserve a machine-readable failure state.
+    assert "continue-on-error: true" in history_step
+    assert 'write_history_status "FAILED_RETRYABLE" "stock_flow_history_input_fetch_failed"' in history_step
+    assert 'write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_mismatch"' in history_step
+    assert 'write_history_status "BLOCKED_QUALITY" "stock_flow_history_lineage_invalid"' in history_step
+    assert 'write_history_status "READY"' in history_step
+    assert "stock-flow-history-status.json" in collect
+    assert 'ETF-to-stock history did not complete: $history_status' in collect
+
+    # Both the local rollback path and delegated publisher prefer the explicit
+    # history state over the generic workflow result.
+    assert collect_terminal.index('HISTORY_STATUS=') < collect_terminal.index('${{ job.status }}')
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"' in collect_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"' in collect_terminal
+    assert "stock-flow-history-status.json" in publish
+    assert 'echo "penetration_status=$HISTORY_STATUS"' in publish
+    assert publish_terminal.index('PENETRATION_STATUS=') < publish_terminal.index('${{ job.status }}')
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"' in publish_terminal
+    assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"' in publish_terminal
+    assert 'if [[ "$STATUS" != "COMPLETED" ]]' in publish_terminal
+    assert 'exit 1' in publish_terminal
+    assert 'if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]' in publish
+    assert 'HISTORY_STATUS="BLOCKED_QUALITY"' in publish
+
+    # Core dashboard publication remains available while penetration is
+    # blocked, preserving the intentional slot separation.
+    assert "--slot dashboard" in publish
+    assert "--output-dir read-models-dashboard" in publish
+
+
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/access-smoke.yml"

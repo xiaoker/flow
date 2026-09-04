@@ -186,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .collection-source/dashboard-snapshot.json dashboard-snapshot.json
-          for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json market-history.json previous-release.json history-bundle.json ingest-bundle.json source-readiness.json source-readiness-response.json; do
+          for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json market-history.json previous-release.json history-bundle.json ingest-bundle.json source-readiness.json source-readiness-response.json; do
             if [[ -s ".collection-source/$file" ]]; then cp ".collection-source/$file" "$file"; fi
           done
           if [[ -d .collection-source/stock-flow-partitions ]]; then
@@ -200,13 +200,24 @@ jobs:
           set -euo pipefail
           if ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
             echo "Source snapshot is pending; no read-model candidate will be built."
+            echo "penetration_status=NOT_REQUIRED" >> "$GITHUB_OUTPUT"
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           HISTORY_ARGS=()
           if [[ -s market-history.json ]]; then HISTORY_ARGS+=(--market-history market-history.json); fi
           if [[ -s previous-release.json ]]; then HISTORY_ARGS+=(--previous-manifest previous-release.json); fi
-          if [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+          HISTORY_STATUS="NOT_REQUIRED"
+          if [[ -s stock-flow-history-status.json ]]; then
+            HISTORY_STATUS="$(jq -er '.status | select(. == "READY" or . == "FAILED_RETRYABLE" or . == "BLOCKED_QUALITY")' stock-flow-history-status.json 2>/dev/null || echo "BLOCKED_QUALITY")"
+          elif [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+            # Keep a bounded compatibility path for a source artifact created
+            # immediately before the status-marker rollout.
+            HISTORY_STATUS="READY"
+          elif [[ -s stock-flow-catalog.json || -s stock-flow-history.json ]]; then
+            HISTORY_STATUS="BLOCKED_QUALITY"
+          fi
+          if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
             python scripts/build_stock_pressure_state.py \
               --catalog stock-flow-catalog.json \
               --output stock-pressure-catalog.json \
@@ -222,6 +233,9 @@ jobs:
             python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
             python scripts/report_read_model_sizes.py --read-model-dir read-models-full --output artifact-size-report.json
           else
+            if [[ "$HISTORY_STATUS" == "READY" ]]; then
+              HISTORY_STATUS="BLOCKED_QUALITY"
+            fi
             python scripts/build_read_models.py \
               --slot dashboard \
               --snapshot dashboard-snapshot.json \
@@ -231,6 +245,7 @@ jobs:
               "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
           fi
+          echo "penetration_status=$HISTORY_STATUS" >> "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Check dashboard capability contract
@@ -339,7 +354,18 @@ jobs:
           set -euo pipefail
           STATUS="COMPLETED"
           ERROR_CODE=""
-          if [[ "${{ job.status }}" != "success" ]]; then
+          PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
+          HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
+          if [[ "$PENETRATION_STATUS" == "BLOCKED_QUALITY" ]]; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
+          elif [[ "$PENETRATION_STATUS" == "FAILED_RETRYABLE" ]]; then
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"
+          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]] || [[ ! -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="stock_flow_history_missing"
+          elif [[ "${{ job.status }}" != "success" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="publish_workflow_failed"
           elif [[ ! -s dashboard-snapshot.json ]] || ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null 2>&1; then
@@ -365,6 +391,10 @@ jobs:
             --data-binary @pipeline-window-terminal.json \
             "$FLOW_PIPELINE_WINDOW_URL/status" \
             --output pipeline-window-terminal-response.json
+          if [[ "$STATUS" != "COMPLETED" ]]; then
+            echo "Pipeline window closed as $STATUS ($ERROR_CODE)." >&2
+            exit 1
+          fi
 
       - name: Preserve publish evidence
         if: always()
@@ -381,6 +411,7 @@ jobs:
             market-history.json
             previous-release.json
             stock-flow-history.json
+            stock-flow-history-status.json
             stock-pressure-catalog.json
             artifact-size-report.json
             dashboard-capabilities.json
