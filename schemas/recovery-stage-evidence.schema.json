@@ -20,7 +20,7 @@
   "properties": {
     "schemaVersion": {"const": 1},
     "contractVersion": {"const": "recovery-audit-v1"},
-    "phase": {"const": "R0-C"},
+    "phase": {"enum": ["R0-C", "R0-D"]},
     "status": {"enum": ["DONE", "DONE_WITH_CONCERNS", "BLOCKED"]},
     "generatedAt": {"type": "string"},
     "planHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

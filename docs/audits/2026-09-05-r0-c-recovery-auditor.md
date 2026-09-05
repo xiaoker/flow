@@ -1,4 +1,4 @@
-# R0-C controlled-recovery auditor
+# R0-C/R0-D controlled-recovery auditor
 
 This is the formal, reproducible and read-only inventory entry for the
 controlled recovery plan. It consumes a local JSON evidence bundle; it does
@@ -15,8 +15,14 @@ resource budget contract:
 PYTHONPATH=src:. python scripts/audit_controlled_recovery.py \
   --input /path/to/r0-evidence-bundle.json \
   --config config/resource-budget.json \
+  --phase R0-C \
   --output-dir /private/tmp/flow-r0-c-audit
 ```
+
+Use `--phase R0-D` only when the same formal auditor is being run for the
+documented production read-only inventory. The default remains `R0-C` for
+backward compatibility; the phase label changes evidence presentation only
+and is deliberately excluded from the canonical plan hash.
 
 The input must be JSON with `schemaVersion=1`, a `scope` containing inclusive
 ISO dates, an explicit `campaignId`, and bounded inventory rows. A row is
@@ -42,7 +48,7 @@ The isolated output directory contains exactly:
   `executionBlocked=true`, stable `planHash` and source fingerprint;
 - `source-unavailable.csv`: only evidence-backed unavailable sources;
 - `budget-estimate.json`: measured, projected and worst-retry resource use;
-- `stage-evidence.json`: machine-readable R0-C status and read-only
+- `stage-evidence.json`: machine-readable R0-C/R0-D status and read-only
   assertions;
 - `summary.md`: concise human review of concerns and next allowed phase.
 
@@ -51,8 +57,9 @@ workflow run IDs and download time are not part of the hash. Outputs must be
 written to an isolated directory. The auditor rejects paths containing the
 protected `reports/phase0` or `memory` roots before creating directories.
 
-R0-C ends at `CODE_READY`/`DONE_WITH_CONCERNS`. It does not run the formal
-production inventory (R0-D), register or approve a plan, run a migration,
+R0-C ends at `CODE_READY`/`DONE_WITH_CONCERNS`. R0-D uses the same offline
+auditor after a bounded production evidence export. Neither phase registers
+or approves a plan, runs a migration,
 enable `PIPELINE_RECOVERY_ENABLED`, dispatch Watchdog/Collector/Publish, or
 run a canary. Those actions require the next documented stop-point and an
 explicit authorization.
