@@ -124,6 +124,20 @@ def test_plan_hash_is_stable_for_reordered_fixture() -> None:
     assert first["plan"]["executionBlocked"] is True
 
 
+def test_r0d_phase_label_is_explicit_without_changing_plan_hash() -> None:
+    r0c = audit_bundle(complete_bundle(), budget_config=CONFIG)
+    r0d = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
+    assert r0c["plan"]["planHash"] == r0d["plan"]["planHash"]
+    assert r0c["stageEvidence"]["phase"] == "R0-C"
+    assert r0d["stageEvidence"]["phase"] == "R0-D"
+    assert r0d["summary"].startswith("# Controlled recovery R0-D audit")
+
+
+def test_unknown_phase_is_rejected() -> None:
+    with pytest.raises(RecoveryAuditError, match="invalid_audit_phase"):
+        audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R1")
+
+
 def test_matrix_expands_date_and_domain_and_separates_slots() -> None:
     bundle = complete_bundle(
         rows=[
@@ -247,6 +261,25 @@ def test_cli_is_offline_and_writes_stage_evidence(tmp_path: Path) -> None:
         "activePointerChanges": 0,
         "flagChanges": 0,
     }
+    r0d_output_dir = tmp_path / "cli-r0d-output"
+    assert (
+        main(
+            [
+                "--input",
+                str(bundle_path),
+                "--config",
+                str(config_path),
+                "--phase",
+                "R0-D",
+                "--output-dir",
+                str(r0d_output_dir),
+            ]
+        )
+        == 0
+    )
+    r0d_evidence = json.loads((r0d_output_dir / "stage-evidence.json").read_text(encoding="utf-8"))
+    assert r0d_evidence["phase"] == "R0-D"
+    assert r0d_evidence["planHash"] == evidence["planHash"]
 
 
 def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
@@ -255,7 +288,7 @@ def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
             encoding="utf-8"
         )
     )
-    assert schema["properties"]["phase"]["const"] == "R0-C"
+    assert set(schema["properties"]["phase"]["enum"]) == {"R0-C", "R0-D"}
     assert schema["properties"]["migrationApplied"]["const"] is False
     assert schema["properties"]["protectedPathsTouched"]["const"] == []
 

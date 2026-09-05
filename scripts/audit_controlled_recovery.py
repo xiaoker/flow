@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the bounded, offline R0-C recovery inventory auditor.
+"""Run the bounded, offline R0-C/R0-D recovery inventory auditor.
 
 The command accepts a JSON evidence bundle exported by an already bounded
 read-only collector.  It intentionally has no URL/provider options and never
@@ -29,6 +29,12 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="isolated directory for seven bounded audit outputs",
     )
+    parser.add_argument(
+        "--phase",
+        choices=("R0-C", "R0-D"),
+        default="R0-C",
+        help="evidence phase label (default: R0-C)",
+    )
     return parser
 
 
@@ -44,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         # with provider-side effects.  The module itself has no such imports.
         from trading_desk.recovery_audit import RecoveryAuditError, audit_bundle, write_audit_outputs
 
-        result = audit_bundle(bundle, budget_config=budget_config)
+        result = audit_bundle(bundle, budget_config=budget_config, phase=args.phase)
         write_audit_outputs(result, args.output_dir)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         error = {"status": "ERROR", "error": type(exc).__name__, "detail": str(exc)}

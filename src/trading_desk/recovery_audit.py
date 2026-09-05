@@ -53,6 +53,7 @@ from .recovery_execution import (
 
 AUDIT_SCHEMA_VERSION = 1
 AUDIT_CONTRACT_VERSION = "recovery-audit-v1"
+AUDIT_PHASES = frozenset({"R0-C", "R0-D"})
 MAX_CALENDAR_DAYS = 1_100
 MAX_INPUT_RECORDS = 10_000
 MAX_RELEASE_RECORDS = 5_000
@@ -1090,6 +1091,7 @@ def _plan(
 
 def _summary(
     *,
+    phase: str,
     plan: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
     targets: Sequence[Mapping[str, Any]],
@@ -1107,7 +1109,7 @@ def _summary(
     )
     status = "BLOCKED" if budget["decision"] == "over_budget" else "DONE_WITH_CONCERNS" if budget["decision"] == "unknown_metrics" or unknowns or r2_status != "READY" else "DONE"
     lines = [
-        "# Controlled recovery R0-C audit",
+        f"# Controlled recovery {phase} audit",
         "",
         f"STATUS: {status}",
         f"campaignId: `{plan['campaignId']}`",
@@ -1159,6 +1161,7 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[s
 
 def build_stage_evidence(
     *,
+    phase: str,
     bundle: Mapping[str, Any],
     plan: Mapping[str, Any],
     budget: Mapping[str, Any],
@@ -1205,7 +1208,7 @@ def build_stage_evidence(
     return {
         "schemaVersion": AUDIT_SCHEMA_VERSION,
         "contractVersion": AUDIT_CONTRACT_VERSION,
-        "phase": "R0-C",
+        "phase": phase,
         "status": status,
         "generatedAt": bundle.get("capturedAt", "unknown"),
         "baseMainSha": repository.get("originMain", "unknown"),
@@ -1262,9 +1265,12 @@ def audit_bundle(
     bundle: Mapping[str, Any],
     *,
     budget_config: Mapping[str, Any],
+    phase: str = "R0-C",
 ) -> dict[str, Any]:
     """Audit one local evidence bundle and return all deterministic outputs."""
 
+    if phase not in AUDIT_PHASES:
+        raise RecoveryAuditError("invalid_audit_phase", str(phase))
     if not isinstance(bundle, Mapping):
         raise RecoveryAuditError("bundle_must_be_object")
     _reject_secret_keys(bundle)
@@ -1308,6 +1314,7 @@ def audit_bundle(
     )
     source_unavailable = _source_unavailable(rows)
     evidence = build_stage_evidence(
+        phase=phase,
         bundle=bundle,
         plan=plan,
         budget=budget,
@@ -1318,6 +1325,7 @@ def audit_bundle(
         source_unavailable=source_unavailable,
     )
     summary = _summary(
+        phase=phase,
         plan=plan,
         rows=rows,
         targets=targets,
