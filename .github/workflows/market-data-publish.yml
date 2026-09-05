@@ -438,15 +438,16 @@ jobs:
           HISTORY_ARGS=()
           if [[ -s market-history.json ]]; then HISTORY_ARGS+=(--market-history market-history.json); fi
           if [[ -s previous-release.json ]]; then HISTORY_ARGS+=(--previous-manifest previous-release.json); fi
-          HISTORY_STATUS="NOT_REQUIRED"
-          if [[ -s stock-flow-history-status.json ]]; then
-            HISTORY_STATUS="$(jq -er '.status | select(. == "READY" or . == "FAILED_RETRYABLE" or . == "BLOCKED_QUALITY")' stock-flow-history-status.json 2>/dev/null || echo "BLOCKED_QUALITY")"
-          elif [[ -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
-            # Keep a bounded compatibility path for a source artifact created
-            # immediately before the status-marker rollout.
-            HISTORY_STATUS="READY"
-          elif [[ -s stock-flow-catalog.json || -s stock-flow-history.json ]]; then
-            HISTORY_STATUS="BLOCKED_QUALITY"
+          STOCK_FLOW_DECISION="$(python scripts/verify_stock_flow_bundle.py \
+            --snapshot dashboard-snapshot.json \
+            --catalog stock-flow-catalog.json \
+            --history stock-flow-history.json \
+            --history-status stock-flow-history-status.json)"
+          HISTORY_STATUS="$(jq -r '.status' <<<"$STOCK_FLOW_DECISION")"
+          if [[ "$(jq -r '.valid' <<<"$STOCK_FLOW_DECISION")" != "true" ]]; then
+            echo "ETF-to-stock history gate rejected the source bundle:" >&2
+            jq . <<<"$STOCK_FLOW_DECISION" >&2
+            exit 1
           fi
           if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
             python scripts/build_stock_pressure_state.py \
