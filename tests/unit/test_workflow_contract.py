@@ -556,6 +556,18 @@ def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocki
     assert "--output-dir read-models-dashboard" in publish
 
 
+def test_empty_unavailable_stock_flow_catalog_does_not_block_dashboard_bundle() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    # The dashboard builder emits an empty catalog sidecar when PCF is not
+    # ready. Both workflows must use the shared contract instead of treating
+    # file existence as proof that penetration history has started.
+    assert "scripts/verify_stock_flow_bundle.py" in collect
+    assert "scripts/verify_stock_flow_bundle.py" in publish
+    assert "STOCK_FLOW_DECISION" in publish
+
+
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:
     workflow = (
         REPOSITORY_ROOT / ".github/workflows/access-smoke.yml"
