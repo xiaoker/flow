@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flow.xiaoker.com/schemas/recovery-stage-evidence-v1.json",
+  "title": "Controlled recovery stage evidence",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "phase",
+    "status",
+    "generatedAt",
+    "planHash",
+    "unknowns",
+    "blockers",
+    "nextAllowedAction",
+    "protectedPathsTouched",
+    "readOnlyAssertions"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "contractVersion": {"const": "recovery-audit-v1"},
+    "phase": {"const": "R0-C"},
+    "status": {"enum": ["DONE", "DONE_WITH_CONCERNS", "BLOCKED"]},
+    "generatedAt": {"type": "string"},
+    "planHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "unknowns": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}},
+    "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE"]},
+    "protectedPathsTouched": {"const": []},
+    "readOnlyAssertions": {
+      "type": "object",
+      "required": [
+        "d1Writes",
+        "r2Writes",
+        "workflowDispatches",
+        "activePointerChanges",
+        "flagChanges"
+      ],
+      "properties": {
+        "d1Writes": {"const": 0},
+        "r2Writes": {"const": 0},
+        "workflowDispatches": {"const": 0},
+        "activePointerChanges": {"const": 0},
+        "flagChanges": {"const": 0}
+      },
+      "additionalProperties": true
+    },
+    "migrationApplied": {"const": false}
+  }
+}

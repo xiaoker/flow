@@ -641,7 +641,10 @@ test("recovery routes fail closed when disabled and require existing authenticat
   const db = await createDatabase();
   try {
     const setup = await completedWindow(db);
-    const recoveryBody = registrationInput(setup.runKey, setup.row);
+    const recoveryBody = registrationInput(setup.runKey, setup.row, "recovery-20260903-01", {
+      authorizedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
     const registerResponse = await worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", {
       method: "POST",
       body: JSON.stringify(recoveryBody),
