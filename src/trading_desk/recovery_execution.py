@@ -288,13 +288,14 @@ def validate_recovery_plan(value: Mapping[str, Any], *, expected_plan_hash: str 
     campaign_id = _string(payload.get("campaignId", payload.get("campaign_id")), "campaign_id", pattern=IDENTIFIER_RE)
     recovery_id = _string(payload.get("recoveryId", payload.get("recovery_id")), "recovery_id", pattern=IDENTIFIER_RE)
     run_key = _string(payload.get("runKey", payload.get("run_key")), "run_key")
-    parsed = parse_run_key(run_key)
+    parse_run_key(run_key)
     dates_value = payload.get("dataDates", payload.get("data_dates"))
     data_dates = _date_list(dates_value, "data_dates", max_count=3)
-    if parsed["date"] not in data_dates and len(data_dates) == 1:
-        # A one-day recovery must be bound to its business window.  Multi-day
-        # campaigns may use one registered run key for their approved scope.
-        raise RecoveryContractError("run_key_date_not_in_scope")
+    # runKey identifies the original scheduling window, not an output date.
+    # In particular, a one-day canary for a reconcile window keeps that
+    # window's runKey. The immutable, approved planHash binds dataDates; receipt
+    # validation independently requires the exact approved output dataDate.
+    # This matches the existing Worker recovery-plan validation contract.
     stages_raw = payload.get("requiredStages", payload.get("required_stages"))
     if not isinstance(stages_raw, (list, tuple)) or not stages_raw:
         raise RecoveryContractError("invalid_required_stages")
