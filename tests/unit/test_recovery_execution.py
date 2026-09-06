@@ -33,11 +33,11 @@ CONFIG = json.loads(
 )
 
 
-def plan(*, dates: list[str] | None = None) -> dict:
+def plan(*, dates: list[str] | None = None, run_key: str = "daily-market-data:2026-08-28:reconcile:v1") -> dict:
     return build_recovery_plan(
         campaign_id="recovery-20260904",
         recovery_id="recovery-20260904-01",
-        run_key="daily-market-data:2026-08-28:reconcile:v1",
+        run_key=run_key,
         data_dates=dates or ["2026-08-27", "2026-08-28", "2026-08-31"],
         required_stages=["dashboard", "etf_penetration", "stock_flow"],
         artifact_root=".recovery/recovery-20260904-01",
@@ -112,6 +112,21 @@ def test_plan_hash_is_stable_and_matrix_is_date_major() -> None:
     assert len(matrix) == 9
     assert [item["dataDate"] for item in matrix[:3]] == ["2026-08-27"] * 3
     assert matrix[0]["artifactRoot"].startswith(".recovery/recovery-20260904-01/2026-08-27/")
+
+
+def test_single_date_recovery_preserves_original_scheduling_window() -> None:
+    # The September 1 reconcile window originally requested August 27/28/31.
+    # A one-day canary must not invent a new runKey to pass local validation.
+    value = plan(dates=["2026-08-28"], run_key="daily-market-data:2026-09-01:reconcile:v1")
+    scope = validate_recovery_plan(value, expected_plan_hash=value["planHash"])
+    assert scope.run_key == "daily-market-data:2026-09-01:reconcile:v1"
+    assert scope.data_dates == ("2026-08-28",)
+    assert {row["dataDate"] for row in iter_execution_matrix(scope)} == {"2026-08-28"}
+    changed = dict(value, dataDates=["2026-09-01"])
+    with pytest.raises(RecoveryContractError, match="plan_hash_mismatch"):
+        validate_recovery_plan(changed, expected_plan_hash=value["planHash"])
+    with pytest.raises(RecoveryContractError, match="receipt_date_outside_scope"):
+        validate_recovery_receipt(receipt(scope, "2026-09-01", "dashboard"), scope=scope)
 
 
 def test_plan_object_hash_is_distinct_from_semantic_plan_hash_and_reproducible() -> None:

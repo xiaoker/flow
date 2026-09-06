@@ -99,13 +99,14 @@ class BudgetedRateLimitedSession:
         parsed = urlparse(url)
         host = (parsed.hostname or "unknown").lower()
         now = time.monotonic()
-        previous = (self.last_by_host or {}).get(host)
+        assert self.last_by_host is not None  # initialized by __post_init__
+        previous = self.last_by_host.get(host)
         if previous is not None:
             delay = self.min_interval_seconds - (now - previous)
             if delay > 0:
                 time.sleep(delay)
         self.request_count += 1
-        (self.last_by_host or {})[host] = time.monotonic()
+        self.last_by_host[host] = time.monotonic()
         return self.session.request(method, url, **kwargs)
 
     def get(self, url: str, **kwargs: Any) -> requests.Response:
@@ -250,6 +251,23 @@ def _assert_confirmed_snapshot(snapshot: dict[str, Any], target: str) -> None:
         raise LiveRecoveryError("live_recovery_quality_gate", "snapshot is not confirmed")
     if str(snapshot.get("asOf") or "") != target:
         raise LiveRecoveryError("live_recovery_date_anchor_mismatch", f"expected={target}")
+
+
+def _assert_history_checkpoint(response: dict[str, Any], target: str) -> None:
+    # HTTP 200 can also mean waiting_sources / archived_pending. Neither is
+    # evidence that the target's normalized history checkpoint is readable.
+    if response.get("status") != "archived" or response.get("asOf") != target:
+        pending_sources = (
+            response.get("asOf") == target
+            and response.get("status") in {"waiting_sources", "archived_pending"}
+            and not response.get("qualityIssues")
+            and response.get("reason") != "derived_etf_quality_failed"
+        )
+        raise LiveRecoveryError(
+            "live_recovery_history_checkpoint_incomplete",
+            f"target={target}, status={response.get('status')}, asOf={response.get('asOf')}",
+            status="FAILED_RETRYABLE" if pending_sources else "BLOCKED_QUALITY",
+        )
 
 
 def _invoke_stock_flow_history(
@@ -435,8 +453,9 @@ def run_live_recovery(
             status="BLOCKED_QUALITY",
         )
     target = scope.data_dates[0]
-    if parsed_run_key["date"] != target:
-        raise LiveRecoveryError("live_recovery_run_key_date_mismatch", target)
+    # The plan hash binds this single output date to the original window.
+    # Rewriting a September reconcile runKey to an August dataDate would
+    # bypass the original window's lease and recovery audit trail.
 
     artifact_root = _safe_root(workspace_root, scope.artifact_root, "artifact_root")
     state_root = _safe_root(workspace_root, scope.state_dir, "state_dir")
@@ -541,6 +560,7 @@ def run_live_recovery(
             max_attempts=3,
         )
         history_publications.append(response)
+        _assert_history_checkpoint(response, target)
         state, _ = _get_json(state_session, state_url, headers=auth)
     _state_dates(state, target)
     _write_json(state_root / "etf-flow-state.json", state)
@@ -646,22 +666,12 @@ def run_live_recovery(
     _write_json(source_bundle / "dashboard-snapshot.json", final_snapshot)
     _copy_json(base_snapshot_path, source_bundle / "dashboard-snapshot-base.json")
 
-    try:
-        _fetch_market_history(
-            base_url=base_url,
-            target=target,
-            output_dir=source_bundle,
-            headers=auth,
-            session=source_session,
-        )
-    except LiveRecoveryError:
-        # Market history is required for the publish capability contract; do
-        # not let a missing compact history silently produce a partial slot.
-        raise
-
     # Archive the final materialized snapshot as the immutable date checkpoint.
     # The server is idempotent for the same source artifact release IDs, so this
-    # second finalize is safe when the state already contained the target.
+    # finalize is safe when the state already contained the target. It must
+    # precede the market-history read: ETF state may contain a date whose
+    # independent history checkpoint was never finalized. Requiring that
+    # checkpoint before creating it makes recovery impossible in that case.
     final_bundle = build_history_bundle_from_files(
         snapshot_path=source_bundle / "dashboard-snapshot.json",
         manifest_path=manifest_path,
@@ -677,6 +687,14 @@ def run_live_recovery(
         max_attempts=3,
     )
     history_publications.append(final_response)
+    _assert_history_checkpoint(final_response, target)
+    _fetch_market_history(
+        base_url=base_url,
+        target=target,
+        output_dir=source_bundle,
+        headers=auth,
+        session=source_session,
+    )
     request_count = source_session.request_count + stock_flow_request_count
     if request_count > scope.max_requests:
         raise LiveRecoveryError(
@@ -711,6 +729,7 @@ def run_live_recovery(
         "recoveryId": scope.recovery_id,
         "planHash": scope.plan_hash,
         "runKey": scope.run_key,
+        "windowDate": parsed_run_key["date"],
         "attemptCount": attempt,
         "dataDates": list(scope.data_dates),
         "targetDate": target,
