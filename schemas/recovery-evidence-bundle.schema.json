@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flow.xiaoker.com/schemas/recovery-evidence-bundle-v2.json",
+  "title": "Controlled recovery evidence bundle v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "contract", "campaignId", "capturedAt", "exportStatus", "errors",
+    "scope", "pages", "inventory", "releaseManifests", "pipelineWindows", "r2Objects",
+    "activeReleaseSlots", "r2Inventory", "accountTelemetry", "accountTelemetryEvidence", "d1Audit",
+    "runtimeEvidence", "readOnlyAssertions", "protectedPathsTouched", "recoveryEstimate",
+    "resourceUsage", "fingerprints"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "contract": { "const": "evidence-bundle-v2" },
+    "campaignId": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "capturedAt": { "$ref": "#/$defs/instant" },
+    "exportStatus": { "enum": ["COMPLETE", "INCOMPLETE"] },
+    "errors": {
+      "type": "array", "maxItems": 250,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "detail"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "detail": { "type": "string", "maxLength": 512 }
+        }
+      }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["startDate", "endDateInclusive", "priorityDates"],
+      "properties": {
+        "startDate": { "const": "2024-08-01" },
+        "endDateInclusive": { "const": "2026-09-03" },
+        "priorityDates": {
+          "type": "array", "maxItems": 32,
+          "items": { "$ref": "#/$defs/date" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "pages": {
+      "type": "array", "maxItems": 250,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "requestCursor", "responseSha256", "responseBytes", "capturedAt", "dateCount", "hasMore", "nextCursor"],
+        "properties": {
+          "kind": { "const": "recovery-inventory" },
+          "requestCursor": { "type": ["string", "null"], "maxLength": 10 },
+          "responseSha256": { "$ref": "#/$defs/sha256" },
+          "responseBytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+          "capturedAt": { "$ref": "#/$defs/instant" },
+          "dateCount": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "hasMore": { "type": "boolean" },
+          "nextCursor": { "type": ["string", "null"], "maxLength": 160 },
+          "usage": { "$ref": "#/$defs/pageUsage" }
+        }
+      }
+    },
+    "activeReleaseSlots": {
+      "type": "array", "maxItems": 2,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["slot", "releaseId", "asOf", "manifestSha256", "observedAt", "activatedAt"],
+        "properties": {
+          "slot": { "enum": ["dashboard", "etf_penetration"] },
+          "releaseId": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "asOf": { "$ref": "#/$defs/date" },
+          "manifestSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "observedAt": { "type": ["string", "null"], "maxLength": 64 },
+          "activatedAt": { "type": ["string", "null"], "maxLength": 64 }
+        }
+      }
+    },
+    "inventory": {
+      "type": "array", "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["dataDate", "domain", "market", "required", "applicability", "stageStatus", "effectiveDate", "rows", "slots", "evidence"],
+        "properties": {
+          "dataDate": { "$ref": "#/$defs/date" },
+          "domain": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "market": { "type": ["string", "null"], "maxLength": 32 },
+          "required": { "type": "boolean" },
+          "applicability": { "type": "string", "maxLength": 32 },
+          "stageStatus": { "$ref": "#/$defs/stageStatus" },
+          "rawKey": { "type": ["string", "null"], "maxLength": 1024 },
+          "rawSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "declaredRawSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "computedRawSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "normalizedKey": { "type": ["string", "null"], "maxLength": 1024 },
+          "normalizedSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "declaredNormalizedSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "computedNormalizedSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "hashOrigin": { "type": ["string", "null"], "maxLength": 128 },
+          "sourceBusinessDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "publicationDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "navDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "pcfDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "effectiveDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "rows": { "type": "integer", "minimum": 0 },
+          "unit": { "type": ["string", "null"], "maxLength": 64 },
+          "schemaVersion": {},
+          "calculationVersion": { "type": ["string", "null"], "maxLength": 128 },
+          "sourceFingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+          "hashStatus": { "type": ["string", "null"], "maxLength": 64 },
+          "hashMismatch": { "type": "boolean" },
+          "runKeys": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 220 } },
+          "releaseIds": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 512 } },
+          "slots": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 64 } },
+          "gapReason": { "type": ["string", "null"], "maxLength": 512 },
+          "evidence": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "releaseManifests": {
+      "type": "array", "maxItems": 5000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["asOf", "slot", "complete"],
+        "properties": {
+          "releaseId": { "type": ["string", "null"], "maxLength": 512 },
+          "asOf": { "$ref": "#/$defs/date" },
+          "slot": { "enum": ["dashboard", "etf_penetration"] },
+          "complete": { "type": "boolean" },
+          "status": { "type": ["string", "null"], "maxLength": 64 },
+          "manifestSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" }
+        }
+      }
+    },
+    "pipelineWindows": {
+      "type": "array", "maxItems": 500,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["runKey", "attemptCount"],
+        "properties": {
+          "runKey": { "type": ["string", "null"], "maxLength": 220 },
+          "pipeline": { "type": ["string", "null"], "maxLength": 80 },
+          "windowDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "windowName": { "type": ["string", "null"], "maxLength": 64 },
+          "targetDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "status": { "type": ["string", "null"], "maxLength": 64 },
+          "attemptCount": { "type": "integer", "minimum": 0 },
+          "lastErrorCode": { "type": ["string", "null"], "maxLength": 128 }
+        }
+      }
+    },
+    "r2Objects": {
+      "type": "array", "maxItems": 20000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["key", "sha256", "bytes"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "dataDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "domain": { "type": ["string", "null"], "maxLength": 80 },
+          "stage": { "type": ["string", "null"], "maxLength": 64 },
+          "bytes": { "type": "integer", "minimum": 0, "maximum": 10000000000 }
+        }
+      }
+    },
+    "r2Inventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["page", "pageSize", "hardLimit", "hasMore", "indexSha256", "suspiciousGaps"],
+      "properties": {
+        "page": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "pageSize": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "hardLimit": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "hasMore": { "type": "boolean" },
+        "indexSha256": { "$ref": "#/$defs/sha256" },
+        "suspiciousGaps": { "type": "array", "maxItems": 500, "items": { "type": "string", "maxLength": 512 } },
+        "source": { "type": "string", "maxLength": 120 }
+      }
+    },
+    "accountTelemetry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["d1RowsReadPerDay", "d1RowsWrittenPerDay", "workersRequestsPerDay", "githubActionsMinutes", "r2StorageBytes", "r2ClassA", "r2ClassB"],
+      "properties": {
+        "d1RowsReadPerDay": { "$ref": "#/$defs/metric" },
+        "d1RowsWrittenPerDay": { "$ref": "#/$defs/metric" },
+        "workersRequestsPerDay": { "$ref": "#/$defs/metric" },
+        "githubActionsMinutes": { "$ref": "#/$defs/metric" },
+        "r2StorageBytes": { "$ref": "#/$defs/metric" },
+        "r2ClassA": { "$ref": "#/$defs/metric" },
+        "r2ClassB": { "$ref": "#/$defs/metric" }
+      }
+    },
+    "accountTelemetryEvidence": { "type": "object", "additionalProperties": false, "required": ["status", "reason"], "properties": { "status": { "type": "string" }, "reason": { "type": "string" }, "capturedAt": { "type": ["string", "null"] }, "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" } } },
+    "d1Audit": { "type": "object", "additionalProperties": false, "required": ["rowsRead", "rowsWritten", "workersRequests"], "properties": { "rowsRead": { "$ref": "#/$defs/countOrUnknown" }, "rowsWritten": { "$ref": "#/$defs/countOrUnknown" }, "workersRequests": { "$ref": "#/$defs/countOrUnknown" } } },
+    "runtimeEvidence": { "type": "object", "additionalProperties": true },
+    "readOnlyAssertions": { "$ref": "#/$defs/assertions" },
+    "protectedPathsTouched": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 512 } },
+    "recoveryEstimate": { "type": "object", "additionalProperties": false, "required": ["actionsMinutes", "r2StorageBytes", "r2ClassA", "r2ClassB"], "properties": { "actionsMinutes": { "$ref": "#/$defs/countOrUnknown" }, "r2StorageBytes": { "$ref": "#/$defs/countOrUnknown" }, "r2ClassA": { "$ref": "#/$defs/countOrUnknown" }, "r2ClassB": { "$ref": "#/$defs/countOrUnknown" } } },
+    "resourceUsage": { "type": "object", "additionalProperties": true },
+    "fingerprints": { "type": "object", "additionalProperties": false, "required": ["sourcePagesSha256", "inventorySha256", "r2IndexSha256"], "properties": { "sourcePagesSha256": { "$ref": "#/$defs/sha256" }, "inventorySha256": { "$ref": "#/$defs/sha256" }, "r2IndexSha256": { "$ref": "#/$defs/sha256" } } },
+    "planHashReplay": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "instant": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "countOrUnknown": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "const": "unknown" }] },
+    "metric": { "type": "object", "additionalProperties": false, "required": ["value", "measuredAt", "reason"], "properties": { "value": { "oneOf": [{ "type": "number", "minimum": 0 }, { "const": "unknown" }] }, "measuredAt": { "type": ["string", "null"] }, "reason": { "type": ["string", "null"], "maxLength": 512 }, "source": { "type": "string", "maxLength": 120 } } },
+    "stageStatus": { "type": "object", "additionalProperties": false, "required": ["raw", "normalized", "model", "pcf_exact", "dashboard", "etf_penetration", "date_visible"], "properties": { "raw": { "type": "string" }, "normalized": { "type": "string" }, "model": { "type": "string" }, "pcf_exact": { "type": "string" }, "dashboard": { "type": "string" }, "etf_penetration": { "type": "string" }, "date_visible": { "type": "string" } } },
+    "assertions": { "type": "object", "additionalProperties": false, "required": ["d1Writes", "r2Writes", "workflowDispatches", "activePointerChanges", "flagChanges"], "properties": { "d1Writes": { "$ref": "#/$defs/countOrUnknown" }, "r2Writes": { "$ref": "#/$defs/countOrUnknown" }, "workflowDispatches": { "$ref": "#/$defs/countOrUnknown" }, "activePointerChanges": { "$ref": "#/$defs/countOrUnknown" }, "flagChanges": { "$ref": "#/$defs/countOrUnknown" } } },
+    "pageUsage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["d1QueryCount", "d1RowsRead", "d1RowsWritten", "d1RowsReadKnown", "d1RowsWrittenKnown", "r2ClassA", "r2ClassB", "r2HeadCount", "r2HeadLimit", "truncated"],
+      "properties": {
+        "d1QueryCount": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "d1RowsRead": { "type": "integer", "minimum": 0, "maximum": 500000 },
+        "d1RowsWritten": { "type": "integer", "minimum": 0 },
+        "d1RowsReadKnown": { "type": "boolean" },
+        "d1RowsWrittenKnown": { "type": "boolean" },
+        "r2ClassA": { "type": "integer", "minimum": 0 },
+        "r2ClassB": { "type": "integer", "minimum": 0 },
+        "r2HeadCount": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "r2HeadLimit": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  }
+}
