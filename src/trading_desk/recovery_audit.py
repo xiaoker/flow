@@ -51,9 +51,12 @@ from .recovery_execution import (
 )
 
 
-AUDIT_SCHEMA_VERSION = 1
-AUDIT_CONTRACT_VERSION = "recovery-audit-v1"
+INPUT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2
+AUDIT_CONTRACT_VERSION = "recovery-audit-v2"
 AUDIT_PHASES = frozenset({"R0-C", "R0-D"})
+RECONCILIATION_STATUSES = frozenset({"NOT_APPLICABLE", "PENDING", "R0_RECONCILED"})
+NEXT_ALLOWED_ACTIONS = frozenset({"STOP", "R0-D_RECONCILE", "R2_ACCEPTANCE_AUDIT"})
 MAX_CALENDAR_DAYS = 1_100
 MAX_INPUT_RECORDS = 10_000
 MAX_RELEASE_RECORDS = 5_000
@@ -546,16 +549,27 @@ def _global_slot_status(
         if complete_values == {True, False}:
             return "BLOCKED"
         return "READY" if True in complete_values else "MISSING"
-    statuses = [
-        str(row.get("stages", {}).get(slot, "UNKNOWN"))
-        for row in rows
-        if row.get("dataDate") == data_date
+    date_rows = [row for row in rows if row.get("dataDate") == data_date]
+    applicable_rows = [
+        row
+        for row in date_rows
+        if row.get("required") and row.get("applicability") == "REQUIRED"
     ]
-    if "READY" in statuses:
-        return "READY"
-    if "MISSING" in statuses or "BLOCKED" in statuses or "BLOCKED_QUALITY" in statuses:
+    if not applicable_rows and date_rows and all(
+        row.get("applicability") in {"OFFICIAL_CLOSED", "NOT_APPLICABLE"}
+        for row in date_rows
+    ):
+        return "NOT_APPLICABLE"
+    statuses = [str(row.get("stages", {}).get(slot, "UNKNOWN")) for row in applicable_rows]
+    if not statuses:
+        return "UNKNOWN"
+    if any(status in {"BLOCKED", "BLOCKED_QUALITY", "INVALID"} for status in statuses):
+        return "BLOCKED"
+    if any(status == "UNKNOWN" or status == "PENDING" for status in statuses):
+        return "UNKNOWN"
+    if any(status == "MISSING" for status in statuses):
         return "MISSING"
-    return "UNKNOWN"
+    return "READY" if all(_is_ready(status) for status in statuses) else "UNKNOWN"
 
 
 def _date_visible_status(
@@ -564,12 +578,23 @@ def _date_visible_status(
     rows: Sequence[Mapping[str, Any]],
     releases: Mapping[tuple[str, str], list[dict[str, Any]]],
 ) -> str:
-    statuses = [
-        str(row.get("stages", {}).get("date_visible", "UNKNOWN"))
-        for row in rows
-        if row.get("dataDate") == data_date
+    date_rows = [row for row in rows if row.get("dataDate") == data_date]
+    applicable_rows = [
+        row
+        for row in date_rows
+        if row.get("required") and row.get("applicability") == "REQUIRED"
     ]
-    if "READY" in statuses:
+    if not applicable_rows and date_rows and all(
+        row.get("applicability") in {"OFFICIAL_CLOSED", "NOT_APPLICABLE"}
+        for row in date_rows
+    ):
+        return "NOT_APPLICABLE"
+    statuses = [str(row.get("stages", {}).get("date_visible", "UNKNOWN")) for row in applicable_rows]
+    if any(status in {"BLOCKED", "BLOCKED_QUALITY", "INVALID"} for status in statuses):
+        return "BLOCKED"
+    if any(status == "UNKNOWN" or status == "PENDING" for status in statuses):
+        return "UNKNOWN"
+    if statuses and all(_is_ready(status) for status in statuses):
         return "READY"
     dashboard = _global_slot_status(data_date, "dashboard", rows=rows, releases=releases)
     if dashboard == "READY":
@@ -934,32 +959,69 @@ def _target_stages(
         return [], ["no_required_domain"], unknowns
     if unknowns:
         return [], unknowns, unknowns
+    # Closed/not-applicable domains do not contribute rows to a required
+    # stage.  Mixing them into the aggregate would turn a valid calendar
+    # closure into an unexplained stage gap.
+    applicable_rows = [row for row in required_rows if row["applicability"] == "REQUIRED"]
     stages: list[str] = []
     reasons: list[str] = []
     for stage in ("raw", "normalized", "model"):
-        aggregate = _aggregate_stage(required_rows, stage)
-        if aggregate in {"UNKNOWN", "BLOCKED", "SOURCE_UNAVAILABLE"}:
+        aggregate = _aggregate_stage(applicable_rows, stage)
+        if aggregate in {"UNKNOWN", "BLOCKED"}:
             unknowns.append(f"{stage}:{aggregate}")
+        elif aggregate == "SOURCE_UNAVAILABLE":
+            reasons.append(f"{stage}_source_unavailable")
         elif aggregate != "READY":
             stages.append(RECOVERY_STAGE_MAP[stage])
             reasons.append(f"{stage}_{aggregate.lower()}")
     for stage in ("dashboard", "etf_penetration"):
         aggregate = _global_slot_status(data_date, stage, rows=rows, releases=releases)
-        if aggregate == "UNKNOWN":
+        if aggregate in {"UNKNOWN", "BLOCKED"}:
             unknowns.append(f"{stage}:UNKNOWN")
-        elif aggregate != "READY":
+        elif aggregate not in {"READY", "NOT_APPLICABLE"}:
             stages.append(RECOVERY_STAGE_MAP[stage])
             reasons.append(f"{stage}_{aggregate.lower()}")
     visible = _date_visible_status(data_date, rows=rows, releases=releases)
-    if visible == "UNKNOWN":
+    if visible in {"UNKNOWN", "BLOCKED"}:
         unknowns.append("date_visible:UNKNOWN")
-    elif visible != "READY":
+    elif visible not in {"READY", "NOT_APPLICABLE"}:
         stages.append("publish")
         reasons.append(f"date_visible_{visible.lower()}")
     # Preserve controlled stage order and de-duplicate reasons.  A plan may
     # still contain a stage only once even when several domains need it.
     ordered = [stage for stage in ("core_collection", "stock_flow", "pcf_exact", "dashboard", "etf_penetration", "publish") if stage in stages]
     return ordered, sorted(set(reasons)), sorted(set(unknowns))
+
+
+def _source_unavailable_provenance(row: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Return whether a SOURCE_UNAVAILABLE row is a closed, auditable fact.
+
+    A source outage is not a missing fact when its business date, reason,
+    source fingerprint and an evidence receipt are present.  Keeping this
+    predicate separate from the display record prevents a known outage from
+    being confused with an unexplained gap while still failing closed for
+    hand-written or incomplete evidence.
+    """
+
+    missing: list[str] = []
+    if not row.get("domain"):
+        missing.append("sourceId")
+    if not row.get("sourceBusinessDate"):
+        missing.append("sourceBusinessDate")
+    if not row.get("gapReason"):
+        missing.append("reason")
+    if not row.get("sourceFingerprint"):
+        missing.append("sourceFingerprint")
+    evidence = row.get("evidence")
+    evidence_present = isinstance(evidence, Mapping) and any(
+        bool(value) for key, value in evidence.items() if key != "sourceReadinessCount"
+    )
+    evidence_present = evidence_present or (
+        isinstance(evidence, Mapping) and int(evidence.get("sourceReadinessCount", 0) or 0) > 0
+    )
+    if not evidence_present:
+        missing.append("evidence")
+    return not missing, missing
 
 
 def _source_unavailable(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -970,6 +1032,7 @@ def _source_unavailable(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         for stage, status in row["stages"].items():
             if status != "SOURCE_UNAVAILABLE":
                 continue
+            provenance_complete, missing = _source_unavailable_provenance(row)
             output.append(
                 {
                     "dataDate": row["dataDate"],
@@ -979,6 +1042,8 @@ def _source_unavailable(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
                     "rawKey": row["rawKey"],
                     "rawSha256": row["rawSha256"],
                     "evidence": row["evidence"],
+                    "provenanceStatus": "COMPLETE" if provenance_complete else "INCOMPLETE",
+                    "missingProvenance": missing,
                 }
             )
     return output
@@ -1102,12 +1167,22 @@ def _summary(
 ) -> str:
     counts = Counter(row["applicability"] for row in rows)
     unknowns = sum(
-        1
-        for row in rows
-        if row["applicability"] == "UNKNOWN"
-        or any(status == "UNKNOWN" for status in row["stages"].values())
+        len(summary.get("unknowns") or [])
+        for summary in plan.get("dateSummaries", [])
+        if isinstance(summary, Mapping)
     )
-    status = "BLOCKED" if budget["decision"] == "over_budget" else "DONE_WITH_CONCERNS" if budget["decision"] == "unknown_metrics" or unknowns or r2_status != "READY" else "DONE"
+    unprovenanced = any(
+        item.get("provenanceStatus") != "COMPLETE"
+        for item in source_unavailable
+        if isinstance(item, Mapping)
+    )
+    status = (
+        "BLOCKED"
+        if budget["decision"] == "over_budget"
+        else "DONE_WITH_CONCERNS"
+        if budget["decision"] == "unknown_metrics" or unknowns or r2_status != "READY" or unprovenanced
+        else "DONE"
+    )
     lines = [
         f"# Controlled recovery {phase} audit",
         "",
@@ -1151,6 +1226,72 @@ def _summary(
     return "\n".join(lines) + "\n"
 
 
+READ_ONLY_ASSERTION_FIELDS = (
+    "d1Writes",
+    "r2Writes",
+    "workflowDispatches",
+    "activePointerChanges",
+    "flagChanges",
+)
+
+
+def _runtime_safety_evidence(
+    bundle: Mapping[str, Any],
+    *,
+    phase: str,
+) -> tuple[dict[str, int], list[str], list[str], list[str]]:
+    """Read safety assertions without granting absent live evidence a pass."""
+
+    runtime = bundle.get("runtimeEvidence")
+    runtime = runtime if isinstance(runtime, Mapping) else {}
+    raw_assertions = bundle.get("readOnlyAssertions")
+    if raw_assertions is None:
+        raw_assertions = runtime.get("readOnlyAssertions")
+    unknowns: list[str] = []
+    blockers: list[str] = []
+    if raw_assertions is None:
+        if phase == "R0-D":
+            unknowns.append("readOnlyAssertions:UNKNOWN")
+        assertions = {field: 0 for field in READ_ONLY_ASSERTION_FIELDS}
+    elif not isinstance(raw_assertions, Mapping):
+        raise RecoveryAuditError("invalid_read_only_assertions")
+    else:
+        assertions = {}
+        for field in READ_ONLY_ASSERTION_FIELDS:
+            value = raw_assertions.get(field)
+            if value in (None, "", "unknown", "UNKNOWN"):
+                if phase == "R0-D":
+                    unknowns.append(f"readOnlyAssertions:{field}:UNKNOWN")
+                assertions[field] = 0
+                continue
+            assertions[field] = _nonnegative_int(value, f"read_only_{field}")
+            if assertions[field] != 0:
+                blockers.append(f"readOnlyAssertions:{field}={assertions[field]}")
+
+    raw_paths = bundle.get("protectedPathsTouched")
+    if raw_paths is None:
+        raw_paths = runtime.get("protectedPathsTouched")
+    if raw_paths is None:
+        protected_paths: list[str] = []
+        if phase == "R0-D":
+            unknowns.append("protectedPathsTouched:UNKNOWN")
+    else:
+        protected_paths = _list_of_text(raw_paths, "protected_paths_touched", max_count=100)
+        blockers.extend(f"protectedPathTouched:{path}" for path in protected_paths)
+    return assertions, unknowns, blockers, protected_paths
+
+
+def _required_stage_unknowns(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    unknowns: list[str] = []
+    for row in rows:
+        if not row.get("required") or row.get("applicability") != "REQUIRED":
+            continue
+        for stage, status in row.get("stages", {}).items():
+            if status in {"UNKNOWN", "PENDING"}:
+                unknowns.append(f"{row['dataDate']}:{row['domain']}:{stage}:{status}")
+    return unknowns
+
+
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields), extrasaction="ignore")
@@ -1174,42 +1315,90 @@ def build_stage_evidence(
     unknowns: list[str] = list(budget["unknownMetrics"])
     if r2_status != "READY":
         unknowns.append(f"r2Inventory:{r2_status}")
+    unknowns.extend(_required_stage_unknowns(rows))
     unknowns.extend(
-        f"{row['dataDate']}:{row['domain']}:{stage}"
+        f"{row['dataDate']}:{row['domain']}:applicability:UNKNOWN"
         for row in rows
-        for stage, status in row["stages"].items()
-        if status == "UNKNOWN"
+        if row.get("required") and row.get("applicability") == "UNKNOWN"
+    )
+    # The date summaries include global slot and date-visible evidence, which
+    # cannot be inferred from a single domain row.
+    unknowns.extend(
+        f"{summary['dataDate']}:{item}"
+        for summary in plan.get("dateSummaries", [])
+        if isinstance(summary, Mapping)
+        for item in summary.get("unknowns", [])
     )
     blockers = list(budget["overLimit"])
     blockers.extend(
         f"{row['dataDate']}:{row['domain']}:{stage}:BLOCKED"
         for row in rows
+        if row.get("required") and row.get("applicability") == "REQUIRED"
         for stage, status in row["stages"].items()
         if status in {"BLOCKED", "BLOCKED_QUALITY", "INVALID"}
     )
-    status = "BLOCKED" if blockers else "DONE_WITH_CONCERNS" if unknowns or source_unavailable else "DONE"
+    incomplete_source_unavailable = [
+        item
+        for item in source_unavailable
+        if item.get("provenanceStatus") != "COMPLETE"
+    ]
+    unknowns.extend(
+        f"{item['dataDate']}:{item['domain']}:{item['stage']}:source_provenance:{','.join(item.get('missingProvenance') or [])}"
+        for item in incomplete_source_unavailable
+    )
+    assertions, safety_unknowns, safety_blockers, protected_paths = _runtime_safety_evidence(
+        bundle,
+        phase=phase,
+    )
+    unknowns.extend(safety_unknowns)
+    blockers.extend(safety_blockers)
+    runtime = bundle.get("runtimeEvidence")
+    runtime = runtime if isinstance(runtime, Mapping) else {}
+    metrics_measured_at = runtime.get("metricsMeasuredAt", runtime.get("metrics_measured_at"))
+    if phase == "R0-D" and not isinstance(metrics_measured_at, str):
+        unknowns.append("metricsMeasuredAt:UNKNOWN")
+    source_incomplete = bool(incomplete_source_unavailable) or r2_status != "READY" or bool(
+        unknowns
+    )
+    status = "BLOCKED" if blockers else "DONE_WITH_CONCERNS" if unknowns else "DONE"
+    reconciliation_status = "NOT_APPLICABLE" if phase == "R0-C" else "PENDING"
+    next_action = "STOP" if blockers else "R0-D_RECONCILE"
+    if phase == "R0-D" and status == "DONE" and budget["decision"] == "allow" and r2_status == "READY":
+        reconciliation_status = "R0_RECONCILED"
+        next_action = "R2_ACCEPTANCE_AUDIT"
     checks = [
-        {"id": "input_schema", "status": "pass", "detail": "schemaVersion=1 and bounded records validated"},
+        {"id": "input_schema", "status": "pass", "detail": "input schemaVersion=1 accepted; output contract is v2"},
         {"id": "read_only_boundary", "status": "pass", "detail": "no network/provider client or mutation API is available"},
         {"id": "stable_plan_hash", "status": "pass", "detail": "planHash derives from canonical scope/evidence only"},
-        {"id": "unknown_fail_closed", "status": "pass" if status != "DONE" or not unknowns else "pass", "detail": "unknown evidence cannot become a recovery target"},
+        {"id": "unknown_fail_closed", "status": "pass", "detail": "unknown evidence cannot become a recovery target or R0_RECONCILED"},
         {"id": "budget_gate", "status": "pass" if budget["decision"] == "allow" else "warn", "detail": budget["decision"]},
         {"id": "release_slot_separation", "status": "pass", "detail": "dashboard and etf_penetration are evaluated independently"},
+        {"id": "r0d_reconciliation", "status": "pass" if reconciliation_status == "R0_RECONCILED" else "warn", "detail": reconciliation_status},
     ]
-    runtime = bundle.get("runtimeEvidence")
     repository = runtime.get("repository") if isinstance(runtime, Mapping) else {}
     if not isinstance(repository, Mapping):
         repository = {}
-    source_incomplete = bool(source_unavailable) or r2_status != "READY" or any(
-        row["applicability"] == "UNKNOWN"
-        or any(status == "UNKNOWN" for status in row["stages"].values())
-        for row in rows
-    )
+    release_slots = {
+        slot: sum(
+            1
+            for summary in plan.get("dateSummaries", [])
+            if isinstance(summary, Mapping)
+            and summary.get("stageStatus", {}).get(slot) == "READY"
+        )
+        for slot in ("dashboard", "etf_penetration")
+    }
+    if source_incomplete:
+        source_status = "INCOMPLETE"
+    elif source_unavailable:
+        source_status = "READY_WITH_EVIDENCED_UNAVAILABLE"
+    else:
+        source_status = "READY"
     return {
         "schemaVersion": AUDIT_SCHEMA_VERSION,
         "contractVersion": AUDIT_CONTRACT_VERSION,
         "phase": phase,
         "status": status,
+        "reconciliationStatus": reconciliation_status,
         "generatedAt": bundle.get("capturedAt", "unknown"),
         "baseMainSha": repository.get("originMain", "unknown"),
         "headSha": repository.get("headSha", repository.get("originMain", "unknown")),
@@ -1223,7 +1412,7 @@ def build_stage_evidence(
         "flagsBefore": {},
         "flagsAfter": {},
         "authorizationRefs": [],
-        "sourceEvidenceStatus": "INCOMPLETE" if source_incomplete else "READY",
+        "sourceEvidenceStatus": source_status,
         "r2InventoryStatus": r2_status,
         "budgetStatus": budget["decision"],
         "claimDecision": "NOT_ATTEMPTED",
@@ -1233,10 +1422,7 @@ def build_stage_evidence(
         "attemptCount": 0,
         "collectorRun": None,
         "publishRun": None,
-        "releaseSlots": {
-            "dashboard": sum(1 for row in rows if row["stages"]["dashboard"] == "READY"),
-            "etf_penetration": sum(1 for row in rows if row["stages"]["etf_penetration"] == "READY"),
-        },
+        "releaseSlots": release_slots,
         "receipts": [],
         "d1RowsRead": budget["measured"].get("d1RowsRead", "unknown"),
         "d1RowsWritten": budget["measured"].get("d1RowsWritten", "unknown"),
@@ -1244,19 +1430,13 @@ def build_stage_evidence(
         "r2ClassA": "unknown",
         "r2ClassB": "unknown",
         "actionsMinutes": "unknown",
-        "metricsMeasuredAt": None,
+        "metricsMeasuredAt": metrics_measured_at if isinstance(metrics_measured_at, str) else None,
         "checks": checks,
         "unknowns": sorted(set(unknowns)),
         "blockers": sorted(set(blockers)),
-        "nextAllowedAction": "STOP" if blockers else "R0-D_RECONCILE",
-        "protectedPathsTouched": [],
-        "readOnlyAssertions": {
-            "d1Writes": 0,
-            "r2Writes": 0,
-            "workflowDispatches": 0,
-            "activePointerChanges": 0,
-            "flagChanges": 0,
-        },
+        "nextAllowedAction": next_action,
+        "protectedPathsTouched": protected_paths,
+        "readOnlyAssertions": assertions,
         "pipelineWindowCount": len(pipeline_windows),
     }
 
@@ -1274,7 +1454,7 @@ def audit_bundle(
     if not isinstance(bundle, Mapping):
         raise RecoveryAuditError("bundle_must_be_object")
     _reject_secret_keys(bundle)
-    if bundle.get("schemaVersion") != AUDIT_SCHEMA_VERSION:
+    if bundle.get("schemaVersion") != INPUT_SCHEMA_VERSION:
         raise RecoveryAuditError("unknown_audit_schema_version")
     start, end, priority, dates = _scope(bundle)
     domains = _domains(bundle)

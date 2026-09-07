@@ -108,6 +108,18 @@ def complete_bundle(*, rows: list[dict] | None = None) -> dict:
             "r2ClassB": 1,
         },
         "d1Audit": {"rowsRead": 10, "rowsWritten": 2, "workersRequests": 1},
+        "readOnlyAssertions": {
+            "d1Writes": 0,
+            "r2Writes": 0,
+            "workflowDispatches": 0,
+            "activePointerChanges": 0,
+            "flagChanges": 0,
+        },
+        "protectedPathsTouched": [],
+        "runtimeEvidence": {
+            "metricsMeasuredAt": "2026-09-07T10:00:00+08:00",
+            "repository": {"originMain": "2eecc643761bcbcc23c91f25f11510afea854427"},
+        },
         "retryAttempts": 1,
     }
 
@@ -124,12 +136,17 @@ def test_plan_hash_is_stable_for_reordered_fixture() -> None:
     assert first["plan"]["executionBlocked"] is True
 
 
-def test_r0d_phase_label_is_explicit_without_changing_plan_hash() -> None:
+def test_r0d_phase_closes_complete_evidence_without_changing_plan_hash() -> None:
     r0c = audit_bundle(complete_bundle(), budget_config=CONFIG)
     r0d = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
     assert r0c["plan"]["planHash"] == r0d["plan"]["planHash"]
     assert r0c["stageEvidence"]["phase"] == "R0-C"
+    assert r0c["stageEvidence"]["reconciliationStatus"] == "NOT_APPLICABLE"
+    assert r0c["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
     assert r0d["stageEvidence"]["phase"] == "R0-D"
+    assert r0d["stageEvidence"]["status"] == "DONE"
+    assert r0d["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
+    assert r0d["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
     assert r0d["summary"].startswith("# Controlled recovery R0-D audit")
 
 
@@ -182,6 +199,66 @@ def test_source_unavailable_is_reported_but_official_closed_is_not() -> None:
     assert {(item["dataDate"], item["stage"]) for item in result["sourceUnavailable"]} == {
         ("2026-08-28", "raw")
     }
+    assert result["sourceUnavailable"][0]["provenanceStatus"] == "INCOMPLETE"
+
+
+def test_evidenced_source_unavailable_is_a_known_closed_state() -> None:
+    row = ready_row(
+        "2026-08-28",
+        stageStatus={
+            "raw": "SOURCE_UNAVAILABLE",
+            "normalized": "SOURCE_UNAVAILABLE",
+            "model": "SOURCE_UNAVAILABLE",
+            "pcf_exact": "SOURCE_UNAVAILABLE",
+        },
+        gapReason="official source did not publish this dataset",
+        evidence={"marketHistory": True},
+    )
+    result = audit_bundle(
+        complete_bundle(rows=[row, ready_row("2026-08-29")]),
+        budget_config=CONFIG,
+        phase="R0-D",
+    )
+    assert result["sourceUnavailable"][0]["provenanceStatus"] == "COMPLETE"
+    assert result["stageEvidence"]["sourceEvidenceStatus"] == "READY_WITH_EVIDENCED_UNAVAILABLE"
+    assert result["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
+
+
+def test_r0d_missing_runtime_safety_evidence_cannot_close() -> None:
+    bundle = complete_bundle()
+    bundle.pop("readOnlyAssertions")
+    bundle.pop("protectedPathsTouched")
+    bundle["runtimeEvidence"] = {"repository": {"originMain": "2eecc643761bcbcc23c91f25f11510afea854427"}}
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["stageEvidence"]["status"] == "DONE_WITH_CONCERNS"
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
+    assert "readOnlyAssertions:UNKNOWN" in result["stageEvidence"]["unknowns"]
+    assert "metricsMeasuredAt:UNKNOWN" in result["stageEvidence"]["unknowns"]
+
+
+def test_r0d_nonzero_read_only_assertion_blocks() -> None:
+    bundle = complete_bundle()
+    bundle["readOnlyAssertions"]["d1Writes"] = 1
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["stageEvidence"]["status"] == "BLOCKED"
+    assert result["stageEvidence"]["nextAllowedAction"] == "STOP"
+    assert "readOnlyAssertions:d1Writes=1" in result["stageEvidence"]["blockers"]
+
+
+def test_dashboard_visibility_cannot_close_missing_penetration_slot() -> None:
+    bundle = complete_bundle()
+    bundle["releaseManifests"] = [
+        item for item in bundle["releaseManifests"] if item["slot"] == "dashboard"
+    ]
+    for row in bundle["inventory"]:
+        row["stageStatus"]["etf_penetration"] = "MISSING"
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
+    assert result["stageEvidence"]["status"] == "DONE"
+    assert result["targets"][0]["requiredStages"] == ["etf_penetration"]
 
 
 def test_missing_hash_is_unknown_and_declared_mismatch_is_blocked() -> None:
@@ -289,8 +366,15 @@ def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
         )
     )
     assert set(schema["properties"]["phase"]["enum"]) == {"R0-C", "R0-D"}
+    assert schema["properties"]["schemaVersion"]["const"] == 2
+    assert schema["properties"]["contractVersion"]["const"] == "recovery-audit-v2"
     assert schema["properties"]["migrationApplied"]["const"] is False
-    assert schema["properties"]["protectedPathsTouched"]["const"] == []
+    assert schema["properties"]["nextAllowedAction"]["enum"] == [
+        "STOP",
+        "R0-D_RECONCILE",
+        "R2_ACCEPTANCE_AUDIT",
+    ]
+    assert "reconciliationStatus" in schema["required"]
 
 
 def test_auditor_dependency_surface_is_offline_and_pure(monkeypatch) -> None:
