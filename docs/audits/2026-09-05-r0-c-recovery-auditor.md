@@ -21,8 +21,11 @@ PYTHONPATH=src:. python scripts/audit_controlled_recovery.py \
 
 Use `--phase R0-D` only when the same formal auditor is being run for the
 documented production read-only inventory. The default remains `R0-C` for
-backward compatibility; the phase label changes evidence presentation only
-and is deliberately excluded from the canonical plan hash.
+backward compatibility. Input bundles remain `schemaVersion=1`; generated
+plan, budget and stage-evidence outputs use the `recovery-audit-v2` contract.
+The phase label remains excluded from the canonical plan hash, while the
+contract version is included, so a v1 plan hash cannot be reused as a v2
+approval.
 
 The input must be JSON with `schemaVersion=1`, a `scope` containing inclusive
 ISO dates, an explicit `campaignId`, and bounded inventory rows. A row is
@@ -46,10 +49,11 @@ The isolated output directory contains exactly:
 - `inventory.json` and `inventory.csv`: date × domain × stage matrix;
 - `recovery-plan.json`: canonical `R0_READ_ONLY_DRAFT`, `NOT_APPROVED`,
   `executionBlocked=true`, stable `planHash` and source fingerprint;
-- `source-unavailable.csv`: only evidence-backed unavailable sources;
+- `source-unavailable.csv`: declared unavailable sources with a
+  `provenanceStatus` indicating whether the closure evidence is complete;
 - `budget-estimate.json`: measured, projected and worst-retry resource use;
-- `stage-evidence.json`: machine-readable R0-C/R0-D status and read-only
-  assertions;
+- `stage-evidence.json`: machine-readable R0-C/R0-D status, reconciliation
+  state and read-only assertions;
 - `summary.md`: concise human review of concerns and next allowed phase.
 
 The same fixture and contract produce the same `planHash`; current time,
@@ -57,9 +61,12 @@ workflow run IDs and download time are not part of the hash. Outputs must be
 written to an isolated directory. The auditor rejects paths containing the
 protected `reports/phase0` or `memory` roots before creating directories.
 
-R0-C ends at `CODE_READY`/`DONE_WITH_CONCERNS`. R0-D uses the same offline
-auditor after a bounded production evidence export. Neither phase registers
-or approves a plan, runs a migration,
-enable `PIPELINE_RECOVERY_ENABLED`, dispatch Watchdog/Collector/Publish, or
-run a canary. Those actions require the next documented stop-point and an
-explicit authorization.
+R0-C ends at `CODE_READY`/`DONE_WITH_CONCERNS` and can only point to
+`R0-D_RECONCILE`. R0-D can emit `R0_RECONCILED` and
+`nextAllowedAction=R2_ACCEPTANCE_AUDIT` only when every required evidence,
+budget metric, R2 page, safety assertion and provenance predicate is closed.
+Evidence-backed `SOURCE_UNAVAILABLE` is a known closed fact; an unavailable
+source without provenance remains incomplete. Neither phase registers or
+approves a plan, runs a migration, enables `PIPELINE_RECOVERY_ENABLED`,
+dispatches Watchdog/Collector/Publish, or runs a canary. Those actions require
+the next documented stop-point and an explicit authorization.

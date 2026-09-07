@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://flow.xiaoker.com/schemas/recovery-stage-evidence-v1.json",
+  "$id": "https://flow.xiaoker.com/schemas/recovery-stage-evidence-v2.json",
   "title": "Controlled recovery stage evidence",
   "type": "object",
   "additionalProperties": true,
@@ -9,6 +9,7 @@
     "contractVersion",
     "phase",
     "status",
+    "reconciliationStatus",
     "generatedAt",
     "planHash",
     "unknowns",
@@ -18,16 +19,17 @@
     "readOnlyAssertions"
   ],
   "properties": {
-    "schemaVersion": {"const": 1},
-    "contractVersion": {"const": "recovery-audit-v1"},
+    "schemaVersion": {"const": 2},
+    "contractVersion": {"const": "recovery-audit-v2"},
     "phase": {"enum": ["R0-C", "R0-D"]},
     "status": {"enum": ["DONE", "DONE_WITH_CONCERNS", "BLOCKED"]},
+    "reconciliationStatus": {"enum": ["NOT_APPLICABLE", "PENDING", "R0_RECONCILED"]},
     "generatedAt": {"type": "string"},
     "planHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "unknowns": {"type": "array", "items": {"type": "string"}},
     "blockers": {"type": "array", "items": {"type": "string"}},
-    "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE"]},
-    "protectedPathsTouched": {"const": []},
+    "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE", "R2_ACCEPTANCE_AUDIT"]},
+    "protectedPathsTouched": {"type": "array", "items": {"type": "string"}},
     "readOnlyAssertions": {
       "type": "object",
       "required": [
@@ -38,14 +40,65 @@
         "flagChanges"
       ],
       "properties": {
-        "d1Writes": {"const": 0},
-        "r2Writes": {"const": 0},
-        "workflowDispatches": {"const": 0},
-        "activePointerChanges": {"const": 0},
-        "flagChanges": {"const": 0}
+        "d1Writes": {"type": "integer", "minimum": 0},
+        "r2Writes": {"type": "integer", "minimum": 0},
+        "workflowDispatches": {"type": "integer", "minimum": 0},
+        "activePointerChanges": {"type": "integer", "minimum": 0},
+        "flagChanges": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": true
     },
-    "migrationApplied": {"const": false}
-  }
+    "migrationApplied": {"const": false},
+    "sourceEvidenceStatus": {
+      "enum": ["READY", "READY_WITH_EVIDENCED_UNAVAILABLE", "INCOMPLETE"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"reconciliationStatus": {"const": "R0_RECONCILED"}}},
+      "then": {
+        "properties": {
+          "phase": {"const": "R0-D"},
+          "status": {"const": "DONE"},
+          "nextAllowedAction": {"const": "R2_ACCEPTANCE_AUDIT"},
+          "unknowns": {"const": []},
+          "blockers": {"const": []},
+          "protectedPathsTouched": {"const": []},
+          "readOnlyAssertions": {
+            "properties": {
+              "d1Writes": {"const": 0},
+              "r2Writes": {"const": 0},
+              "workflowDispatches": {"const": 0},
+              "activePointerChanges": {"const": 0},
+              "flagChanges": {"const": 0}
+            }
+          },
+          "budgetStatus": {"const": "allow"},
+          "r2InventoryStatus": {"const": "READY"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"nextAllowedAction": {"const": "R2_ACCEPTANCE_AUDIT"}}},
+      "then": {
+        "properties": {
+          "phase": {"const": "R0-D"},
+          "reconciliationStatus": {"const": "R0_RECONCILED"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"phase": {"const": "R0-C"}}},
+      "then": {
+        "properties": {
+          "reconciliationStatus": {"const": "NOT_APPLICABLE"},
+          "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "BLOCKED"}}},
+      "then": {"properties": {"nextAllowedAction": {"const": "STOP"}}}
+    }
+  ]
 }
