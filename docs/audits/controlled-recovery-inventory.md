@@ -44,6 +44,15 @@ before its `expiresAt`).  Missing, expired, malformed or mismatched usage is
 retained as `unknown`; it cannot produce `R0_RECONCILED`.  A future provider
 usage API adapter may feed the same contract without changing the auditor.
 
+The manual workflow receives this export through the repository secret
+`FLOW_OFFICIAL_USAGE_EXPORT_JSON`.  It validates the contract before making
+the production inventory request, writes the value only to an ephemeral runner
+path outside the uploaded artifact, passes that path to `--usage-file`, and
+removes it in an `always()` cleanup step.  Because the export expires after 60
+minutes, it must be generated from current official Cloudflare/GitHub usage
+telemetry immediately before the run; it is not a durable baseline or a
+replacement for provider APIs.
+
 ## Offline audit and safety boundary
 
 The existing `trading_desk.recovery_audit` remains the sole owner of status,
