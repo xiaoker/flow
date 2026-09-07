@@ -36,6 +36,7 @@ jobs:
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      FLOW_OFFICIAL_USAGE_EXPORT_JSON: ${{ secrets.FLOW_OFFICIAL_USAGE_EXPORT_JSON }}
       RECOVERY_ORIGIN_MAIN_SHA: ${{ github.sha }}
     steps:
       - name: Checkout read-only exporter
@@ -64,6 +65,10 @@ jobs:
             echo '{"status":"INCOMPLETE","code":"required_read_credentials_missing"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
             exit 2
           fi
+          if [ -z "${FLOW_OFFICIAL_USAGE_EXPORT_JSON:-}" ]; then
+            echo '{"status":"INCOMPLETE","code":"official_usage_export_missing"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
+            exit 2
+          fi
           case "${PRIORITY_DATES}" in
             *2026-09-04*|*2026-09-05*|*2026-09-06*|*2026-09-07*)
               echo '{"status":"INCOMPLETE","code":"priority_date_outside_scope"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
@@ -78,6 +83,24 @@ jobs:
             echo '{"status":"INCOMPLETE","code":"access_secret_pair_incomplete"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
             exit 2
           fi
+
+      - name: Prepare and validate ephemeral official usage export
+        if: ${{ success() }}
+        run: |
+          set -eu
+          umask 077
+          printf '%s' "$FLOW_OFFICIAL_USAGE_EXPORT_JSON" > "$RUNNER_TEMP/official-usage-export.json"
+          PYTHONPATH=src:. python -c '
+          import json, os, sys
+          from trading_desk.recovery_evidence import load_official_usage
+          path = os.environ["RUNNER_TEMP"] + "/official-usage-export.json"
+          metrics, status = load_official_usage(path)
+          if status.get("status") != "VALID" or any(value.get("value") == "unknown" for value in metrics.values()):
+              code = status.get("reason", "official_usage_invalid")
+              with open(os.environ["RUNNER_TEMP"] + "/controlled-recovery/preflight-error.json", "w", encoding="utf-8") as handle:
+                  json.dump({"status": "INCOMPLETE", "code": code}, handle)
+              sys.exit(2)
+          '
 
       - name: Export evidence and run offline auditor twice
         if: ${{ success() }}
@@ -101,7 +124,12 @@ jobs:
             "${priority_args[@]}" \
             --phase R0-D \
             --output-dir "$RUNNER_TEMP/controlled-recovery" \
+            --usage-file "$RUNNER_TEMP/official-usage-export.json" \
             --config config/resource-budget.json
+
+      - name: Remove ephemeral official usage export
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/official-usage-export.json"
 
       - name: Upload read-only evidence artifact
         if: ${{ always() }}

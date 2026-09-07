@@ -37,6 +37,8 @@ def test_workflow_inputs_are_fixed_and_preflight_precedes_export() -> None:
     assert preflight_at < exporter_at
     assert "--phase R0-D" in text
     assert "--output-dir \"$RUNNER_TEMP/controlled-recovery\"" in text
+    assert "Prepare and validate ephemeral official usage export" in text
+    assert "--usage-file \"$RUNNER_TEMP/official-usage-export.json\"" in text
 
 
 def test_workflow_has_no_collection_publish_dispatch_or_secret_artifact_paths() -> None:
@@ -46,5 +48,8 @@ def test_workflow_has_no_collection_publish_dispatch_or_secret_artifact_paths() 
         assert forbidden not in text
     assert "FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}" in text
     assert "FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}" in text
+    assert "FLOW_OFFICIAL_USAGE_EXPORT_JSON: ${{ secrets.FLOW_OFFICIAL_USAGE_EXPORT_JSON }}" in text
+    assert "official_usage_export_missing" in text
+    assert "Remove ephemeral official usage export" in text
     assert "retention-days: 14" in text
     assert "if: ${{ always() }}" in text
