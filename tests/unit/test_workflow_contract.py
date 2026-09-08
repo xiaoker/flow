@@ -201,6 +201,20 @@ def test_pr2_ci_covers_python_and_web_without_schedules() -> None:
     assert "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38" in workflow
 
 
+def test_publish_checks_all_candidate_capabilities_before_activation() -> None:
+    workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    penetration_check = workflow.index("Check ETF penetration capability contract before activation")
+    dashboard_stage = workflow.index("Stage dashboard candidate")
+    dashboard_activate = workflow.index("Verify and activate dashboard candidate")
+    penetration_stage = workflow.index("Check and stage ETF penetration candidate")
+
+    assert penetration_check < dashboard_stage
+    assert penetration_check < dashboard_activate
+    assert workflow.count("--slot etf_penetration --output penetration-capabilities.json") == 1
+    assert penetration_check < penetration_stage
+
+
 def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")

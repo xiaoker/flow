@@ -121,6 +121,9 @@ test("keeps release history and rollback reads exact and migration-compatible", 
   assert.match(contract, /requiredArtifacts/);
   assert.match(capabilities, /readModelManifestSchemas/);
   assert.match(capabilities, /sameDateObservedAtOrder/);
+  assert.match(capabilities, /SELECT status, overall_status FROM source_readiness LIMIT 1/);
+  assert.doesNotMatch(capabilities, /SELECT state FROM source_readiness/);
+  assert.match(capabilities, /sourceReadinessLedger/);
   assert.match(candidates, /MAX_CANDIDATES = 30/);
   assert.match(candidates, /status: candidates\.length \? "found" : "not_found"/);
   assert.match(artifact, /releaseId = url\.searchParams\.get\("releaseId"\)/);
