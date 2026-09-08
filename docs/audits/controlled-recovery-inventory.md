@@ -38,9 +38,24 @@ counters, account-telemetry status and read-only safety assertions.  URLs and
 headers are never written to the artifact.
 
 R2 evidence is limited to exact keys declared by release manifests and checked
-by the PR B HEAD surface.  The `r2Inventory` object records a hard limit,
-pagination status, an index fingerprint and suspicious gaps.  It is not a
-bucket listing and it never downloads object bodies.
+by the PR B HEAD surface.  A date page whose manifest surface contains more
+than 64 exact keys is returned as an explicit `R2_HEAD_PAGE_REMAINS` 503 with
+an opaque, scope-bound `r2Cursor`; the exporter drains that cursor and merges
+the artifact receipts back into one logical date page.  The endpoint performs
+at most 64 HEADs per request, while one campaign stops at 2,496 HEADs (39 full
+pages), preserving the documented 2,500-head ceiling.  Reaching that ceiling,
+an unstable manifest/index fingerprint, or a malformed continuation remains
+`INCOMPLETE` and never becomes READY.  The `r2Inventory` object records the
+object hard limit, the separate `headHardLimit`, pagination status, an index
+fingerprint and suspicious gaps.  It is not a bucket listing and it never
+downloads object bodies.
+
+The exporter accepts HTTP 503 only when the response body is exactly
+`INCOMPLETE` with `R2_HEAD_PAGE_REMAINS` and a valid advancing `r2Cursor`.
+Generic 503 responses, partial HEAD pages, and pages with a non-full
+continuation size fail closed.  The cursor contract is bounded to 256 encoded
+characters and includes the original date scope, so a cursor cannot be reused
+for another campaign.
 
 Account usage is accepted only from a current, hashed official export supplied
 with `--usage-file`.  The file must contain `capturedAt`, `metrics` and a

@@ -56,7 +56,16 @@ MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_DATES_PER_PAGE = 100
 MAX_R2_OBJECTS = 20_000
-MAX_R2_PAGE_SIZE = 1_000
+MAX_R2_PAGE_SIZE = MAX_R2_OBJECTS
+MAX_R2_HEADS_PER_REQUEST = 64
+# The inventory endpoint is intentionally conservative: even a complete
+# manifest surface is bounded before we spend Class-B operations or Worker
+# requests.  2,496 is the largest multiple of the 64-head request cap that
+# stays below the documented 2,500-head campaign ceiling.
+MAX_R2_TOTAL_HEADS = 2_496
+MAX_R2_PAGES_PER_DATE_PAGE = MAX_R2_TOTAL_HEADS // MAX_R2_HEADS_PER_REQUEST
+MAX_TOTAL_REQUESTS = 300
+MAX_R2_CURSOR_LENGTH = 256
 USAGE_MAX_AGE = timedelta(minutes=60)
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -150,6 +159,24 @@ def _cursor_date(value: str | None) -> str | None:
     return candidate if _valid_date(candidate) else None
 
 
+def _r2_cursor(value: str | None, *, start: str, end: str) -> tuple[str, str] | None:
+    if not value or not re.fullmatch(rf"[A-Za-z0-9_-]{{1,{MAX_R2_CURSOR_LENGTH}}}", value):
+        return None
+    try:
+        padded = value.replace("-", "+").replace("_", "/") + "==="[: (4 - len(value) % 4) % 4]
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return None
+    if not isinstance(decoded, Mapping) or decoded.get("v") != 1:
+        return None
+    if decoded.get("start") != start or decoded.get("end") != end:
+        return None
+    key = decoded.get("key")
+    if not isinstance(key, str) or not key.startswith("market-data/releases/") or ".." in key or "//" in key or "\n" in key or len(key) > 512:
+        return None
+    return value, key
+
+
 def _safe_nonnegative(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
@@ -183,6 +210,15 @@ def _first_mapping(values: Any) -> Mapping[str, Any] | None:
 
 @dataclass(frozen=True)
 class InventoryPage:
+    body: Mapping[str, Any]
+    request_cursor: str | None
+    response_sha256: str
+    response_bytes: int
+    captured_at: str
+
+
+@dataclass(frozen=True)
+class R2InventoryPage:
     body: Mapping[str, Any]
     request_cursor: str | None
     response_sha256: str
@@ -262,7 +298,7 @@ class RecoveryEvidenceExporter:
             headers["CF-Access-Client-Secret"] = self.access_client_secret
         return headers
 
-    def _url(self, cursor: str | None) -> str:
+    def _url(self, cursor: str | None, r2_cursor: str | None = None) -> str:
         params: list[tuple[str, str]] = [
             ("start", self.start),
             ("end", self.end),
@@ -270,6 +306,8 @@ class RecoveryEvidenceExporter:
         ]
         if cursor:
             params.append(("cursor", cursor))
+        if r2_cursor:
+            params.append(("r2Cursor", r2_cursor))
         return f"{self.base_url}/api/v1/admin/recovery-inventory?{urllib.parse.urlencode(params)}"
 
     def _validate_page(
@@ -278,6 +316,7 @@ class RecoveryEvidenceExporter:
         status_code: int,
         payload: bytes,
         request_cursor: str | None,
+        request_r2_cursor: str | None,
     ) -> InventoryPage:
         if len(payload) > MAX_PAGE_BYTES:
             raise RecoveryEvidenceError("response_bytes_exceed_limit")
@@ -286,7 +325,12 @@ class RecoveryEvidenceExporter:
         if status_code == 429:
             raise RecoveryEvidenceError("inventory_rate_limited")
         if status_code < 200 or status_code >= 300:
-            raise RecoveryEvidenceError("inventory_http_error", str(status_code))
+            # The inventory route deliberately returns 503 while a bounded R2
+            # page remains.  This is not a complete page and is accepted only
+            # for the single explicit continuation reason below.  The body is
+            # parsed first so a generic 503 can never masquerade as a page.
+            if status_code != 503:
+                raise RecoveryEvidenceError("inventory_http_error", str(status_code))
         try:
             body = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -301,10 +345,14 @@ class RecoveryEvidenceExporter:
         expected_request_cursor = request_cursor
         if request.get("start") != self.start or request.get("end") != self.end:
             raise RecoveryEvidenceError("inventory_scope_mismatch")
-        if request.get("limit") != self.limit or request.get("cursor") != expected_request_cursor:
+        if request.get("limit") != self.limit or request.get("cursor") != expected_request_cursor or request.get("r2Cursor") != request_r2_cursor:
             raise RecoveryEvidenceError("inventory_cursor_contract_mismatch")
-        if body.get("status") != "COMPLETE":
-            raise RecoveryEvidenceError("inventory_incomplete", ",".join(map(str, body.get("incompleteReasons") or [])))
+        reasons = [str(item) for item in body.get("incompleteReasons") or []]
+        deferred_r2 = body.get("status") == "INCOMPLETE" and reasons == ["R2_HEAD_PAGE_REMAINS"]
+        if status_code == 503 and not deferred_r2:
+            raise RecoveryEvidenceError("inventory_http_error", "503")
+        if body.get("status") != "COMPLETE" and not deferred_r2:
+            raise RecoveryEvidenceError("inventory_incomplete", ",".join(reasons))
         dates = body.get("dates")
         if not isinstance(dates, list) or len(dates) > MAX_DATES_PER_PAGE:
             raise RecoveryEvidenceError("inventory_dates_exceed_limit")
@@ -328,6 +376,33 @@ class RecoveryEvidenceExporter:
                 raise RecoveryEvidenceError("inventory_cursor_not_advanced")
         elif next_cursor not in (None, ""):
             raise RecoveryEvidenceError("inventory_unexpected_next_cursor")
+        r2_pagination = body.get("r2Pagination")
+        if not isinstance(r2_pagination, Mapping):
+            raise RecoveryEvidenceError("inventory_r2_pagination_missing")
+        if r2_pagination.get("cursor") != request_r2_cursor:
+            raise RecoveryEvidenceError("inventory_r2_cursor_contract_mismatch")
+        r2_has_more = r2_pagination.get("hasMore")
+        r2_next_cursor = r2_pagination.get("nextCursor")
+        if not isinstance(r2_has_more, bool):
+            raise RecoveryEvidenceError("inventory_r2_has_more_invalid")
+        if deferred_r2 and not r2_has_more:
+            raise RecoveryEvidenceError("inventory_r2_deferred_without_next")
+        if not deferred_r2 and r2_has_more:
+            raise RecoveryEvidenceError("inventory_r2_complete_with_next")
+        if r2_has_more:
+            if not isinstance(r2_next_cursor, str) or _r2_cursor(r2_next_cursor, start=self.start, end=self.end) is None:
+                raise RecoveryEvidenceError("inventory_r2_next_cursor_missing")
+        elif r2_next_cursor not in (None, ""):
+            raise RecoveryEvidenceError("inventory_r2_unexpected_next_cursor")
+        r2_page_size = _safe_nonnegative(r2_pagination.get("pageSize"))
+        r2_candidate_count = _safe_nonnegative(r2_pagination.get("candidateCount"))
+        if r2_page_size is None or r2_candidate_count is None or r2_page_size > MAX_R2_HEADS_PER_REQUEST or r2_candidate_count > MAX_R2_OBJECTS:
+            raise RecoveryEvidenceError("inventory_r2_pagination_invalid")
+        if r2_has_more and r2_page_size != MAX_R2_HEADS_PER_REQUEST:
+            raise RecoveryEvidenceError("inventory_r2_page_size_not_full")
+        index_sha = r2_pagination.get("indexSha256")
+        if not isinstance(index_sha, str) or not SHA256.fullmatch(index_sha):
+            raise RecoveryEvidenceError("inventory_r2_index_sha_invalid")
         usage = body.get("usage")
         d1 = usage.get("d1") if isinstance(usage, Mapping) and isinstance(usage.get("d1"), Mapping) else None
         if d1 is None or d1.get("rowsReadKnown") is not True or d1.get("rowsWrittenKnown") is not True:
@@ -347,6 +422,8 @@ class RecoveryEvidenceExporter:
         for field in ("classA", "classB", "headCount", "headLimit"):
             if _safe_nonnegative(r2.get(field)) is None:
                 raise RecoveryEvidenceError("inventory_r2_telemetry_unknown")
+        if _safe_nonnegative(r2.get("headCount")) > MAX_R2_HEADS_PER_REQUEST or _safe_nonnegative(r2.get("headLimit")) != MAX_R2_HEADS_PER_REQUEST:
+            raise RecoveryEvidenceError("inventory_r2_head_limit_invalid")
         return InventoryPage(
             body=body,
             request_cursor=request_cursor,
@@ -355,61 +432,205 @@ class RecoveryEvidenceExporter:
             captured_at=self.captured_at,
         )
 
-    def fetch_pages(self) -> tuple[list[InventoryPage], list[dict[str, str]]]:
+    def fetch_pages(self) -> tuple[list[InventoryPage], list[dict[str, str]], list[InventoryPage]]:
+        """Fetch date pages while draining each page's bounded R2 HEAD cursor."""
+
+        def merge_r2_artifacts(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+            target_dates = {str(item.get("dataDate")): item for item in target.get("dates", []) if isinstance(item, Mapping)}
+            source_date_values = source.get("dates") if isinstance(source.get("dates"), list) else []
+            for source_date in source_date_values:
+                if not isinstance(source_date, Mapping):
+                    continue
+                target_date = target_dates.get(str(source_date.get("dataDate")))
+                if not isinstance(target_date, dict):
+                    continue
+                target_releases = target_date.get("releases") if isinstance(target_date.get("releases"), dict) else {}
+                source_releases = source_date.get("releases") if isinstance(source_date.get("releases"), Mapping) else {}
+                for slot, source_values in source_releases.items():
+                    if not isinstance(source_values, list):
+                        continue
+                    target_values = target_releases.setdefault(slot, [])
+                    by_release = {str(item.get("releaseId")): item for item in target_values if isinstance(item, dict)}
+                    for source_release in source_values:
+                        if not isinstance(source_release, Mapping):
+                            continue
+                        release_id = str(source_release.get("releaseId"))
+                        target_release = by_release.get(release_id)
+                        if not isinstance(target_release, dict):
+                            target_values.append(copy.deepcopy(dict(source_release)))
+                            by_release[release_id] = target_values[-1]
+                            continue
+                        source_artifacts = source_release.get("artifacts") if isinstance(source_release.get("artifacts"), Mapping) else {}
+                        target_artifacts = target_release.setdefault("artifacts", {})
+                        for name, artifact in source_artifacts.items():
+                            if isinstance(artifact, Mapping):
+                                target_artifacts[name] = copy.deepcopy(dict(artifact))
+
+        def refresh_stage_status(target: dict[str, Any]) -> None:
+            date_values = target.get("dates") if isinstance(target.get("dates"), list) else []
+            for date_record in date_values:
+                if not isinstance(date_record, dict):
+                    continue
+                releases = date_record.get("releases") if isinstance(date_record.get("releases"), Mapping) else {}
+                ready: dict[str, bool] = {}
+                for slot in ("dashboard", "etf_penetration"):
+                    values = releases.get(slot) if isinstance(releases.get(slot), list) else []
+                    ready[slot] = any(
+                        isinstance(item, Mapping)
+                        and item.get("status") in {"ACTIVE", "SUPERSEDED"}
+                        and item.get("manifestValid") is True
+                        and item.get("manifestComplete") is True
+                        and item.get("manifestHashStatus") == "READY"
+                        and isinstance(item.get("artifacts"), Mapping)
+                        and bool(item["artifacts"])
+                        and all(isinstance(artifact, Mapping) and artifact.get("status") == "READY" for artifact in item["artifacts"].values())
+                        for item in values
+                    )
+                domain_values = date_record.get("domains") if isinstance(date_record.get("domains"), list) else []
+                for domain in domain_values:
+                    if not isinstance(domain, dict):
+                        continue
+                    stages = domain.get("stageStatus") if isinstance(domain.get("stageStatus"), dict) else {}
+                    for slot in ("dashboard", "etf_penetration"):
+                        values = releases.get(slot) if isinstance(releases.get(slot), list) else []
+                        stages[slot] = "READY" if ready[slot] else "INCOMPLETE" if values else "UNKNOWN"
+
         pages: list[InventoryPage] = []
+        transport_pages: list[InventoryPage] = []
         errors: list[dict[str, str]] = []
-        cursor_token: str | None = None
-        cursor_date: str | None = None
+        date_cursor_token: str | None = None
+        date_cursor: str | None = None
         seen_dates: set[str] = set()
-        seen_page_hashes: set[str] = set()
-        seen_page_keys: set[str] = set()
+        seen_date_page_keys: set[str] = set()
         total_bytes = 0
         for _ in range(MAX_PAGES):
-            url = self._url(cursor_token)
-            try:
-                self.request_count += 1
-                status_code, payload = self.transport(url, self._headers(), self.timeout)
-                total_bytes += len(payload)
-                if total_bytes > MAX_TOTAL_BYTES:
-                    raise RecoveryEvidenceError("response_total_bytes_exceed_limit")
-                page = self._validate_page(status_code=status_code, payload=payload, request_cursor=cursor_date)
-            except RecoveryEvidenceError as error:
-                errors.append({"code": error.code, "detail": str(error)})
+            aggregate_body: dict[str, Any] | None = None
+            r2_cursor_token: str | None = None
+            r2_cursor_key: str | None = None
+            r2_index_sha: str | None = None
+            final_page: InventoryPage | None = None
+            seen_r2_hashes: set[str] = set()
+            r2_head_total = 0
+            for _ in range(MAX_R2_PAGES_PER_DATE_PAGE):
+                if self.request_count >= MAX_TOTAL_REQUESTS:
+                    errors.append({"code": "inventory_request_limit", "detail": str(MAX_TOTAL_REQUESTS)})
+                    break
+                url = self._url(date_cursor_token, r2_cursor_token)
+                try:
+                    self.request_count += 1
+                    status_code, payload = self.transport(url, self._headers(), self.timeout)
+                    total_bytes += len(payload)
+                    if total_bytes > MAX_TOTAL_BYTES:
+                        raise RecoveryEvidenceError("response_total_bytes_exceed_limit")
+                    page = self._validate_page(
+                        status_code=status_code,
+                        payload=payload,
+                        request_cursor=date_cursor,
+                        request_r2_cursor=r2_cursor_token,
+                    )
+                except RecoveryEvidenceError as error:
+                    errors.append({"code": error.code, "detail": str(error)})
+                    break
+                transport_pages.append(page)
+                page_usage = page.body.get("usage") if isinstance(page.body.get("usage"), Mapping) else {}
+                page_r2_usage = page_usage.get("r2") if isinstance(page_usage.get("r2"), Mapping) else {}
+                page_head_count = _safe_nonnegative(page_r2_usage.get("headCount")) or 0
+                r2_head_total += page_head_count
+                if r2_head_total > MAX_R2_TOTAL_HEADS:
+                    errors.append({"code": "inventory_r2_head_limit", "detail": str(MAX_R2_TOTAL_HEADS)})
+                    break
+                if page.response_sha256 in seen_r2_hashes:
+                    errors.append({"code": "inventory_repeated_page", "detail": page.response_sha256})
+                    break
+                seen_r2_hashes.add(page.response_sha256)
+                body = copy.deepcopy(dict(page.body))
+                pagination = body["r2Pagination"]
+                page_index_sha = str(pagination["indexSha256"])
+                if r2_index_sha is None:
+                    r2_index_sha = page_index_sha
+                elif page_index_sha != r2_index_sha:
+                    errors.append({"code": "inventory_r2_index_changed", "detail": page_index_sha})
+                    break
+                if aggregate_body is None:
+                    aggregate_body = body
+                else:
+                    merge_r2_artifacts(aggregate_body, body)
+                if not pagination["hasMore"]:
+                    if aggregate_body is None:
+                        errors.append({"code": "inventory_empty_page", "detail": "r2_aggregate"})
+                        break
+                    aggregate_body["status"] = "COMPLETE"
+                    aggregate_body["incompleteReasons"] = [
+                        reason for reason in aggregate_body.get("incompleteReasons", [])
+                        if reason != "R2_HEAD_PAGE_REMAINS"
+                    ]
+                    aggregate_body["request"] = {**aggregate_body.get("request", {}), "r2Cursor": None}
+                    aggregate_body["r2Pagination"] = {
+                        **pagination,
+                        "cursor": None,
+                        "nextCursor": None,
+                        "hasMore": False,
+                        "indexSha256": r2_index_sha,
+                    }
+                    refresh_stage_status(aggregate_body)
+                    aggregate_payload = _json_bytes(aggregate_body)
+                    final_page = InventoryPage(
+                        body=aggregate_body,
+                        request_cursor=date_cursor,
+                        response_sha256=_sha_bytes(aggregate_payload),
+                        response_bytes=len(aggregate_payload),
+                        captured_at=self.captured_at,
+                    )
+                    break
+                if r2_head_total >= MAX_R2_TOTAL_HEADS:
+                    errors.append({"code": "inventory_r2_head_limit", "detail": str(MAX_R2_TOTAL_HEADS)})
+                    break
+                next_token = pagination.get("nextCursor")
+                decoded_next = _r2_cursor(str(next_token), start=self.start, end=self.end) if isinstance(next_token, str) else None
+                if decoded_next is None:
+                    errors.append({"code": "inventory_r2_next_cursor_missing", "detail": str(next_token)})
+                    break
+                next_key = decoded_next[1]
+                if r2_cursor_key and next_key <= r2_cursor_key:
+                    errors.append({"code": "inventory_r2_cursor_loop", "detail": next_key})
+                    break
+                r2_cursor_token, r2_cursor_key = decoded_next
+            else:
+                errors.append({"code": "inventory_r2_page_limit", "detail": str(MAX_R2_PAGES_PER_DATE_PAGE)})
+
+            if errors or final_page is None:
                 break
-            if page.response_sha256 in seen_page_hashes:
-                errors.append({"code": "inventory_repeated_page", "detail": page.response_sha256})
-                break
-            seen_page_hashes.add(page.response_sha256)
-            page_dates = [str(item["dataDate"]) for item in page.body["dates"]]
+            page_dates = [str(item["dataDate"]) for item in final_page.body["dates"]]
             page_key = canonical_sha256({
                 "dates": page_dates,
-                "hasMore": page.body["hasMore"],
-                "nextCursor": page.body["nextCursor"],
+                "hasMore": final_page.body["hasMore"],
+                "nextCursor": final_page.body["nextCursor"],
+                "r2IndexSha256": final_page.body["r2Pagination"]["indexSha256"],
             })
-            if page_key in seen_page_keys:
+            if page_key in seen_date_page_keys:
                 errors.append({"code": "inventory_repeated_page", "detail": page_key})
                 break
-            seen_page_keys.add(page_key)
+            seen_date_page_keys.add(page_key)
             if seen_dates.intersection(page_dates):
                 errors.append({"code": "inventory_duplicate_date", "detail": ",".join(page_dates)})
                 break
             seen_dates.update(page_dates)
-            pages.append(page)
-            if not page.body["hasMore"]:
-                return pages, errors
-            next_cursor = str(page.body["nextCursor"])
+            pages.append(final_page)
+            if not final_page.body["hasMore"]:
+                return pages, errors, transport_pages
+            next_cursor = str(final_page.body["nextCursor"])
             next_date = _cursor_date(next_cursor)
-            if not next_date or (cursor_date and next_date <= cursor_date):
+            if not next_date or (date_cursor and next_date <= date_cursor):
                 errors.append({"code": "inventory_cursor_loop", "detail": next_cursor})
                 break
-            cursor_token = next_cursor
-            cursor_date = next_date
+            date_cursor_token = next_cursor
+            date_cursor = next_date
         else:
             errors.append({"code": "inventory_page_limit", "detail": str(MAX_PAGES)})
-        return pages, errors
+        return pages, errors, transport_pages
 
     def collect(self) -> ExportResult:
-        pages, errors = self.fetch_pages()
+        pages, errors, transport_pages = self.fetch_pages()
         bundle = build_evidence_bundle(
             pages=pages,
             start=self.start,
@@ -418,6 +639,7 @@ class RecoveryEvidenceExporter:
             captured_at=self.captured_at,
             errors=errors,
             request_count=self.request_count,
+            transport_pages=transport_pages,
         )
         return ExportResult(bundle=bundle, errors=tuple(errors))
 
@@ -635,13 +857,19 @@ def _r2_rows(release_rows: Sequence[Mapping[str, Any]], dates: Sequence[Mapping[
     return ordered[:MAX_R2_PAGE_SIZE], sorted(set(gaps))
 
 
-def _usage_summary(pages: Sequence[InventoryPage], *, request_count: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def _usage_summary(
+    pages: Sequence[InventoryPage],
+    *,
+    request_count: int | None = None,
+    transport_pages: Sequence[InventoryPage] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    measured_pages = list(transport_pages if transport_pages is not None else pages)
     rows_read = 0
     rows_written = 0
     rows_read_known = True
     rows_written_known = True
     class_a = class_b = heads = 0
-    for page in pages:
+    for page in measured_pages:
         usage = page.body.get("usage") if isinstance(page.body.get("usage"), Mapping) else {}
         d1 = usage.get("d1") if isinstance(usage.get("d1"), Mapping) else {}
         read = _safe_nonnegative(d1.get("rowsRead"))
@@ -658,22 +886,22 @@ def _usage_summary(pages: Sequence[InventoryPage], *, request_count: int | None 
         class_a += _safe_nonnegative(r2.get("classA")) or 0
         class_b += _safe_nonnegative(r2.get("classB")) or 0
         heads += _safe_nonnegative(r2.get("headCount")) or 0
-    requests = len(pages) if request_count is None else request_count
-    complete_page_usage = bool(pages) and requests == len(pages)
+    requests = len(measured_pages) if request_count is None else request_count
+    complete_page_usage = bool(measured_pages) and requests == len(measured_pages)
     d1_audit = {
         "rowsRead": rows_read if rows_read_known and complete_page_usage else "unknown",
         "rowsWritten": rows_written if rows_written_known and complete_page_usage else "unknown",
         "workersRequests": requests,
     }
     usage = {
-        "d1RowsRead": rows_read if rows_read_known and pages else "unknown",
-        "d1RowsWritten": rows_written if rows_written_known and pages else "unknown",
+        "d1RowsRead": rows_read if rows_read_known and measured_pages else "unknown",
+        "d1RowsWritten": rows_written if rows_written_known and measured_pages else "unknown",
         "workerRequests": requests,
         "r2ClassA": class_a,
         "r2ClassB": class_b,
         "r2HeadCount": heads,
-        "pages": len(pages),
-        "metricsMeasuredAt": pages[-1].captured_at if pages else None,
+        "pages": len(measured_pages),
+        "metricsMeasuredAt": measured_pages[-1].captured_at if measured_pages else None,
     }
     return d1_audit, usage
 
@@ -793,6 +1021,7 @@ def build_evidence_bundle(
     captured_at: str,
     errors: Sequence[Mapping[str, str]],
     request_count: int | None = None,
+    transport_pages: Sequence[InventoryPage] | None = None,
     official_usage: Mapping[str, Mapping[str, Any]] | None = None,
     usage_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -837,7 +1066,16 @@ def build_evidence_bundle(
         r2_gaps.append("r2_manifest_evidence_missing")
         r2_gaps = sorted(set(r2_gaps))
     r2_index_payload = {"objects": r2_objects, "gaps": r2_gaps, "source": "release-manifest-head-receipts"}
-    d1_audit, usage = _usage_summary(pages, request_count=request_count)
+    r2_index_sha = next(
+        (
+            str(page.body["r2Pagination"]["indexSha256"])
+            for page in pages
+            if isinstance(page.body.get("r2Pagination"), Mapping)
+            and isinstance(page.body["r2Pagination"].get("indexSha256"), str)
+        ),
+        canonical_sha256(r2_index_payload),
+    )
+    d1_audit, usage = _usage_summary(pages, request_count=request_count, transport_pages=transport_pages)
     telemetry = dict(official_usage or _unknown_telemetry("official_usage_not_provided", captured_at))
     source_receipts = [
         {
@@ -875,8 +1113,9 @@ def build_evidence_bundle(
             "page": 0,
             "pageSize": len(r2_objects),
             "hardLimit": MAX_R2_PAGE_SIZE,
-            "hasMore": "r2_object_page_limit" in r2_gaps,
-            "indexSha256": canonical_sha256(r2_index_payload),
+            "headHardLimit": MAX_R2_TOTAL_HEADS,
+            "hasMore": bool(errors) or "r2_object_page_limit" in r2_gaps,
+            "indexSha256": r2_index_sha,
             "suspiciousGaps": r2_gaps,
             "source": "release-manifest-head-receipts",
         },
@@ -885,6 +1124,11 @@ def build_evidence_bundle(
         "d1Audit": d1_audit,
         "runtimeEvidence": {
             "metricsMeasuredAt": captured_at,
+            "inventoryTransportPages": len(transport_pages if transport_pages is not None else pages),
+            "r2HeadPageCount": sum(
+                1 for page in (transport_pages if transport_pages is not None else pages)
+                if isinstance(page.body.get("r2Pagination"), Mapping)
+            ),
             "repository": {
                 "originMain": os.environ.get("RECOVERY_ORIGIN_MAIN_SHA", "unknown"),
                 "headSha": os.environ.get("GITHUB_SHA", "unknown"),

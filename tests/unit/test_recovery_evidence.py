@@ -57,21 +57,47 @@ def domain_record(data_date: str, *, dashboard: str = "UNKNOWN", penetration: st
     }
 
 
-def page(data_dates: list[str], *, request_cursor: str | None = None, has_more: bool = False, next_cursor: str | None = None, status: str = "COMPLETE") -> bytes:
+def r2_cursor(key: str) -> str:
+    raw = json.dumps({"v": 1, "start": "2024-08-01", "end": "2026-09-03", "key": key}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def page(
+    data_dates: list[str],
+    *,
+    request_cursor: str | None = None,
+    r2_request_cursor: str | None = None,
+    has_more: bool = False,
+    next_cursor: str | None = None,
+    r2_has_more: bool = False,
+    r2_next_cursor: str | None = None,
+    r2_head_count: int = 0,
+    status: str = "COMPLETE",
+    incomplete_reasons: list[str] | None = None,
+    r2_index_sha: str = SHA_A,
+) -> bytes:
     dates = []
     for data_date in data_dates:
         dates.append({"dataDate": data_date, "domains": [domain_record(data_date)], "releases": {"dashboard": [], "etf_penetration": []}, "sourceReadiness": [], "artifactPointers": [], "pipelineWindows": [], "recoveries": [], "marketHistory": None, "dateVisible": {"status": "UNKNOWN", "evidence": []}})
     body = {
         "schemaVersion": 1,
         "contract": "recovery-inventory-v1",
-        "request": {"start": "2024-08-01", "end": "2026-09-03", "cursor": request_cursor, "limit": 100},
+        "request": {"start": "2024-08-01", "end": "2026-09-03", "cursor": request_cursor, "limit": 100, "r2Cursor": r2_request_cursor},
         "status": status,
         "hasMore": has_more,
         "nextCursor": next_cursor,
         "activeReleaseSlots": [],
         "dates": dates,
-        "usage": {"d1": {"queryCount": 1, "rowsRead": 10, "rowsWritten": 0, "rowsReadKnown": True, "rowsWrittenKnown": True}, "r2": {"classA": 0, "classB": 0, "headCount": 0, "headLimit": 64}, "truncated": False},
-        "incompleteReasons": [],
+        "usage": {"d1": {"queryCount": 1, "rowsRead": 10, "rowsWritten": 0, "rowsReadKnown": True, "rowsWrittenKnown": True}, "r2": {"classA": 0, "classB": r2_head_count, "headCount": r2_head_count, "headLimit": 64}, "truncated": False},
+        "incompleteReasons": incomplete_reasons or [],
+        "r2Pagination": {
+            "cursor": r2_request_cursor,
+            "nextCursor": r2_next_cursor,
+            "hasMore": r2_has_more,
+            "pageSize": r2_head_count if r2_has_more or r2_request_cursor else 0,
+            "candidateCount": r2_head_count if r2_has_more or r2_request_cursor else 0,
+            "indexSha256": r2_index_sha,
+        },
     }
     return json.dumps(body, separators=(",", ":")).encode()
 
@@ -88,7 +114,10 @@ class FixtureTransport:
         token = params.get("cursor")
         if token:
             token = urllib_unquote(token)
-        result = self.pages.get(token)
+        r2_token = params.get("r2Cursor")
+        if r2_token:
+            r2_token = urllib_unquote(r2_token)
+        result = self.pages.get((token, r2_token), self.pages.get(token))
         if isinstance(result, Exception):
             raise result
         if result is None:
@@ -169,6 +198,8 @@ def test_timeout_and_partial_page_fail_closed() -> None:
     result = exporter(partial).collect()
     assert result.errors[0]["code"] == "inventory_incomplete"
     assert result.bundle["exportStatus"] == "INCOMPLETE"
+    generic_503 = FixtureTransport({None: (503, page(["2026-08-27"]))})
+    assert exporter(generic_503).collect().errors[-1]["code"] == "inventory_http_error"
 
 
 def test_empty_page_and_nonzero_or_unknown_d1_writes_fail_closed() -> None:
@@ -213,6 +244,65 @@ def test_cursor_regressions_repeated_page_and_missing_page_are_blocked() -> None
 
     missing = FixtureTransport({None: (200, page(["2026-08-27"], has_more=True, next_cursor=None))})
     assert exporter(missing).collect().errors[-1]["code"] == "inventory_next_cursor_missing"
+
+
+def test_r2_head_cursor_is_drained_without_duplicate_date_pages() -> None:
+    token = r2_cursor("market-data/releases/2026-08-27/release:a/artifact.json")
+    transport = FixtureTransport({
+        (None, None): (503, page(
+            ["2026-08-27"],
+            status="INCOMPLETE",
+            incomplete_reasons=["R2_HEAD_PAGE_REMAINS"],
+            r2_has_more=True,
+            r2_next_cursor=token,
+            r2_head_count=64,
+        )),
+        (None, token): (200, page(
+            ["2026-08-27"],
+            r2_request_cursor=token,
+            r2_has_more=False,
+            r2_next_cursor=None,
+            r2_head_count=1,
+        )),
+    })
+    result = exporter(transport).collect()
+    assert not result.errors
+    assert len(result.bundle["pages"]) == 1
+    assert result.bundle["runtimeEvidence"]["inventoryTransportPages"] == 2
+    assert result.bundle["runtimeEvidence"]["r2HeadPageCount"] == 2
+    assert result.bundle["resourceUsage"]["actual"]["workerRequests"] == 2
+    assert len(transport.requests) == 2
+
+
+def test_r2_head_campaign_cap_fails_closed_before_unbounded_drain() -> None:
+    pages: dict[tuple[str | None, str | None], tuple[int, bytes]] = {}
+    previous: str | None = None
+    for index in range(39):
+        key = f"market-data/releases/2026-08-27/release:2026-08-27:{index:016x}/artifact.json"
+        token = r2_cursor(key)
+        pages[(previous, None) if index == 0 else (None, previous)] = (503, page(
+            ["2026-08-27"],
+            status="INCOMPLETE",
+            incomplete_reasons=["R2_HEAD_PAGE_REMAINS"],
+            r2_request_cursor=previous,
+            r2_has_more=True,
+            r2_next_cursor=token,
+            r2_head_count=64,
+        ))
+        previous = token
+    pages[(None, previous)] = (503, page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["R2_HEAD_PAGE_REMAINS"],
+        r2_request_cursor=previous,
+        r2_has_more=True,
+        r2_next_cursor=r2_cursor("market-data/releases/2026-08-27/release:2026-08-27:final/artifact.json"),
+        r2_head_count=64,
+    ))
+    transport = FixtureTransport(pages)
+    result = exporter(transport).collect()
+    assert result.errors[-1]["code"] == "inventory_r2_head_limit"
+    assert len(transport.requests) == 39
 
 
 def test_dashboard_and_penetration_are_independent_and_source_provenance_is_preserved() -> None:
