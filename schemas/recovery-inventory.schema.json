@@ -4,24 +4,38 @@
   "title": "Flow R0-D recovery inventory",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "contract", "request", "status", "hasMore", "nextCursor", "dates", "usage", "incompleteReasons"],
+  "required": ["schemaVersion", "contract", "request", "status", "hasMore", "nextCursor", "dates", "usage", "incompleteReasons", "r2Pagination"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "contract": { "const": "recovery-inventory-v1" },
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start", "end", "cursor", "limit"],
+      "required": ["start", "end", "cursor", "limit", "r2Cursor"],
       "properties": {
         "start": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
         "end": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
         "cursor": { "type": ["string", "null"] },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "r2Cursor": { "type": ["string", "null"], "maxLength": 256 }
       }
     },
     "status": { "enum": ["COMPLETE", "INCOMPLETE"] },
     "hasMore": { "type": "boolean" },
     "nextCursor": { "type": ["string", "null"] },
+    "r2Pagination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cursor", "nextCursor", "hasMore", "pageSize", "candidateCount", "indexSha256"],
+      "properties": {
+        "cursor": { "type": ["string", "null"], "maxLength": 256 },
+        "nextCursor": { "type": ["string", "null"], "maxLength": 256 },
+        "hasMore": { "type": "boolean" },
+        "pageSize": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "indexSha256": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" }
+      }
+    },
     "activeReleaseSlots": { "type": "array" },
     "dates": {
       "type": "array",

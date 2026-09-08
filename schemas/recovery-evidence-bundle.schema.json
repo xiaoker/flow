@@ -164,11 +164,12 @@
     },
     "r2Inventory": {
       "type": "object", "additionalProperties": false,
-      "required": ["page", "pageSize", "hardLimit", "hasMore", "indexSha256", "suspiciousGaps"],
+      "required": ["page", "pageSize", "hardLimit", "headHardLimit", "hasMore", "indexSha256", "suspiciousGaps"],
       "properties": {
         "page": { "type": "integer", "minimum": 0, "maximum": 100000 },
-        "pageSize": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "pageSize": { "type": "integer", "minimum": 0, "maximum": 20000 },
         "hardLimit": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "headHardLimit": { "type": "integer", "minimum": 0, "maximum": 2500 },
         "hasMore": { "type": "boolean" },
         "indexSha256": { "$ref": "#/$defs/sha256" },
         "suspiciousGaps": { "type": "array", "maxItems": 500, "items": { "type": "string", "maxLength": 512 } },

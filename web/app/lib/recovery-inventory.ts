@@ -30,6 +30,8 @@ export const MAX_R2_HEADS = 64;
 export const MAX_RELEASE_ROWS = 600;
 export const MAX_POINTER_ROWS = 1_000;
 export const MAX_SOURCE_READINESS_ROWS = 500;
+export const MAX_R2_CANDIDATES = 20_000;
+export const MAX_R2_CURSOR_LENGTH = 256;
 
 export const INVENTORY_DOMAINS = [
   { id: "sse_etf", market: "SSE" },
@@ -66,6 +68,16 @@ export type InventoryQuery = {
   end: string;
   cursor: string | null;
   limit: number;
+  r2Cursor: string | null;
+  r2CursorKey: string | null;
+};
+
+type PublicInventoryQuery = {
+  start: string;
+  end: string;
+  cursor: string | null;
+  limit: number;
+  r2Cursor: string | null;
 };
 
 export type InventoryUsage = {
@@ -350,7 +362,7 @@ function base64UrlEncode(value: string): string {
 }
 
 function base64UrlDecode(value: string): string | null {
-  if (!/^[A-Za-z0-9_-]{1,160}$/.test(value)) return null;
+  if (!/^[A-Za-z0-9_-]{1,256}$/.test(value)) return null;
   try {
     const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "===".slice((value.length + 3) % 4);
     const binary = atob(padded);
@@ -358,6 +370,20 @@ function base64UrlDecode(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function encodeInventoryCursor(date: string): string {
@@ -374,6 +400,30 @@ export function decodeInventoryCursor(value: string): string | null {
     const candidate = parsed as Record<string, unknown>;
     return candidate.v === 1 && typeof candidate.date === "string" && validDate(candidate.date)
       ? candidate.date
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function encodeR2InventoryCursor(start: string, end: string, key: string): string {
+  if (!validDate(start) || !validDate(end) || end < start || !safeKey(key, "market-data/releases/")) {
+    throw new Error("invalid_r2_cursor");
+  }
+  return base64UrlEncode(JSON.stringify({ v: 1, start, end, key }));
+}
+
+export function decodeR2InventoryCursor(value: string): { start: string; end: string; key: string } | null {
+  const decoded = base64UrlDecode(value);
+  if (!decoded) return null;
+  try {
+    const parsed: unknown = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const candidate = parsed as Record<string, unknown>;
+    return candidate.v === 1 && typeof candidate.start === "string" && validDate(candidate.start) &&
+      typeof candidate.end === "string" && validDate(candidate.end) && candidate.end >= candidate.start &&
+      typeof candidate.key === "string" && safeKey(candidate.key, "market-data/releases/")
+      ? { start: candidate.start, end: candidate.end, key: candidate.key }
       : null;
   } catch {
     return null;
@@ -398,7 +448,16 @@ export function parseInventoryQuery(params: URLSearchParams): InventoryQuery {
   const cursor = rawCursor ? decodeInventoryCursor(rawCursor) : null;
   if (rawCursor && !cursor) throw new Error("invalid_cursor");
   if (cursor && (cursor < start || cursor >= end)) throw new Error("cursor_out_of_range");
-  return { start, end, cursor, limit };
+  const rawR2Cursor = params.get("r2Cursor");
+  if (rawR2Cursor && rawR2Cursor.length > MAX_R2_CURSOR_LENGTH) throw new Error("invalid_r2_cursor");
+  const r2Decoded = rawR2Cursor ? decodeR2InventoryCursor(rawR2Cursor) : null;
+  if (rawR2Cursor && !r2Decoded) throw new Error("invalid_r2_cursor");
+  if (r2Decoded && (r2Decoded.start !== start || r2Decoded.end !== end)) throw new Error("r2_cursor_scope_mismatch");
+  return { start, end, cursor, limit, r2Cursor: rawR2Cursor || null, r2CursorKey: r2Decoded?.key ?? null };
+}
+
+function publicInventoryQuery(query: InventoryQuery): PublicInventoryQuery {
+  return { start: query.start, end: query.end, cursor: query.cursor, limit: query.limit, r2Cursor: query.r2Cursor ?? null };
 }
 
 function safeInteger(value: unknown): number | null {
@@ -515,6 +574,15 @@ type ReleaseEvidence = {
   manifestSha256: string | null;
   requiredArtifacts: string[];
   artifacts: Record<string, Record<string, unknown>>;
+};
+
+export type RecoveryR2Pagination = {
+  cursor: string | null;
+  nextCursor: string | null;
+  hasMore: boolean;
+  pageSize: number;
+  candidateCount: number;
+  indexSha256: string | null;
 };
 
 function releaseEvidence(row: ReleaseRow): { evidence: ReleaseEvidence; manifest: ReadModelManifest | null } {
@@ -751,87 +819,152 @@ function applyPointers(records: DateInventory[], rows: PointerRow[]): void {
   }
 }
 
-function addR2HeadEvidence(
+type R2HeadCandidate = {
+  release: ReleaseEvidence;
+  name: string;
+  key: string;
+  sha256: string;
+  bytes: number;
+};
+
+function addR2Gap(gaps: string[], value: string): void {
+  if (!gaps.includes(value)) gaps.push(value);
+}
+
+async function addR2HeadEvidence(
   state: RequestState,
   releaseEvidenceRows: Array<{ date: DateInventory; release: ReleaseEvidence; manifest: ReadModelManifest | null }>,
   bucket: ReadOnlyR2,
-): Promise<void> {
-  return (async () => {
-    const candidates: Array<{ date: DateInventory; release: ReleaseEvidence; name: string; key: string; sha256: string; bytes: number }> = [];
-    for (const row of releaseEvidenceRows) {
-      if (!row.manifest) continue;
-      const prefix = `market-data/releases/${row.release.asOf}/${row.release.releaseId}/`;
-      for (const [name, descriptor] of Object.entries(row.manifest.artifacts)) {
-        if (safeKey(descriptor.key, prefix) && SHA256.test(descriptor.sha256)) {
-          candidates.push({ date: row.date, release: row.release, name, key: descriptor.key, sha256: descriptor.sha256, bytes: descriptor.bytes });
-        } else {
-          row.release.artifacts[name] = {
-            ...row.release.artifacts[name],
-            status: !SHA256.test(descriptor.sha256) ? "HASH_MISSING" : "INCOMPLETE",
-          };
-          state.incompleteReasons.push("RELEASE_ARTIFACT_KEY_OR_HASH_INVALID");
+  query: Pick<InventoryQuery, "start" | "end" | "r2Cursor" | "r2CursorKey">,
+): Promise<RecoveryR2Pagination> {
+  const candidatesByKey = new Map<string, R2HeadCandidate>();
+  const gaps: string[] = [];
+  for (const row of releaseEvidenceRows) {
+    if (!row.manifest) continue;
+    const prefix = `market-data/releases/${row.release.asOf}/${row.release.releaseId}/`;
+    for (const [name, descriptor] of Object.entries(row.manifest.artifacts)) {
+      const bytes = Number(descriptor.bytes);
+      const valid = safeKey(descriptor.key, prefix) && SHA256.test(descriptor.sha256) && Number.isSafeInteger(bytes) && bytes >= 0;
+      if (!valid) {
+        row.release.artifacts[name] = {
+          ...row.release.artifacts[name],
+          status: !SHA256.test(descriptor.sha256) ? "HASH_MISSING" : "INCOMPLETE",
+        };
+        state.incompleteReasons.push("RELEASE_ARTIFACT_KEY_OR_HASH_INVALID");
+        addR2Gap(gaps, `${row.release.asOf}:${row.release.releaseId}:${name}:descriptor`);
+        continue;
+      }
+      const candidate: R2HeadCandidate = { release: row.release, name, key: descriptor.key, sha256: descriptor.sha256, bytes };
+      const existing = candidatesByKey.get(candidate.key);
+      if (existing) {
+        if (existing.sha256 !== candidate.sha256 || existing.bytes !== candidate.bytes || existing.release.releaseId !== candidate.release.releaseId || existing.name !== candidate.name) {
+          state.incompleteReasons.push("R2_DUPLICATE_KEY_CONFLICT");
+          addR2Gap(gaps, `r2_duplicate_key_conflict:${candidate.key}`);
         }
-      }
-    }
-    candidates.sort((left, right) => left.key.localeCompare(right.key));
-    if (candidates.length > MAX_R2_HEADS) {
-      state.usage.truncated = true;
-      state.incompleteReasons.push("R2_HEAD_LIMIT");
-    }
-    for (let index = 0; index < candidates.length && state.usage.r2.headCount < MAX_R2_HEADS; index += 1) {
-      const candidate = candidates[index];
-      state.usage.r2.headCount += 1;
-      state.usage.r2.classB += 1;
-      let object: R2Head | null;
-      try {
-        object = await bucket.head(candidate.key);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const reason = /403/.test(message) ? "R2_HEAD_FORBIDDEN" : /429/.test(message) ? "R2_HEAD_RATE_LIMITED" : /timeout|timed out/i.test(message) ? "R2_HEAD_TIMEOUT" : "R2_HEAD_FAILED";
-        state.incompleteReasons.push(reason);
-        candidate.release.artifacts[candidate.name] = {
-          ...candidate.release.artifacts[candidate.name],
-          status: "INCOMPLETE",
-          error: reason,
-        };
         continue;
       }
-      const metadata = candidate.release.artifacts[candidate.name];
-      if (!object) {
-        state.incompleteReasons.push("R2_OBJECT_MISSING");
-        candidate.release.artifacts[candidate.name] = { ...metadata, status: "MISSING" };
-        continue;
-      }
-      const actualSha = object.customMetadata?.sha256 ?? null;
-      const status = !actualSha
-        ? "HASH_MISSING"
-        : actualSha !== candidate.sha256 || object.size !== candidate.bytes
-          ? "HASH_MISMATCH"
-          : "READY";
-      if (status !== "READY") state.incompleteReasons.push(`R2_${status}`);
+      candidatesByKey.set(candidate.key, candidate);
+    }
+  }
+
+  let candidates = [...candidatesByKey.values()].sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+  // A page containing no release rows is a valid inventory result (for
+  // example, a source-only historical date).  Only treat an otherwise
+  // present release surface with zero valid artifact descriptors as a
+  // manifest-evidence gap; missing release rows are represented by the
+  // per-date UNKNOWN/INCOMPLETE stage statuses instead.
+  if (releaseEvidenceRows.length > 0 && !candidates.length) {
+    state.incompleteReasons.push("R2_MANIFEST_EVIDENCE_MISSING");
+  }
+  if (candidates.length > MAX_R2_CANDIDATES) {
+    state.incompleteReasons.push("R2_CANDIDATE_LIMIT");
+    addR2Gap(gaps, "r2_candidate_limit");
+    candidates = candidates.slice(0, MAX_R2_CANDIDATES);
+  }
+  const indexSha256 = await sha256Hex(canonicalJson({
+    candidates: candidates.map((candidate) => ({
+      key: candidate.key,
+      sha256: candidate.sha256,
+      bytes: candidate.bytes,
+      releaseId: candidate.release.releaseId,
+      asOf: candidate.release.asOf,
+      slot: candidate.release.slot,
+      artifactName: candidate.name,
+    })),
+    gaps: [...gaps].sort(),
+  }));
+
+  const afterCursor = query.r2CursorKey ? candidates.filter((candidate) => candidate.key > query.r2CursorKey!) : candidates;
+  if (query.r2CursorKey && !candidates.some((candidate) => candidate.key === query.r2CursorKey)) {
+    // A continuation token is only valid for the exact candidate index that
+    // produced it.  Reject a forged or stale key instead of silently skipping
+    // the prefix of the deterministic candidate list.
+    state.incompleteReasons.push("R2_CURSOR_NOT_IN_INDEX");
+  }
+  const pageCandidates = afterCursor.slice(0, MAX_R2_HEADS);
+  const hasMore = afterCursor.length > pageCandidates.length;
+  const nextCursor = hasMore && pageCandidates.length
+    ? encodeR2InventoryCursor(query.start, query.end, pageCandidates[pageCandidates.length - 1].key)
+    : null;
+  if (hasMore) state.incompleteReasons.push("R2_HEAD_PAGE_REMAINS");
+
+  for (const candidate of pageCandidates) {
+    state.usage.r2.headCount += 1;
+    state.usage.r2.classB += 1;
+    let object: R2Head | null;
+    try {
+      object = await bucket.head(candidate.key);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const reason = /403/.test(message) ? "R2_HEAD_FORBIDDEN" : /429/.test(message) ? "R2_HEAD_RATE_LIMITED" : /timeout|timed out/i.test(message) ? "R2_HEAD_TIMEOUT" : "R2_HEAD_FAILED";
+      state.incompleteReasons.push(reason);
       candidate.release.artifacts[candidate.name] = {
-        ...metadata,
-        status,
-        actualSha256: actualSha,
-        actualBytes: object.size,
+        ...candidate.release.artifacts[candidate.name],
+        status: "INCOMPLETE",
+        error: reason,
       };
+      addR2Gap(gaps, `${candidate.release.asOf}:${candidate.release.releaseId}:${candidate.name}:${reason}`);
+      continue;
     }
-    if (candidates.length > MAX_R2_HEADS) {
-      for (let index = MAX_R2_HEADS; index < candidates.length; index += 1) {
-        const candidate = candidates[index];
-        candidate.release.artifacts[candidate.name] = {
-          ...candidate.release.artifacts[candidate.name],
-          status: "INCOMPLETE",
-        };
-      }
+    const metadata = candidate.release.artifacts[candidate.name];
+    if (!object) {
+      state.incompleteReasons.push("R2_OBJECT_MISSING");
+      candidate.release.artifacts[candidate.name] = { ...metadata, status: "MISSING" };
+      addR2Gap(gaps, `${candidate.release.asOf}:${candidate.release.releaseId}:${candidate.name}:missing`);
+      continue;
     }
-  })();
+    const actualSha = object.customMetadata?.sha256 ?? null;
+    const status = !actualSha
+      ? "HASH_MISSING"
+      : actualSha !== candidate.sha256 || object.size !== candidate.bytes
+        ? "HASH_MISMATCH"
+        : "READY";
+    if (status !== "READY") {
+      state.incompleteReasons.push(`R2_${status}`);
+      addR2Gap(gaps, `${candidate.release.asOf}:${candidate.release.releaseId}:${candidate.name}:${status.toLowerCase()}`);
+    }
+    candidate.release.artifacts[candidate.name] = {
+      ...metadata,
+      status,
+      actualSha256: actualSha,
+      actualBytes: object.size,
+    };
+  }
+
+  return {
+    cursor: query.r2Cursor ?? null,
+    nextCursor,
+    hasMore,
+    pageSize: pageCandidates.length,
+    candidateCount: candidates.length,
+    indexSha256,
+  };
 }
 
 export type RecoveryInventoryResponse = {
   schemaVersion: typeof RECOVERY_INVENTORY_SCHEMA_VERSION;
   contract: typeof RECOVERY_INVENTORY_CONTRACT;
-  request: InventoryQuery;
+  request: PublicInventoryQuery;
   status: "COMPLETE" | "INCOMPLETE";
   hasMore: boolean;
   nextCursor: string | null;
@@ -849,6 +982,7 @@ export type RecoveryInventoryResponse = {
   }>;
   usage: InventoryUsage;
   incompleteReasons: string[];
+  r2Pagination: RecoveryR2Pagination;
 };
 
 export async function collectRecoveryInventory(
@@ -865,7 +999,7 @@ export async function collectRecoveryInventory(
     return {
       schemaVersion: RECOVERY_INVENTORY_SCHEMA_VERSION,
       contract: RECOVERY_INVENTORY_CONTRACT,
-      request: query,
+      request: publicInventoryQuery(query),
       status: "INCOMPLETE",
       hasMore: false,
       nextCursor: null,
@@ -873,6 +1007,7 @@ export async function collectRecoveryInventory(
       dates: [],
       usage,
       incompleteReasons: ["STORAGE_UNAVAILABLE"],
+      r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
     };
   }
 
@@ -892,7 +1027,7 @@ export async function collectRecoveryInventory(
     return {
       schemaVersion: RECOVERY_INVENTORY_SCHEMA_VERSION,
       contract: RECOVERY_INVENTORY_CONTRACT,
-      request: query,
+      request: publicInventoryQuery(query),
       status: "INCOMPLETE",
       hasMore: false,
       nextCursor: null,
@@ -900,6 +1035,7 @@ export async function collectRecoveryInventory(
       dates: [],
       usage,
       incompleteReasons: [...new Set(state.incompleteReasons)],
+      r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
     };
   }
   const hasMore = dateRows.length > query.limit;
@@ -919,28 +1055,43 @@ export async function collectRecoveryInventory(
   const outputReadiness = new Map<string, Record<string, unknown>[]>();
   const outputPointers = new Map<string, Record<string, unknown>[]>();
   let activeReleaseSlots: ActiveReleaseRow[] = [];
+  let r2Pagination: RecoveryR2Pagination = {
+    cursor: query.r2Cursor,
+    nextCursor: null,
+    hasMore: false,
+    pageSize: 0,
+    candidateCount: 0,
+    indexSha256: null,
+  };
 
   if (firstDate && lastDate) {
     try {
       const [pipelineStart, pipelineEnd] = pipelineKeyRange(firstDate, lastDate);
       const expectedPipelineRows = selected.length * PIPELINE_WINDOWS.length;
+      // Callers using the internal helper may omit the additive field; only
+      // a real opaque token selects the continuation fast path.
+      const r2Continuation = Boolean(query.r2Cursor);
       // Keep D1 reads sequential.  D1 row telemetry arrives only with each
       // result; issuing all reads through Promise.all would allow later
       // queries to run after the global row budget had already been exceeded.
-      const historical = await readAll<HistoricalRow>(state, runtime.DB, HISTORICAL_SQL, [firstDate, lastDate, selected.length + 1]);
-      const dashboards = await readAll<DashboardRow>(state, runtime.DB, DASHBOARD_SQL, [firstDate, lastDate, selected.length + 1]);
+      // R2 continuation pages only need the date candidates and release
+      // manifests: re-reading the seven independent domain tables would
+      // multiply D1 rows and CPU for every 64-head page without changing the
+      // release evidence that the exporter is draining.
+      const historical = r2Continuation ? [] : await readAll<HistoricalRow>(state, runtime.DB, HISTORICAL_SQL, [firstDate, lastDate, selected.length + 1]);
+      const dashboards = r2Continuation ? [] : await readAll<DashboardRow>(state, runtime.DB, DASHBOARD_SQL, [firstDate, lastDate, selected.length + 1]);
       const releases = await readAll<ReleaseRow>(state, runtime.DB, RELEASE_SQL, [firstDate, lastDate, MAX_RELEASE_ROWS]);
-      const readiness = await readAll<SourceReadinessRow>(state, runtime.DB, SOURCE_READINESS_SQL, [firstDate, lastDate, MAX_SOURCE_READINESS_ROWS]);
-      const pointers = await readAll<PointerRow>(state, runtime.DB, POINTER_SQL, [firstDate, lastDate, MAX_POINTER_ROWS]);
-      const models = await readAll<ModelRow>(state, runtime.DB, MODEL_SQL, [firstDate, lastDate, firstDate, lastDate, firstDate, lastDate, 900]);
-      const marketHistory = await readAll<MarketHistoryRow>(state, runtime.DB, MARKET_HISTORY_SQL, [firstDate, lastDate, selected.length + 1]);
+      const readiness = r2Continuation ? [] : await readAll<SourceReadinessRow>(state, runtime.DB, SOURCE_READINESS_SQL, [firstDate, lastDate, MAX_SOURCE_READINESS_ROWS]);
+      const pointers = r2Continuation ? [] : await readAll<PointerRow>(state, runtime.DB, POINTER_SQL, [firstDate, lastDate, MAX_POINTER_ROWS]);
+      const models = r2Continuation ? [] : await readAll<ModelRow>(state, runtime.DB, MODEL_SQL, [firstDate, lastDate, firstDate, lastDate, firstDate, lastDate, 900]);
+      const marketHistory = r2Continuation ? [] : await readAll<MarketHistoryRow>(state, runtime.DB, MARKET_HISTORY_SQL, [firstDate, lastDate, selected.length + 1]);
       const pipelines = expectedPipelineRows
-        ? await readAll<PipelineRow>(state, runtime.DB, pipelineSql(), [pipelineStart, pipelineEnd, "daily-market-data", expectedPipelineRows + 1])
+        ? r2Continuation ? [] : await readAll<PipelineRow>(state, runtime.DB, pipelineSql(), [pipelineStart, pipelineEnd, "daily-market-data", expectedPipelineRows + 1])
         : [];
       const recoveries = expectedPipelineRows
-        ? await readAll<RecoveryRow>(state, runtime.DB, recoverySql(), [pipelineStart, pipelineEnd, expectedPipelineRows + 1])
+        ? r2Continuation ? [] : await readAll<RecoveryRow>(state, runtime.DB, recoverySql(), [pipelineStart, pipelineEnd, expectedPipelineRows + 1])
         : [];
-      const activeReleases = await readAll<ActiveReleaseRow>(state, runtime.DB, ACTIVE_RELEASE_SQL, [2]);
+      const activeReleases = r2Continuation ? [] : await readAll<ActiveReleaseRow>(state, runtime.DB, ACTIVE_RELEASE_SQL, [2]);
       applySourceReadiness(records, readiness);
       applyPointers(records, pointers);
       markModel(records, models);
@@ -1034,7 +1185,11 @@ export async function collectRecoveryInventory(
         outputReleases.set(row.as_of, slotRecord);
         releaseEvidenceRows.push({ date, release: parsed.evidence, manifest: parsed.manifest });
       }
-      await addR2HeadEvidence(state, releaseEvidenceRows, runtime.RAW_BUCKET);
+      if (runtime.RAW_BUCKET) {
+        r2Pagination = await addR2HeadEvidence(state, releaseEvidenceRows, runtime.RAW_BUCKET, query);
+      } else {
+        state.incompleteReasons.push("STORAGE_UNAVAILABLE");
+      }
     } catch {
       state.incompleteReasons.push("D1_OR_R2_READ_FAILED");
     }
@@ -1075,7 +1230,7 @@ export async function collectRecoveryInventory(
   return {
     schemaVersion: RECOVERY_INVENTORY_SCHEMA_VERSION,
     contract: RECOVERY_INVENTORY_CONTRACT,
-    request: query,
+    request: publicInventoryQuery(query),
     status,
     hasMore,
     nextCursor: hasMore && last ? encodeInventoryCursor(last) : null,
@@ -1083,5 +1238,6 @@ export async function collectRecoveryInventory(
     dates,
     usage,
     incompleteReasons: [...new Set(state.incompleteReasons)],
+    r2Pagination,
   };
 }

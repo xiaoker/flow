@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   collectRecoveryInventory,
   decodeInventoryCursor,
+  decodeR2InventoryCursor,
   encodeInventoryCursor,
+  encodeR2InventoryCursor,
   INVENTORY_STAGES,
   isRecoveryInventoryAuthorized,
   MAX_DATE_SPAN_DAYS,
@@ -12,6 +14,7 @@ import {
   MAX_D1_ROWS_READ,
   MAX_INVENTORY_LIMIT,
   MAX_R2_HEADS,
+  MAX_R2_CURSOR_LENGTH,
   parseInventoryQuery,
 } from "../app/lib/recovery-inventory.ts";
 import {
@@ -143,6 +146,10 @@ test("query validation enforces dates, keyset cursor and hard limits", () => {
   assert.equal(decodeInventoryCursor(cursor), "2026-08-31");
   assert.throws(() => parseInventoryQuery(new URLSearchParams(`start=2026-08-01&end=2026-08-31&cursor=${cursor}`)), /cursor_out_of_range/);
   assert.equal(MAX_DATE_SPAN_DAYS, 1100);
+  const r2Cursor = encodeR2InventoryCursor("2026-08-01", "2026-08-31", "market-data/releases/2026-08-27/release:2026-08-27:0000000000000000/artifact.json");
+  assert.ok(r2Cursor.length <= MAX_R2_CURSOR_LENGTH);
+  assert.equal(decodeR2InventoryCursor(r2Cursor).end, "2026-08-31");
+  assert.throws(() => parseInventoryQuery(new URLSearchParams(`start=2026-08-01&end=2026-08-31&r2Cursor=${encodeR2InventoryCursor("2026-08-02", "2026-08-31", "market-data/releases/2026-08-27/release:2026-08-27:0000000000000000/artifact.json")}`)), /r2_cursor_scope_mismatch/);
 });
 
 test("admin endpoint authorization accepts only the existing exact bearer key", () => {
@@ -176,6 +183,26 @@ test("same fixture paginates deterministically without duplicate dates and keeps
   assert.ok(fixture.r2.heads.every((key) => key.startsWith("market-data/releases/")));
   assert.ok(fixture.d1.calls.every(({ sql }) => /LIMIT\s+\?/i.test(sql)));
   assert.ok(fixture.d1.calls.some(({ sql }) => /FROM\s+etf_daily/i.test(sql)));
+});
+
+test("R2 continuation pages avoid repeating unrelated D1 history reads", async () => {
+  const fixture = baseFixture();
+  const firstManifest = JSON.parse(fixture.d1.fixture.releases[0].manifest_json);
+  const key = Object.values(firstManifest.artifacts)[0].key;
+  const token = encodeR2InventoryCursor("2026-08-01", "2026-09-03", key);
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2026-08-01",
+    end: "2026-09-03",
+    cursor: null,
+    limit: 2,
+    r2Cursor: token,
+    r2CursorKey: key,
+  });
+  assert.equal(result.request.r2Cursor, token);
+  assert.ok(fixture.d1.calls.some(({ sql }) => /WITH dates/i.test(sql)));
+  assert.ok(fixture.d1.calls.some(({ sql }) => /FROM release_manifest/i.test(sql)));
+  assert.equal(fixture.d1.calls.length, 2);
+  assert.ok(fixture.d1.calls.filter(({ sql }) => !/WITH dates/i.test(sql)).every(({ sql }) => !/FROM (historical_snapshot|dashboard_snapshot|source_readiness|history_artifact_pointer|etf_daily|margin_daily|connect_daily|pipeline_window|active_release)/i.test(sql)));
 });
 
 test("pipeline and recovery reads stay below D1 bind cap on a full date page", async () => {
@@ -333,14 +360,34 @@ test("hard caps are visible and source contains no R2 list/get or write paths", 
 test("R2 head work is bounded even when many release artifacts are present", async () => {
   const fixture = baseFixture();
   const rows = [];
-  for (let index = 0; index < 10; index += 1) {
-    const row = releaseRow({ asOf: "2026-08-27", slot: index % 2 ? "dashboard" : "etf_penetration" });
-    rows.push(row);
-    Object.assign(fixture.r2.objects, objectsFor(row));
+  for (let index = 0; index < 6; index += 1) {
+    const asOf = `2026-08-${String(20 + index).padStart(2, "0")}`;
+    for (const slot of ["dashboard", "etf_penetration"]) {
+      const row = releaseRow({ asOf, slot });
+      rows.push(row);
+      Object.assign(fixture.r2.objects, objectsFor(row));
+    }
   }
+  fixture.d1.fixture.dates = rows.map((row) => row.as_of);
   fixture.d1.fixture.releases = rows;
-  const result = await collectRecoveryInventory(fixture, { start: "2026-08-27", end: "2026-08-27", cursor: null, limit: 1 });
+  const result = await collectRecoveryInventory(fixture, { start: "2026-08-20", end: "2026-08-25", cursor: null, limit: 6 });
   assert.equal(result.status, "INCOMPLETE");
-  assert.ok(result.usage.truncated || fixture.r2.heads.length <= MAX_R2_HEADS);
+  assert.ok(result.incompleteReasons.includes("R2_HEAD_PAGE_REMAINS"));
   assert.ok(fixture.r2.heads.length <= MAX_R2_HEADS);
+});
+
+test("R2 continuation cursor must belong to the current candidate index", async () => {
+  const fixture = baseFixture();
+  const key = "market-data/releases/2026-08-27/release:2026-08-27:ffffffffffffffff/not-present.json";
+  const token = encodeR2InventoryCursor("2026-08-01", "2026-09-03", key);
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2026-08-01",
+    end: "2026-09-03",
+    cursor: null,
+    limit: 2,
+    r2Cursor: token,
+    r2CursorKey: key,
+  });
+  assert.equal(result.status, "INCOMPLETE");
+  assert.ok(result.incompleteReasons.includes("R2_CURSOR_NOT_IN_INDEX"));
 });

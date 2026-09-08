@@ -283,7 +283,7 @@ def test_r2_requires_page_metadata_and_hard_limit() -> None:
     result = audit_bundle(no_page, budget_config=CONFIG)
     assert result["budget"]["r2InventoryStatus"] == "UNKNOWN"
     too_large = complete_bundle()
-    too_large["r2Inventory"]["pageSize"] = 1001
+    too_large["r2Inventory"]["pageSize"] = 20_001
     with pytest.raises(RecoveryAuditError, match="r2_page_size_exceeds_limit"):
         audit_bundle(too_large, budget_config=CONFIG)
 
