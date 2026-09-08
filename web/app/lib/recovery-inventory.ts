@@ -6,7 +6,7 @@ import {
   type ReadModelManifest,
   type ReadModelSlot,
 } from "./read-model-contract.ts";
-import { PIPELINE_WINDOWS, buildPipelineRunKey } from "./pipeline-window.ts";
+import { PIPELINE_WINDOWS } from "./pipeline-window.ts";
 
 /**
  * Bounded, read-only evidence surface for the controlled recovery auditor.
@@ -23,6 +23,8 @@ export const DEFAULT_INVENTORY_LIMIT = 50;
 export const MAX_INVENTORY_LIMIT = 100;
 export const MAX_DATE_SPAN_DAYS = 1_100;
 export const MAX_D1_ROWS_READ = 500_000;
+/** Cloudflare D1 rejects a prepared statement with more than 100 binds. */
+export const MAX_D1_BOUND_PARAMETERS = 100;
 export const MAX_D1_QUERIES = 12;
 export const MAX_R2_HEADS = 64;
 export const MAX_RELEASE_ROWS = 600;
@@ -319,14 +321,6 @@ const MARKET_HISTORY_SQL = `
     FROM market_history_daily
    WHERE trade_date BETWEEN ? AND ?
    ORDER BY trade_date ASC
-   LIMIT ?`;
-
-const RECOVERY_SQL = `
-  SELECT recovery_id, run_key, plan_key, plan_sha256, scope_sha256, status,
-         latest_receipt_key, latest_receipt_sha256, updated_at
-    FROM pipeline_window_recovery
-   WHERE run_key IN (__RUN_KEYS__)
-   ORDER BY run_key ASC, updated_at DESC
    LIMIT ?`;
 
 const ACTIVE_RELEASE_SQL = `
@@ -637,24 +631,40 @@ function markModel(
   }
 }
 
-function pipelineRunKeys(dates: string[]): string[] {
-  return dates.flatMap((date) => PIPELINE_WINDOWS.map((windowName) => buildPipelineRunKey(date, windowName)));
+function nextIsoDate(value: string): string {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + 1);
+  return parsed.toISOString().slice(0, 10);
 }
 
-function pipelineSql(count: number): string {
+function pipelineKeyRange(firstDate: string, lastDate: string): [string, string] {
+  return [
+    `daily-market-data:${firstDate}:`,
+    `daily-market-data:${nextIsoDate(lastDate)}:`,
+  ];
+}
+
+function pipelineSql(): string {
   return `
     SELECT run_key, pipeline, window_date, window_name, contract_version,
            target_date, status, lease_owner, lease_expires_at,
            source_fingerprint, github_run_id, attempt_count, last_error_code,
            updated_at, completed_at, recovery_id
       FROM pipeline_window
-     WHERE run_key IN (${Array.from({ length: count }, () => "?").join(", ")})
+     WHERE run_key >= ? AND run_key < ?
+       AND pipeline = ?
      ORDER BY window_date ASC, window_name ASC
      LIMIT ?`;
 }
 
-function recoverySql(count: number): string {
-  return RECOVERY_SQL.replace("__RUN_KEYS__", Array.from({ length: count }, () => "?").join(", "));
+function recoverySql(): string {
+  return `
+    SELECT recovery_id, run_key, plan_key, plan_sha256, scope_sha256, status,
+           latest_receipt_key, latest_receipt_sha256, updated_at
+      FROM pipeline_window_recovery
+     WHERE run_key >= ? AND run_key < ?
+     ORDER BY run_key ASC, updated_at DESC
+     LIMIT ?`;
 }
 
 function domainForSource(sourceId: string): InventoryDomain | null {
@@ -912,7 +922,8 @@ export async function collectRecoveryInventory(
 
   if (firstDate && lastDate) {
     try {
-      const runKeys = pipelineRunKeys(selected);
+      const [pipelineStart, pipelineEnd] = pipelineKeyRange(firstDate, lastDate);
+      const expectedPipelineRows = selected.length * PIPELINE_WINDOWS.length;
       // Keep D1 reads sequential.  D1 row telemetry arrives only with each
       // result; issuing all reads through Promise.all would allow later
       // queries to run after the global row budget had already been exceeded.
@@ -923,11 +934,11 @@ export async function collectRecoveryInventory(
       const pointers = await readAll<PointerRow>(state, runtime.DB, POINTER_SQL, [firstDate, lastDate, MAX_POINTER_ROWS]);
       const models = await readAll<ModelRow>(state, runtime.DB, MODEL_SQL, [firstDate, lastDate, firstDate, lastDate, firstDate, lastDate, 900]);
       const marketHistory = await readAll<MarketHistoryRow>(state, runtime.DB, MARKET_HISTORY_SQL, [firstDate, lastDate, selected.length + 1]);
-      const pipelines = runKeys.length
-        ? await readAll<PipelineRow>(state, runtime.DB, pipelineSql(runKeys.length), [...runKeys, runKeys.length + 1])
+      const pipelines = expectedPipelineRows
+        ? await readAll<PipelineRow>(state, runtime.DB, pipelineSql(), [pipelineStart, pipelineEnd, "daily-market-data", expectedPipelineRows + 1])
         : [];
-      const recoveries = runKeys.length
-        ? await readAll<RecoveryRow>(state, runtime.DB, recoverySql(runKeys.length), [...runKeys, runKeys.length + 1])
+      const recoveries = expectedPipelineRows
+        ? await readAll<RecoveryRow>(state, runtime.DB, recoverySql(), [pipelineStart, pipelineEnd, expectedPipelineRows + 1])
         : [];
       const activeReleases = await readAll<ActiveReleaseRow>(state, runtime.DB, ACTIVE_RELEASE_SQL, [2]);
       applySourceReadiness(records, readiness);
