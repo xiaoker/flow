@@ -30,7 +30,11 @@ export async function GET(request: Request) {
       observedAtColumnsReady = false;
     }
     try {
-      await runtime.DB.prepare("SELECT state FROM source_readiness LIMIT 1").first();
+      // Keep this probe aligned with the deployed source_readiness schema.  A
+      // capability check must only answer whether the ledger exists; querying
+      // a legacy/non-existent column would silently hide the feature and make
+      // every ETF-penetration publish fail closed.
+      await runtime.DB.prepare("SELECT status, overall_status FROM source_readiness LIMIT 1").first();
       sourceReadinessReady = true;
     } catch {
       sourceReadinessReady = false;
