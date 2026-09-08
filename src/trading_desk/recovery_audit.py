@@ -124,6 +124,15 @@ TELEMETRY_FIELDS = (
     "r2ClassA",
     "r2ClassB",
 )
+READ_ONLY_INVENTORY_USAGE_FIELDS = (
+    "d1RowsRead",
+    "d1RowsWritten",
+    "workerRequests",
+    "r2ClassA",
+    "r2ClassB",
+    "inventoryPages",
+    "responseBytes",
+)
 SECRET_KEY_PARTS = ("token", "secret", "password", "cookie", "authorization", "access_key")
 
 
@@ -805,12 +814,94 @@ def _stage_budget_key(stage: str) -> str:
     }[stage]
 
 
+def _read_only_inventory_budget(
+    *,
+    bundle: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the finite resource envelope of this inventory run.
+
+    Account-wide provider telemetry is useful when it is available, but it is
+    not evidence about whether this read-only task respected its own bounds.
+    R0-D therefore closes against exact task counters plus the workflow's hard
+    timeout.  Missing counters, counter disagreement, or any exceeded cap fail
+    closed.
+    """
+
+    raw_limits = config.get("readOnlyInventoryBudget")
+    if not isinstance(raw_limits, Mapping):
+        raise RecoveryAuditError("read_only_inventory_budget_required")
+    limits = {
+        field: _nonnegative_int(raw_limits.get(field), f"read_only_budget_{field}")
+        for field in (*READ_ONLY_INVENTORY_USAGE_FIELDS, "actionsMinutesUpperBound")
+    }
+    resource_usage = bundle.get("resourceUsage")
+    actual_source = resource_usage.get("actual") if isinstance(resource_usage, Mapping) else None
+    if not isinstance(actual_source, Mapping):
+        actual_source = {}
+    actual: dict[str, int | str] = {}
+    unknowns: list[str] = []
+    violations: list[str] = []
+    for field in READ_ONLY_INVENTORY_USAGE_FIELDS:
+        value = actual_source.get(field)
+        if value in (None, "", "unknown", "UNKNOWN"):
+            actual[field] = "unknown"
+            unknowns.append(f"local.{field}")
+            continue
+        measured = _nonnegative_int(value, f"local_{field}")
+        actual[field] = measured
+        if measured > limits[field]:
+            violations.append(f"local.{field}:over_limit")
+
+    d1_audit = bundle.get("d1Audit")
+    d1_audit = d1_audit if isinstance(d1_audit, Mapping) else {}
+    audit_fields = {
+        "d1RowsRead": "rowsRead",
+        "d1RowsWritten": "rowsWritten",
+        "workerRequests": "workersRequests",
+    }
+    for local_field, audit_field in audit_fields.items():
+        audit_value = d1_audit.get(audit_field)
+        if audit_value in (None, "", "unknown", "UNKNOWN"):
+            unknowns.append(f"local.d1Audit.{audit_field}")
+            continue
+        audited = _nonnegative_int(audit_value, f"local_d1_audit_{audit_field}")
+        if actual[local_field] != "unknown" and actual[local_field] != audited:
+            violations.append(f"local.{local_field}:counter_mismatch")
+
+    # These two resources must remain mutation-free, not merely below a
+    # positive allowance.  Keeping explicit assertions prevents a future
+    # config edit from silently permitting writes in a read-only phase.
+    if isinstance(actual["d1RowsWritten"], int) and actual["d1RowsWritten"] != 0:
+        violations.append("local.d1RowsWritten:read_only_violation")
+    if isinstance(actual["r2ClassA"], int) and actual["r2ClassA"] != 0:
+        violations.append("local.r2ClassA:read_only_violation")
+
+    if violations:
+        decision = "over_budget"
+    elif unknowns:
+        decision = "unknown_metrics"
+    else:
+        decision = "allow"
+    return {
+        "decision": decision,
+        "actual": actual,
+        "limits": limits,
+        "unknownMetrics": sorted(set(unknowns)),
+        "violations": sorted(set(violations)),
+        # The workflow test pins timeout-minutes to this value.  It is a hard
+        # upper bound, not a fabricated post-run usage measurement.
+        "actionsMinutesUpperBound": limits["actionsMinutesUpperBound"],
+    }
+
+
 def _budget_report(
     *,
     bundle: Mapping[str, Any],
     config: Mapping[str, Any],
     targets: Sequence[Mapping[str, Any]],
     r2_status: str,
+    phase: str,
 ) -> dict[str, Any]:
     telemetry = _telemetry(bundle)
     stage_budgets = config.get("stageBudgets")
@@ -854,14 +945,14 @@ def _budget_report(
                 raise RecoveryAuditError(f"invalid_recovery_estimate_{field}")
     elif provided_estimate is not None:
         raise RecoveryAuditError("invalid_recovery_estimate")
-    unknown_metrics = [
+    account_unknown_metrics = [
         field
         for field, metric in telemetry.items()
         if metric["value"] == "unknown"
     ]
-    unknown_metrics.extend(unknown_estimates)
+    account_unknown_metrics.extend(unknown_estimates)
     if r2_status != "READY":
-        unknown_metrics.append("r2Inventory")
+        account_unknown_metrics.append("r2Inventory")
     d1_audit = bundle.get("d1Audit") or {}
     if not isinstance(d1_audit, Mapping):
         raise RecoveryAuditError("invalid_d1_audit")
@@ -872,7 +963,7 @@ def _budget_report(
     }
     for field, value in measured.items():
         if value in (None, "", "unknown", "UNKNOWN"):
-            unknown_metrics.append(f"measured.{field}")
+            account_unknown_metrics.append(f"measured.{field}")
         elif isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RecoveryAuditError(f"invalid_measured_{field}")
     projected: dict[str, int | str] = {}
@@ -908,23 +999,55 @@ def _budget_report(
         if isinstance(value, int) and isinstance(limit, int) and value > limit:
             over_limit.append(field)
     if over_limit:
-        decision = "over_budget"
-    elif unknown_metrics:
-        decision = "unknown_metrics"
+        account_decision = "over_budget"
+    elif account_unknown_metrics:
+        account_decision = "unknown_metrics"
     else:
-        decision = "allow"
+        account_decision = "allow"
+
+    local_budget = _read_only_inventory_budget(bundle=bundle, config=config)
+    account_evidence = bundle.get("accountTelemetryEvidence")
+    account_evidence_status = (
+        str(account_evidence.get("status")).upper()
+        if isinstance(account_evidence, Mapping) and account_evidence.get("status") is not None
+        else "UNKNOWN"
+    )
+    account_verified = account_evidence_status == "VALID" and account_decision == "allow"
+    if phase == "R0-D":
+        # R0-D is a read-only reconciliation.  Its hard budget gate is the
+        # finite task envelope, while account telemetry remains advisory for
+        # the separately authorized recovery/backfill gate.
+        decision = local_budget["decision"]
+        unknown_metrics = list(local_budget["unknownMetrics"])
+        hard_over_limit = list(local_budget["violations"])
+        if decision == "allow":
+            evidence_mode = "ACCOUNT_VERIFIED" if account_verified else "LOCAL_BOUNDED"
+        else:
+            evidence_mode = "UNVERIFIED"
+    else:
+        # Preserve R0-C's original account-aware draft semantics.
+        decision = account_decision
+        unknown_metrics = sorted(set(account_unknown_metrics))
+        hard_over_limit = sorted(over_limit)
+        evidence_mode = "ACCOUNT_VERIFIED" if account_verified and decision == "allow" else "UNVERIFIED"
     return {
         "schemaVersion": AUDIT_SCHEMA_VERSION,
         "decision": decision,
+        "evidenceMode": evidence_mode,
         "retryAttempts": retry_attempts,
         "accountTelemetry": telemetry,
+        "accountTelemetryEvidenceStatus": account_evidence_status,
+        "accountDecision": account_decision,
+        "accountUnknownMetrics": sorted(set(account_unknown_metrics)),
+        "accountOverLimit": sorted(over_limit),
+        "localBudget": local_budget,
         "d1Audit": dict(d1_audit),
         "estimate": estimate,
         "measured": measured,
         "projected": projected,
         "limits": limits,
         "unknownMetrics": sorted(set(unknown_metrics)),
-        "overLimit": sorted(over_limit),
+        "overLimit": sorted(set(hard_over_limit)),
         "r2InventoryStatus": r2_status,
         "policyTargets": {
             key: config.get("targets", {}).get(key)
@@ -1201,6 +1324,8 @@ def _summary(
         f"- pipeline windows: {len(pipeline_windows)}",
         f"- R2 inventory: {r2_status}",
         f"- budget decision: {budget['decision']}",
+        f"- budget evidence mode: {budget['evidenceMode']}",
+        f"- account budget advisory: {budget['accountDecision']}",
         "",
         "## Safety assertions",
         "",
@@ -1223,6 +1348,17 @@ def _summary(
         )
     if budget["unknownMetrics"]:
         lines.extend(["", "## Unknown budget metrics", "", f"- {', '.join(budget['unknownMetrics'])}"])
+    if budget["accountUnknownMetrics"] and budget["evidenceMode"] == "LOCAL_BOUNDED":
+        lines.extend(
+            [
+                "",
+                "## Optional account telemetry",
+                "",
+                "- Account-wide usage is unavailable or incomplete; R0-D closed only against the bounded read-only task envelope.",
+                f"- Advisory unknowns: {', '.join(budget['accountUnknownMetrics'])}",
+                "- Recovery and backfill remain subject to their separate account-level budget gate.",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1371,7 +1507,11 @@ def build_stage_evidence(
         {"id": "read_only_boundary", "status": "pass", "detail": "no network/provider client or mutation API is available"},
         {"id": "stable_plan_hash", "status": "pass", "detail": "planHash derives from canonical scope/evidence only"},
         {"id": "unknown_fail_closed", "status": "pass", "detail": "unknown evidence cannot become a recovery target or R0_RECONCILED"},
-        {"id": "budget_gate", "status": "pass" if budget["decision"] == "allow" else "warn", "detail": budget["decision"]},
+        {
+            "id": "budget_gate",
+            "status": "pass" if budget["decision"] == "allow" else "warn",
+            "detail": f"{budget['decision']}:{budget['evidenceMode']}",
+        },
         {"id": "release_slot_separation", "status": "pass", "detail": "dashboard and etf_penetration are evaluated independently"},
         {"id": "r0d_reconciliation", "status": "pass" if reconciliation_status == "R0_RECONCILED" else "warn", "detail": reconciliation_status},
     ]
@@ -1415,6 +1555,10 @@ def build_stage_evidence(
         "sourceEvidenceStatus": source_status,
         "r2InventoryStatus": r2_status,
         "budgetStatus": budget["decision"],
+        "budgetEvidenceMode": budget["evidenceMode"],
+        "localBudgetStatus": budget["localBudget"]["decision"],
+        "accountBudgetStatus": budget["accountDecision"],
+        "accountTelemetryEvidenceStatus": budget["accountTelemetryEvidenceStatus"],
         "claimDecision": "NOT_ATTEMPTED",
         "recoveryId": None,
         "runKey": None,
@@ -1478,7 +1622,13 @@ def audit_bundle(
         r2_status=r2_status,
         budget=preliminary_budget,
     )
-    budget = _budget_report(bundle=bundle, config=budget_config, targets=targets, r2_status=r2_status)
+    budget = _budget_report(
+        bundle=bundle,
+        config=budget_config,
+        targets=targets,
+        r2_status=r2_status,
+        phase=phase,
+    )
     plan, targets, date_summaries = _plan(
         bundle=bundle,
         start=start,

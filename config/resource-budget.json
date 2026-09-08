@@ -24,6 +24,16 @@
     "workersRequestsPerDay": 50000,
     "githubActionsMinutesPerMonth": 1500
   },
+  "readOnlyInventoryBudget": {
+    "d1RowsRead": 500000,
+    "d1RowsWritten": 0,
+    "workerRequests": 300,
+    "r2ClassA": 0,
+    "r2ClassB": 2496,
+    "inventoryPages": 250,
+    "responseBytes": 67108864,
+    "actionsMinutesUpperBound": 20
+  },
   "stageBudgets": {
     "scheduler": {"rowsRead": 25000, "rowsWritten": 1000},
     "coreCollection": {"rowsRead": 100000, "rowsWritten": 3000},

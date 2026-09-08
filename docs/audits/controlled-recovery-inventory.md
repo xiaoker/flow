@@ -57,21 +57,36 @@ continuation size fail closed.  The cursor contract is bounded to 256 encoded
 characters and includes the original date scope, so a cursor cannot be reused
 for another campaign.
 
-Account usage is accepted only from a current, hashed official export supplied
-with `--usage-file`.  The file must contain `capturedAt`, `metrics` and a
-SHA-256 over the unsigned payload and must be no more than 60 minutes old (or
-before its `expiresAt`).  Missing, expired, malformed or mismatched usage is
-retained as `unknown`; it cannot produce `R0_RECONCILED`.  A future provider
-usage API adapter may feed the same contract without changing the auditor.
+R0-D has two deliberately separate budget evidence layers.  Its hard closure
+gate is the finite task-local envelope in `config/resource-budget.json`:
+500,000 D1 rows read, zero D1 rows written, 300 Worker requests, zero R2 Class-A
+operations, 2,496 R2 Class-B operations, 250 logical inventory pages, 64 MiB of
+responses and a 20-minute workflow timeout.  The exporter records exact local
+counters; an unknown counter, disagreement with the independent D1 audit, a
+write operation or an exceeded cap fails closed.  A successful report labels
+this basis `LOCAL_BOUNDED`.
 
-The manual workflow receives this export through the repository secret
-`FLOW_OFFICIAL_USAGE_EXPORT_JSON`.  It validates the contract before making
-the production inventory request, writes the value only to an ephemeral runner
-path outside the uploaded artifact, passes that path to `--usage-file`, and
-removes it in an `always()` cleanup step.  Because the export expires after 60
-minutes, it must be generated from current official Cloudflare/GitHub usage
-telemetry immediately before the run; it is not a durable baseline or a
-replacement for provider APIs.
+An optional current, hashed official account-usage export may still be supplied
+with `--usage-file`.  It must contain `capturedAt`, `metrics` and a SHA-256 over
+the unsigned payload and must be no more than 60 minutes old (or before its
+`expiresAt`).  When valid and within budget, the report labels the combined
+evidence `ACCOUNT_VERIFIED`.  Missing, expired, malformed or mismatched account
+telemetry remains explicit advisory evidence; it no longer prevents this
+read-only inventory from becoming `R0_RECONCILED` when every local counter and
+all data-integrity predicates are proven.
+
+This exception is scoped only to R0-D reconciliation.  It does not authorize a
+recovery, backfill, collection or publication.  Those mutation-capable stages
+continue to use their separate account-level budget gate and must fail closed
+when required provider usage is unknown or over budget.
+
+The manual workflow may receive the optional export through the repository
+secret `FLOW_OFFICIAL_USAGE_EXPORT_JSON`.  When present, it writes the value
+only to an ephemeral runner path outside the uploaded artifact, passes that
+path to `--usage-file`, and removes it in an `always()` cleanup step.  When the
+secret is absent, no file is created and the exporter records account telemetry
+as `UNKNOWN`; the bounded read-only run proceeds without requiring a user to
+manufacture temporary provider data.
 
 ## Offline audit and safety boundary
 
@@ -92,8 +107,9 @@ repository.
 `workflow_dispatch` entry, `contents: read` permissions and one fixed
 concurrency group.  It performs scope/credential preflight before invoking the
 stdlib-only exporter and uploads an artifact even when a preflight, pagination
-or budget check fails.  It has no schedule, no workflow-dispatch capability,
-and no collection, publish, migration, recovery or canary step.
+or budget check fails.  Its `timeout-minutes` value is tested against the
+checked-in task-local envelope.  It has no schedule, no workflow-dispatch
+capability, and no collection, publish, migration, recovery or canary step.
 
 Running this workflow is the later R0-D-RUN action.  It must not be run as part
 of PR C implementation or CI.  After a real run, a stage report must be

@@ -16,7 +16,12 @@
     "blockers",
     "nextAllowedAction",
     "protectedPathsTouched",
-    "readOnlyAssertions"
+    "readOnlyAssertions",
+    "budgetStatus",
+    "budgetEvidenceMode",
+    "localBudgetStatus",
+    "accountBudgetStatus",
+    "accountTelemetryEvidenceStatus"
   ],
   "properties": {
     "schemaVersion": {"const": 2},
@@ -51,7 +56,12 @@
     "migrationApplied": {"const": false},
     "sourceEvidenceStatus": {
       "enum": ["READY", "READY_WITH_EVIDENCED_UNAVAILABLE", "INCOMPLETE"]
-    }
+    },
+    "budgetStatus": {"enum": ["allow", "unknown_metrics", "over_budget"]},
+    "budgetEvidenceMode": {"enum": ["ACCOUNT_VERIFIED", "LOCAL_BOUNDED", "UNVERIFIED"]},
+    "localBudgetStatus": {"enum": ["allow", "unknown_metrics", "over_budget"]},
+    "accountBudgetStatus": {"enum": ["allow", "unknown_metrics", "over_budget"]},
+    "accountTelemetryEvidenceStatus": {"type": "string", "maxLength": 64}
   },
   "allOf": [
     {
@@ -74,6 +84,8 @@
             }
           },
           "budgetStatus": {"const": "allow"},
+          "budgetEvidenceMode": {"enum": ["ACCOUNT_VERIFIED", "LOCAL_BOUNDED"]},
+          "localBudgetStatus": {"const": "allow"},
           "r2InventoryStatus": {"const": "READY"}
         }
       }
