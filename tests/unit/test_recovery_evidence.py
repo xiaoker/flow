@@ -274,6 +274,56 @@ def test_r2_head_cursor_is_drained_without_duplicate_date_pages() -> None:
     assert len(transport.requests) == 2
 
 
+def test_r2_pagination_allows_known_legacy_warning_but_rejects_fatal_reason() -> None:
+    allowed_payload = page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["R2_HEAD_PAGE_REMAINS", "RELEASE_MANIFEST_INCOMPLETE"],
+        r2_has_more=True,
+        r2_next_cursor=r2_cursor("market-data/releases/2026-08-27/release:a/artifact.json"),
+        r2_head_count=64,
+    )
+    instance = exporter(FixtureTransport({None: (503, allowed_payload)}))
+    validated = instance._validate_page(
+        status_code=503,
+        payload=allowed_payload,
+        request_cursor=None,
+        request_r2_cursor=None,
+    )
+    assert validated.body["incompleteReasons"] == ["R2_HEAD_PAGE_REMAINS", "RELEASE_MANIFEST_INCOMPLETE"]
+
+    fatal_payload = page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["R2_HEAD_PAGE_REMAINS", "D1_READ_FAILED"],
+        r2_has_more=True,
+        r2_next_cursor=r2_cursor("market-data/releases/2026-08-27/release:a/artifact.json"),
+        r2_head_count=64,
+    )
+    with pytest.raises(RecoveryEvidenceError) as error:
+        instance._validate_page(
+            status_code=503,
+            payload=fatal_payload,
+            request_cursor=None,
+            request_r2_cursor=None,
+        )
+    assert error.value.code == "inventory_http_error"
+
+    complete_with_fatal_reason = page(
+        ["2026-08-27"],
+        status="COMPLETE",
+        incomplete_reasons=["D1_READ_FAILED"],
+    )
+    with pytest.raises(RecoveryEvidenceError) as complete_error:
+        instance._validate_page(
+            status_code=200,
+            payload=complete_with_fatal_reason,
+            request_cursor=None,
+            request_r2_cursor=None,
+        )
+    assert complete_error.value.code == "inventory_incomplete"
+
+
 def test_r2_head_campaign_cap_fails_closed_before_unbounded_drain() -> None:
     pages: dict[tuple[str | None, str | None], tuple[int, bytes]] = {}
     previous: str | None = None

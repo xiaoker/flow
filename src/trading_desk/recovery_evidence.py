@@ -67,6 +67,13 @@ MAX_R2_PAGES_PER_DATE_PAGE = MAX_R2_TOTAL_HEADS // MAX_R2_HEADS_PER_REQUEST
 MAX_TOTAL_REQUESTS = 300
 MAX_R2_CURSOR_LENGTH = 256
 USAGE_MAX_AGE = timedelta(minutes=60)
+# These warnings are safe to carry while an R2 HEAD cursor is being drained.
+# Any other reason remains fatal so a 503 or incomplete response cannot be
+# mistaken for a usable evidence page.
+NON_FATAL_PAGINATED_REASONS = frozenset({
+    "R2_HEAD_PAGE_REMAINS",
+    "RELEASE_MANIFEST_INCOMPLETE",
+})
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 SECRET_KEY_PARTS = (
@@ -348,7 +355,21 @@ class RecoveryEvidenceExporter:
         if request.get("limit") != self.limit or request.get("cursor") != expected_request_cursor or request.get("r2Cursor") != request_r2_cursor:
             raise RecoveryEvidenceError("inventory_cursor_contract_mismatch")
         reasons = [str(item) for item in body.get("incompleteReasons") or []]
-        deferred_r2 = body.get("status") == "INCOMPLETE" and reasons == ["R2_HEAD_PAGE_REMAINS"]
+        deferred_r2 = (
+            body.get("status") == "INCOMPLETE"
+            and "R2_HEAD_PAGE_REMAINS" in reasons
+            and set(reasons).issubset(NON_FATAL_PAGINATED_REASONS)
+        )
+        fatal_reasons = sorted(set(reasons) - NON_FATAL_PAGINATED_REASONS)
+        if fatal_reasons:
+            code = "inventory_http_error" if status_code == 503 else "inventory_incomplete"
+            detail = "503" if status_code == 503 else ",".join(fatal_reasons)
+            raise RecoveryEvidenceError(code, detail)
+        # R2_HEAD_PAGE_REMAINS is only non-fatal while its continuation cursor
+        # is explicitly being drained.  A terminal COMPLETE page must never
+        # claim that pagination is still pending.
+        if body.get("status") == "COMPLETE" and "R2_HEAD_PAGE_REMAINS" in reasons:
+            raise RecoveryEvidenceError("inventory_incomplete", "R2_HEAD_PAGE_REMAINS")
         if status_code == 503 and not deferred_r2:
             raise RecoveryEvidenceError("inventory_http_error", "503")
         if body.get("status") != "COMPLETE" and not deferred_r2:

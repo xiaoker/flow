@@ -116,6 +116,27 @@ function releaseRow({ asOf = "2026-08-27", slot = "dashboard" } = {}) {
   };
 }
 
+function legacyReleaseRow({ asOf = "2026-08-27" } = {}) {
+  const releaseId = `release:${asOf}:cccccccccccccccc`;
+  const current = manifest({ asOf, releaseId, slot: "dashboard", names: MARKET_READ_MODEL_NAMES });
+  const value = {
+    schemaVersion: 2,
+    releaseId,
+    asOf,
+    artifacts: current.artifacts,
+  };
+  return {
+    release_id: releaseId,
+    as_of: asOf,
+    status: "SUPERSEDED",
+    schema_version: 2,
+    manifest_sha256: SHA("c"),
+    manifest_json: JSON.stringify(value),
+    observed_at: null,
+    created_at: "2026-08-27T12:00:00.000Z",
+  };
+}
+
 function objectsFor(row) {
   const value = JSON.parse(row.manifest_json);
   return Object.fromEntries(Object.values(value.artifacts).map((item) => [item.key, { key: item.key, size: item.bytes, customMetadata: { sha256: item.sha256 } }]));
@@ -183,6 +204,20 @@ test("same fixture paginates deterministically without duplicate dates and keeps
   assert.ok(fixture.r2.heads.every((key) => key.startsWith("market-data/releases/")));
   assert.ok(fixture.d1.calls.every(({ sql }) => /LIMIT\s+\?/i.test(sql)));
   assert.ok(fixture.d1.calls.some(({ sql }) => /FROM\s+etf_daily/i.test(sql)));
+});
+
+test("legacy schema v2 slotless market manifests remain inventory-compatible", async () => {
+  const legacy = legacyReleaseRow({});
+  const fixture = new FakeD1({ dates: ["2026-08-27"], releases: [legacy] });
+  const r2 = new FakeR2(objectsFor(legacy));
+  const result = await collectRecoveryInventory(
+    { DB: fixture, RAW_BUCKET: r2 },
+    { start: "2026-08-27", end: "2026-08-27", cursor: null, limit: 1 },
+  );
+  assert.equal(result.status, "COMPLETE", JSON.stringify(result));
+  assert.equal(result.incompleteReasons.includes("RELEASE_MANIFEST_INCOMPLETE"), false);
+  assert.equal(result.dates[0].releases.dashboard[0].manifestComplete, true);
+  assert.equal(result.dates[0].domains[0].stageStatus.dashboard, "READY");
 });
 
 test("R2 continuation pages avoid repeating unrelated D1 history reads", async () => {
