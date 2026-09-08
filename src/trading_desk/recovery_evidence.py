@@ -1030,7 +1030,12 @@ def load_official_usage(path: str | Path | None, *, now: datetime | None = None)
         status = "UNKNOWN"
     else:
         status = "VALID"
-    return output, {"status": status, "capturedAt": measured_at, "sha256": expected_hash}
+    return output, {
+        "status": status,
+        "reason": "verified" if status == "VALID" else "metrics_incomplete",
+        "capturedAt": measured_at,
+        "sha256": expected_hash,
+    }
 
 
 def build_evidence_bundle(
@@ -1181,6 +1186,11 @@ def build_evidence_bundle(
                 "workerRequests": usage["workerRequests"],
                 "r2ClassA": usage["r2ClassA"],
                 "r2ClassB": usage["r2ClassB"],
+                "inventoryPages": len(pages),
+                "responseBytes": sum(
+                    page.response_bytes
+                    for page in (transport_pages if transport_pages is not None else pages)
+                ),
                 "actionsMinutes": "unknown",
             },
             "estimated": {"d1RowsRead": "unknown", "d1RowsWritten": "unknown", "workerRequests": usage["workerRequests"], "r2ClassA": 0, "r2ClassB": usage["r2HeadCount"], "actionsMinutes": "unknown"},
@@ -1243,9 +1253,10 @@ def to_audit_input(bundle: Mapping[str, Any]) -> dict[str, Any]:
             ("szse_margin", "szse"), ("bse_margin", "bse"), ("hkex_connect", None),
         )
     ]
-    # v2 source receipts and account evidence are deliberately retained in the
-    # v2 artifact, but the v1 auditor only needs its established fields.
-    for field in ("accountTelemetryEvidence", "resourceUsage", "fingerprints", "pages", "exportStatus", "errors"):
+    # Page bodies, fingerprints and exporter errors remain v2-only.  Account
+    # provenance and task-local counters are retained so R0-D can distinguish
+    # an optional account snapshot from its mandatory bounded read-only run.
+    for field in ("fingerprints", "pages", "exportStatus", "errors"):
         output.pop(field, None)
     return output
 

@@ -13,6 +13,10 @@ from trading_desk.recovery_execution import canonical_sha256
 from trading_desk.recovery_evidence import (
     EVIDENCE_CONTRACT,
     EVIDENCE_SCHEMA_VERSION,
+    MAX_PAGES,
+    MAX_R2_TOTAL_HEADS,
+    MAX_TOTAL_BYTES,
+    MAX_TOTAL_REQUESTS,
     PRIORITY_DATES,
     RecoveryEvidenceError,
     RecoveryEvidenceExporter,
@@ -154,8 +158,22 @@ def test_fixture_replay_is_bounded_and_schema_stable() -> None:
     assert all("secret" not in json.dumps(receipt).lower() for receipt in result.bundle["pages"])
     assert result.bundle["pages"][0]["usage"]["d1RowsRead"] == 10
     assert result.bundle["pages"][0]["usage"]["d1RowsWritten"] == 0
+    assert result.bundle["resourceUsage"]["actual"]["inventoryPages"] == 2
+    assert result.bundle["resourceUsage"]["actual"]["responseBytes"] == sum(
+        receipt["responseBytes"] for receipt in result.bundle["pages"]
+    )
     assert result.bundle["activeReleaseSlots"] == []
     assert transport.requests[0][1]["Authorization"] == "Bearer fixture-ingest"
+
+
+def test_checked_in_local_budget_matches_exporter_hard_bounds() -> None:
+    local = CONFIG["readOnlyInventoryBudget"]
+    assert local["workerRequests"] == MAX_TOTAL_REQUESTS
+    assert local["r2ClassB"] == MAX_R2_TOTAL_HEADS
+    assert local["inventoryPages"] == MAX_PAGES
+    assert local["responseBytes"] == MAX_TOTAL_BYTES
+    assert local["d1RowsWritten"] == 0
+    assert local["r2ClassA"] == 0
 
 
 def test_fixture_bundle_validates_against_published_json_schema() -> None:
@@ -172,12 +190,17 @@ def test_same_fixture_has_stable_plan_hash_on_two_audits() -> None:
     bundle = exporter(transport).collect().bundle
     first, second_hash = audit_twice(bundle, CONFIG)
     assert first["plan"]["planHash"] == second_hash
+    assert first["budget"]["decision"] == "allow"
+    assert first["budget"]["evidenceMode"] == "LOCAL_BOUNDED"
     reordered = json.loads(json.dumps(bundle))
     reordered["inventory"] = list(reversed(reordered["inventory"]))
     assert audit_twice(reordered, CONFIG)[0]["plan"]["planHash"] == first["plan"]["planHash"]
     recaptured = dict(bundle)
     recaptured["capturedAt"] = "2026-09-07T02:00:00Z"
     assert audit_twice(recaptured, CONFIG)[0]["plan"]["planHash"] == first["plan"]["planHash"]
+    audit_input = to_audit_input(bundle)
+    assert audit_input["accountTelemetryEvidence"]["status"] == "UNKNOWN"
+    assert audit_input["resourceUsage"]["actual"]["workerRequests"] == 1
 
 
 @pytest.mark.parametrize("status,code", [(401, "inventory_permission_denied"), (403, "inventory_permission_denied"), (429, "inventory_rate_limited")])
@@ -406,6 +429,12 @@ def test_usage_missing_expired_mismatched_and_secret_are_unknown(tmp_path: Path)
     expired_payload["sha256"] = canonical_sha256({key: value for key, value in expired_payload.items() if key != "sha256"})
     expired_path = tmp_path / "expired.json"
     expired_path.write_text(json.dumps(expired_payload), encoding="utf-8")
+    valid_values, valid = load_official_usage(
+        expired_path,
+        now=datetime(2026, 9, 1, 0, 15, tzinfo=timezone.utc),
+    )
+    assert valid["status"] == "VALID" and valid["reason"] == "verified"
+    assert valid_values["d1RowsReadPerDay"]["value"] == 1
     values, expired = load_official_usage(expired_path, now=datetime(2026, 9, 7, tzinfo=timezone.utc))
     assert expired["reason"] == "expired" and values["d1RowsReadPerDay"]["value"] == "unknown"
     expired_payload["sha256"] = "0" * 64

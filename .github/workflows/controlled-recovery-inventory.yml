@@ -65,10 +65,6 @@ jobs:
             echo '{"status":"INCOMPLETE","code":"required_read_credentials_missing"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
             exit 2
           fi
-          if [ -z "${FLOW_OFFICIAL_USAGE_EXPORT_JSON:-}" ]; then
-            echo '{"status":"INCOMPLETE","code":"official_usage_export_missing"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
-            exit 2
-          fi
           case "${PRIORITY_DATES}" in
             *2026-09-04*|*2026-09-05*|*2026-09-06*|*2026-09-07*)
               echo '{"status":"INCOMPLETE","code":"priority_date_outside_scope"}' > "$RUNNER_TEMP/controlled-recovery/preflight-error.json"
@@ -84,23 +80,14 @@ jobs:
             exit 2
           fi
 
-      - name: Prepare and validate ephemeral official usage export
+      - name: Prepare optional ephemeral official usage export
         if: ${{ success() }}
         run: |
           set -eu
-          umask 077
-          printf '%s' "$FLOW_OFFICIAL_USAGE_EXPORT_JSON" > "$RUNNER_TEMP/official-usage-export.json"
-          PYTHONPATH=src:. python -c '
-          import json, os, sys
-          from trading_desk.recovery_evidence import load_official_usage
-          path = os.environ["RUNNER_TEMP"] + "/official-usage-export.json"
-          metrics, status = load_official_usage(path)
-          if status.get("status") != "VALID" or any(value.get("value") == "unknown" for value in metrics.values()):
-              code = status.get("reason", "official_usage_invalid")
-              with open(os.environ["RUNNER_TEMP"] + "/controlled-recovery/preflight-error.json", "w", encoding="utf-8") as handle:
-                  json.dump({"status": "INCOMPLETE", "code": code}, handle)
-              sys.exit(2)
-          '
+          if [ -n "${FLOW_OFFICIAL_USAGE_EXPORT_JSON:-}" ]; then
+            umask 077
+            printf '%s' "$FLOW_OFFICIAL_USAGE_EXPORT_JSON" > "$RUNNER_TEMP/official-usage-export.json"
+          fi
 
       - name: Export evidence and run offline auditor twice
         if: ${{ success() }}
@@ -117,6 +104,10 @@ jobs:
             priority_args+=(--priority-date "$priority")
           done
           IFS="$old_ifs"
+          usage_args=()
+          if [ -s "$RUNNER_TEMP/official-usage-export.json" ]; then
+            usage_args+=(--usage-file "$RUNNER_TEMP/official-usage-export.json")
+          fi
           PYTHONPATH=src:. python scripts/export_controlled_recovery_evidence.py \
             --base-url "$FLOW_PUBLIC_URL" \
             --start "$START_DATE" \
@@ -124,7 +115,7 @@ jobs:
             "${priority_args[@]}" \
             --phase R0-D \
             --output-dir "$RUNNER_TEMP/controlled-recovery" \
-            --usage-file "$RUNNER_TEMP/official-usage-export.json" \
+            "${usage_args[@]}" \
             --config config/resource-budget.json
 
       - name: Remove ephemeral official usage export

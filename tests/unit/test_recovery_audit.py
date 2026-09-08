@@ -107,7 +107,26 @@ def complete_bundle(*, rows: list[dict] | None = None) -> dict:
             "r2ClassA": 1,
             "r2ClassB": 1,
         },
-        "d1Audit": {"rowsRead": 10, "rowsWritten": 2, "workersRequests": 1},
+        "accountTelemetryEvidence": {
+            "status": "VALID",
+            "reason": "fixture",
+            "capturedAt": "2026-09-07T02:00:00Z",
+        },
+        "d1Audit": {"rowsRead": 10, "rowsWritten": 0, "workersRequests": 1},
+        "resourceUsage": {
+            "schemaVersion": 1,
+            "metricsMeasuredAt": "2026-09-07T02:00:00Z",
+            "actual": {
+                "d1RowsRead": 10,
+                "d1RowsWritten": 0,
+                "workerRequests": 1,
+                "r2ClassA": 0,
+                "r2ClassB": 1,
+                "inventoryPages": 1,
+                "responseBytes": 1000,
+                "actionsMinutes": "unknown",
+            },
+        },
         "readOnlyAssertions": {
             "d1Writes": 0,
             "r2Writes": 0,
@@ -147,7 +166,80 @@ def test_r0d_phase_closes_complete_evidence_without_changing_plan_hash() -> None
     assert r0d["stageEvidence"]["status"] == "DONE"
     assert r0d["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
     assert r0d["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
+    assert r0d["stageEvidence"]["budgetEvidenceMode"] == "ACCOUNT_VERIFIED"
+    assert r0d["stageEvidence"]["localBudgetStatus"] == "allow"
     assert r0d["summary"].startswith("# Controlled recovery R0-D audit")
+
+
+def test_r0d_closes_on_bounded_local_budget_without_official_account_snapshot() -> None:
+    bundle = complete_bundle()
+    verified = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
+    bundle["accountTelemetry"] = {}
+    bundle["accountTelemetryEvidence"] = {
+        "status": "UNKNOWN",
+        "reason": "not_provided",
+    }
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["budget"]["decision"] == "allow"
+    assert result["budget"]["evidenceMode"] == "LOCAL_BOUNDED"
+    assert result["budget"]["accountDecision"] == "unknown_metrics"
+    assert result["budget"]["unknownMetrics"] == []
+    assert "githubActionsMinutes" in result["budget"]["accountUnknownMetrics"]
+    assert result["stageEvidence"]["status"] == "DONE"
+    assert result["stageEvidence"]["unknowns"] == []
+    assert result["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
+    assert result["plan"]["planHash"] == verified["plan"]["planHash"]
+    assert "Recovery and backfill remain subject" in result["summary"]
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas/recovery-stage-evidence.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = list(Draft202012Validator(schema).iter_errors(result["stageEvidence"]))
+    assert not errors, [error.message for error in errors]
+
+
+def test_r0c_does_not_reclassify_missing_account_snapshot_as_local_bounded() -> None:
+    bundle = complete_bundle()
+    bundle["accountTelemetry"] = {}
+    bundle["accountTelemetryEvidence"] = {"status": "UNKNOWN", "reason": "not_provided"}
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-C")
+    assert result["budget"]["decision"] == "unknown_metrics"
+    assert result["budget"]["evidenceMode"] == "UNVERIFIED"
+    assert result["stageEvidence"]["status"] == "DONE_WITH_CONCERNS"
+
+
+def test_r0d_local_budget_unknown_or_exceeded_fails_closed() -> None:
+    unknown = complete_bundle()
+    unknown["accountTelemetry"] = {}
+    unknown["accountTelemetryEvidence"] = {"status": "UNKNOWN", "reason": "not_provided"}
+    unknown["resourceUsage"]["actual"]["r2ClassB"] = "unknown"
+    unknown_result = audit_bundle(unknown, budget_config=CONFIG, phase="R0-D")
+    assert unknown_result["budget"]["decision"] == "unknown_metrics"
+    assert unknown_result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert "local.r2ClassB" in unknown_result["stageEvidence"]["unknowns"]
+
+    exceeded = complete_bundle()
+    exceeded["accountTelemetry"] = {}
+    exceeded["accountTelemetryEvidence"] = {"status": "UNKNOWN", "reason": "not_provided"}
+    exceeded["resourceUsage"]["actual"]["workerRequests"] = 301
+    exceeded["d1Audit"]["workersRequests"] = 301
+    exceeded_result = audit_bundle(exceeded, budget_config=CONFIG, phase="R0-D")
+    assert exceeded_result["budget"]["decision"] == "over_budget"
+    assert exceeded_result["stageEvidence"]["status"] == "BLOCKED"
+    assert exceeded_result["stageEvidence"]["nextAllowedAction"] == "STOP"
+    assert "local.workerRequests:over_limit" in exceeded_result["stageEvidence"]["blockers"]
+
+
+def test_r0d_local_counter_mismatch_is_blocked() -> None:
+    bundle = complete_bundle()
+    bundle["resourceUsage"]["actual"]["d1RowsRead"] = 11
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["budget"]["decision"] == "over_budget"
+    assert "local.d1RowsRead:counter_mismatch" in result["stageEvidence"]["blockers"]
 
 
 def test_unknown_phase_is_rejected() -> None:
@@ -375,6 +467,12 @@ def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
         "R2_ACCEPTANCE_AUDIT",
     ]
     assert "reconciliationStatus" in schema["required"]
+    assert "budgetEvidenceMode" in schema["required"]
+    assert set(schema["properties"]["budgetEvidenceMode"]["enum"]) == {
+        "ACCOUNT_VERIFIED",
+        "LOCAL_BOUNDED",
+        "UNVERIFIED",
+    }
 
 
 def test_auditor_dependency_surface_is_offline_and_pure(monkeypatch) -> None:
