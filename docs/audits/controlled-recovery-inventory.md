@@ -22,6 +22,11 @@ cursor, missing page, partial endpoint response, HTTP 403/429, timeout, or
 response-size limit produces an explicit `INCOMPLETE` result.  No such failure
 is converted to an empty `READY` inventory.
 
+The pipeline-window and recovery lookups use a bounded lexicographic
+`run_key` range instead of expanding one bound parameter per date/window. This
+keeps every prepared statement below Cloudflare D1's 100-parameter limit even
+when a page contains the maximum 100 dates.
+
 ## Evidence bundle
 
 `evidence-bundle-v2.json` is the stable external artifact.  It contains the

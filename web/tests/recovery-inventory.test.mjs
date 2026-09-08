@@ -8,6 +8,7 @@ import {
   INVENTORY_STAGES,
   isRecoveryInventoryAuthorized,
   MAX_DATE_SPAN_DAYS,
+  MAX_D1_BOUND_PARAMETERS,
   MAX_D1_ROWS_READ,
   MAX_INVENTORY_LIMIT,
   MAX_R2_HEADS,
@@ -177,6 +178,31 @@ test("same fixture paginates deterministically without duplicate dates and keeps
   assert.ok(fixture.d1.calls.some(({ sql }) => /FROM\s+etf_daily/i.test(sql)));
 });
 
+test("pipeline and recovery reads stay below D1 bind cap on a full date page", async () => {
+  const fixture = baseFixture();
+  fixture.d1.fixture.dates = Array.from({ length: 100 }, (_, index) => {
+    const value = new Date(Date.UTC(2024, 7, 1 + index));
+    return value.toISOString().slice(0, 10);
+  });
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2024-08-01",
+    end: "2026-09-03",
+    cursor: null,
+    limit: 100,
+  });
+  assert.equal(result.status, "COMPLETE", JSON.stringify(result));
+  assert.ok(fixture.d1.calls.length > 0);
+  assert.ok(fixture.d1.calls.every(({ values }) => values.length <= MAX_D1_BOUND_PARAMETERS));
+  assert.equal(
+    fixture.d1.calls.find(({ sql }) => /FROM pipeline_window\s/i.test(sql)).values.length,
+    4,
+  );
+  assert.equal(
+    fixture.d1.calls.find(({ sql }) => /FROM pipeline_window_recovery\s/i.test(sql)).values.length,
+    3,
+  );
+});
+
 test("R2 hash mismatch and failed HEAD remain INCOMPLETE, never READY", async () => {
   const fixture = baseFixture();
   const dashboard = JSON.parse(fixture.d1.fixture.releases[0].manifest_json);
@@ -299,8 +325,8 @@ test("hard caps are visible and source contains no R2 list/get or write paths", 
   ]) {
     assert.match(schema, new RegExp(index));
   }
-  assert.match(library, /FROM pipeline_window[\s\S]*WHERE run_key IN/);
-  assert.match(library, /FROM pipeline_window_recovery[\s\S]*WHERE run_key IN/);
+  assert.match(library, /FROM pipeline_window[\s\S]*WHERE run_key >= \? AND run_key < \?/);
+  assert.match(library, /FROM pipeline_window_recovery[\s\S]*WHERE run_key >= \? AND run_key < \?/);
   assert.doesNotMatch(library, /SELECT\s+\*/i);
 });
 
