@@ -1,5 +1,5 @@
 import {
-  hasCompleteReadModelManifest,
+  hasHistoricalCompatibleReadModelManifest,
   isReadModelManifest,
   READ_MODEL_SLOTS,
   SHA256,
@@ -596,7 +596,7 @@ function releaseEvidence(row: ReleaseRow): { evidence: ReleaseEvidence; manifest
   } catch {
     manifest = null;
   }
-  const complete = Boolean(manifest && hasCompleteReadModelManifest(manifest));
+  const complete = Boolean(manifest && hasHistoricalCompatibleReadModelManifest(manifest));
   const slot = manifest ? releaseSlot(manifest) : ((row.manifest_json && row.manifest_json.includes('"slot":"etf_penetration"')) ? "etf_penetration" : "dashboard");
   const required = manifest?.requiredArtifacts ?? (manifest ? Object.keys(manifest.artifacts) : []);
   const artifacts: Record<string, Record<string, unknown>> = {};

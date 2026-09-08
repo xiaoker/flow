@@ -250,3 +250,20 @@ export function hasCompleteReadModelManifest(manifest: ReadModelManifest): boole
       : COMPLETE_READ_MODEL_NAMES;
   return required.every((name) => names.has(name));
 }
+
+/**
+ * Historical inventory compatibility is intentionally less strict than the
+ * current release activation contract.  Schema-v2 slotless releases were
+ * published before ETF-to-stock penetration was introduced, so they are
+ * complete when the seven original market artifacts are present.  Current
+ * schema-v3 slots continue to use the strict activation requirements above.
+ * This helper is for read-only recovery evidence only; it must not be used by
+ * production release selection or date visibility.
+ */
+export function hasHistoricalCompatibleReadModelManifest(manifest: ReadModelManifest): boolean {
+  if (manifest.schemaVersion === 2 && manifest.slot === undefined) {
+    const names = new Set(Object.keys(manifest.artifacts));
+    return MARKET_READ_MODEL_NAMES.every((name) => names.has(name));
+  }
+  return hasCompleteReadModelManifest(manifest);
+}
