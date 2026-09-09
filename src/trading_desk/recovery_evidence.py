@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .recovery_audit import audit_bundle, write_audit_outputs
+from .recovery_audit import RecoveryAuditError, audit_bundle, write_audit_outputs
 from .recovery_execution import assert_recovery_output_path, canonical_sha256
 
 
@@ -1520,6 +1520,50 @@ def _write_cli_error(output_dir: str | Path, error: RecoveryEvidenceError) -> No
     )
 
 
+def _write_cli_audit_error(
+    output_dir: str | Path,
+    error: BaseException,
+    *,
+    bundle: Mapping[str, Any] | None = None,
+) -> None:
+    """Write bounded, actionable evidence when the offline audit rejects a bundle.
+
+    The previous path recorded only ``RecoveryAuditError`` and discarded the
+    error code and the otherwise valid v2 evidence bundle.  That made a
+    read-only inventory failure impossible to diagnose from the workflow
+    artifact.  Preserve the deterministic code/detail and the validated
+    bundle, while never writing an unvalidated payload to the artifact.
+    """
+
+    output = Path(output_dir).resolve()
+    assert_recovery_output_path(str(output / "_cli_audit_error_guard"))
+    output.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "status": "INCOMPLETE",
+        "error": getattr(error, "code", type(error).__name__),
+        "detail": str(error),
+    }
+    if isinstance(error, RecoveryAuditError):
+        payload["errorType"] = "RecoveryAuditError"
+    if bundle is not None:
+        try:
+            validate_evidence_bundle(bundle)
+        except (RecoveryEvidenceError, ValueError, OSError, json.JSONDecodeError):
+            pass
+        else:
+            (output / "evidence-bundle-v2.json").write_text(
+                json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            payload["bundleStatus"] = bundle.get("exportStatus")
+            errors = bundle.get("errors")
+            payload["bundleErrorCount"] = len(errors) if isinstance(errors, list) else 0
+    (output / "export-error.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     priority_values = args.priority_dates or list(PRIORITY_DATES)
@@ -1564,11 +1608,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         audit_result, second_hash = audit_twice(bundle, config, phase=args.phase)
         bundle["planHashReplay"] = second_hash
         write_evidence_outputs(bundle, audit_result, args.output_dir)
-    except (RecoveryEvidenceError, ValueError, OSError, json.JSONDecodeError) as error:
-        output = Path(args.output_dir).resolve()
-        assert_recovery_output_path(str(output / "_cli_audit_error_guard"))
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "export-error.json").write_text(json.dumps({"status": "INCOMPLETE", "error": type(error).__name__}, indent=2) + "\n", encoding="utf-8")
+    except (RecoveryEvidenceError, RecoveryAuditError, ValueError, OSError, json.JSONDecodeError) as error:
+        _write_cli_audit_error(args.output_dir, error, bundle=bundle)
         return 2
     print(json.dumps({"status": bundle["exportStatus"], "pages": len(bundle["pages"]), "planHash": second_hash, "outputDir": str(Path(args.output_dir).resolve())}, ensure_ascii=False))
     return 0 if bundle["exportStatus"] == "COMPLETE" and not errors else 2

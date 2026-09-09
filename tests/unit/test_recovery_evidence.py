@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from trading_desk.recovery_audit import audit_bundle
+from trading_desk.recovery_audit import RecoveryAuditError, audit_bundle
 from trading_desk.recovery_execution import canonical_sha256
 from trading_desk.recovery_evidence import (
     EVIDENCE_CONTRACT,
@@ -25,6 +25,7 @@ from trading_desk.recovery_evidence import (
     to_audit_input,
     validate_evidence_bundle,
     audit_twice,
+    _write_cli_audit_error,
 )
 
 
@@ -201,6 +202,24 @@ def test_same_fixture_has_stable_plan_hash_on_two_audits() -> None:
     audit_input = to_audit_input(bundle)
     assert audit_input["accountTelemetryEvidence"]["status"] == "UNKNOWN"
     assert audit_input["resourceUsage"]["actual"]["workerRequests"] == 1
+
+
+def test_audit_error_artifact_preserves_code_and_validated_bundle(tmp_path: Path) -> None:
+    output_dir = tmp_path / "audit-error"
+    bundle = exporter(FixtureTransport({None: (200, page(["2026-08-27"]))})).collect().bundle
+
+    _write_cli_audit_error(
+        output_dir,
+        RecoveryAuditError("invalid_run_key", "daily-market-data:bad"),
+        bundle=bundle,
+    )
+
+    error = json.loads((output_dir / "export-error.json").read_text(encoding="utf-8"))
+    assert error["error"] == "invalid_run_key"
+    assert error["errorType"] == "RecoveryAuditError"
+    assert "daily-market-data:bad" in error["detail"]
+    assert error["bundleStatus"] == bundle["exportStatus"]
+    assert (output_dir / "evidence-bundle-v2.json").exists()
 
 
 @pytest.mark.parametrize("status,code", [(401, "inventory_permission_denied"), (403, "inventory_permission_denied"), (429, "inventory_rate_limited")])
