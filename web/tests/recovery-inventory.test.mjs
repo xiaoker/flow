@@ -7,10 +7,12 @@ import {
   decodeR2InventoryCursor,
   encodeInventoryCursor,
   encodeR2InventoryCursor,
+  DATE_CANDIDATE_SQLS,
   INVENTORY_STAGES,
   isRecoveryInventoryAuthorized,
   MAX_DATE_SPAN_DAYS,
   MAX_D1_BOUND_PARAMETERS,
+  MAX_D1_QUERIES,
   MAX_D1_ROWS_READ,
   MAX_INVENTORY_LIMIT,
   MAX_R2_HEADS,
@@ -245,8 +247,28 @@ test("R2 continuation pages avoid repeating unrelated D1 history reads", async (
   assert.equal(result.request.r2Cursor, token);
   assert.ok(fixture.d1.calls.some(({ sql }) => /WITH dates/i.test(sql)));
   assert.ok(fixture.d1.calls.some(({ sql }) => /FROM release_manifest/i.test(sql)));
-  assert.equal(fixture.d1.calls.length, 2);
+  assert.equal(fixture.d1.calls.length, 3);
   assert.ok(fixture.d1.calls.filter(({ sql }) => !/WITH dates/i.test(sql)).every(({ sql }) => !/FROM (historical_snapshot|dashboard_snapshot|source_readiness|history_artifact_pointer|etf_daily|margin_daily|connect_daily|pipeline_window|active_release)/i.test(sql)));
+});
+
+test("date candidate queries stay within D1 compound SELECT limits and merge globally", async () => {
+  assert.equal(DATE_CANDIDATE_SQLS.length, 2);
+  for (const sql of DATE_CANDIDATE_SQLS) {
+    assert.equal((sql.match(/\bUNION\b/gi) ?? []).length, 2);
+    assert.ok(!/UNION\s+SELECT[\s\S]*UNION\s+SELECT[\s\S]*UNION\s+SELECT/i.test(sql));
+    assert.ok(/LIMIT\s+\?/i.test(sql));
+  }
+  const fixture = baseFixture();
+  fixture.d1.fixture.dates = ["2026-08-31", "2026-08-27", "2026-08-28"];
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2026-08-01",
+    end: "2026-09-03",
+    cursor: null,
+    limit: 2,
+  });
+  assert.deepEqual(result.dates.map((item) => item.dataDate), ["2026-08-27", "2026-08-28"]);
+  assert.equal(result.hasMore, true);
+  assert.equal(fixture.d1.calls.filter(({ sql }) => /WITH dates/i.test(sql)).length, 2);
 });
 
 test("pipeline and recovery reads stay below D1 bind cap on a full date page", async () => {
@@ -263,6 +285,7 @@ test("pipeline and recovery reads stay below D1 bind cap on a full date page", a
   });
   assert.equal(result.status, "COMPLETE", JSON.stringify(result));
   assert.ok(fixture.d1.calls.length > 0);
+  assert.ok(fixture.d1.calls.length <= MAX_D1_QUERIES);
   assert.ok(fixture.d1.calls.every(({ values }) => values.length <= MAX_D1_BOUND_PARAMETERS));
   assert.equal(
     fixture.d1.calls.find(({ sql }) => /FROM pipeline_window\s/i.test(sql)).values.length,

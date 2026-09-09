@@ -249,23 +249,39 @@ type ActiveReleaseRow = {
   activated_at: string | null;
 };
 
-export const DATE_CANDIDATES_SQL = `
-  WITH dates(data_date) AS (
-    SELECT as_of FROM historical_snapshot WHERE as_of BETWEEN ? AND ?
-    UNION SELECT as_of FROM release_manifest WHERE as_of BETWEEN ? AND ?
-    UNION SELECT as_of FROM dashboard_snapshot WHERE as_of BETWEEN ? AND ?
-    UNION SELECT trade_date FROM market_history_daily WHERE trade_date BETWEEN ? AND ?
-    UNION SELECT target_date FROM source_readiness WHERE target_date BETWEEN ? AND ?
-    UNION SELECT trade_date
-      FROM history_artifact_pointer
-     WHERE trade_date BETWEEN ? AND ?
-       AND dataset IN ('etf_scale', 'etf_pcf')
-  )
-  SELECT data_date
-    FROM dates
-   WHERE data_date > ?
-   ORDER BY data_date ASC
-   LIMIT ?`;
+/**
+ * D1's SQLite build rejects compound SELECT statements with more than five
+ * terms.  Keep each candidate query below that limit and merge the two
+ * bounded result sets in memory.  Each query returns at most limit + 1 rows,
+ * so the global keyset page still has enough evidence to decide hasMore.
+ */
+export const DATE_CANDIDATE_SQLS = [
+  `
+    WITH dates(data_date) AS (
+      SELECT as_of FROM historical_snapshot WHERE as_of BETWEEN ? AND ?
+      UNION SELECT as_of FROM release_manifest WHERE as_of BETWEEN ? AND ?
+      UNION SELECT as_of FROM dashboard_snapshot WHERE as_of BETWEEN ? AND ?
+    )
+    SELECT data_date
+      FROM dates
+     WHERE data_date > ?
+     ORDER BY data_date ASC
+     LIMIT ?`,
+  `
+    WITH dates(data_date) AS (
+      SELECT trade_date FROM market_history_daily WHERE trade_date BETWEEN ? AND ?
+      UNION SELECT target_date FROM source_readiness WHERE target_date BETWEEN ? AND ?
+      UNION SELECT trade_date
+        FROM history_artifact_pointer
+       WHERE trade_date BETWEEN ? AND ?
+         AND dataset IN ('etf_scale', 'etf_pcf')
+    )
+    SELECT data_date
+      FROM dates
+     WHERE data_date > ?
+     ORDER BY data_date ASC
+     LIMIT ?`,
+] as const;
 
 const HISTORICAL_SQL = `
   SELECT as_of, observed_at, snapshot_sha256, r2_object_key, manifest_key,
@@ -678,6 +694,28 @@ async function readAll<T>(state: RequestState, db: ReadOnlyD1, sql: string, bind
   return result.results ?? [];
 }
 
+async function readDateCandidates(
+  state: RequestState,
+  db: ReadOnlyD1,
+  query: InventoryQuery,
+): Promise<DateRow[]> {
+  const cursor = query.cursor ?? "";
+  const rows: DateRow[] = [];
+  for (const sql of DATE_CANDIDATE_SQLS) {
+    rows.push(...await readAll<DateRow>(state, db, sql, [
+      query.start,
+      query.end,
+      query.start,
+      query.end,
+      query.start,
+      query.end,
+      cursor,
+      query.limit + 1,
+    ]));
+  }
+  return rows;
+}
+
 function markModel(
   records: DateInventory[],
   rows: ModelRow[],
@@ -1039,15 +1077,7 @@ export async function collectRecoveryInventory(
 
   let dateRows: DateRow[];
   try {
-    dateRows = await readAll<DateRow>(state, runtime.DB, DATE_CANDIDATES_SQL, [
-      query.start, query.end, // historical_snapshot
-      query.start, query.end, // release_manifest
-      query.start, query.end, // dashboard_snapshot
-      query.start, query.end, // market_history_daily
-      query.start, query.end, // source_readiness
-      query.start, query.end, // history_artifact_pointer
-      query.cursor ?? "", query.limit + 1,
-    ]);
+    dateRows = await readDateCandidates(state, runtime.DB, query);
   } catch {
     state.incompleteReasons.push("D1_READ_FAILED");
     return {
@@ -1064,8 +1094,10 @@ export async function collectRecoveryInventory(
       r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
     };
   }
-  const hasMore = dateRows.length > query.limit;
-  const selected = [...new Set(dateRows.map((row) => row.data_date).filter(validDate))].slice(0, query.limit);
+  const candidateDates = [...new Set(dateRows.map((row) => row.data_date).filter(validDate))]
+    .sort((left, right) => left.localeCompare(right));
+  const hasMore = candidateDates.length > query.limit;
+  const selected = candidateDates.slice(0, query.limit);
   if (!selected.length) state.incompleteReasons.push("NO_OBSERVED_DATES");
   const firstDate = selected[0];
   const lastDate = selected[selected.length - 1];
