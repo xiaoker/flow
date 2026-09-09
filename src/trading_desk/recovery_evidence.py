@@ -74,6 +74,43 @@ NON_FATAL_PAGINATED_REASONS = frozenset({
     "R2_HEAD_PAGE_REMAINS",
     "RELEASE_MANIFEST_INCOMPLETE",
 })
+# These reasons describe a bounded response that carries date-scoped evidence
+# but is not strong enough to be called COMPLETE.  They must remain visible to
+# the offline auditor instead of being mistaken for an HTTP transport failure.
+# Reasons outside these explicit sets fail closed so a newly introduced server
+# condition cannot silently change the evidence contract.
+SEMANTIC_INCOMPLETE_REASONS = frozenset({
+    "D1_QUERY_LIMIT",
+    "D1_ROWS_READ_LIMIT",
+    "D1_ROWS_READ_TELEMETRY_UNKNOWN",
+    "D1_ROWS_WRITTEN_TELEMETRY_UNKNOWN",
+    "D1_READONLY_VIOLATION",
+    "NO_OBSERVED_DATES",
+    "R2_CANDIDATE_LIMIT",
+    "R2_CURSOR_NOT_IN_INDEX",
+    "R2_DUPLICATE_KEY_CONFLICT",
+    "R2_MANIFEST_EVIDENCE_MISSING",
+    "R2_OBJECT_MISSING",
+    "RELEASE_ARTIFACT_KEY_OR_HASH_INVALID",
+    "RELEASE_MANIFEST_HASH_MISSING",
+    "RELEASE_MANIFEST_INCOMPLETE",
+    "RELEASE_MANIFEST_INVALID",
+    "SOURCE_UNAVAILABLE",
+})
+TRANSPORT_INCOMPLETE_REASONS = frozenset({
+    "STORAGE_UNAVAILABLE",
+    "D1_READ_FAILED",
+    "D1_OR_R2_READ_FAILED",
+    "R2_HEAD_FAILED",
+    "R2_HEAD_FORBIDDEN",
+    "R2_HEAD_RATE_LIMITED",
+    "R2_HEAD_TIMEOUT",
+})
+KNOWN_INCOMPLETE_REASONS = (
+    SEMANTIC_INCOMPLETE_REASONS
+    | NON_FATAL_PAGINATED_REASONS
+    | TRANSPORT_INCOMPLETE_REASONS
+)
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 SECRET_KEY_PARTS = (
@@ -354,26 +391,44 @@ class RecoveryEvidenceExporter:
             raise RecoveryEvidenceError("inventory_scope_mismatch")
         if request.get("limit") != self.limit or request.get("cursor") != expected_request_cursor or request.get("r2Cursor") != request_r2_cursor:
             raise RecoveryEvidenceError("inventory_cursor_contract_mismatch")
-        reasons = [str(item) for item in body.get("incompleteReasons") or []]
+        status_value = body.get("status")
+        if status_value not in {"COMPLETE", "INCOMPLETE"}:
+            raise RecoveryEvidenceError("inventory_status_invalid")
+        raw_reasons = body.get("incompleteReasons")
+        if raw_reasons is None:
+            reasons: list[str] = []
+        elif not isinstance(raw_reasons, list) or any(not isinstance(item, str) for item in raw_reasons):
+            raise RecoveryEvidenceError("inventory_incomplete_reasons_invalid")
+        else:
+            reasons = list(raw_reasons)
+        unknown_reasons = sorted(set(reasons) - KNOWN_INCOMPLETE_REASONS)
+        transport_reasons = sorted(set(reasons) & TRANSPORT_INCOMPLETE_REASONS)
+        semantic_incomplete = (
+            status_value == "INCOMPLETE"
+            and bool(reasons)
+            and not unknown_reasons
+            and not transport_reasons
+            and set(reasons).issubset(SEMANTIC_INCOMPLETE_REASONS | NON_FATAL_PAGINATED_REASONS)
+        )
         deferred_r2 = (
-            body.get("status") == "INCOMPLETE"
+            status_value == "INCOMPLETE"
             and "R2_HEAD_PAGE_REMAINS" in reasons
             and set(reasons).issubset(NON_FATAL_PAGINATED_REASONS)
         )
-        fatal_reasons = sorted(set(reasons) - NON_FATAL_PAGINATED_REASONS)
-        if fatal_reasons:
+        if unknown_reasons or transport_reasons:
+            fatal_reasons = unknown_reasons + transport_reasons
             code = "inventory_http_error" if status_code == 503 else "inventory_incomplete"
-            detail = "503" if status_code == 503 else ",".join(fatal_reasons)
+            detail = ",".join(fatal_reasons) or "incomplete_reason"
             raise RecoveryEvidenceError(code, detail)
         # R2_HEAD_PAGE_REMAINS is only non-fatal while its continuation cursor
         # is explicitly being drained.  A terminal COMPLETE page must never
         # claim that pagination is still pending.
-        if body.get("status") == "COMPLETE" and "R2_HEAD_PAGE_REMAINS" in reasons:
-            raise RecoveryEvidenceError("inventory_incomplete", "R2_HEAD_PAGE_REMAINS")
-        if status_code == 503 and not deferred_r2:
-            raise RecoveryEvidenceError("inventory_http_error", "503")
-        if body.get("status") != "COMPLETE" and not deferred_r2:
-            raise RecoveryEvidenceError("inventory_incomplete", ",".join(reasons))
+        if status_value == "COMPLETE" and reasons:
+            raise RecoveryEvidenceError("inventory_incomplete", ",".join(sorted(set(reasons))))
+        if status_code == 503 and not deferred_r2 and not semantic_incomplete:
+            raise RecoveryEvidenceError("inventory_http_error", ",".join(reasons) or "503")
+        if status_value == "INCOMPLETE" and not deferred_r2 and not semantic_incomplete:
+            raise RecoveryEvidenceError("inventory_incomplete", ",".join(reasons) or "missing_reason")
         dates = body.get("dates")
         if not isinstance(dates, list) or len(dates) > MAX_DATES_PER_PAGE:
             raise RecoveryEvidenceError("inventory_dates_exceed_limit")
@@ -580,11 +635,17 @@ class RecoveryEvidenceExporter:
                     if aggregate_body is None:
                         errors.append({"code": "inventory_empty_page", "detail": "r2_aggregate"})
                         break
-                    aggregate_body["status"] = "COMPLETE"
                     aggregate_body["incompleteReasons"] = [
                         reason for reason in aggregate_body.get("incompleteReasons", [])
                         if reason != "R2_HEAD_PAGE_REMAINS"
                     ]
+                    # R2 pagination is the only condition resolved by draining
+                    # this inner cursor.  Preserve every other semantic
+                    # warning so the logical page remains auditable as
+                    # INCOMPLETE rather than being upgraded by the exporter.
+                    aggregate_body["status"] = (
+                        "INCOMPLETE" if aggregate_body["incompleteReasons"] else "COMPLETE"
+                    )
                     aggregate_body["request"] = {**aggregate_body.get("request", {}), "r2Cursor": None}
                     aggregate_body["r2Pagination"] = {
                         **pagination,

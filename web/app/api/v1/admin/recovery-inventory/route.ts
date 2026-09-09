@@ -3,6 +3,7 @@ import {
   collectRecoveryInventory,
   isRecoveryInventoryAuthorized,
   parseInventoryQuery,
+  recoveryInventoryHttpStatus,
 } from "@/app/lib/recovery-inventory";
 
 export const dynamic = "force-dynamic";
@@ -29,5 +30,5 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const result = await collectRecoveryInventory(runtime, query);
-  return response(result as unknown as Record<string, unknown>, result.status === "COMPLETE" ? 200 : 503);
+  return response(result as unknown as Record<string, unknown>, recoveryInventoryHttpStatus(result));
 }

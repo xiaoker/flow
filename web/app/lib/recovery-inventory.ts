@@ -985,6 +985,32 @@ export type RecoveryInventoryResponse = {
   r2Pagination: RecoveryR2Pagination;
 };
 
+/**
+ * Map the inventory contract to transport semantics.  A data-quality warning
+ * is still a valid, auditable response and must stay HTTP 200 so callers can
+ * inspect its date-scoped evidence.  HTTP 503 is reserved for an actual
+ * storage/read failure or an unfinished bounded R2 HEAD continuation.
+ */
+const RECOVERY_INVENTORY_503_REASONS = new Set([
+  "STORAGE_UNAVAILABLE",
+  "D1_READ_FAILED",
+  "D1_OR_R2_READ_FAILED",
+  "R2_HEAD_FAILED",
+  "R2_HEAD_FORBIDDEN",
+  "R2_HEAD_RATE_LIMITED",
+  "R2_HEAD_TIMEOUT",
+]);
+
+export function recoveryInventoryHttpStatus(
+  result: Pick<RecoveryInventoryResponse, "status" | "incompleteReasons">,
+): number {
+  if (result.status === "COMPLETE") return 200;
+  const reasons = new Set(result.incompleteReasons);
+  if (reasons.has("R2_HEAD_PAGE_REMAINS")) return 503;
+  if ([...reasons].some((reason) => RECOVERY_INVENTORY_503_REASONS.has(reason))) return 503;
+  return 200;
+}
+
 export async function collectRecoveryInventory(
   runtime: RecoveryInventoryRuntime,
   query: InventoryQuery,
