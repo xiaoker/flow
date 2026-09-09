@@ -24,7 +24,45 @@
         "required": ["code", "detail"],
         "properties": {
           "code": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "detail": { "type": "string", "maxLength": 512 }
+          "detail": { "type": "string", "maxLength": 512 },
+          "evidence": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "reasons": {
+                "type": "array", "maxItems": 32,
+                "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+              },
+              "r2Pagination": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                  "indexSha256": { "$ref": "#/$defs/sha256" },
+                  "pageSize": { "type": "integer", "minimum": 0, "maximum": 64 },
+                  "candidateCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+                  "hasMore": { "type": "boolean" }
+                }
+              },
+              "issues": {
+                "type": "array", "maxItems": 64,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["dataDate", "releaseId", "slot", "artifactName", "status"],
+                  "properties": {
+                    "dataDate": { "$ref": "#/$defs/date" },
+                    "releaseId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                    "slot": { "enum": ["dashboard", "etf_penetration"] },
+                    "artifactName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "status": { "enum": ["HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE"] },
+                    "key": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                    "expectedSha256": { "$ref": "#/$defs/sha256" },
+                    "actualSha256": { "$ref": "#/$defs/sha256" },
+                    "expectedBytes": { "type": "integer", "minimum": 0 },
+                    "actualBytes": { "type": "integer", "minimum": 0 },
+                    "error": { "type": "string", "minLength": 1, "maxLength": 128 }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

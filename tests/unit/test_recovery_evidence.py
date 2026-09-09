@@ -385,6 +385,54 @@ def test_r2_pagination_allows_known_legacy_warning_but_rejects_fatal_reason() ->
     assert complete_quality_error.value.code == "inventory_incomplete"
 
 
+def test_r2_integrity_error_preserves_bounded_artifact_receipt() -> None:
+    key = "market-data/releases/2026-08-27/release:2026-08-27:aaaaaaaaaaaaaaaa/bootstrap.json"
+    body = json.loads(page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["R2_HEAD_PAGE_REMAINS", "R2_HASH_MISSING"],
+        r2_has_more=True,
+        r2_next_cursor=r2_cursor(key),
+        r2_head_count=64,
+    ).decode())
+    body["dates"][0]["releases"]["dashboard"] = [{
+        "releaseId": "release:2026-08-27:aaaaaaaaaaaaaaaa",
+        "asOf": "2026-08-27",
+        "slot": "dashboard",
+        "artifacts": {
+            "bootstrap": {
+                "key": key,
+                "declaredSha256": SHA_A,
+                "declaredBytes": 100,
+                "status": "HASH_MISSING",
+                "actualSha256": None,
+                "actualBytes": 100,
+            },
+        },
+    }]
+    payload = json.dumps(body, separators=(",", ":")).encode()
+    instance = exporter(FixtureTransport({None: (503, payload)}))
+    with pytest.raises(RecoveryEvidenceError) as error:
+        instance._validate_page(
+            status_code=503,
+            payload=payload,
+            request_cursor=None,
+            request_r2_cursor=None,
+        )
+    assert error.value.code == "inventory_http_error"
+    assert error.value.evidence is not None
+    issue = error.value.evidence["issues"][0]
+    assert issue["key"] == key
+    assert issue["status"] == "HASH_MISSING"
+    assert issue["expectedSha256"] == SHA_A
+    assert "nextCursor" not in error.value.evidence.get("r2Pagination", {})
+
+    result = exporter(FixtureTransport({None: (503, payload)})).collect()
+    assert result.bundle["exportStatus"] == "INCOMPLETE"
+    assert result.errors[0]["evidence"]["issues"][0]["key"] == key
+    validate_evidence_bundle(result.bundle)
+
+
 def test_r2_head_campaign_cap_fails_closed_before_unbounded_drain() -> None:
     pages: dict[tuple[str | None, str | None], tuple[int, bytes]] = {}
     previous: str | None = None

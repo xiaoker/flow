@@ -312,6 +312,26 @@ test("R2 hash mismatch and failed HEAD remain INCOMPLETE, never READY", async ()
   assert.ok(unavailable.incompleteReasons.includes("R2_HEAD_FORBIDDEN"));
 });
 
+test("R2 missing hash keeps the exact bounded artifact receipt", async () => {
+  const fixture = baseFixture();
+  const dashboard = JSON.parse(fixture.d1.fixture.releases[0].manifest_json);
+  const key = dashboard.artifacts.bootstrap.key;
+  fixture.r2.objects[key].customMetadata = {};
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2026-08-27",
+    end: "2026-08-27",
+    cursor: null,
+    limit: 1,
+  });
+  assert.equal(result.status, "INCOMPLETE", JSON.stringify(result));
+  assert.ok(result.incompleteReasons.includes("R2_HASH_MISSING"));
+  const artifact = result.dates[0].releases.dashboard[0].artifacts.bootstrap;
+  assert.equal(artifact.status, "HASH_MISSING");
+  assert.equal(artifact.actualSha256, null);
+  assert.equal(artifact.actualBytes, 100);
+  assert.equal(artifact.key, key);
+});
+
 test("a release manifest without its declared hash cannot make a slot READY", async () => {
   const fixture = baseFixture();
   fixture.d1.fixture.releases[0].manifest_sha256 = null;
