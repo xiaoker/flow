@@ -66,6 +66,12 @@ MAX_R2_TOTAL_HEADS = 2_496
 MAX_R2_PAGES_PER_DATE_PAGE = MAX_R2_TOTAL_HEADS // MAX_R2_HEADS_PER_REQUEST
 MAX_TOTAL_REQUESTS = 300
 MAX_R2_CURSOR_LENGTH = 256
+# Failure evidence is bounded independently from the response-size guard.  A
+# failed R2 HEAD page may contain many date records, but the exporter only
+# needs enough structured receipts to identify the first bounded set of bad
+# objects without copying the full response into the error record.
+MAX_R2_FAILURE_ISSUES = 64
+MAX_R2_FAILURE_KEY_LENGTH = 1024
 USAGE_MAX_AGE = timedelta(minutes=60)
 # These warnings are safe to carry while an R2 HEAD cursor is being drained.
 # Any other reason remains fatal so a 503 or incomplete response cannot be
@@ -127,8 +133,15 @@ SECRET_KEY_PARTS = (
 class RecoveryEvidenceError(ValueError):
     """A bounded evidence request or response violated its contract."""
 
-    def __init__(self, code: str, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str | None = None,
+        *,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
         self.code = code
+        self.evidence = dict(evidence) if evidence is not None else None
         super().__init__(code if not detail else f"{code}: {detail}")
 
 
@@ -221,6 +234,120 @@ def _r2_cursor(value: str | None, *, start: str, end: str) -> tuple[str, str] | 
     return value, key
 
 
+def _bounded_text(value: Any, *, max_length: int) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        return None
+    if any(ord(character) < 0x20 for character in value):
+        return None
+    return value
+
+
+def _r2_failure_evidence(body: Mapping[str, Any], reasons: Sequence[str]) -> dict[str, Any]:
+    """Extract bounded, non-secret receipts from a failed inventory page.
+
+    The inventory route already returns per-artifact HEAD results.  When a
+    page is rejected (for example because a 64-head page still has a
+    ``R2_HASH_MISSING`` item), the old exporter discarded that response and
+    kept only the reason string.  Preserve enough deterministic metadata to
+    identify the bad object while never copying object bodies, opaque cursors,
+    credentials, or an unbounded response subtree.
+    """
+
+    output: dict[str, Any] = {"reasons": sorted(set(str(reason) for reason in reasons))}
+    pagination = body.get("r2Pagination")
+    if isinstance(pagination, Mapping):
+        pagination_evidence: dict[str, Any] = {}
+        index_sha = _hash_from_any(pagination.get("indexSha256"))
+        if index_sha:
+            pagination_evidence["indexSha256"] = index_sha
+        for field in ("pageSize", "candidateCount"):
+            value = _safe_nonnegative(pagination.get(field))
+            if value is not None:
+                pagination_evidence[field] = value
+        if isinstance(pagination.get("hasMore"), bool):
+            pagination_evidence["hasMore"] = pagination["hasMore"]
+        if pagination_evidence:
+            output["r2Pagination"] = pagination_evidence
+
+    bad_statuses = {"HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE"}
+    issues: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    dates = body.get("dates")
+    if isinstance(dates, list):
+        for date_record in dates[:MAX_DATES_PER_PAGE]:
+            if not isinstance(date_record, Mapping):
+                continue
+            data_date = date_record.get("dataDate")
+            if not _valid_date(data_date):
+                continue
+            releases = date_record.get("releases")
+            if not isinstance(releases, Mapping):
+                continue
+            for slot, values in releases.items():
+                if slot not in {"dashboard", "etf_penetration"} or not isinstance(values, list):
+                    continue
+                for release in values:
+                    if not isinstance(release, Mapping):
+                        continue
+                    release_id = _bounded_text(release.get("releaseId"), max_length=512)
+                    as_of = release.get("asOf")
+                    if release_id is None or not _valid_date(as_of):
+                        continue
+                    artifacts = release.get("artifacts")
+                    if not isinstance(artifacts, Mapping):
+                        continue
+                    for name, artifact in artifacts.items():
+                        if len(issues) >= MAX_R2_FAILURE_ISSUES:
+                            break
+                        if not isinstance(name, str) or not name or len(name) > 128 or not isinstance(artifact, Mapping):
+                            continue
+                        status = artifact.get("status")
+                        if status not in bad_statuses:
+                            continue
+                        identity = (str(as_of), release_id, name)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        issue: dict[str, Any] = {
+                            "dataDate": str(as_of),
+                            "releaseId": release_id,
+                            "slot": slot,
+                            "artifactName": name,
+                            "status": status,
+                        }
+                        key = _bounded_text(artifact.get("key"), max_length=MAX_R2_FAILURE_KEY_LENGTH)
+                        if key and key.startswith("market-data/releases/") and ".." not in key and "//" not in key:
+                            issue["key"] = key
+                        for source_field, output_field in (
+                            ("declaredSha256", "expectedSha256"),
+                            ("actualSha256", "actualSha256"),
+                        ):
+                            value = _hash_from_any(artifact.get(source_field))
+                            if value:
+                                issue[output_field] = value
+                        for source_field, output_field in (
+                            ("declaredBytes", "expectedBytes"),
+                            ("actualBytes", "actualBytes"),
+                        ):
+                            value = _safe_nonnegative(artifact.get(source_field))
+                            if value is not None:
+                                issue[output_field] = value
+                        error = _bounded_text(artifact.get("error"), max_length=128)
+                        if error:
+                            issue["error"] = error
+                        issues.append(issue)
+                    if len(issues) >= MAX_R2_FAILURE_ISSUES:
+                        break
+                if len(issues) >= MAX_R2_FAILURE_ISSUES:
+                    break
+            if len(issues) >= MAX_R2_FAILURE_ISSUES:
+                break
+    issues.sort(key=lambda item: (item["dataDate"], item["releaseId"], item["artifactName"]))
+    if issues:
+        output["issues"] = issues
+    return output
+
+
 def _safe_nonnegative(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
@@ -273,7 +400,7 @@ class R2InventoryPage:
 @dataclass(frozen=True)
 class ExportResult:
     bundle: dict[str, Any]
-    errors: tuple[dict[str, str], ...]
+    errors: tuple[dict[str, Any], ...]
 
 
 Transport = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
@@ -415,18 +542,27 @@ class RecoveryEvidenceExporter:
             and "R2_HEAD_PAGE_REMAINS" in reasons
             and set(reasons).issubset(NON_FATAL_PAGINATED_REASONS)
         )
+        failure_evidence = (
+            _r2_failure_evidence(body, reasons)
+            if any(reason.startswith("R2_") for reason in reasons)
+            else None
+        )
         if unknown_reasons or transport_reasons:
             fatal_reasons = unknown_reasons + transport_reasons
             code = "inventory_http_error" if status_code == 503 else "inventory_incomplete"
             detail = ",".join(fatal_reasons) or "incomplete_reason"
-            raise RecoveryEvidenceError(code, detail)
+            raise RecoveryEvidenceError(code, detail, evidence=failure_evidence)
         # R2_HEAD_PAGE_REMAINS is only non-fatal while its continuation cursor
         # is explicitly being drained.  A terminal COMPLETE page must never
         # claim that pagination is still pending.
         if status_value == "COMPLETE" and reasons:
             raise RecoveryEvidenceError("inventory_incomplete", ",".join(sorted(set(reasons))))
         if status_code == 503 and not deferred_r2 and not semantic_incomplete:
-            raise RecoveryEvidenceError("inventory_http_error", ",".join(reasons) or "503")
+            raise RecoveryEvidenceError(
+                "inventory_http_error",
+                ",".join(reasons) or "503",
+                evidence=failure_evidence,
+            )
         if status_value == "INCOMPLETE" and not deferred_r2 and not semantic_incomplete:
             raise RecoveryEvidenceError("inventory_incomplete", ",".join(reasons) or "missing_reason")
         dates = body.get("dates")
@@ -573,7 +709,7 @@ class RecoveryEvidenceExporter:
 
         pages: list[InventoryPage] = []
         transport_pages: list[InventoryPage] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         date_cursor_token: str | None = None
         date_cursor: str | None = None
         seen_dates: set[str] = set()
@@ -605,7 +741,10 @@ class RecoveryEvidenceExporter:
                         request_r2_cursor=r2_cursor_token,
                     )
                 except RecoveryEvidenceError as error:
-                    errors.append({"code": error.code, "detail": str(error)})
+                    item: dict[str, Any] = {"code": error.code, "detail": str(error)}
+                    if error.evidence is not None:
+                        item["evidence"] = copy.deepcopy(error.evidence)
+                    errors.append(item)
                     break
                 transport_pages.append(page)
                 page_usage = page.body.get("usage") if isinstance(page.body.get("usage"), Mapping) else {}
@@ -1106,7 +1245,7 @@ def build_evidence_bundle(
     end: str,
     priority_dates: Sequence[str],
     captured_at: str,
-    errors: Sequence[Mapping[str, str]],
+    errors: Sequence[Mapping[str, Any]],
     request_count: int | None = None,
     transport_pages: Sequence[InventoryPage] | None = None,
     official_usage: Mapping[str, Mapping[str, Any]] | None = None,
@@ -1387,7 +1526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     priority = [item.strip() for value in priority_values for item in str(value).split(",") if item.strip()]
     assert_recovery_output_path(str(Path(args.output_dir).resolve() / "_cli_output_guard"))
     captured_at = _utc_now()
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     usage, usage_status = load_official_usage(args.usage_file)
     try:
         exporter = RecoveryEvidenceExporter(
@@ -1407,7 +1546,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         bundle["accountTelemetryEvidence"] = usage_status
         errors.extend(result.errors)
     except RecoveryEvidenceError as error:
-        errors.append({"code": error.code, "detail": str(error)})
+        item: dict[str, Any] = {"code": error.code, "detail": str(error)}
+        if error.evidence is not None:
+            item["evidence"] = copy.deepcopy(error.evidence)
+        errors.append(item)
         if args.start != SCOPE_START or args.end != SCOPE_END or any(
             not _valid_date(item) or item < SCOPE_START or item > SCOPE_END for item in priority
         ):
