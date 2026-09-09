@@ -45,6 +45,7 @@ import {
 } from "./national-team-view";
 import { EtfPressureView } from "./etf-pressure-view";
 import { SectorRotationView } from "./sector-rotation-view";
+import { getEffectiveEtfSharePeriods } from "./lib/etf-period-availability";
 import { normalizeSearchText, searchTextMatches } from "./lib/search-utils";
 
 type DashboardProps = {
@@ -291,7 +292,10 @@ export function Dashboard({
     : terminal.instruments,
     [snapshot.etfSearch, terminal.instruments]);
   const categories = useMemo(() => Array.from(new Set(terminal.instruments.map((item) => item.category))).sort(), [terminal.instruments]);
-  const shareAvailablePeriods = useMemo(() => new Set(terminal.availablePeriods ?? ["1d"]), [terminal]);
+  const shareAvailablePeriods = useMemo(
+    () => new Set(getEffectiveEtfSharePeriods(terminal)),
+    [terminal],
+  );
   const cashAvailable = Boolean(
     terminal.cashFlow?.available ||
       (terminal.cashAvailablePeriods?.length ?? 0) > 0 ||
@@ -1168,7 +1172,7 @@ export function Dashboard({
             <button className={etfDisplayMetric === "cash" ? "active" : ""} disabled={!cashAvailable} onClick={() => setEtfDisplayMetric("cash")} title={cashAvailable ? "逐日份额变化 × 对应交易日官方单位净值，单位亿元" : terminal.cashFlow?.warning ?? "等待官方单位净值覆盖"} type="button">金额估算（亿元）</button>
           </div>}
           <div className="period-tabs" aria-label="观察周期">
-            {periods.map((item) => <button aria-pressed={period === item.id} aria-disabled={!activeAvailablePeriods.has(item.id)} className={`${period === item.id ? "active" : ""} ${activeAvailablePeriods.has(item.id) ? "" : "unavailable"}`} disabled={!activeAvailablePeriods.has(item.id)} key={item.id} onClick={() => choosePeriod(item.id)} type="button">{item.label}</button>)}
+            {periods.map((item) => <button aria-pressed={period === item.id} aria-disabled={!activeAvailablePeriods.has(item.id)} className={`${period === item.id ? "active" : ""} ${activeAvailablePeriods.has(item.id) ? "" : "unavailable"}`} disabled={!activeAvailablePeriods.has(item.id)} key={item.id} onClick={() => choosePeriod(item.id)} title={activeAvailablePeriods.has(item.id) ? undefined : "缺少完整官方交易日快照，暂不可比"} type="button">{item.label}</button>)}
           </div>
           <div className="coverage-chip"><Database size={16} /><span>{activeAvailablePeriods.size} 个可用周期</span><strong>{view === "national" ? `${nationalTeamEtfs.length} 只观察池 ETF` : etfDisplayMetric === "cash" ? `${terminal.cashFlow?.eligibleInstruments ?? 0} 只净值可比` : `${terminal.universe?.total ?? terminal.instruments.length} 只 ETF`} · 沪 {terminal.universe?.marketCounts.SSE ?? terminal.instruments.filter((item) => item.market !== "SZSE").length} / 深 {terminal.universe?.marketCounts.SZSE ?? terminal.instruments.filter((item) => item.market === "SZSE").length}</strong></div>
         </section>
