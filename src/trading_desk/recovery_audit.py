@@ -493,6 +493,9 @@ def _normalise_row(
             if isinstance(evidence.get("sourceReadiness"), list)
             else 0,
         }
+        applicability_source = evidence.get("applicabilitySource")
+        if isinstance(applicability_source, str) and applicability_source:
+            result["evidence"]["applicabilitySource"] = applicability_source
     else:
         result["evidence"] = {
             "marketHistory": False,
@@ -1038,16 +1041,29 @@ def _budget_report(
     )
     account_verified = account_evidence_status == "VALID" and account_decision == "allow"
     if phase == "R0-D":
-        # R0-D is a read-only reconciliation.  Its hard budget gate is the
-        # finite task envelope, while account telemetry remains advisory for
-        # the separately authorized recovery/backfill gate.
-        decision = local_budget["decision"]
+        # R0-D is the production reconciliation gate.  The bounded local
+        # envelope proves this read-only run stayed within its own caps, but
+        # it cannot prove that the account has room for a later recovery.  A
+        # missing/expired official account snapshot therefore remains an
+        # UNKNOWN budget result and must not be upgraded to R0_RECONCILED.
         unknown_metrics = list(local_budget["unknownMetrics"])
+        unknown_metrics.extend(account_unknown_metrics)
         hard_over_limit = list(local_budget["violations"])
-        if decision == "allow":
-            evidence_mode = "ACCOUNT_VERIFIED" if account_verified else "LOCAL_BOUNDED"
-        else:
+        hard_over_limit.extend(over_limit)
+        if account_decision == "over_budget" or local_budget["decision"] == "over_budget":
+            decision = "over_budget"
             evidence_mode = "UNVERIFIED"
+        elif account_decision != "allow" or account_evidence_status != "VALID":
+            decision = "unknown_metrics"
+            if account_evidence_status != "VALID":
+                unknown_metrics.append("accountTelemetryEvidenceStatus")
+            evidence_mode = "UNVERIFIED"
+        elif local_budget["decision"] != "allow":
+            decision = local_budget["decision"]
+            evidence_mode = "UNVERIFIED"
+        else:
+            decision = "allow"
+            evidence_mode = "ACCOUNT_VERIFIED" if account_verified else "UNVERIFIED"
     else:
         # Preserve R0-C's original account-aware draft semantics.
         decision = account_decision

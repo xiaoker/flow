@@ -13,6 +13,7 @@ from trading_desk.recovery_execution import canonical_sha256
 from trading_desk.recovery_evidence import (
     EVIDENCE_CONTRACT,
     EVIDENCE_SCHEMA_VERSION,
+    InventoryPage,
     MAX_PAGES,
     MAX_R2_TOTAL_HEADS,
     MAX_TOTAL_BYTES,
@@ -230,8 +231,8 @@ def test_same_fixture_has_stable_plan_hash_on_two_audits() -> None:
     bundle = exporter(transport).collect().bundle
     first, second_hash = audit_twice(bundle, CONFIG)
     assert first["plan"]["planHash"] == second_hash
-    assert first["budget"]["decision"] == "allow"
-    assert first["budget"]["evidenceMode"] == "LOCAL_BOUNDED"
+    assert first["budget"]["decision"] == "unknown_metrics"
+    assert first["budget"]["evidenceMode"] == "UNVERIFIED"
     reordered = json.loads(json.dumps(bundle))
     reordered["inventory"] = list(reversed(reordered["inventory"]))
     assert audit_twice(reordered, CONFIG)[0]["plan"]["planHash"] == first["plan"]["planHash"]
@@ -545,6 +546,80 @@ def test_dashboard_and_penetration_are_independent_and_source_provenance_is_pres
     summary = {item["dataDate"]: item for item in result["dateSummaries"]}
     assert summary["2026-08-27"]["stageStatus"]["dashboard"] != summary["2026-08-27"]["stageStatus"]["etf_penetration"]
     assert result["sourceUnavailable"]
+
+
+def test_date_scoped_authoritative_evidence_proves_applicability() -> None:
+    body = json.loads(page(["2026-08-27"]).decode())
+    date_record = body["dates"][0]
+    date_record["marketHistory"] = {
+        "trade_date": "2026-08-27",
+        "margin_available": 1,
+        "connect_available": 0,
+    }
+    etf = date_record["domains"][0]
+    etf.pop("applicability", None)
+    etf["stageStatus"] = {stage: "UNKNOWN" for stage in etf["stageStatus"]}
+    etf["stageStatus"]["model"] = "READY"
+    etf["evidence"] = {"model": [{"domain": "sse_etf", "rowCount": 12}]}
+    margin = {
+        "dataDate": "2026-08-27",
+        "domain": "sse_margin",
+        "market": "SSE",
+        "stageStatus": {stage: "UNKNOWN" for stage in etf["stageStatus"]},
+        "evidence": {},
+    }
+    date_record["domains"].append(margin)
+    evidence_page = InventoryPage(
+        body=body,
+        request_cursor=None,
+        response_sha256=SHA_A,
+        response_bytes=len(json.dumps(body).encode()),
+        captured_at=CAPTURED,
+    )
+    bundle = build_evidence_bundle(
+        pages=[evidence_page],
+        start="2024-08-01",
+        end="2026-09-03",
+        priority_dates=PRIORITY_DATES,
+        captured_at=CAPTURED,
+        errors=[],
+    )
+    rows = {row["domain"]: row for row in bundle["inventory"]}
+    assert rows["sse_etf"]["applicability"] == "REQUIRED"
+    assert rows["sse_etf"]["evidence"]["applicabilitySource"] == "model_row"
+    assert rows["sse_margin"]["applicability"] == "REQUIRED"
+    assert rows["sse_margin"]["evidence"]["applicabilitySource"] == "market_history"
+    assert rows["sse_margin"]["evidence"]["marketHistory"] is True
+
+
+def test_applicability_stays_unknown_without_date_scoped_authority() -> None:
+    body = json.loads(page(["2026-08-28"]).decode())
+    date_record = body["dates"][0]
+    date_record["marketHistory"] = None
+    date_record["artifactPointers"] = []
+    date_record["sourceReadiness"] = []
+    domain = date_record["domains"][0]
+    domain.pop("applicability", None)
+    domain["stageStatus"] = {stage: "UNKNOWN" for stage in domain["stageStatus"]}
+    domain["evidence"] = {}
+    evidence_page = InventoryPage(
+        body=body,
+        request_cursor=None,
+        response_sha256=SHA_A,
+        response_bytes=len(json.dumps(body).encode()),
+        captured_at=CAPTURED,
+    )
+    bundle = build_evidence_bundle(
+        pages=[evidence_page],
+        start="2024-08-01",
+        end="2026-09-03",
+        priority_dates=PRIORITY_DATES,
+        captured_at=CAPTURED,
+        errors=[],
+    )
+    row = bundle["inventory"][0]
+    assert row["applicability"] == "UNKNOWN"
+    assert row["evidence"]["applicabilitySource"] == "unknown"
 
 
 def test_nested_source_readiness_evidence_is_promoted_without_downloading_objects() -> None:

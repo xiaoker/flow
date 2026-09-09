@@ -171,7 +171,7 @@ def test_r0d_phase_closes_complete_evidence_without_changing_plan_hash() -> None
     assert r0d["summary"].startswith("# Controlled recovery R0-D audit")
 
 
-def test_r0d_closes_on_bounded_local_budget_without_official_account_snapshot() -> None:
+def test_r0d_stays_pending_without_official_account_snapshot() -> None:
     bundle = complete_bundle()
     verified = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
     bundle["accountTelemetry"] = {}
@@ -180,17 +180,20 @@ def test_r0d_closes_on_bounded_local_budget_without_official_account_snapshot() 
         "reason": "not_provided",
     }
     result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
-    assert result["budget"]["decision"] == "allow"
-    assert result["budget"]["evidenceMode"] == "LOCAL_BOUNDED"
+    assert result["budget"]["decision"] == "unknown_metrics"
+    assert result["budget"]["evidenceMode"] == "UNVERIFIED"
     assert result["budget"]["accountDecision"] == "unknown_metrics"
-    assert result["budget"]["unknownMetrics"] == []
+    assert "accountTelemetryEvidenceStatus" in result["budget"]["unknownMetrics"]
     assert "githubActionsMinutes" in result["budget"]["accountUnknownMetrics"]
-    assert result["stageEvidence"]["status"] == "DONE"
-    assert result["stageEvidence"]["unknowns"] == []
-    assert result["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
-    assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
-    assert result["plan"]["planHash"] == verified["plan"]["planHash"]
-    assert "Recovery and backfill remain subject" in result["summary"]
+    assert result["stageEvidence"]["status"] == "DONE_WITH_CONCERNS"
+    assert result["stageEvidence"]["unknowns"]
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
+    # The account evidence changed from VALID to UNKNOWN, so the canonical
+    # plan correctly changes with its budget decision; recaptures with the
+    # same evidence remain stable (covered below).
+    assert result["plan"]["planHash"] != verified["plan"]["planHash"]
+    assert "Unknown budget metrics" in result["summary"]
     from jsonschema import Draft202012Validator
 
     schema = json.loads(
@@ -200,6 +203,18 @@ def test_r0d_closes_on_bounded_local_budget_without_official_account_snapshot() 
     )
     errors = list(Draft202012Validator(schema).iter_errors(result["stageEvidence"]))
     assert not errors, [error.message for error in errors]
+
+
+def test_r0d_does_not_trust_numeric_account_metrics_with_unknown_evidence_status() -> None:
+    bundle = complete_bundle()
+    bundle["accountTelemetryEvidence"] = {"status": "UNKNOWN", "reason": "stale_export"}
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["budget"]["accountDecision"] == "allow"
+    assert result["budget"]["decision"] == "unknown_metrics"
+    assert result["budget"]["evidenceMode"] == "UNVERIFIED"
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
+    assert "accountTelemetryEvidenceStatus" in result["stageEvidence"]["unknowns"]
 
 
 def test_r0c_does_not_reclassify_missing_account_snapshot_as_local_bounded() -> None:

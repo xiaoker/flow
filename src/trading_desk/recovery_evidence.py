@@ -878,31 +878,90 @@ def _domain_id(value: Any) -> str | None:
 def _domain_applicability(
     domain: Mapping[str, Any],
     readiness: Sequence[Mapping[str, Any]],
-) -> str:
+    *,
+    date_record: Mapping[str, Any] | None = None,
+    stage_status: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Derive applicability only from date-scoped, authoritative evidence.
+
+    Historical rows predate ``source_readiness``.  For those rows the
+    date-scoped market-history availability flags, a READY artifact pointer,
+    or a non-empty model count can prove that the source was applicable.  An
+    absent signal remains UNKNOWN; calendar weekdays and UI visibility are
+    deliberately never used as a substitute.
+    """
+
     explicit = domain.get("applicability")
     if isinstance(explicit, str) and explicit:
-        return explicit.upper()
+        return explicit.upper(), "explicit"
     applicable = [item for item in readiness if isinstance(item, Mapping)]
     required = [item for item in applicable if item.get("required") is True]
     if required:
-        return "REQUIRED"
+        return "REQUIRED", "source_readiness"
     closed = [str(item.get("status", "")).upper() for item in applicable]
     if closed and all(item in {"OFFICIAL_CLOSED", "NOT_APPLICABLE", "CLOSED"} for item in closed):
-        return "OFFICIAL_CLOSED" if "OFFICIAL_CLOSED" in closed else "NOT_APPLICABLE"
-    return "UNKNOWN"
+        return (
+            "OFFICIAL_CLOSED" if "OFFICIAL_CLOSED" in closed else "NOT_APPLICABLE",
+            "source_readiness",
+        )
+
+    date_record = date_record if isinstance(date_record, Mapping) else {}
+    stage_status = stage_status if isinstance(stage_status, Mapping) else {}
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    market_history = date_record.get("marketHistory")
+    market_history = market_history if isinstance(market_history, Mapping) else {}
+    market_history_field = {
+        "sse_margin": "margin_available",
+        "szse_margin": "margin_available",
+        "bse_margin": "margin_available",
+        "hkex_connect": "connect_available",
+    }.get(_domain_id(domain.get("domain")) or "")
+    if market_history_field and market_history.get(market_history_field) in {True, 1}:
+        return "REQUIRED", "market_history"
+
+    pointers = date_record.get("artifactPointers")
+    pointers = pointers if isinstance(pointers, list) else []
+    pointer_pairs = {
+        "sse_etf": {("sse", "etf_scale"), ("sse", "etf_pcf")},
+        "szse_etf": {("szse", "etf_scale")},
+    }
+    domain_name = _domain_id(domain.get("domain")) or ""
+    if domain_name in pointer_pairs and any(
+        isinstance(item, Mapping)
+        and str(item.get("status", "")).upper() == "READY"
+        and (str(item.get("sourceId", item.get("source_id", ""))), str(item.get("dataset", ""))) in pointer_pairs[domain_name]
+        for item in pointers
+    ):
+        return "REQUIRED", "artifact_pointer"
+
+    model_items = evidence.get("model") if isinstance(evidence.get("model"), list) else []
+    if stage_status.get("model") in {"READY", "COMPLETE", "COMPLETED"} and any(
+        isinstance(item, Mapping)
+        and isinstance(item.get("rowCount", item.get("row_count")), int)
+        and item.get("rowCount", item.get("row_count")) > 0
+        for item in model_items
+    ):
+        return "REQUIRED", "model_row"
+
+    return "UNKNOWN", "unknown"
 
 
 def _domain_row(
     data_date: str,
     domain: Mapping[str, Any],
     readiness: Sequence[Mapping[str, Any]],
+    *,
+    date_record: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    date_record_map = date_record if isinstance(date_record, Mapping) else {}
     domain_name = _domain_id(domain.get("domain")) or ""
     stage_status = domain.get("stageStatus") if isinstance(domain.get("stageStatus"), Mapping) else {}
     evidence = domain.get("evidence") if isinstance(domain.get("evidence"), Mapping) else {}
     raw_items = evidence.get("raw") if isinstance(evidence.get("raw"), list) else []
     normalized_items = evidence.get("normalized") if isinstance(evidence.get("normalized"), list) else []
     pcf_items = evidence.get("pcfExact") if isinstance(evidence.get("pcfExact"), list) else []
+    model_items = evidence.get("model") if isinstance(evidence.get("model"), list) else []
     raw = _first_mapping(raw_items) or {}
     normalized = _first_mapping(normalized_items) or {}
     pcf = _first_mapping(pcf_items) or {}
@@ -929,6 +988,13 @@ def _domain_row(
     pcf_date = _date_from_any(_first_value((pcf,), ("pcfDate", "tradeDate")))
     source_date = _date_from_any(_first_value(provenance_sources, ("sourceBusinessDate", "businessDate", "targetDate")))
     fingerprint = _hash_from_any(_first_value(provenance_sources, ("sourceFingerprint", "source_fingerprint")))
+    applicability, applicability_source = _domain_applicability(
+        domain,
+        matching_readiness,
+        date_record=date_record_map,
+        stage_status=stage_status,
+        evidence=evidence,
+    )
     row_count = 0
     for item in (*raw_items, *normalized_items, *pcf_items):
         if isinstance(item, Mapping) and isinstance(item.get("rowCount"), int) and item["rowCount"] >= 0:
@@ -942,7 +1008,7 @@ def _domain_row(
         "domain": domain_name,
         "market": domain.get("market"),
         "required": bool(domain.get("required", True)),
-        "applicability": _domain_applicability(domain, matching_readiness),
+        "applicability": applicability,
         "stageStatus": stages,
         "rawKey": raw_key,
         "rawSha256": raw_sha if isinstance(raw_sha, str) else None,
@@ -978,12 +1044,13 @@ def _domain_row(
         "slots": [stage for stage, status in stages.items() if status in {"READY", "COMPLETE", "COMPLETED"}],
         "gapReason": gap_reason if isinstance(gap_reason, str) else None,
         "evidence": {
-            "marketHistory": bool(domain.get("marketHistory")),
+            "marketHistory": bool(isinstance(date_record_map.get("marketHistory"), Mapping)),
             "historicalSnapshot": bool(evidence.get("dateVisible")),
             "dashboardRelease": bool(evidence.get("dashboard")),
             "penetrationRelease": bool(evidence.get("etfPenetration")),
-            "sourceEvidence": bool(raw_items or matching_readiness),
+            "sourceEvidence": bool(raw_items or matching_readiness or model_items or date_record_map.get("artifactPointers")),
             "sourceReadiness": matching_readiness,
+            "applicabilitySource": applicability_source,
         },
     }
 
@@ -1291,7 +1358,14 @@ def build_evidence_bundle(
         domains = date_record.get("domains") if isinstance(date_record.get("domains"), list) else []
         for domain in domains:
             if isinstance(domain, Mapping):
-                inventory.append(_domain_row(str(data_date), domain, readiness))
+                inventory.append(
+                    _domain_row(
+                        str(data_date),
+                        domain,
+                        readiness,
+                        date_record=date_record,
+                    )
+                )
         releases.extend(_release_rows(date_record))
         for item in date_record.get("pipelineWindows") or []:
             if isinstance(item, Mapping):
