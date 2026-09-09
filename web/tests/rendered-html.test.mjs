@@ -1387,6 +1387,124 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
   assert.equal(statements.some(({ sql }) => sql.includes("WITH current_rows AS")), false);
 });
 
+test("archive-only history accepts a pending snapshot without an ETF delta contract", async () => {
+  const worker = await loadWorker();
+  const overview = await worker.fetch(
+    new Request("http://localhost/api/v1/overview"),
+    env,
+    context,
+  );
+  const publishedSnapshot = await overview.json();
+  const snapshot = {
+    ...publishedSnapshot,
+    gate: "blocked",
+    quality: { ...publishedSnapshot.quality, fail: 1 },
+    publication: {
+      ...publishedSnapshot.publication,
+      status: "pending",
+      pendingDomains: ["深交所 ETF"],
+    },
+  };
+  const raw = Buffer.from('{"result":[{"SEC_CODE":"510300"}]}');
+  const normalized = Buffer.from(
+    "trade_date,market,instrument_code,instrument_name,investment_type,shares,date_basis,source_id,observed_at\n" +
+      `${snapshot.asOf},SSE,510300,沪深300ETF,股票ETF,130,source_published,sse,2026-07-22T09:15:20+08:00\n`,
+  );
+  const rawSha256 = createHash("sha256").update(raw).digest("hex");
+  const normalizedSha256 = createHash("sha256").update(normalized).digest("hex");
+  const releaseId = `etf_scale:sse:${snapshot.asOf}:${rawSha256.slice(0, 16)}`;
+  const statements = [];
+  const objects = new Map();
+  const db = {
+    prepare(sql) {
+      return {
+        sql,
+        values: [],
+        bind(...values) {
+          this.values = values;
+          return this;
+        },
+        async run() {
+          statements.push({ sql: this.sql, values: this.values });
+          return { success: true };
+        },
+      };
+    },
+  };
+  const bucket = {
+    async head(key) {
+      return objects.has(key) ? { customMetadata: {} } : null;
+    },
+    async put(key, value) {
+      objects.set(key, value);
+      return {};
+    },
+  };
+  const bundle = {
+    version: 1,
+    history: {
+      runId: "history-pending-20260722",
+      startedAt: "2026-07-22T09:15:00+08:00",
+      finishedAt: "2026-07-22T09:16:00+08:00",
+      retentionDays: 0,
+      asOf: snapshot.asOf,
+      snapshot,
+      finalize: true,
+      expectedArtifacts: [releaseId],
+      artifacts: [
+        {
+          releaseId,
+          sourceId: "sse",
+          dataset: "etf_scale",
+          requestedDate: snapshot.asOf,
+          tradeDates: [snapshot.asOf],
+          observedAt: "2026-07-22T09:15:20+08:00",
+          sourceUrl: "https://query.sse.com.cn/commonQuery.do",
+          dateBasis: "source_published",
+          sha256: rawSha256,
+          contentType: "application/json",
+          extension: "json",
+          rawContentBase64: raw.toString("base64"),
+          metadata: { sha256: rawSha256 },
+          normalized: [
+            {
+              name: "data",
+              format: "csv",
+              sha256: normalizedSha256,
+              rowCount: 1,
+              tradeDates: [snapshot.asOf],
+              contentBase64: normalized.toString("base64"),
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/history-import", {
+      method: "POST",
+      headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      body: JSON.stringify(bundle),
+    }),
+    {
+      ...env,
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      HISTORY_IMPORT_ARCHIVE_ONLY: "1",
+    },
+    context,
+  );
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.status, "archived_pending");
+  assert.equal(result.historyImportMode, "archive_only");
+  assert.equal(result.officialEtfDailyChanges.status, "not_provided");
+  assert.equal(statements.some(({ sql }) => sql.includes("INSERT INTO historical_snapshot")), false);
+  assert.ok([...objects.keys()].some((key) => key.includes("history-pending-manifests/")));
+});
+
 test("archives verified ETF evidence before publishing a snapshot", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(

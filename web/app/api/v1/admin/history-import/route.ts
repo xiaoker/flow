@@ -1070,15 +1070,20 @@ export async function POST(request: Request) {
     const officialEtfDailyChanges = history.officialEtfDailyChanges;
     const finalizeRequested = history.finalize !== false;
     const snapshot = history.snapshot;
-    if (archiveOnly && finalizeRequested && snapshot && !officialEtfDailyChanges) {
-      return NextResponse.json({ error: "missing_official_etf_daily_changes" }, { status: 422 });
-    }
     const etfQualityIssues = snapshot
       ? validateEtfTerminalCoverage(snapshot.etfTerminal)
       : [];
     const publishHistory = snapshot
       ? isPublishableSnapshot(snapshot) && etfQualityIssues.length === 0
       : false;
+    // Pending/fallback snapshots are valid archive evidence but are not
+    // publishable releases.  They may legitimately have no adjacent ETF
+    // contract after future-dated source responses are excluded by the
+    // collector.  Require the compact contract only at the actual publish
+    // boundary, so a missing optional derivative cannot abort raw archiving.
+    if (archiveOnly && finalizeRequested && snapshot && publishHistory && !officialEtfDailyChanges) {
+      return NextResponse.json({ error: "missing_official_etf_daily_changes" }, { status: 422 });
+    }
     const expectedArtifacts = history.expectedArtifacts;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
     const collectionStateKeys: string[] = [];
@@ -1288,11 +1293,13 @@ export async function POST(request: Request) {
       return NextResponse.json({
         status: collection.complete ? "archived_pending" : "waiting_sources",
         asOf: history.asOf,
+        historyImportMode: archiveOnly ? "archive_only" : "legacy_compatibility",
         artifacts: history.artifacts.length,
         standardizedRows,
         snapshotSha256,
         snapshotKey: null,
         manifestKey,
+        officialEtfDailyChanges: { status: "not_provided" },
         publication: snapshot.publication ?? null,
         ...(etfQualityIssues.length
           ? { reason: "derived_etf_quality_failed", qualityIssues: etfQualityIssues.slice(0, 50) }

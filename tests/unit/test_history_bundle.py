@@ -276,6 +276,17 @@ def test_history_bundle_generates_offline_etf_adjacent_changes_from_canonical_pa
                     "instrument_name": "测试ETF",
                     "shares": current,
                 },
+                # The same collection window can also contain a newer source
+                # response than the snapshot selected for publication.  It
+                # must remain archive evidence but cannot enter an as-of
+                # bounded adjacent-change contract.
+                {
+                    "trade_date": "2026-08-23",
+                    "market": "SSE" if source_id == "sse" else "SZSE",
+                    "instrument_code": code,
+                    "instrument_name": "测试ETF",
+                    "shares": current + 10,
+                },
             ]
         ).to_csv(normalized_path, index=False)
         artifacts.append(
