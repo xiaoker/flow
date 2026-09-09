@@ -13,6 +13,34 @@ const PERIOD_ORDER: FlowPeriod[] = [
 ];
 
 /**
+ * Resolve the period windows declared by the published ETF terminal.
+ *
+ * A declared window is a valid query even when its current release has no
+ * comparable observations yet.  Keep this separate from
+ * `getEffectiveEtfSharePeriods`, which is deliberately evidence-based and is
+ * used for coverage/status messaging.
+ */
+export function getSelectableEtfSharePeriods(
+  terminal: EtfTerminalData,
+): FlowPeriod[] {
+  const declared = terminal.availablePeriods?.filter((period) =>
+    PERIOD_ORDER.includes(period),
+  ) ?? [];
+  if (declared.length) {
+    return PERIOD_ORDER.filter((period) => declared.includes(period));
+  }
+
+  const structural = PERIOD_ORDER.filter(
+    (period) =>
+      terminal.reconciliation?.[period] !== undefined ||
+      terminal.instruments.some((item) =>
+        Object.prototype.hasOwnProperty.call(item.periods, period),
+      ),
+  );
+  return structural.length ? structural : ["1d"];
+}
+
+/**
  * Resolve the ETF share periods that can actually be displayed.
  *
  * Published overview artifacts intentionally omit the full instrument matrix
@@ -26,16 +54,7 @@ const PERIOD_ORDER: FlowPeriod[] = [
 export function getEffectiveEtfSharePeriods(
   terminal: EtfTerminalData,
 ): FlowPeriod[] {
-  const declared = terminal.availablePeriods?.length
-    ? terminal.availablePeriods
-    : PERIOD_ORDER.filter(
-        (period) =>
-          terminal.reconciliation?.[period] !== undefined ||
-          terminal.instruments.some((item) =>
-            Object.prototype.hasOwnProperty.call(item.periods, period),
-          ),
-      );
-  const candidates = declared.length ? declared : ["1d" as FlowPeriod];
+  const candidates = getSelectableEtfSharePeriods(terminal);
 
   if (terminal.instruments.length) {
     const instrumentPeriods = candidates.filter((period) =>

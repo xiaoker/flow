@@ -6,7 +6,7 @@ import { useMemo } from "react";
 type RotationRow = {
   name: string;
   groupType?: string;
-  value: number;
+  value: number | null;
   componentCount: number;
   comparableCount: number;
   rank?: number;
@@ -24,14 +24,15 @@ type SectorRotationViewProps = {
   metricLabel: string;
   metricUnit: string;
   rows: RotationRow[];
-  totalFlow: number;
+  totalFlow: number | null;
   crowding: number;
   dailySeries: DailyPoint[];
   onBack: () => void;
   onOpenRadar: () => void;
 };
 
-function formatFlow(value: number, digits = 1) {
+function formatFlow(value: number | null | undefined, digits = 1) {
+  if (value === null || value === undefined) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
 
@@ -55,6 +56,7 @@ function groupTypeLabel(value?: string) {
 }
 
 function FlowRow({ row, max, direction }: { row: RotationRow; max: number; direction: "in" | "out" }) {
+  if (row.value === null) return null;
   const width = Math.max(5, Math.round((Math.abs(row.value) / Math.max(max, 0.01)) * 100));
   return (
     <div className={`rotation-flow-row rotation-flow-${direction}`}>
@@ -81,10 +83,13 @@ export function SectorRotationView({
   onOpenRadar,
 }: SectorRotationViewProps) {
   const { outflows, inflows, outflowTotal, inflowTotal } = useMemo(() => {
-    const allOutflowRows = rows
+    const numericRows = rows.filter(
+      (row): row is RotationRow & { value: number } => typeof row.value === "number",
+    );
+    const allOutflowRows = numericRows
       .filter((row) => row.value < 0)
       .sort((left, right) => left.value - right.value);
-    const allInflowRows = rows
+    const allInflowRows = numericRows
       .filter((row) => row.value > 0)
       .sort((left, right) => right.value - left.value);
     const outflowRows = allOutflowRows
@@ -98,8 +103,12 @@ export function SectorRotationView({
       inflows: inflowRows,
       // Totals cover every group; the lists intentionally show only the
       // largest contributors to keep the bridge readable.
-      outflowTotal: allOutflowRows.reduce((sum, row) => sum + Math.abs(row.value), 0),
-      inflowTotal: allInflowRows.reduce((sum, row) => sum + row.value, 0),
+      outflowTotal: allOutflowRows.length
+        ? allOutflowRows.reduce((sum, row) => sum + Math.abs(row.value), 0)
+        : null,
+      inflowTotal: allInflowRows.length
+        ? allInflowRows.reduce((sum, row) => sum + row.value, 0)
+        : null,
     };
   }, [metricUnit, rows]);
 
@@ -107,8 +116,8 @@ export function SectorRotationView({
   const maxInflow = Math.max(...inflows.map((row) => row.value), 0.01);
   const topInflow = inflows[0];
   const topOutflow = outflows[0];
-  const inflowConcentration = inflowTotal > 0 && topInflow ? Math.round((topInflow.value / inflowTotal) * 100) : 0;
-  const outflowConcentration = outflowTotal > 0 && topOutflow ? Math.round((Math.abs(topOutflow.value) / outflowTotal) * 100) : 0;
+  const inflowConcentration = inflowTotal && inflowTotal > 0 && topInflow ? Math.round((topInflow.value / inflowTotal) * 100) : null;
+  const outflowConcentration = outflowTotal && outflowTotal > 0 && topOutflow ? Math.round((Math.abs(topOutflow.value) / outflowTotal) * 100) : null;
   const rotationSpeed = useMemo(() => {
     if (dailySeries.length < 3) return null;
     let switches = 0;
@@ -119,7 +128,7 @@ export function SectorRotationView({
     }
     return Math.round((switches / Math.max(1, dailySeries.length - 1)) * 100);
   }, [dailySeries]);
-  const balanceEfficiency = inflowTotal + outflowTotal > 0
+  const balanceEfficiency = totalFlow !== null && inflowTotal !== null && outflowTotal !== null && inflowTotal + outflowTotal > 0
     ? Math.round((Math.abs(totalFlow) / (inflowTotal + outflowTotal)) * 100)
     : null;
 
@@ -141,20 +150,20 @@ export function SectorRotationView({
 
         <div className="rotation-flow-card">
           <div className="rotation-flow-head">
-            <div><span>流出来源</span><strong>流出合计 <b className="text-out">{formatFlow(-outflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
-            <div className="rotation-flow-head-center"><span>资金桥接</span><small>同一全市场 ETF 口径 · 合计覆盖 {rows.length} 个板块 · 拥挤度 {crowding}%</small></div>
-            <div><span>流入去向</span><strong>流入合计 <b className="text-in">{formatFlow(inflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
+              <div><span>流出来源</span><strong>流出合计 <b className="text-out">{formatFlow(outflowTotal === null ? null : -outflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
+            <div className="rotation-flow-head-center"><span>资金桥接</span><small>同一全市场 ETF 口径 · 合计覆盖 {rows.length} 个板块 · 拥挤度 {outflows.length || inflows.length ? `${crowding}%` : "—"}</small></div>
+              <div><span>流入去向</span><strong>流入合计 <b className="text-in">{formatFlow(inflowTotal)}</b><em>{formatUnit(metricUnit)}</em></strong></div>
           </div>
 
           <div className="rotation-flow-body">
             <div className="rotation-side rotation-side-out" aria-label="流出来源">
               {outflows.length ? outflows.map((row) => <FlowRow direction="out" key={row.name} max={maxOutflow} row={row} />) : <div className="rotation-empty">暂无可比流出板块</div>}
             </div>
-            <div className="rotation-net-card">
-              <div className="rotation-net-icon"><ArrowsLeftRight size={30} weight="bold" /></div>
-              <span>净流入</span>
-              <strong className={totalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalFlow, 2)}<em>{formatUnit(metricUnit)}</em></strong>
-              <small>{rows.length} 个板块 · {metricLabel}</small>
+              <div className="rotation-net-card">
+                <div className="rotation-net-icon"><ArrowsLeftRight size={30} weight="bold" /></div>
+                <span>净流入</span>
+              <strong className={totalFlow === null ? "" : totalFlow >= 0 ? "text-in" : "text-out"}>{formatFlow(totalFlow, 2)}<em>{formatUnit(metricUnit)}</em></strong>
+              <small>{totalFlow === null ? "当前周期暂无可比数据" : `${rows.length} 个板块 · ${metricLabel}`}</small>
             </div>
             <div className="rotation-side rotation-side-in" aria-label="流入去向">
               {inflows.length ? inflows.map((row) => <FlowRow direction="in" key={row.name} max={maxInflow} row={row} />) : <div className="rotation-empty">暂无可比流入板块</div>}
@@ -167,9 +176,9 @@ export function SectorRotationView({
       <section className="rotation-insights" aria-label="板块轮动解读">
         <div className="rotation-section-title"><div><span className="eyebrow">结构解读</span><h3>资金从哪里来，又去了哪里</h3></div><span>{rows.length} 个版本化板块 · {periodLabel}</span></div>
         <div className="rotation-insight-grid">
-          <article><span className="rotation-insight-index rotation-insight-green">01</span><div><strong>{topOutflow?.name ?? "—"}是主要流出来源</strong><p>单一来源约占流出侧 {outflowConcentration}%；先看资金撤离的行业或资产类型。</p></div></article>
-          <article><span className="rotation-insight-index rotation-insight-red">02</span><div><strong>{topInflow?.name ?? "—"}吸收主要资金</strong><p>流入侧集中度约 {inflowConcentration}%；集中度越高，短期主线越清晰，回撤也更敏感。</p></div></article>
-          <article><span className="rotation-insight-index rotation-insight-cyan">03</span><div><strong>{totalFlow >= 0 ? "净流入为正，资金仍在寻找承接" : "净流入为负，板块整体偏防御"}</strong><p>流入效率 {balanceEfficiency === null ? "—" : `${balanceEfficiency}%`}；结合 ETF 雷达逐只核对，不把板块汇总当成个股信号。</p></div></article>
+          <article><span className="rotation-insight-index rotation-insight-green">01</span><div><strong>{topOutflow?.name ?? "暂无可比数据"}{topOutflow ? "是主要流出来源" : ""}</strong><p>{outflowConcentration === null ? "当前周期暂无可比流出板块。" : `单一来源约占流出侧 ${outflowConcentration}%；先看资金撤离的行业或资产类型。`}</p></div></article>
+          <article><span className="rotation-insight-index rotation-insight-red">02</span><div><strong>{topInflow?.name ?? "暂无可比数据"}{topInflow ? "吸收主要资金" : ""}</strong><p>{inflowConcentration === null ? "当前周期暂无可比流入板块。" : `流入侧集中度约 ${inflowConcentration}%；集中度越高，短期主线越清晰，回撤也更敏感。`}</p></div></article>
+          <article><span className="rotation-insight-index rotation-insight-cyan">03</span><div><strong>{totalFlow === null ? "当前周期暂无可比净变化" : totalFlow >= 0 ? "净流入为正，资金仍在寻找承接" : "净流入为负，板块整体偏防御"}</strong><p>流入效率 {balanceEfficiency === null ? "—" : `${balanceEfficiency}%`}；结合 ETF 雷达逐只核对，不把板块汇总当成个股信号。</p></div></article>
         </div>
       </section>
 
@@ -181,7 +190,7 @@ export function SectorRotationView({
         </div>
         <div className="rotation-gauge">
           <div className="rotation-gauge-title"><span>流入集中度</span><strong className="text-amber">{inflowConcentration ? `${inflowConcentration}%` : "—"}</strong></div>
-          <div className="rotation-gauge-track rotation-gauge-amber"><span style={{ width: `${inflowConcentration}%` }} /></div>
+          <div className="rotation-gauge-track rotation-gauge-amber"><span style={{ width: `${inflowConcentration ?? 0}%` }} /></div>
           <p>{inflowConcentration >= 65 ? "资金明显集中在少数板块，注意拥挤与回撤风险" : "资金分布相对分散，需结合趋势确认是否形成主线"}</p>
         </div>
       </section>
