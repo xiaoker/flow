@@ -217,10 +217,34 @@ def test_http_permission_and_rate_limit_are_incomplete_not_empty_ready(status: i
 def test_timeout_and_partial_page_fail_closed() -> None:
     timeout = FixtureTransport({None: RecoveryEvidenceError("inventory_timeout")})
     assert exporter(timeout).collect().bundle["exportStatus"] == "INCOMPLETE"
-    partial = FixtureTransport({None: (200, page(["2026-08-27"], status="INCOMPLETE"))})
+    # A valid date page can be semantically incomplete (for example, a
+    # release manifest is missing) and must remain available to the auditor.
+    partial = FixtureTransport({None: (200, page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["RELEASE_MANIFEST_INCOMPLETE"],
+    ))})
     result = exporter(partial).collect()
-    assert result.errors[0]["code"] == "inventory_incomplete"
-    assert result.bundle["exportStatus"] == "INCOMPLETE"
+    assert not result.errors
+    assert result.bundle["exportStatus"] == "COMPLETE"
+    assert len(result.bundle["inventory"]) == 1
+    # The pre-fix production route used 503 for this same semantic body; the
+    # exporter accepts it for backwards compatibility and still preserves the
+    # page-level incomplete status in the captured response hash.
+    legacy_partial = FixtureTransport({None: (503, page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["RELEASE_MANIFEST_INCOMPLETE"],
+    ))})
+    legacy_result = exporter(legacy_partial).collect()
+    assert not legacy_result.errors
+    assert len(legacy_result.bundle["pages"]) == 1
+    transport_failure = FixtureTransport({None: (200, page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["D1_OR_R2_READ_FAILED"],
+    ))})
+    assert exporter(transport_failure).collect().errors[-1]["code"] == "inventory_incomplete"
     generic_503 = FixtureTransport({None: (503, page(["2026-08-27"]))})
     assert exporter(generic_503).collect().errors[-1]["code"] == "inventory_http_error"
 
@@ -345,6 +369,20 @@ def test_r2_pagination_allows_known_legacy_warning_but_rejects_fatal_reason() ->
             request_r2_cursor=None,
         )
     assert complete_error.value.code == "inventory_incomplete"
+
+    complete_with_quality_reason = page(
+        ["2026-08-27"],
+        status="COMPLETE",
+        incomplete_reasons=["RELEASE_MANIFEST_INCOMPLETE"],
+    )
+    with pytest.raises(RecoveryEvidenceError) as complete_quality_error:
+        instance._validate_page(
+            status_code=200,
+            payload=complete_with_quality_reason,
+            request_cursor=None,
+            request_r2_cursor=None,
+        )
+    assert complete_quality_error.value.code == "inventory_incomplete"
 
 
 def test_r2_head_campaign_cap_fails_closed_before_unbounded_drain() -> None:

@@ -16,6 +16,7 @@ import {
   MAX_R2_HEADS,
   MAX_R2_CURSOR_LENGTH,
   parseInventoryQuery,
+  recoveryInventoryHttpStatus,
 } from "../app/lib/recovery-inventory.ts";
 import {
   MARKET_READ_MODEL_NAMES,
@@ -178,6 +179,14 @@ test("admin endpoint authorization accepts only the existing exact bearer key", 
   assert.equal(isRecoveryInventoryAuthorized("secret-key", "secret-key-2"), false);
   assert.equal(isRecoveryInventoryAuthorized("", "secret-key"), false);
   assert.equal(isRecoveryInventoryAuthorized("secret-key", ""), false);
+});
+
+test("inventory HTTP status keeps data-quality evidence inspectable", () => {
+  assert.equal(recoveryInventoryHttpStatus({ status: "COMPLETE", incompleteReasons: [] }), 200);
+  assert.equal(recoveryInventoryHttpStatus({ status: "INCOMPLETE", incompleteReasons: ["RELEASE_MANIFEST_INCOMPLETE"] }), 200);
+  assert.equal(recoveryInventoryHttpStatus({ status: "INCOMPLETE", incompleteReasons: ["NO_OBSERVED_DATES"] }), 200);
+  assert.equal(recoveryInventoryHttpStatus({ status: "INCOMPLETE", incompleteReasons: ["R2_HEAD_PAGE_REMAINS"] }), 503);
+  assert.equal(recoveryInventoryHttpStatus({ status: "INCOMPLETE", incompleteReasons: ["D1_OR_R2_READ_FAILED"] }), 503);
 });
 
 test("same fixture paginates deterministically without duplicate dates and keeps slots independent", async () => {
