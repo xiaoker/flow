@@ -211,7 +211,22 @@ def _build_official_etf_daily_changes_from_artifacts(
         if source_id not in by_market:
             raise ValueError(f"Unsupported ETF scale source for adjacent changes: {source_id!r}")
         frame = _load_etf_scale_frame(artifact, workspace_root=workspace_root)
-        if not frame.empty:
+        # A collection window may contain a newer source response than the
+        # snapshot selected for publication (for example, a 09-08 ETF file
+        # alongside a 09-07 fallback snapshot).  That newer response remains
+        # immutable archive evidence, but it cannot participate in an
+        # as-of-bounded adjacent-change contract.  Passing it to the strict
+        # canonical builder would make a valid fallback fail with
+        # ``canonical_etf_future_date`` before the archive can be persisted.
+        eligible_dates = (
+            frame.get("trade_date", pd.Series(dtype="string"))
+            .dropna()
+            .astype(str)
+            .loc[lambda values: values <= as_of]
+            .unique()
+            .tolist()
+        )
+        if not frame.empty and eligible_dates:
             by_market[source_id].append(frame)
         # Use the same release id that is sent over the wire, rather than a
         # second hash implementation.  This lets the server verify source
@@ -224,7 +239,7 @@ def _build_official_etf_daily_changes_from_artifacts(
             and item.get("requestedDate") == str(payload.get("requested_date") or "")
             and item.get("sha256") == str(payload.get("sha256") or "")
         ]
-        if matching:
+        if matching and eligible_dates:
             release_ids.append(str(matching[0]["releaseId"]))
         elif str(payload.get("sha256") or ""):
             # This branch is defensive for a malformed caller; normal bundle
@@ -241,8 +256,15 @@ def _build_official_etf_daily_changes_from_artifacts(
             for frame in (sse, szse)
             if not frame.empty and "trade_date" in frame.columns
             for value in frame["trade_date"].dropna().astype(str).unique().tolist()
+            if value <= as_of
         }
     )
+    # A pending/fallback snapshot can have no ETF rows at its selected as-of
+    # date after future responses are excluded.  In that case there is no
+    # adjacent contract to publish; archive the source evidence without
+    # inventing an empty or stale change set.
+    if as_of not in dates:
+        return None
     canonical = build_canonical_etf_daily_fact(sse, szse, dates)
     return build_official_etf_daily_changes(
         canonical,
