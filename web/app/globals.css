@@ -152,7 +152,9 @@ strong em { margin-left: 4px; color: var(--muted); font-family: var(--font-geist
 .metric-switch { padding-right: 16px; border-right: 1px solid var(--line); }
 .metric-switch button, .period-tabs button, .direction-tabs button, .market-tabs button, .margin-metric-tabs button { height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; background: #101824; color: var(--muted-strong); cursor: pointer; font-size: var(--text-sm); font-weight: 650; }
 .metric-switch button.active, .period-tabs button.active, .direction-tabs button.active, .market-tabs button.active, .margin-metric-tabs button.active { border-color: rgba(80,183,217,.8); background: #245f78; color: #f2fbff; box-shadow: inset 0 0 16px rgba(80,183,217,.13); }
-.metric-switch button:disabled, .period-tabs button.unavailable { border-style: dashed; opacity: .42; }
+.metric-switch button:disabled, .period-tabs button:disabled { border-style: dashed; opacity: .42; }
+.period-tabs button.unavailable { border-style: dashed; color: var(--muted-strong); }
+.period-tabs button.unavailable:hover:not(:disabled) { border-color: rgba(80,183,217,.65); color: var(--cyan); }
 .metric-switch button:disabled { cursor: not-allowed; }
 .period-tabs { flex: 1; overflow-x: auto; scrollbar-width: none; }
 .period-tabs::-webkit-scrollbar { display: none; }

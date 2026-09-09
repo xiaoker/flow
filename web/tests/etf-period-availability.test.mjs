@@ -1,15 +1,36 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { getEffectiveEtfSharePeriods } from "../app/lib/etf-period-availability.ts";
+import {
+  getEffectiveEtfSharePeriods,
+  getSelectableEtfSharePeriods,
+} from "../app/lib/etf-period-availability.ts";
 
 const declaredPeriods = ["1d", "3d", "1w", "2w"];
 
-test("dashboard period tabs use the effective coverage gate", async () => {
+test("dashboard period tabs use declared windows and expose coverage separately", async () => {
   const source = await readFile(new URL("../app/dashboard.tsx", import.meta.url), "utf8");
   assert.match(source, /getEffectiveEtfSharePeriods\(terminal\)/);
   assert.match(source, /new Set\(getEffectiveEtfSharePeriods\(terminal\)\)/);
-  assert.match(source, /缺少完整官方交易日快照，暂不可比/);
+  assert.match(source, /getSelectableEtfSharePeriods\(terminal\)/);
+  assert.match(source, /可查看，但当前没有完整官方交易日覆盖/);
+  assert.match(source, /disabled=\{!activeAvailablePeriods\.has\(item\.id\)\}/);
+});
+
+test("declared windows remain selectable even when coverage is empty", () => {
+  const terminal = {
+    availablePeriods: declaredPeriods,
+    instruments: [],
+    reconciliation: {
+      "1d": { shares: { comparable: 903 } },
+      "3d": { shares: { comparable: 900 } },
+      "1w": { shares: { comparable: 0 } },
+      "2w": { shares: { comparable: 0 } },
+    },
+  };
+
+  assert.deepEqual(getSelectableEtfSharePeriods(terminal), declaredPeriods);
+  assert.deepEqual(getEffectiveEtfSharePeriods(terminal), ["1d", "3d"]);
 });
 
 test("uses compact reconciliation evidence for the overview period gate", () => {
