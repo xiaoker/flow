@@ -211,6 +211,9 @@
         "hasMore": { "type": "boolean" },
         "indexSha256": { "$ref": "#/$defs/sha256" },
         "suspiciousGaps": { "type": "array", "maxItems": 500, "items": { "type": "string", "maxLength": 512 } },
+        "suspiciousGapCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "suspiciousGapsSha256": { "$ref": "#/$defs/sha256" },
+        "suspiciousGapsTruncated": { "type": "boolean" },
         "source": { "type": "string", "maxLength": 120 }
       }
     },

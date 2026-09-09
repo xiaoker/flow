@@ -186,6 +186,45 @@ def test_fixture_bundle_validates_against_published_json_schema() -> None:
     assert not errors, [error.message for error in errors]
 
 
+def test_r2_gap_summary_is_bounded_and_auditable() -> None:
+    body = json.loads(page(["2026-08-27"]).decode())
+    release_id = "release:2026-08-27:gap-fixture"
+    artifacts: dict[str, dict[str, object]] = {}
+    expected_gaps: list[str] = []
+    for index in range(501):
+        name = f"artifact-{index:03d}"
+        key = f"market-data/releases/2026-08-27/{release_id}/{name}.json"
+        artifacts[name] = {"key": key, "status": "HASH_MISSING", "actualSha256": None, "actualBytes": None}
+        expected_gaps.append(f"2026-08-27:{release_id}:{name}")
+    body["dates"][0]["releases"]["dashboard"] = [{
+        "releaseId": release_id,
+        "asOf": "2026-08-27",
+        "slot": "dashboard",
+        "artifacts": artifacts,
+    }]
+    payload = json.dumps(body, separators=(",", ":")).encode()
+    bundle = exporter(FixtureTransport({None: (200, payload)})).collect().bundle
+    r2 = bundle["r2Inventory"]
+    assert len(r2["suspiciousGaps"]) == 500
+    assert r2["suspiciousGapCount"] == 501
+    assert r2["suspiciousGapsTruncated"] is True
+    assert r2["suspiciousGapsSha256"] == canonical_sha256(sorted(expected_gaps))
+    validate_evidence_bundle(bundle)
+    audit_result, second_hash = audit_twice(bundle, CONFIG)
+    assert audit_result["budget"]["r2InventoryStatus"] == "INCOMPLETE"
+    assert audit_result["plan"]["planHash"] == second_hash
+
+
+def test_r2_gap_summary_rejects_missing_hash_for_truncated_sample() -> None:
+    bundle = exporter(FixtureTransport({None: (200, page(["2026-08-27"]))})).collect().bundle
+    bundle["r2Inventory"]["suspiciousGaps"] = ["gap-000"]
+    bundle["r2Inventory"]["suspiciousGapCount"] = 501
+    bundle["r2Inventory"]["suspiciousGapsTruncated"] = True
+    bundle["r2Inventory"].pop("suspiciousGapsSha256")
+    with pytest.raises(RecoveryEvidenceError, match="evidence_r2_suspicious_gap_hash_required"):
+        validate_evidence_bundle(bundle)
+
+
 def test_same_fixture_has_stable_plan_hash_on_two_audits() -> None:
     transport = FixtureTransport({None: (200, page(["2026-08-27"]))})
     bundle = exporter(transport).collect().bundle

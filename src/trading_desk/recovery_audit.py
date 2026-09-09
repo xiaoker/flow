@@ -63,6 +63,8 @@ MAX_RELEASE_RECORDS = 5_000
 MAX_PIPELINE_RECORDS = 500
 MAX_R2_RECORDS = 20_000
 MAX_R2_PAGE_SIZE = MAX_R2_RECORDS
+MAX_R2_GAP_SAMPLES = 500
+MAX_R2_GAP_COUNT = MAX_R2_RECORDS
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -722,12 +724,34 @@ def _validate_r2_objects(bundle: Mapping[str, Any]) -> tuple[list[dict[str, Any]
     if not isinstance(page.get("hasMore"), bool):
         raise RecoveryAuditError("r2_has_more_required")
     suspicious_gaps = page.get("suspiciousGaps", page.get("suspicious_gaps", []))
-    if not isinstance(suspicious_gaps, list) or len(suspicious_gaps) > 500:
+    if not isinstance(suspicious_gaps, list) or len(suspicious_gaps) > MAX_R2_GAP_SAMPLES:
         raise RecoveryAuditError("invalid_r2_suspicious_gaps")
+    suspicious_gaps = _list_of_text(suspicious_gaps, "r2_suspicious_gaps", max_count=MAX_R2_GAP_SAMPLES)
+    suspicious_gap_count = _nonnegative_int(
+        page.get("suspiciousGapCount", page.get("suspicious_gap_count", len(suspicious_gaps))),
+        "r2_suspicious_gap_count",
+        maximum=MAX_R2_GAP_COUNT,
+    )
+    if suspicious_gap_count < len(suspicious_gaps):
+        raise RecoveryAuditError("r2_suspicious_gap_count_below_sample")
+    suspicious_gaps_truncated = page.get(
+        "suspiciousGapsTruncated",
+        page.get("suspicious_gaps_truncated", suspicious_gap_count > len(suspicious_gaps)),
+    )
+    if not isinstance(suspicious_gaps_truncated, bool) or suspicious_gaps_truncated != (suspicious_gap_count > len(suspicious_gaps)):
+        raise RecoveryAuditError("invalid_r2_suspicious_gap_truncation")
+    suspicious_gaps_sha256 = _sha(
+        page.get("suspiciousGapsSha256", page.get("suspicious_gaps_sha256")),
+        "r2_suspicious_gaps_sha256",
+    )
+    if suspicious_gaps_truncated and not suspicious_gaps_sha256:
+        raise RecoveryAuditError("r2_suspicious_gaps_hash_required")
+    if suspicious_gaps_sha256 and not suspicious_gaps_truncated and suspicious_gaps_sha256 != canonical_sha256(suspicious_gaps):
+        raise RecoveryAuditError("r2_suspicious_gaps_hash_mismatch")
     index_sha = _sha(page.get("indexSha256", page.get("index_sha256")), "r2_index_sha256")
     if not index_sha:
         raise RecoveryAuditError("r2_index_sha_required")
-    if page.get("hasMore") is True or suspicious_gaps:
+    if page.get("hasMore") is True or suspicious_gap_count:
         # The page is valid evidence, but it cannot prove complete inventory.
         r2_status = "INCOMPLETE"
     else:
