@@ -66,6 +66,12 @@ MAX_R2_TOTAL_HEADS = 2_496
 MAX_R2_PAGES_PER_DATE_PAGE = MAX_R2_TOTAL_HEADS // MAX_R2_HEADS_PER_REQUEST
 MAX_TOTAL_REQUESTS = 300
 MAX_R2_CURSOR_LENGTH = 256
+# R2 HEAD receipts can legitimately report more bad release artifacts than
+# the evidence schema can carry as an array.  Keep the complete set in the
+# deterministic index fingerprint, while exposing only a bounded sample plus
+# count/hash metadata in the published bundle.
+MAX_R2_GAP_SAMPLES = 500
+MAX_R2_GAP_COUNT = MAX_R2_OBJECTS
 # Failure evidence is bounded independently from the response-size guard.  A
 # failed R2 HEAD page may contain many date records, but the exporter only
 # needs enough structured receipts to identify the first bounded set of bad
@@ -1078,6 +1084,22 @@ def _r2_rows(release_rows: Sequence[Mapping[str, Any]], dates: Sequence[Mapping[
     return ordered[:MAX_R2_PAGE_SIZE], sorted(set(gaps))
 
 
+def _r2_gap_summary(gaps: Sequence[str]) -> tuple[list[str], int, str, bool]:
+    """Return a bounded sample and a stable receipt for the complete gap set.
+
+    The full sorted, de-duplicated list is hashed for reproducibility but is
+    never copied into the evidence bundle when it exceeds the array bound.
+    Keeping the count and truncation bit explicit prevents the auditor from
+    mistaking a sample for an exhaustive R2 inspection.
+    """
+
+    ordered = sorted(set(gaps))
+    if len(ordered) > MAX_R2_GAP_COUNT:
+        raise RecoveryEvidenceError("r2_gap_count_exceeds_limit", str(MAX_R2_GAP_COUNT))
+    sample = ordered[:MAX_R2_GAP_SAMPLES]
+    return sample, len(ordered), canonical_sha256(ordered), len(ordered) > len(sample)
+
+
 def _usage_summary(
     pages: Sequence[InventoryPage],
     *,
@@ -1291,6 +1313,8 @@ def build_evidence_bundle(
     ):
         r2_gaps.append("r2_manifest_evidence_missing")
         r2_gaps = sorted(set(r2_gaps))
+    r2_gaps = sorted(set(r2_gaps))
+    r2_gap_sample, r2_gap_count, r2_gap_sha256, r2_gaps_truncated = _r2_gap_summary(r2_gaps)
     r2_index_payload = {"objects": r2_objects, "gaps": r2_gaps, "source": "release-manifest-head-receipts"}
     r2_index_sha = next(
         (
@@ -1342,7 +1366,10 @@ def build_evidence_bundle(
             "headHardLimit": MAX_R2_TOTAL_HEADS,
             "hasMore": bool(errors) or "r2_object_page_limit" in r2_gaps,
             "indexSha256": r2_index_sha,
-            "suspiciousGaps": r2_gaps,
+            "suspiciousGaps": r2_gap_sample,
+            "suspiciousGapCount": r2_gap_count,
+            "suspiciousGapsSha256": r2_gap_sha256,
+            "suspiciousGapsTruncated": r2_gaps_truncated,
             "source": "release-manifest-head-receipts",
         },
         "accountTelemetry": telemetry,
@@ -1419,6 +1446,26 @@ def validate_evidence_bundle(bundle: Mapping[str, Any]) -> None:
             raise RecoveryEvidenceError(f"evidence_{field}_invalid")
     if len(bundle["pages"]) > MAX_PAGES or len(bundle["r2Objects"]) > MAX_R2_OBJECTS or len(bundle["activeReleaseSlots"]) > 2:
         raise RecoveryEvidenceError("evidence_bound_exceeded")
+    r2_inventory = bundle.get("r2Inventory")
+    if not isinstance(r2_inventory, Mapping):
+        raise RecoveryEvidenceError("evidence_r2_inventory_invalid")
+    gaps = r2_inventory.get("suspiciousGaps", [])
+    if not isinstance(gaps, list) or len(gaps) > MAX_R2_GAP_SAMPLES:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gaps_invalid")
+    gap_count = r2_inventory.get("suspiciousGapCount", len(gaps))
+    if not isinstance(gap_count, int) or isinstance(gap_count, bool) or gap_count < len(gaps) or gap_count > MAX_R2_GAP_COUNT:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_count_invalid")
+    truncated = r2_inventory.get("suspiciousGapsTruncated", gap_count > len(gaps))
+    if not isinstance(truncated, bool) or truncated != (gap_count > len(gaps)):
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_truncation_invalid")
+    gap_sha = r2_inventory.get("suspiciousGapsSha256")
+    if gap_sha is not None:
+        if not isinstance(gap_sha, str) or not SHA256.fullmatch(gap_sha):
+            raise RecoveryEvidenceError("evidence_r2_suspicious_gap_hash_invalid")
+        if not truncated and gap_sha.lower() != canonical_sha256(sorted(set(gaps))):
+            raise RecoveryEvidenceError("evidence_r2_suspicious_gap_hash_mismatch")
+    elif truncated:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_hash_required")
     if bundle.get("exportStatus") == "COMPLETE" and (not bundle["pages"] or bundle["errors"]):
         raise RecoveryEvidenceError("complete_export_without_complete_pages")
     secret_path = _contains_secret_key(bundle)
