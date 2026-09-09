@@ -1,0 +1,147 @@
+name: R2 release metadata repair (manual, bounded)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Inclusive release date scope start"
+        required: true
+        default: "2024-08-01"
+        type: string
+      end_date:
+        description: "Inclusive release date scope end"
+        required: true
+        default: "2026-09-03"
+        type: string
+      mode:
+        description: "dry-run verifies bytes; apply writes one exact R2 key at a time"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - apply
+      max_objects:
+        description: "Hard object ceiling (apply must include the complete candidate set)"
+        required: true
+        default: "1"
+        type: string
+      max_bytes:
+        description: "Hard byte ceiling"
+        required: true
+        default: "10000000"
+        type: string
+      confirm_apply:
+        description: "Required only for apply: R2_METADATA_REPAIR_APPLY_20260909"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-release-metadata-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    name: Verify or repair exact release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FLOW_PUBLIC_URL: ${{ vars.FLOW_PUBLIC_URL }}
+      FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+      FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+      FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      START_DATE: ${{ inputs.start_date }}
+      END_DATE: ${{ inputs.end_date }}
+      REPAIR_MODE: ${{ inputs.mode }}
+      MAX_OBJECTS: ${{ inputs.max_objects }}
+      MAX_BYTES: ${{ inputs.max_bytes }}
+      CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+    steps:
+      - name: Checkout repair coordinator
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js for Wrangler
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install bounded repair dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -e .
+          npm ci --prefix web --ignore-scripts
+
+      - name: Validate fixed scope, credentials, and apply guard
+        run: |
+          set -euo pipefail
+          if [ "$START_DATE" != "2024-08-01" ] || [ "$END_DATE" != "2026-09-03" ]; then
+            echo "fixed historical scope is required" >&2
+            exit 2
+          fi
+          if [ -z "${FLOW_PUBLIC_URL:-}" ] || [ -z "${FLOW_INGEST_API_KEY:-}" ]; then
+            echo "FLOW_PUBLIC_URL and FLOW_INGEST_API_KEY are required" >&2
+            exit 2
+          fi
+          if [ "$REPAIR_MODE" = "apply" ] && [ "$CONFIRM_APPLY" != "R2_METADATA_REPAIR_APPLY_20260909" ]; then
+            echo "apply confirmation is required" >&2
+            exit 2
+          fi
+          if [ -n "${FLOW_CF_ACCESS_CLIENT_ID:-}" ] && [ -z "${FLOW_CF_ACCESS_CLIENT_SECRET:-}" ]; then
+            echo "Cloudflare Access credentials must be supplied as a pair" >&2
+            exit 2
+          fi
+          if [ -z "${FLOW_CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${FLOW_CF_ACCESS_CLIENT_SECRET:-}" ]; then
+            echo "Cloudflare Access credentials must be supplied as a pair" >&2
+            exit 2
+          fi
+
+      - name: Export bounded release manifests from D1
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r2-release-metadata-repair"
+          (cd web && npx wrangler d1 execute flow --remote --json \
+            --command "SELECT as_of, release_id, status, manifest_json FROM release_manifest WHERE as_of >= '2024-08-01' AND as_of <= '2026-09-03' AND status IN ('ACTIVE', 'SUPERSEDED', 'STAGED') ORDER BY as_of ASC, created_at ASC LIMIT 1001;") \
+            > "$RUNNER_TEMP/r2-release-metadata-repair/release-manifests.json"
+
+      - name: Verify or repair sequentially with hard bounds
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src:. python scripts/repair_r2_release_metadata.py \
+            --input "$RUNNER_TEMP/r2-release-metadata-repair/release-manifests.json" \
+            --base-url "$FLOW_PUBLIC_URL" \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --mode "$REPAIR_MODE" \
+            --max-objects "$MAX_OBJECTS" \
+            --max-bytes "$MAX_BYTES" \
+            --confirm-apply "$CONFIRM_APPLY" \
+            --output "$RUNNER_TEMP/r2-release-metadata-repair/report.json"
+
+      - name: Remove temporary inputs and credentials
+        if: ${{ always() }}
+        run: |
+          rm -f "$RUNNER_TEMP/r2-release-metadata-repair/release-manifests.json"
+          unset FLOW_INGEST_API_KEY FLOW_CF_ACCESS_CLIENT_SECRET CLOUDFLARE_API_TOKEN
+
+      - name: Upload bounded repair evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f0246 # v7.0.0
+        with:
+          name: r2-release-metadata-repair-${{ github.run_id }}
+          path: ${{ runner.temp }}/r2-release-metadata-repair/report.json
+          if-no-files-found: warn
+          retention-days: 7
