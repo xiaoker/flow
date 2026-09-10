@@ -22,7 +22,8 @@ PYTHONPATH=src:. python scripts/audit_controlled_recovery.py \
 Use `--phase R0-D` only when the same formal auditor is being run for the
 documented production read-only inventory. The default remains `R0-C` for
 backward compatibility. Input bundles remain `schemaVersion=1`; generated
-plan, budget and stage-evidence outputs use the `recovery-audit-v2` contract.
+plan and budget outputs use the `recovery-audit-v2` contract; stage evidence
+uses `schemaVersion=recovery-stage-evidence-v2` with that same contract.
 The phase label remains excluded from the canonical plan hash, while the
 contract version is included, so a v1 plan hash cannot be reused as a v2
 approval.
@@ -65,8 +66,10 @@ R0-C ends at `CODE_READY`/`DONE_WITH_CONCERNS` and can only point to
 `R0-D_RECONCILE`. R0-D can emit `R0_RECONCILED` and
 `nextAllowedAction=R2_ACCEPTANCE_AUDIT` only when every required evidence,
 budget metric, R2 page, safety assertion and provenance predicate is closed.
-Evidence-backed `SOURCE_UNAVAILABLE` is a known closed fact; an unavailable
-source without provenance remains incomplete. Neither phase registers or
-approves a plan, runs a migration, enables `PIPELINE_RECOVERY_ENABLED`,
-dispatches Watchdog/Collector/Publish, or runs a canary. Those actions require
-the next documented stop-point and an explicit authorization.
+Evidence-backed `SOURCE_UNAVAILABLE` is a known closed fact; its provenance
+must include source id, source business date, reason, evidence source,
+evidence capture/check time and source fingerprint. An unavailable source
+without provenance remains incomplete. Neither phase registers or approves a
+plan, runs a migration, enables `PIPELINE_RECOVERY_ENABLED`, dispatches
+Watchdog/Collector/Publish, or runs a canary. Those actions require the next
+documented stop-point and an explicit authorization.

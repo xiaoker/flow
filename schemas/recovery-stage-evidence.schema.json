@@ -21,10 +21,13 @@
     "budgetEvidenceMode",
     "localBudgetStatus",
     "accountBudgetStatus",
-    "accountTelemetryEvidenceStatus"
+    "accountTelemetryEvidenceStatus",
+    "migrationApplied",
+    "sourceEvidenceStatus",
+    "r2InventoryStatus"
   ],
   "properties": {
-    "schemaVersion": {"const": 2},
+    "schemaVersion": {"const": "recovery-stage-evidence-v2"},
     "contractVersion": {"const": "recovery-audit-v2"},
     "phase": {"enum": ["R0-C", "R0-D"]},
     "status": {"enum": ["DONE", "DONE_WITH_CONCERNS", "BLOCKED"]},
@@ -63,54 +66,65 @@
     "accountBudgetStatus": {"enum": ["allow", "unknown_metrics", "over_budget"]},
     "accountTelemetryEvidenceStatus": {"type": "string", "maxLength": 64}
   },
-  "allOf": [
+  "oneOf": [
     {
-      "if": {"properties": {"reconciliationStatus": {"const": "R0_RECONCILED"}}},
-      "then": {
-        "properties": {
-          "phase": {"const": "R0-D"},
-          "status": {"const": "DONE"},
-          "nextAllowedAction": {"const": "R2_ACCEPTANCE_AUDIT"},
-          "unknowns": {"const": []},
-          "blockers": {"const": []},
-          "protectedPathsTouched": {"const": []},
-          "readOnlyAssertions": {
-            "properties": {
-              "d1Writes": {"const": 0},
-              "r2Writes": {"const": 0},
-              "workflowDispatches": {"const": 0},
-              "activePointerChanges": {"const": 0},
-              "flagChanges": {"const": 0}
-            }
-          },
-          "budgetStatus": {"const": "allow"},
-          "budgetEvidenceMode": {"enum": ["ACCOUNT_VERIFIED", "LOCAL_BOUNDED"]},
-          "localBudgetStatus": {"const": "allow"},
-          "r2InventoryStatus": {"const": "READY"}
-        }
+      "properties": {
+        "phase": {"const": "R0-C"},
+        "status": {"enum": ["DONE", "DONE_WITH_CONCERNS"]},
+        "reconciliationStatus": {"const": "NOT_APPLICABLE"},
+        "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE"]}
       }
     },
     {
-      "if": {"properties": {"nextAllowedAction": {"const": "R2_ACCEPTANCE_AUDIT"}}},
-      "then": {
-        "properties": {
-          "phase": {"const": "R0-D"},
-          "reconciliationStatus": {"const": "R0_RECONCILED"}
-        }
+      "properties": {
+        "phase": {"const": "R0-C"},
+        "status": {"const": "BLOCKED"},
+        "reconciliationStatus": {"const": "PENDING"},
+        "nextAllowedAction": {"const": "STOP"}
       }
     },
     {
-      "if": {"properties": {"phase": {"const": "R0-C"}}},
-      "then": {
-        "properties": {
-          "reconciliationStatus": {"const": "NOT_APPLICABLE"},
-          "nextAllowedAction": {"enum": ["STOP", "R0-D_RECONCILE"]}
-        }
+      "properties": {
+        "phase": {"const": "R0-D"},
+        "status": {"const": "BLOCKED"},
+        "reconciliationStatus": {"const": "PENDING"},
+        "nextAllowedAction": {"const": "STOP"}
       }
     },
     {
-      "if": {"properties": {"status": {"const": "BLOCKED"}}},
-      "then": {"properties": {"nextAllowedAction": {"const": "STOP"}}}
+      "properties": {
+        "phase": {"const": "R0-D"},
+        "status": {"const": "DONE_WITH_CONCERNS"},
+        "reconciliationStatus": {"const": "PENDING"},
+        "nextAllowedAction": {"const": "R0-D_RECONCILE"}
+      }
+    },
+    {
+      "properties": {
+        "phase": {"const": "R0-D"},
+        "status": {"const": "DONE"},
+        "reconciliationStatus": {"const": "R0_RECONCILED"},
+        "nextAllowedAction": {"const": "R2_ACCEPTANCE_AUDIT"},
+        "unknowns": {"const": []},
+        "blockers": {"const": []},
+        "protectedPathsTouched": {"const": []},
+        "readOnlyAssertions": {
+          "properties": {
+            "d1Writes": {"const": 0},
+            "r2Writes": {"const": 0},
+            "workflowDispatches": {"const": 0},
+            "activePointerChanges": {"const": 0},
+            "flagChanges": {"const": 0}
+          }
+        },
+        "migrationApplied": {"const": false},
+        "budgetStatus": {"const": "allow"},
+        "budgetEvidenceMode": {"const": "ACCOUNT_VERIFIED"},
+        "localBudgetStatus": {"const": "allow"},
+        "accountBudgetStatus": {"const": "allow"},
+        "accountTelemetryEvidenceStatus": {"const": "VALID"},
+        "r2InventoryStatus": {"const": "READY"}
+      }
     }
   ]
 }

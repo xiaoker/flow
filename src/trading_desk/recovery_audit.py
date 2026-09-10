@@ -39,7 +39,7 @@ import csv
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -53,6 +53,12 @@ from .recovery_execution import (
 
 INPUT_SCHEMA_VERSION = 1
 AUDIT_SCHEMA_VERSION = 2
+# ``AUDIT_SCHEMA_VERSION`` is retained for the plan and budget payloads,
+# which already use the repository-wide numeric v2 convention.  Stage
+# evidence has its own explicit contract identifier so a consumer cannot
+# confuse the R0-D state machine with an unrelated schema that also happens
+# to be version 2.
+STAGE_EVIDENCE_SCHEMA_VERSION = "recovery-stage-evidence-v2"
 AUDIT_CONTRACT_VERSION = "recovery-audit-v2"
 AUDIT_PHASES = frozenset({"R0-C", "R0-D"})
 RECONCILIATION_STATUSES = frozenset({"NOT_APPLICABLE", "PENDING", "R0_RECONCILED"})
@@ -188,6 +194,18 @@ def _optional_date(value: Any, field: str) -> str | None:
     if value in (None, ""):
         return None
     return _date_text(value, field)
+
+
+def _valid_instant(value: Any) -> bool:
+    """Return whether a provenance timestamp is an ISO-8601 instant."""
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def _nonnegative_int(value: Any, field: str, *, maximum: int | None = None) -> int:
@@ -391,6 +409,8 @@ def _normalise_row(
     data_date: str,
     releases: Mapping[tuple[str, str], list[dict[str, Any]]],
 ) -> dict[str, Any]:
+    source_id_key_present = "sourceId" in row or "source_id" in row
+    source_id_value = row.get("sourceId", row.get("source_id"))
     raw_sha = _sha(
         row.get("rawSha256", row.get("raw_sha256", row.get("declaredRawSha256", row.get("declared_raw_sha256")))),
         "raw_sha256",
@@ -465,6 +485,36 @@ def _normalise_row(
         "computedNormalizedSha256": computed_normalized_sha,
         "hashOrigin": _optional_text(row.get("hashOrigin", row.get("hash_origin")), "hash_origin", max_length=128),
         "sourceBusinessDate": _optional_date(row.get("sourceBusinessDate", row.get("source_business_date")), "source_business_date"),
+        # Domain IDs are the repository's canonical source IDs.  A producer
+        # may repeat the value explicitly, but the normalized row must remain
+        # auditable for legacy evidence that only carries the domain key.
+        "sourceId": (
+            _optional_text(source_id_value, "source_id", max_length=120)
+            if source_id_key_present
+            else domain["id"]
+        ),
+        "evidenceSource": _optional_text(
+            row.get("evidenceSource", row.get("evidence_source")),
+            "evidence_source",
+            max_length=256,
+        ),
+        "evidenceCapturedAt": _optional_text(
+            row.get(
+                "evidenceCapturedAt",
+                row.get(
+                    "evidence_captured_at",
+                    row.get(
+                        "checkedAt",
+                        row.get(
+                            "checked_at",
+                            row.get("observedAt", row.get("collectedAt", row.get("collectionTime"))),
+                        ),
+                    ),
+                ),
+            ),
+            "evidence_captured_at",
+            max_length=64,
+        ),
         "publicationDate": _optional_date(row.get("publicationDate", row.get("publication_date")), "publication_date"),
         "navDate": _optional_date(row.get("navDate", row.get("nav_date")), "nav_date"),
         "pcfDate": _optional_date(row.get("pcfDate", row.get("pcf_date")), "pcf_date"),
@@ -496,14 +546,56 @@ def _normalise_row(
         applicability_source = evidence.get("applicabilitySource")
         if isinstance(applicability_source, str) and applicability_source:
             result["evidence"]["applicabilitySource"] = applicability_source
+        evidence_source_id = evidence.get("sourceId", evidence.get("source_id"))
+        if isinstance(evidence_source_id, str) and evidence_source_id:
+            result["sourceId"] = result["sourceId"] or evidence_source_id
+        evidence_business_date = evidence.get(
+            "sourceBusinessDate",
+            evidence.get("source_business_date", evidence.get("businessDate")),
+        )
+        if result["sourceBusinessDate"] is None and evidence_business_date not in (None, ""):
+            result["sourceBusinessDate"] = _date_text(evidence_business_date, "source_business_date")
+        evidence_fingerprint = evidence.get("sourceFingerprint", evidence.get("source_fingerprint"))
+        if result["sourceFingerprint"] is None and evidence_fingerprint not in (None, ""):
+            result["sourceFingerprint"] = _sha(evidence_fingerprint, "source_fingerprint")
+        evidence_reason = evidence.get("gapReason", evidence.get("reason"))
+        if result["gapReason"] is None and isinstance(evidence_reason, str) and evidence_reason:
+            result["gapReason"] = _text(evidence_reason, "gap_reason", max_length=512)
+        evidence_source = evidence.get("evidenceSource", evidence.get("source"))
+        if isinstance(evidence_source, str) and evidence_source:
+            result["evidenceSource"] = result["evidenceSource"] or evidence_source
+        source_evidence = evidence.get("sourceEvidence")
+        if isinstance(source_evidence, str) and source_evidence:
+            result["evidenceSource"] = result["evidenceSource"] or source_evidence
+        if source_evidence is True and not result["evidenceSource"]:
+            # The v2 exporter currently records a boolean source receipt.  It
+            # is still a real evidence source, but its stable label must be
+            # explicit in the normalized row rather than inferred from a UI
+            # status.
+            result["evidenceSource"] = "sourceEvidence"
+        evidence_captured_at = evidence.get(
+            "capturedAt",
+            evidence.get(
+                "captured_at",
+                evidence.get(
+                    "checkedAt",
+                    evidence.get(
+                        "checked_at",
+                        evidence.get("observedAt", evidence.get("collectedAt", evidence.get("collectionTime"))),
+                    ),
+                ),
+            ),
+        )
+        if isinstance(evidence_captured_at, str) and evidence_captured_at:
+            result["evidenceCapturedAt"] = result["evidenceCapturedAt"] or evidence_captured_at
     else:
         result["evidence"] = {
             "marketHistory": False,
             "historicalSnapshot": False,
             "dashboardRelease": False,
             "penetrationRelease": False,
-            "sourceReadinessCount": 0,
-        }
+        "sourceReadinessCount": 0,
+    }
     return result
 
 
@@ -537,12 +629,20 @@ def _validate_inventory(
         key = (data_date, domain_id)
         if key in values:
             raise RecoveryAuditError("duplicate_inventory_row", f"{data_date}:{domain_id}")
-        values[key] = _normalise_row(
+        normalized = _normalise_row(
             item,
             domain=domain,
             data_date=data_date,
             releases=releases,
         )
+        # The formal evidence exporter records one immutable capture time for
+        # the bundle.  Use it as the receipt time when a legacy row omitted a
+        # nested timestamp; this keeps the source-unavailable provenance
+        # complete without inventing a time or using the UI date.
+        captured_at = bundle.get("capturedAt", bundle.get("captured_at"))
+        if normalized["evidenceCapturedAt"] is None and isinstance(captured_at, str) and captured_at.strip():
+            normalized["evidenceCapturedAt"] = captured_at.strip()
+        values[key] = normalized
     output: list[dict[str, Any]] = []
     for data_date in dates:
         for domain in domains:
@@ -641,6 +741,8 @@ def _row_hash_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "required": row["required"],
         "applicability": row["applicability"],
         "stages": row["stages"],
+        "sourceId": row["sourceId"],
+        "evidenceSource": row["evidenceSource"],
         "rawKey": row["rawKey"],
         "rawSha256": row["rawSha256"],
         "declaredRawSha256": row["declaredRawSha256"],
@@ -717,7 +819,7 @@ def _validate_r2_objects(bundle: Mapping[str, Any]) -> tuple[list[dict[str, Any]
     page = bundle.get("r2Inventory")
     if not isinstance(page, Mapping):
         return [], "UNKNOWN"
-    _nonnegative_int(page.get("page", 0), "r2_page", maximum=100_000)
+    page_number = _nonnegative_int(page.get("page", 0), "r2_page", maximum=100_000)
     page_size = _nonnegative_int(page.get("pageSize", len(raw)), "r2_page_size", maximum=MAX_R2_PAGE_SIZE)
     hard_limit = _nonnegative_int(page.get("hardLimit"), "r2_hard_limit", maximum=MAX_R2_RECORDS)
     if page_size > hard_limit:
@@ -754,7 +856,21 @@ def _validate_r2_objects(bundle: Mapping[str, Any]) -> tuple[list[dict[str, Any]
     index_sha = _sha(page.get("indexSha256", page.get("index_sha256")), "r2_index_sha256")
     if not index_sha:
         raise RecoveryAuditError("r2_index_sha_required")
-    if page.get("hasMore") is True or suspicious_gap_count:
+    computed_index_sha = _sha(
+        page.get("computedIndexSha256", page.get("computed_index_sha256")),
+        "r2_computed_index_sha256",
+    )
+    if computed_index_sha and computed_index_sha != index_sha:
+        raise RecoveryAuditError("r2_index_sha256_mismatch")
+    next_cursor = page.get("nextCursor", page.get("next_cursor"))
+    if next_cursor not in (None, ""):
+        _text(next_cursor, "r2_next_cursor", max_length=256)
+    # A page other than the first cannot prove that the preceding pages were
+    # observed.  The formal exporter may aggregate pages into page=0, but a
+    # lone page=1 (or later) is always incomplete evidence.
+    if page_number != 0:
+        r2_status = "INCOMPLETE"
+    elif page.get("hasMore") is True or next_cursor not in (None, "") or suspicious_gap_count:
         # The page is valid evidence, but it cannot prove complete inventory.
         r2_status = "INCOMPLETE"
     else:
@@ -1025,13 +1141,6 @@ def _budget_report(
         limit = limits.get(limit_field)
         if isinstance(value, int) and isinstance(limit, int) and value > limit:
             over_limit.append(field)
-    if over_limit:
-        account_decision = "over_budget"
-    elif account_unknown_metrics:
-        account_decision = "unknown_metrics"
-    else:
-        account_decision = "allow"
-
     local_budget = _read_only_inventory_budget(bundle=bundle, config=config)
     account_evidence = bundle.get("accountTelemetryEvidence")
     account_evidence_status = (
@@ -1039,6 +1148,30 @@ def _budget_report(
         if isinstance(account_evidence, Mapping) and account_evidence.get("status") is not None
         else "UNKNOWN"
     )
+    if account_evidence_status == "VALID":
+        account_captured_at = (
+            account_evidence.get("capturedAt", account_evidence.get("captured_at"))
+            if isinstance(account_evidence, Mapping)
+            else None
+        )
+        if not _valid_instant(account_captured_at):
+            account_unknown_metrics.append("accountTelemetryEvidenceCapturedAt")
+        bundle_captured_at = bundle.get("capturedAt", bundle.get("captured_at"))
+        if _valid_instant(account_captured_at) and _valid_instant(bundle_captured_at):
+            captured_dt = datetime.fromisoformat(str(account_captured_at).replace("Z", "+00:00"))
+            bundle_dt = datetime.fromisoformat(str(bundle_captured_at).replace("Z", "+00:00"))
+            if captured_dt.tzinfo is None:
+                captured_dt = captured_dt.astimezone()
+            if bundle_dt.tzinfo is None:
+                bundle_dt = bundle_dt.astimezone()
+            if abs(bundle_dt - captured_dt) > timedelta(hours=1):
+                account_unknown_metrics.append("accountTelemetryEvidenceStatus:EXPIRED")
+    if over_limit:
+        account_decision = "over_budget"
+    elif account_unknown_metrics:
+        account_decision = "unknown_metrics"
+    else:
+        account_decision = "allow"
     account_verified = account_evidence_status == "VALID" and account_decision == "allow"
     if phase == "R0-D":
         # R0-D is the production reconciliation gate.  The bounded local
@@ -1167,7 +1300,7 @@ def _source_unavailable_provenance(row: Mapping[str, Any]) -> tuple[bool, list[s
     """
 
     missing: list[str] = []
-    if not row.get("domain"):
+    if not row.get("sourceId"):
         missing.append("sourceId")
     if not row.get("sourceBusinessDate"):
         missing.append("sourceBusinessDate")
@@ -1175,15 +1308,10 @@ def _source_unavailable_provenance(row: Mapping[str, Any]) -> tuple[bool, list[s
         missing.append("reason")
     if not row.get("sourceFingerprint"):
         missing.append("sourceFingerprint")
-    evidence = row.get("evidence")
-    evidence_present = isinstance(evidence, Mapping) and any(
-        bool(value) for key, value in evidence.items() if key != "sourceReadinessCount"
-    )
-    evidence_present = evidence_present or (
-        isinstance(evidence, Mapping) and int(evidence.get("sourceReadinessCount", 0) or 0) > 0
-    )
-    if not evidence_present:
-        missing.append("evidence")
+    if not row.get("evidenceSource"):
+        missing.append("evidenceSource")
+    if not _valid_instant(row.get("evidenceCapturedAt")):
+        missing.append("evidenceCapturedAt")
     return not missing, missing
 
 
@@ -1200,8 +1328,13 @@ def _source_unavailable(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
                 {
                     "dataDate": row["dataDate"],
                     "domain": row["domain"],
+                    "sourceId": row["sourceId"],
+                    "sourceBusinessDate": row["sourceBusinessDate"],
                     "stage": stage,
                     "reason": row["gapReason"] or "source_unavailable",
+                    "evidenceSource": row["evidenceSource"],
+                    "evidenceCapturedAt": row["evidenceCapturedAt"],
+                    "sourceFingerprint": row["sourceFingerprint"],
                     "rawKey": row["rawKey"],
                     "rawSha256": row["rawSha256"],
                     "evidence": row["evidence"],
@@ -1468,6 +1601,149 @@ def _required_stage_unknowns(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return unknowns
 
 
+def evaluate_r0d_closure(
+    *,
+    phase: str,
+    status: str,
+    contract_version: str,
+    unknowns: Sequence[str],
+    blockers: Sequence[str],
+    protected_paths: Sequence[str],
+    read_only_assertions: Mapping[str, Any],
+    budget: Mapping[str, Any],
+    r2_status: str,
+    rows: Sequence[Mapping[str, Any]],
+    source_unavailable: Sequence[Mapping[str, Any]],
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate the R0-D closure predicate without side effects.
+
+    The auditor deliberately computes ordinary execution status separately
+    from this predicate.  ``DONE`` means that the local function completed;
+    only a ``True`` result here may advance R0-D to ``R0_RECONCILED``.  The
+    returned failure lists are deterministic and can be fed back into the
+    stage-evidence payload without changing the canonical plan hash.
+    """
+
+    if phase == "R0-C":
+        blocked = status == "BLOCKED"
+        return {
+            "closed": False,
+            "reconciliationStatus": "PENDING" if blocked else "NOT_APPLICABLE",
+            "nextAllowedAction": "STOP" if blocked else "R0-D_RECONCILE",
+            # R0-C cannot reconcile production, but it must not discard the
+            # evidence that made the local run concerned or blocked.  Keep the
+            # lists canonical so callers can use this pure function directly.
+            "unknowns": sorted(set(unknowns)),
+            "blockers": sorted(set(blockers)),
+        }
+
+    predicate_unknowns = list(unknowns)
+    predicate_blockers = list(blockers)
+
+    def require(value: bool, reason: str, *, blocking: bool = False) -> None:
+        if value:
+            return
+        (predicate_blockers if blocking else predicate_unknowns).append(reason)
+
+    require(phase == "R0-D", "phase:not_R0-D", blocking=True)
+    require(contract_version == AUDIT_CONTRACT_VERSION, "contractVersion:mismatch", blocking=True)
+    require(status == "DONE", f"status:{status}")
+    require(not protected_paths, "protectedPathsTouched:non_empty", blocking=True)
+
+    for field in READ_ONLY_ASSERTION_FIELDS:
+        value = read_only_assertions.get(field) if isinstance(read_only_assertions, Mapping) else None
+        if value in (None, "unknown", "UNKNOWN"):
+            require(False, f"readOnlyAssertions:{field}:unknown")
+        else:
+            require(
+                value == 0 and not isinstance(value, bool),
+                f"readOnlyAssertions:{field}:not_zero",
+                blocking=True,
+            )
+
+    require(budget.get("decision") == "allow", f"budgetStatus:{budget.get('decision', 'unknown')}")
+    require(budget.get("evidenceMode") == "ACCOUNT_VERIFIED", "budgetEvidenceMode:not_account_verified")
+    require(budget.get("accountDecision") == "allow", f"accountBudgetStatus:{budget.get('accountDecision', 'unknown')}")
+    require(
+        budget.get("accountTelemetryEvidenceStatus") == "VALID",
+        "accountTelemetryEvidenceStatus:not_valid",
+    )
+    local_budget = budget.get("localBudget")
+    require(
+        isinstance(local_budget, Mapping) and local_budget.get("decision") == "allow",
+        "localBudgetStatus:not_allow",
+    )
+
+    if r2_status == "BLOCKED":
+        require(False, "r2Inventory:BLOCKED", blocking=True)
+    else:
+        require(r2_status == "READY", f"r2Inventory:{r2_status}")
+
+    # Every required row must have a known applicability and a stage state
+    # that is either ready, intentionally missing, or an evidenced source
+    # unavailability.  Unknown/pending/invalid states are never closed.
+    allowed_stage_states = {"MISSING", "SOURCE_UNAVAILABLE", "OFFICIAL_CLOSED", "NOT_APPLICABLE"}
+    for row in rows:
+        if not row.get("required"):
+            continue
+        row_key = f"{row.get('dataDate')}:{row.get('domain')}"
+        applicability = row.get("applicability")
+        if applicability == "UNKNOWN":
+            require(False, f"{row_key}:applicability:UNKNOWN")
+            continue
+        if applicability != "REQUIRED":
+            continue
+        stages = row.get("stages") if isinstance(row.get("stages"), Mapping) else {}
+        for stage in AUDIT_STAGES:
+            stage_status = str(stages.get(stage, "UNKNOWN"))
+            if stage_status in {"UNKNOWN", "PENDING"}:
+                require(False, f"{row_key}:{stage}:{stage_status}")
+            elif stage_status in {"BLOCKED", "BLOCKED_QUALITY", "INVALID"}:
+                require(False, f"{row_key}:{stage}:{stage_status}", blocking=True)
+            elif not (_is_ready(stage_status) or stage_status in allowed_stage_states):
+                require(False, f"{row_key}:{stage}:unrecognized")
+
+    for item in source_unavailable:
+        if item.get("provenanceStatus") != "COMPLETE":
+            require(
+                False,
+                f"{item.get('dataDate')}:{item.get('domain')}:{item.get('stage')}:source_provenance:INCOMPLETE",
+            )
+
+    require(plan.get("status") == "NOT_APPROVED", "planStatus:not_NOT_APPROVED", blocking=True)
+    require(plan.get("executionBlocked") is True, "planExecutionBlocked:false", blocking=True)
+    require(plan.get("contractVersion") == AUDIT_CONTRACT_VERSION, "planContractVersion:mismatch", blocking=True)
+    require(
+        isinstance(plan.get("planHash"), str) and SHA256_RE.fullmatch(plan["planHash"]) is not None,
+        "planHash:invalid",
+        blocking=True,
+    )
+    require(
+        isinstance(plan.get("sourceFingerprint"), str)
+        and SHA256_RE.fullmatch(plan["sourceFingerprint"]) is not None,
+        "sourceFingerprint:invalid",
+        blocking=True,
+    )
+
+    predicate_unknowns = sorted(set(predicate_unknowns))
+    predicate_blockers = sorted(set(predicate_blockers))
+    closed = not predicate_unknowns and not predicate_blockers
+    if closed:
+        reconciliation_status = "R0_RECONCILED"
+        next_action = "R2_ACCEPTANCE_AUDIT"
+    else:
+        reconciliation_status = "PENDING"
+        next_action = "STOP" if predicate_blockers else "R0-D_RECONCILE"
+    return {
+        "closed": closed,
+        "reconciliationStatus": reconciliation_status,
+        "nextAllowedAction": next_action,
+        "unknowns": predicate_unknowns,
+        "blockers": predicate_blockers,
+    }
+
+
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields), extrasaction="ignore")
@@ -1537,11 +1813,38 @@ def build_stage_evidence(
         unknowns
     )
     status = "BLOCKED" if blockers else "DONE_WITH_CONCERNS" if unknowns else "DONE"
-    reconciliation_status = "NOT_APPLICABLE" if phase == "R0-C" else "PENDING"
-    next_action = "STOP" if blockers else "R0-D_RECONCILE"
-    if phase == "R0-D" and status == "DONE" and budget["decision"] == "allow" and r2_status == "READY":
-        reconciliation_status = "R0_RECONCILED"
-        next_action = "R2_ACCEPTANCE_AUDIT"
+    closure = evaluate_r0d_closure(
+        phase=phase,
+        status=status,
+        contract_version=AUDIT_CONTRACT_VERSION,
+        unknowns=unknowns,
+        blockers=blockers,
+        protected_paths=protected_paths,
+        read_only_assertions=assertions,
+        budget=budget,
+        r2_status=r2_status,
+        rows=rows,
+        source_unavailable=source_unavailable,
+        plan=plan,
+    )
+    if phase == "R0-D":
+        # The pure predicate may discover an invariant that is not represented
+        # by a normal inventory warning (for example a malformed draft plan).
+        # Preserve that evidence in the output before deriving the final
+        # execution status and stop action.
+        unknowns = sorted(set(closure["unknowns"]))
+        blockers = sorted(set(closure["blockers"]))
+        status = "BLOCKED" if blockers else "DONE_WITH_CONCERNS" if unknowns else "DONE"
+        source_incomplete = bool(incomplete_source_unavailable) or r2_status != "READY" or bool(
+            unknowns
+        )
+    reconciliation_status = closure["reconciliationStatus"]
+    next_action = closure["nextAllowedAction"]
+    if phase == "R0-C":
+        # R0-C is a code/evidence validation phase only; it can never advance
+        # directly to R2 even when its fixture happens to be complete.
+        reconciliation_status = "PENDING" if status == "BLOCKED" else "NOT_APPLICABLE"
+        next_action = "STOP" if status == "BLOCKED" else "R0-D_RECONCILE"
     checks = [
         {"id": "input_schema", "status": "pass", "detail": "input schemaVersion=1 accepted; output contract is v2"},
         {"id": "read_only_boundary", "status": "pass", "detail": "no network/provider client or mutation API is available"},
@@ -1574,7 +1877,7 @@ def build_stage_evidence(
     else:
         source_status = "READY"
     return {
-        "schemaVersion": AUDIT_SCHEMA_VERSION,
+        "schemaVersion": STAGE_EVIDENCE_SCHEMA_VERSION,
         "contractVersion": AUDIT_CONTRACT_VERSION,
         "phase": phase,
         "status": status,
@@ -1786,7 +2089,22 @@ def write_audit_outputs(result: Mapping[str, Any], output_dir: Path) -> None:
     _write_csv(
         output_dir / "source-unavailable.csv",
         list(result["sourceUnavailable"]),
-        ["dataDate", "domain", "stage", "reason", "rawKey", "rawSha256", "evidence"],
+        [
+            "dataDate",
+            "domain",
+            "sourceId",
+            "sourceBusinessDate",
+            "stage",
+            "reason",
+            "evidenceSource",
+            "evidenceCapturedAt",
+            "sourceFingerprint",
+            "rawKey",
+            "rawSha256",
+            "evidence",
+            "provenanceStatus",
+            "missingProvenance",
+        ],
     )
     (output_dir / "budget-estimate.json").write_text(
         json.dumps(result["budget"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
