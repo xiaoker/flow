@@ -1236,6 +1236,17 @@ test("archives full-source history with server-side hash verification", async ()
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO connect_daily")));
   assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO etf_daily")));
   assert.ok(statements.some(({ sql }) => sql.includes("WITH current_rows AS")));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO history_artifact_pointer")));
+  assert.ok(statements.some(({ sql, values }) =>
+    sql.includes("INSERT INTO history_artifact_pointer") &&
+    values.some((value) => typeof value === "string" && value.includes("market-data/normalized/sse/etf_scale")),
+  ));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO source_readiness")));
+  assert.ok(statements.some(({ sql, values }) =>
+    sql.includes("INSERT INTO source_readiness") &&
+    values.includes("sse_etf") &&
+    values.some((value) => typeof value === "string" && value.includes('"archiveVerified":true')),
+  ));
   const manifest = [...objects.entries()].find(([key]) => key.includes("history-manifests/"));
   assert.ok(manifest);
   assert.match(String(manifest[1]), /"officialEtfDailyChanges"/);
@@ -1385,6 +1396,17 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
   assert.equal(statements.some(({ sql }) => sql.includes("INSERT INTO etf_daily")), false);
   assert.equal(statements.some(({ sql }) => sql.includes("DELETE FROM etf_daily")), false);
   assert.equal(statements.some(({ sql }) => sql.includes("WITH current_rows AS")), false);
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO history_artifact_pointer")));
+  assert.ok(statements.some(({ sql, values }) =>
+    sql.includes("INSERT INTO history_artifact_pointer") &&
+    values.some((value) => typeof value === "string" && value.includes("market-data/normalized/sse/etf_scale")),
+  ));
+  assert.ok(statements.some(({ sql }) => sql.includes("INSERT INTO source_readiness")));
+  assert.ok(statements.some(({ sql, values }) =>
+    sql.includes("INSERT INTO source_readiness") &&
+    values.includes("sse_etf") &&
+    values.some((value) => typeof value === "string" && value.includes('"archiveVerified":true')),
+  ));
 });
 
 test("archive-only history accepts a pending snapshot without an ETF delta contract", async () => {

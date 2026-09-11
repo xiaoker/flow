@@ -21,6 +21,11 @@ const MAX_ETF_DAILY_CHANGE_ROWS = 10_000;
 const HISTORY_RETENTION_DAYS = 0;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const REQUIRED_READINESS_DATASETS = new Set<HistoryArtifact["dataset"]>([
+  "etf_scale",
+  "margin_market_daily",
+  "stock_connect_daily",
+]);
 
 type NormalizedFile = {
   name: string;
@@ -507,6 +512,170 @@ async function executeD1Statements(
     }
     for (const statement of batch) await statement.run();
   }
+}
+
+/**
+ * The phase-0 readiness ledger is written before the archive request, so its
+ * first version only knows local runner paths.  Once an artifact is accepted
+ * by this route, the immutable R2 key and digest become the authoritative
+ * provenance receipt.  Keep that receipt in the existing control-plane
+ * tables instead of asking the read-only inventory to infer it from a model
+ * row or a UI release.
+ */
+function canonicalTradeDate(value: string): string | null {
+  if (ISO_DATE.test(value)) return value;
+  if (/^\d{8}$/.test(value)) {
+    const candidate = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+    return ISO_DATE.test(candidate) ? candidate : null;
+  }
+  return null;
+}
+
+function canonicalObservedAt(value: string): string {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString();
+}
+
+function readinessSourceId(artifact: HistoryArtifact): string | null {
+  if (artifact.dataset === "etf_scale") return `${artifact.sourceId}_etf`;
+  if (artifact.dataset === "etf_nav") return "sse_etf_nav";
+  if (artifact.dataset === "etf_pcf") return "sse_etf_pcf";
+  if (artifact.dataset === "margin_market_daily") return `${artifact.sourceId}_margin`;
+  if (artifact.dataset === "stock_connect_daily") return "stock_connect_summary";
+  // Security-level margin detail is an optional enrichment and must not
+  // overwrite the market-level readiness watermark with a different feed.
+  return null;
+}
+
+function pointerDataset(artifact: HistoryArtifact): "etf_scale" | "etf_pcf" | null {
+  // Keep this first repair bounded to the pointer datasets already consumed
+  // by the inventory reader.  Margin/connect pointers need a separate
+  // contract review before they can affect recovery stage semantics.
+  return artifact.dataset === "etf_scale" || artifact.dataset === "etf_pcf"
+    ? artifact.dataset
+    : null;
+}
+
+async function persistArchivedArtifactEvidence(
+  db: D1Database,
+  artifact: HistoryArtifact,
+  normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array }>,
+  rawKey: string,
+  normalizedKeys: string[],
+  runId: string,
+): Promise<{ pointerCount: number; readinessCount: number }> {
+  const observedAt = canonicalObservedAt(artifact.observedAt);
+  const updatedAt = new Date().toISOString();
+  const dates = [...new Set(
+    normalizedFiles.flatMap(({ file }) => file.tradeDates.map(canonicalTradeDate).filter((date): date is string => Boolean(date))),
+  )].sort();
+  const pointerStatements: D1PreparedStatement[] = [];
+  const dataset = pointerDataset(artifact);
+  if (dataset) {
+    normalizedFiles.forEach(({ file }, index) => {
+      const objectKey = normalizedKeys[index];
+      if (!objectKey) return;
+      for (const tradeDate of file.tradeDates
+        .map(canonicalTradeDate)
+        .filter((date): date is string => Boolean(date))) {
+        pointerStatements.push(
+          db.prepare(
+            `INSERT INTO history_artifact_pointer (
+               source_id, dataset, trade_date, file_name, revision_id,
+               object_key, sha256, content_encoding, row_count, observed_at,
+               status, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)
+             ON CONFLICT(source_id, dataset, trade_date, file_name) DO UPDATE SET
+               revision_id = excluded.revision_id,
+               object_key = excluded.object_key,
+               sha256 = excluded.sha256,
+               content_encoding = excluded.content_encoding,
+               row_count = excluded.row_count,
+               observed_at = excluded.observed_at,
+               status = excluded.status,
+               updated_at = excluded.updated_at
+             WHERE excluded.observed_at >= history_artifact_pointer.observed_at`,
+          ).bind(
+            artifact.sourceId,
+            dataset,
+            tradeDate,
+            file.name,
+            artifact.releaseId,
+            objectKey,
+            file.sha256,
+            file.contentEncoding === "gzip" ? "gzip" : null,
+            file.rowCount,
+            observedAt,
+            updatedAt,
+          ),
+        );
+      }
+    });
+  }
+
+  const sourceId = readinessSourceId(artifact);
+  const readinessStatements: D1PreparedStatement[] = [];
+  if (sourceId && dates.length) {
+    for (const tradeDate of dates) {
+      const evidence = {
+        archiveVerified: true,
+        objectKey: rawKey,
+        rawObjectKey: rawKey,
+        sha256: artifact.sha256,
+        rawSha256: artifact.sha256,
+        normalizedKeys,
+        normalizedSha256: normalizedFiles.map(({ file }) => ({
+          name: file.name,
+          sha256: file.sha256,
+          rowCount: file.rowCount,
+        })),
+        sourceBusinessDate: tradeDate,
+        sourceFingerprint: artifact.sha256,
+        evidenceSource: "history-import",
+        evidenceCapturedAt: observedAt,
+      };
+      readinessStatements.push(
+        db.prepare(
+          `INSERT INTO source_readiness (
+             target_date, source_id, status, overall_status, required,
+             observed_at, next_check_at, deadline_at, deadline_exceeded, attempt,
+             observed_dates_json, watermark_json, reason, run_id, evidence_json, updated_at
+           ) VALUES (?, ?, 'ready', 'ready', ?, ?, NULL, ?, 0, 1, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(target_date, source_id) DO UPDATE SET
+             status = excluded.status,
+             overall_status = excluded.overall_status,
+             required = excluded.required,
+             observed_at = excluded.observed_at,
+             next_check_at = excluded.next_check_at,
+             deadline_at = excluded.deadline_at,
+             deadline_exceeded = excluded.deadline_exceeded,
+             attempt = MAX(source_readiness.attempt, excluded.attempt),
+             observed_dates_json = excluded.observed_dates_json,
+             watermark_json = excluded.watermark_json,
+             reason = excluded.reason,
+             run_id = excluded.run_id,
+             evidence_json = excluded.evidence_json,
+             updated_at = excluded.updated_at
+           WHERE excluded.observed_at >= source_readiness.observed_at`,
+        ).bind(
+          tradeDate,
+          sourceId,
+          REQUIRED_READINESS_DATASETS.has(artifact.dataset) ? 1 : 0,
+          observedAt,
+          observedAt,
+          JSON.stringify(dates),
+          JSON.stringify({ observedTradeDate: tradeDate }),
+          "official_source_archived",
+          runId,
+          JSON.stringify(evidence),
+          updatedAt,
+        ),
+      );
+    }
+  }
+
+  await executeD1Statements(db, [...pointerStatements, ...readinessStatements]);
+  return { pointerCount: pointerStatements.length, readinessCount: readinessStatements.length };
 }
 
 function decodeBase64(value: string): Uint8Array {
@@ -1087,6 +1256,8 @@ export async function POST(request: Request) {
     const expectedArtifacts = history.expectedArtifacts;
     const manifestArtifacts: Array<Record<string, unknown>> = [];
     const collectionStateKeys: string[] = [];
+    let archivedPointerCount = 0;
+    let archivedReadinessCount = 0;
     let standardizedRows = 0;
     for (const artifact of history.artifacts) {
       try {
@@ -1205,6 +1376,16 @@ export async function POST(request: Request) {
           rowCount: normalizedRowCount,
         });
         collectionStateKeys.push(stateKey);
+        const evidenceCounts = await persistArchivedArtifactEvidence(
+          runtime.DB,
+          artifact,
+          normalizedFiles,
+          rawKey,
+          normalizedKeys,
+          history.runId,
+        );
+        archivedPointerCount += evidenceCounts.pointerCount;
+        archivedReadinessCount += evidenceCounts.readinessCount;
         manifestArtifacts.push({
           releaseId: artifact.releaseId,
           sourceId: artifact.sourceId,
@@ -1241,6 +1422,8 @@ export async function POST(request: Request) {
         asOf: history.asOf,
         artifacts: history.artifacts.length,
         standardizedRows,
+        archivedPointerCount,
+        archivedReadinessCount,
       });
     }
 
@@ -1428,6 +1611,8 @@ export async function POST(request: Request) {
       historyImportMode: archiveOnly ? "archive_only" : "legacy_compatibility",
       artifacts: history.artifacts.length,
       standardizedRows,
+      archivedPointerCount,
+      archivedReadinessCount,
       snapshotSha256,
       snapshotKey,
       manifestKey,
