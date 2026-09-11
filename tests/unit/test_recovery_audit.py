@@ -7,8 +7,13 @@ from pathlib import Path
 import pytest
 
 from scripts.audit_controlled_recovery import main
-from trading_desk.recovery_audit import RecoveryAuditError, audit_bundle, write_audit_outputs
-from trading_desk.recovery_execution import RecoveryContractError
+from trading_desk.recovery_audit import (
+    RecoveryAuditError,
+    audit_bundle,
+    evaluate_r0d_closure,
+    write_audit_outputs,
+)
+from trading_desk.recovery_execution import RecoveryContractError, canonical_sha256
 
 
 CONFIG = json.loads(
@@ -155,6 +160,15 @@ def test_plan_hash_is_stable_for_reordered_fixture() -> None:
     assert first["plan"]["executionBlocked"] is True
 
 
+def test_v1_plan_contract_cannot_reuse_v2_plan_hash() -> None:
+    result = audit_bundle(complete_bundle(), budget_config=CONFIG)
+    v2_plan = result["plan"]
+    v1_payload = {key: value for key, value in v2_plan.items() if key != "planHash"}
+    v1_payload["schemaVersion"] = 1
+    v1_payload["contractVersion"] = "recovery-audit-v1"
+    assert v2_plan["planHash"] != canonical_sha256(v1_payload)
+
+
 def test_r0d_phase_closes_complete_evidence_without_changing_plan_hash() -> None:
     r0c = audit_bundle(complete_bundle(), budget_config=CONFIG)
     r0d = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
@@ -215,6 +229,20 @@ def test_r0d_does_not_trust_numeric_account_metrics_with_unknown_evidence_status
     assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
     assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
     assert "accountTelemetryEvidenceStatus" in result["stageEvidence"]["unknowns"]
+
+
+def test_r0d_rejects_missing_or_stale_valid_account_snapshot() -> None:
+    missing_timestamp = complete_bundle()
+    missing_timestamp["accountTelemetryEvidence"] = {"status": "VALID", "reason": "fixture"}
+    missing_result = audit_bundle(missing_timestamp, budget_config=CONFIG, phase="R0-D")
+    assert missing_result["budget"]["decision"] == "unknown_metrics"
+    assert "accountTelemetryEvidenceCapturedAt" in missing_result["stageEvidence"]["unknowns"]
+
+    stale = complete_bundle()
+    stale["capturedAt"] = "2026-09-07T04:00:00Z"
+    stale_result = audit_bundle(stale, budget_config=CONFIG, phase="R0-D")
+    assert stale_result["budget"]["decision"] == "unknown_metrics"
+    assert "accountTelemetryEvidenceStatus:EXPIRED" in stale_result["stageEvidence"]["unknowns"]
 
 
 def test_r0c_does_not_reclassify_missing_account_snapshot_as_local_bounded() -> None:
@@ -319,6 +347,9 @@ def test_evidenced_source_unavailable_is_a_known_closed_state() -> None:
             "pcf_exact": "SOURCE_UNAVAILABLE",
         },
         gapReason="official source did not publish this dataset",
+        sourceId="sse_etf",
+        evidenceSource="official-calendar",
+        evidenceCapturedAt="2026-09-07T02:00:00Z",
         evidence={"marketHistory": True},
     )
     result = audit_bundle(
@@ -330,6 +361,118 @@ def test_evidenced_source_unavailable_is_a_known_closed_state() -> None:
     assert result["stageEvidence"]["sourceEvidenceStatus"] == "READY_WITH_EVIDENCED_UNAVAILABLE"
     assert result["stageEvidence"]["reconciliationStatus"] == "R0_RECONCILED"
     assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "sourceId",
+        "sourceBusinessDate",
+        "gapReason",
+        "sourceFingerprint",
+        "evidenceSource",
+        "evidenceCapturedAt",
+    ],
+)
+def test_source_unavailable_requires_complete_provenance(field: str) -> None:
+    row = ready_row(
+        "2026-08-28",
+        sourceId="sse_etf",
+        evidenceSource="official-calendar",
+        evidenceCapturedAt="2026-09-07T02:00:00Z",
+        gapReason="official source did not publish this dataset",
+        stageStatus={
+            "raw": "SOURCE_UNAVAILABLE",
+            "normalized": "SOURCE_UNAVAILABLE",
+            "model": "SOURCE_UNAVAILABLE",
+            "pcf_exact": "SOURCE_UNAVAILABLE",
+        },
+    )
+    row[field] = None
+    result = audit_bundle(
+        complete_bundle(rows=[row, ready_row("2026-08-29")]),
+        budget_config=CONFIG,
+        phase="R0-D",
+    )
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
+    assert result["sourceUnavailable"][0]["provenanceStatus"] == "INCOMPLETE"
+
+
+def test_r0d_closure_predicate_is_explicit_and_pure() -> None:
+    result = audit_bundle(complete_bundle(), budget_config=CONFIG, phase="R0-D")
+    evidence = result["stageEvidence"]
+    closed = evaluate_r0d_closure(
+        phase=evidence["phase"],
+        status=evidence["status"],
+        contract_version=evidence["contractVersion"],
+        unknowns=evidence["unknowns"],
+        blockers=evidence["blockers"],
+        protected_paths=evidence["protectedPathsTouched"],
+        read_only_assertions=evidence["readOnlyAssertions"],
+        budget=result["budget"],
+        r2_status=evidence["r2InventoryStatus"],
+        rows=result["inventory"],
+        source_unavailable=result["sourceUnavailable"],
+        plan=result["plan"],
+    )
+    assert closed == {
+        "closed": True,
+        "reconciliationStatus": "R0_RECONCILED",
+        "nextAllowedAction": "R2_ACCEPTANCE_AUDIT",
+        "unknowns": [],
+        "blockers": [],
+    }
+
+
+def test_r0c_closure_preserves_local_concerns_without_advancing_to_r2() -> None:
+    closed = evaluate_r0d_closure(
+        phase="R0-C",
+        status="DONE_WITH_CONCERNS",
+        contract_version="recovery-audit-v2",
+        unknowns=["z", "z", "a"],
+        blockers=[],
+        protected_paths=[],
+        read_only_assertions={},
+        budget={},
+        r2_status="READY",
+        rows=[],
+        source_unavailable=[],
+        plan={},
+    )
+    assert closed == {
+        "closed": False,
+        "reconciliationStatus": "NOT_APPLICABLE",
+        "nextAllowedAction": "R0-D_RECONCILE",
+        "unknowns": ["a", "z"],
+        "blockers": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda bundle: bundle["r2Inventory"].update(hasMore=True),
+        lambda bundle: bundle["r2Inventory"].update(page=1),
+        lambda bundle: bundle["r2Inventory"].update(nextCursor="next-page"),
+        lambda bundle: bundle["accountTelemetryEvidence"].update(status="EXPIRED"),
+        lambda bundle: bundle["readOnlyAssertions"].update(r2Writes=1),
+        lambda bundle: bundle.update(protectedPathsTouched=["memory"]),
+    ],
+)
+def test_each_r0d_closure_predicate_gate_fails_closed(mutator) -> None:
+    bundle = complete_bundle()
+    mutator(bundle)
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] != "R2_ACCEPTANCE_AUDIT"
+
+
+def test_r2_declared_and_computed_index_hash_mismatch_is_rejected() -> None:
+    bundle = complete_bundle()
+    bundle["r2Inventory"]["computedIndexSha256"] = SHA_A
+    with pytest.raises(RecoveryAuditError, match="r2_index_sha256_mismatch"):
+        audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
 
 
 def test_r0d_missing_runtime_safety_evidence_cannot_close() -> None:
@@ -366,6 +509,19 @@ def test_dashboard_visibility_cannot_close_missing_penetration_slot() -> None:
     assert result["stageEvidence"]["nextAllowedAction"] == "R2_ACCEPTANCE_AUDIT"
     assert result["stageEvidence"]["status"] == "DONE"
     assert result["targets"][0]["requiredStages"] == ["etf_penetration"]
+
+
+def test_dashboard_ready_and_penetration_unknown_cannot_close() -> None:
+    bundle = complete_bundle()
+    bundle["releaseManifests"] = [
+        item for item in bundle["releaseManifests"] if item["slot"] == "dashboard"
+    ]
+    for row in bundle["inventory"]:
+        row["stageStatus"]["etf_penetration"] = "UNKNOWN"
+    result = audit_bundle(bundle, budget_config=CONFIG, phase="R0-D")
+    assert result["stageEvidence"]["reconciliationStatus"] == "PENDING"
+    assert result["stageEvidence"]["nextAllowedAction"] == "R0-D_RECONCILE"
+    assert result["stageEvidence"]["status"] == "DONE_WITH_CONCERNS"
 
 
 def test_missing_hash_is_unknown_and_declared_mismatch_is_blocked() -> None:
@@ -473,7 +629,7 @@ def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
         )
     )
     assert set(schema["properties"]["phase"]["enum"]) == {"R0-C", "R0-D"}
-    assert schema["properties"]["schemaVersion"]["const"] == 2
+    assert schema["properties"]["schemaVersion"]["const"] == "recovery-stage-evidence-v2"
     assert schema["properties"]["contractVersion"]["const"] == "recovery-audit-v2"
     assert schema["properties"]["migrationApplied"]["const"] is False
     assert schema["properties"]["nextAllowedAction"]["enum"] == [
@@ -488,6 +644,36 @@ def test_stage_evidence_schema_declares_r0_c_stop_contract() -> None:
         "LOCAL_BOUNDED",
         "UNVERIFIED",
     }
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda value: value.update(reconciliationStatus="R0_RECONCILED"),
+        lambda value: value.update(nextAllowedAction="R2_ACCEPTANCE_AUDIT"),
+        lambda value: value.update(status="DONE_WITH_CONCERNS", nextAllowedAction="R2_ACCEPTANCE_AUDIT"),
+        lambda value: value.update(status="BLOCKED", reconciliationStatus="NOT_APPLICABLE"),
+        lambda value: value.update(
+            phase="R0-D",
+            status="DONE",
+            reconciliationStatus="R0_RECONCILED",
+            nextAllowedAction="R2_ACCEPTANCE_AUDIT",
+            budgetStatus="unknown_metrics",
+        ),
+    ],
+)
+def test_stage_evidence_schema_rejects_impossible_state_combinations(mutator) -> None:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas/recovery-stage-evidence.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    value = audit_bundle(complete_bundle(), budget_config=CONFIG)["stageEvidence"]
+    mutator(value)
+    errors = list(Draft202012Validator(schema).iter_errors(value))
+    assert errors, value
 
 
 def test_auditor_dependency_surface_is_offline_and_pure(monkeypatch) -> None:
