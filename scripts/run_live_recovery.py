@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -251,6 +251,68 @@ def _assert_confirmed_snapshot(snapshot: dict[str, Any], target: str) -> None:
         raise LiveRecoveryError("live_recovery_quality_gate", "snapshot is not confirmed")
     if str(snapshot.get("asOf") or "") != target:
         raise LiveRecoveryError("live_recovery_date_anchor_mismatch", f"expected={target}")
+
+
+def _assert_szse_current_snapshot_is_adjacent(
+    *,
+    manifest: dict[str, Any],
+    target: str,
+    session: Any,
+) -> None:
+    """Reject a moving SZSE list when it cannot prove the target date.
+
+    ``fetch_szse_etf_current`` is intentionally a *current* snapshot adapter.
+    It maps the list page's disclosure date to the preceding known trading
+    date, which is correct for a normal forward collection window but unsafe
+    for a historical recovery: a September workbook would otherwise be
+    relabelled as an August target.  A recovery may use this adapter only when
+    the page date's immediately preceding official trading day is the target.
+    Older targets must use the retained per-fund historical endpoint and are
+    rejected before any derived snapshot can be published.
+    """
+
+    page_value = manifest.get("szse_etf_page_date")
+    page_date = str(page_value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", page_date):
+        raise LiveRecoveryError(
+            "live_recovery_historical_szse_source_required",
+            f"target={target}, page_date=missing",
+            status="BLOCKED_QUALITY",
+        )
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target):
+        raise LiveRecoveryError("live_recovery_date_anchor_mismatch", f"expected={target}")
+    if page_date <= target:
+        raise LiveRecoveryError(
+            "live_recovery_historical_szse_source_required",
+            f"target={target}, page_date={page_date}",
+            status="BLOCKED_QUALITY",
+        )
+
+    try:
+        preceding_dates = discover_recent_trading_dates(
+            end_date=date.fromisoformat(page_date) - timedelta(days=1),
+            count=2,
+            session=session,
+        )
+    except Exception as exc:
+        if getattr(exc, "code", None) in {
+            "live_recovery_request_budget_exceeded",
+            "live_recovery_source_unavailable",
+        }:
+            raise
+        raise LiveRecoveryError(
+            "live_recovery_historical_szse_calendar_unavailable",
+            type(exc).__name__,
+            status="FAILED_RETRYABLE",
+        ) from exc
+
+    if not preceding_dates or preceding_dates[-1] != target:
+        detail = ",".join(str(value) for value in preceding_dates[-2:]) or "missing"
+        raise LiveRecoveryError(
+            "live_recovery_historical_szse_source_required",
+            f"target={target}, page_date={page_date}, preceding={detail}",
+            status="BLOCKED_QUALITY",
+        )
 
 
 def _assert_history_checkpoint(response: dict[str, Any], target: str) -> None:
@@ -517,6 +579,14 @@ def run_live_recovery(
     quality_path = report_root / run_id / "quality-summary.json"
     if int((quality.get("counts") or {}).get("fail", 0) or 0) > 0:
         raise LiveRecoveryError("live_recovery_quality_gate", "phase0 validation failed")
+    # The ordinary collector may have a valid current SZSE workbook whose
+    # preceding business date is newer than this recovery target.  Refuse that
+    # moving snapshot before it can become a confirmed historical release.
+    _assert_szse_current_snapshot_is_adjacent(
+        manifest=manifest,
+        target=target,
+        session=source_session,
+    )
     base_snapshot_path = source_bundle / "dashboard-snapshot-base.json"
     stock_catalog_path = source_bundle / "stock-flow-catalog.json"
     base_snapshot = build_dashboard_snapshot(

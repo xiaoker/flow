@@ -10,6 +10,7 @@ from scripts.run_live_recovery import (
     BudgetedRateLimitedSession,
     LiveRecoveryError,
     _post_child_request_reserve,
+    _assert_szse_current_snapshot_is_adjacent,
     _fetch_market_history,
     run_live_recovery,
 )
@@ -148,7 +149,11 @@ def offline_runner(monkeypatch):
     monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **_kwargs: ["2026-08-26", "2026-08-27", "2026-08-28"])
 
     def collect(**kwargs):
-        manifest = {"run_id": "fixture", "artifacts": [{"releaseId": "fixture-source"}]}
+        manifest = {
+            "run_id": "fixture",
+            "artifacts": [{"releaseId": "fixture-source"}],
+            "szse_etf_page_date": "2026-08-29",
+        }
         quality = {"counts": {"fail": 0}}
         runner._write_json(kwargs["report_root"] / "fixture" / "manifest.json", manifest)
         runner._write_json(kwargs["report_root"] / "fixture" / "quality-summary.json", quality)
@@ -225,6 +230,49 @@ def test_budgeted_session_fails_closed_on_source_rejection(status_code: int) -> 
         session.get("https://source.example/rejected")
     assert session.request_count == 1
     assert len(transport.calls) == 1
+
+
+def test_historical_szse_snapshot_accepts_only_immediate_preceding_business_date(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "discover_recent_trading_dates",
+        lambda **_kwargs: ["2026-08-27", "2026-08-28"],
+    )
+    _assert_szse_current_snapshot_is_adjacent(
+        manifest={"szse_etf_page_date": "2026-08-31"},
+        target="2026-08-28",
+        session=object(),
+    )
+
+
+def test_historical_szse_snapshot_rejects_a_later_moving_workbook(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "discover_recent_trading_dates",
+        lambda **_kwargs: ["2026-09-09", "2026-09-10"],
+    )
+    with pytest.raises(
+        LiveRecoveryError,
+        match="live_recovery_historical_szse_source_required",
+    ) as caught:
+        _assert_szse_current_snapshot_is_adjacent(
+            manifest={"szse_etf_page_date": "2026-09-11"},
+            target="2026-08-28",
+            session=object(),
+        )
+    assert caught.value.status == "BLOCKED_QUALITY"
+
+
+def test_historical_szse_snapshot_rejects_missing_page_date() -> None:
+    with pytest.raises(
+        LiveRecoveryError,
+        match="live_recovery_historical_szse_source_required",
+    ):
+        _assert_szse_current_snapshot_is_adjacent(
+            manifest={},
+            target="2026-08-28",
+            session=object(),
+        )
 
 
 def test_post_child_reserve_covers_history_reads_and_retry_attempts() -> None:
