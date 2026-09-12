@@ -19,6 +19,7 @@ import html
 import json
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,32 @@ DATE_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}$")
 CODE_RE = re.compile(r"\d{6}")
 
 
+class RequestBudget:
+    """Bound and pace every top-level exchange request in this helper."""
+
+    def __init__(self, maximum: int | None, min_interval_seconds: float) -> None:
+        if maximum is not None and maximum <= 0:
+            raise ValueError("max_requests must be positive")
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must be non-negative")
+        self.maximum = maximum
+        self.min_interval_seconds = min_interval_seconds
+        self.request_count = 0
+        self._last_request_at = 0.0
+        self._lock = threading.Lock()
+
+    def before_request(self) -> None:
+        with self._lock:
+            if self.maximum is not None and self.request_count >= self.maximum:
+                raise RuntimeError("recovery_request_budget_exceeded")
+            now = time.monotonic()
+            delay = self.min_interval_seconds - (now - self._last_request_at)
+            if delay > 0:
+                time.sleep(delay)
+            self.request_count += 1
+            self._last_request_at = time.monotonic()
+
+
 def _session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -55,21 +82,25 @@ def _session() -> requests.Session:
     return session
 
 
-def _request_json(session: requests.Session, params: dict[str, str]) -> Any:
+def _request_json(
+    session: requests.Session,
+    params: dict[str, str],
+    *,
+    budget: RequestBudget | None = None,
+) -> Any:
     # The desktop proxy intermittently returns a 503 tunnel error for a burst
     # of Python TLS sessions, while curl's connection reuse/retry path remains
     # stable.  Keep this recovery path conservative and invoke curl with an
     # argument list (never a shell string) so all query values are escaped.
+    if budget is not None:
+        budget.before_request()
     command = [
         "curl",
         "--silent",
         "--show-error",
         "--fail",
         "--retry",
-        "3",
-        "--retry-all-errors",
-        "--retry-delay",
-        "2",
+        "0",
         "--max-time",
         "30",
         "--resolve",
@@ -106,14 +137,16 @@ def _code_from_row(row: dict[str, Any]) -> str | None:
     return match.group(0) if match else None
 
 
-def _current_list() -> dict[str, dict[str, str]]:
-    first = _request_json(_session(), {**LIST_PARAMS, "tab1PAGENO": "1"})
+def _current_list(budget: RequestBudget | None = None) -> dict[str, dict[str, str]]:
+    first = _request_json(_session(), {**LIST_PARAMS, "tab1PAGENO": "1"}, budget=budget)
     metadata = first[0]["metadata"]
     page_count = int(metadata["pagecount"])
     pages: list[list[dict[str, Any]]] = [first[0].get("data") or []]
 
     def fetch_page(page: int) -> list[dict[str, Any]]:
-        payload = _request_json(_session(), {**LIST_PARAMS, "tab1PAGENO": str(page)})
+        payload = _request_json(
+            _session(), {**LIST_PARAMS, "tab1PAGENO": str(page)}, budget=budget
+        )
         return payload[0].get("data") or []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -163,7 +196,11 @@ def _load_code_overrides(path: Path | None) -> dict[str, dict[str, str]]:
 
 
 def _historical_response(
-    code: str, start_date: str, end_date: str
+    code: str,
+    start_date: str,
+    end_date: str,
+    *,
+    budget: RequestBudget | None = None,
 ) -> tuple[str, dict[str, Any]]:
     payload = _request_json(
         _session(),
@@ -176,6 +213,7 @@ def _historical_response(
             "txtStart": start_date,
             "txtEnd": end_date,
         },
+        budget=budget,
     )
     return code, {"request": {"code": code, "start": start_date, "end": end_date}, "response": payload}
 
@@ -199,7 +237,9 @@ def main() -> None:
     parser.add_argument("--dates", nargs="+", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-overrides", type=Path)
-    parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--max-requests", type=int)
+    parser.add_argument("--min-interval", type=float, default=0.5)
     args = parser.parse_args()
     dates = sorted(set(args.dates))
     if not dates or any(not DATE_RE.fullmatch(value) for value in dates):
@@ -209,12 +249,13 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     response_root = output_root / "responses"
     response_root.mkdir(parents=True, exist_ok=True)
+    budget = RequestBudget(args.max_requests, args.min_interval)
 
     overrides = _load_code_overrides(args.code_overrides)
     # A D1 export from the last known release is a safer and much cheaper
     # starting universe during recovery.  Only fall back to the paginated live
     # list when no substantial override set was supplied.
-    codes = dict(overrides) if len(overrides) >= 500 else _current_list()
+    codes = dict(overrides) if len(overrides) >= 500 else _current_list(budget)
     if codes is not overrides:
         codes.update(overrides)
     ordered_codes = sorted(codes)
@@ -232,7 +273,7 @@ def main() -> None:
     )
 
     def fetch_and_cache(code: str) -> str:
-        _, payload = _historical_response(code, start_date, end_date)
+        _, payload = _historical_response(code, start_date, end_date, budget=budget)
         (response_root / f"{code}.json").write_text(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
@@ -261,7 +302,7 @@ def main() -> None:
     # codes at a low rate rather than silently publishing an incomplete set.
     for code in failed:
         time.sleep(0.25)
-        _, payload = _historical_response(code, start_date, end_date)
+        _, payload = _historical_response(code, start_date, end_date, budget=budget)
         (response_root / f"{code}.json").write_text(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
@@ -374,9 +415,28 @@ def main() -> None:
         )
         print(f"prepared {trade_date}: rows={len(rows)} codes={len(codes_seen)} sha256={digest}", flush=True)
 
-    manifest = {"version": 1, "artifacts": artifacts, "dates": dates, "observed_at": observed_at}
+    manifest = {
+        "version": 1,
+        "artifacts": artifacts,
+        "dates": dates,
+        "observed_at": observed_at,
+        "requestCount": budget.request_count,
+        "maxRequests": args.max_requests,
+        "minIntervalSeconds": args.min_interval,
+    }
     (output_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"dates": dates, "artifacts": len(artifacts), "codes": len(ordered_codes), "output": str(output_root)}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "dates": dates,
+                "artifacts": len(artifacts),
+                "codes": len(ordered_codes),
+                "requestCount": budget.request_count,
+                "output": str(output_root),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":
