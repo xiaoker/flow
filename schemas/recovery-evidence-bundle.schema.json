@@ -57,7 +57,8 @@
                     "actualSha256": { "$ref": "#/$defs/sha256" },
                     "expectedBytes": { "type": "integer", "minimum": 0 },
                     "actualBytes": { "type": "integer", "minimum": 0 },
-                    "error": { "type": "string", "minLength": 1, "maxLength": 128 }
+                    "error": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "reason": { "type": "string", "minLength": 1, "maxLength": 64 }
                   }
                 }
               }
@@ -204,7 +205,7 @@
     },
     "r2Inventory": {
       "type": "object", "additionalProperties": false,
-      "required": ["page", "pageSize", "hardLimit", "headHardLimit", "hasMore", "indexSha256", "suspiciousGaps"],
+      "required": ["page", "pageSize", "hardLimit", "headHardLimit", "hasMore", "indexSha256", "suspiciousGaps", "headReceiptCount", "headReceiptSha256", "headReceiptMissingCount"],
       "properties": {
         "page": { "type": "integer", "minimum": 0, "maximum": 100000 },
         "pageSize": { "type": "integer", "minimum": 0, "maximum": 20000 },
@@ -220,6 +221,9 @@
         "suspiciousGapDetailsCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
         "suspiciousGapDetailsSha256": { "$ref": "#/$defs/sha256" },
         "suspiciousGapDetailsTruncated": { "type": "boolean" },
+        "headReceiptCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "headReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "headReceiptMissingCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
         "source": { "type": "string", "maxLength": 120 }
       }
     },
@@ -294,7 +298,8 @@
         "actualSha256": { "$ref": "#/$defs/sha256" },
         "expectedBytes": { "type": "integer", "minimum": 0 },
         "actualBytes": { "type": "integer", "minimum": 0 },
-        "error": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "error": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "assertions": { "type": "object", "additionalProperties": false, "required": ["d1Writes", "r2Writes", "workflowDispatches", "activePointerChanges", "flagChanges"], "properties": { "d1Writes": { "$ref": "#/$defs/countOrUnknown" }, "r2Writes": { "$ref": "#/$defs/countOrUnknown" }, "workflowDispatches": { "$ref": "#/$defs/countOrUnknown" }, "activePointerChanges": { "$ref": "#/$defs/countOrUnknown" }, "flagChanges": { "$ref": "#/$defs/countOrUnknown" } } },

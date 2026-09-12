@@ -116,6 +116,22 @@ def page(
         "dates": dates,
         "usage": {"d1": {"queryCount": 1, "rowsRead": 10, "rowsWritten": 0, "rowsReadKnown": True, "rowsWrittenKnown": True}, "r2": {"classA": 0, "classB": r2_head_count, "headCount": r2_head_count, "headLimit": 64}, "truncated": False},
         "incompleteReasons": incomplete_reasons or [],
+        "r2HeadReceipts": [
+            {
+                "asOf": "2026-08-27",
+                "releaseId": "release:2026-08-27:fixture000000000000",
+                "slot": "dashboard",
+                "artifactName": f"artifact-{index:03d}",
+                "key": f"market-data/releases/2026-08-27/release:2026-08-27:fixture000000000000/artifact-{index:03d}.json",
+                "declaredSha256": SHA_A,
+                "declaredBytes": 100,
+                "status": "READY",
+                "actualSha256": SHA_A,
+                "actualBytes": 100,
+                "error": None,
+            }
+            for index in range(r2_head_count)
+        ],
         "r2Pagination": {
             "cursor": r2_request_cursor,
             "nextCursor": r2_next_cursor,
@@ -420,6 +436,66 @@ def test_r2_head_cursor_is_drained_without_duplicate_date_pages() -> None:
     assert result.bundle["runtimeEvidence"]["r2HeadPageCount"] == 2
     assert result.bundle["resourceUsage"]["actual"]["workerRequests"] == 2
     assert len(transport.requests) == 2
+
+
+def test_r2_head_receipt_from_continuation_updates_artifact_by_key() -> None:
+    """A receipt must survive even when its continuation omits the date tree."""
+
+    release_id = "release:2026-08-27:target000000000000"
+    key = f"market-data/releases/2026-08-27/{release_id}/bootstrap.json"
+    token = r2_cursor("market-data/releases/2026-08-27/release:2026-08-27:fixture000000000000/artifact-063.json")
+    first = json.loads(page(
+        ["2026-08-27"],
+        status="INCOMPLETE",
+        incomplete_reasons=["R2_HEAD_PAGE_REMAINS"],
+        r2_has_more=True,
+        r2_next_cursor=token,
+        r2_head_count=64,
+    ).decode())
+    first["dates"][0]["releases"]["dashboard"] = [{
+        "releaseId": release_id,
+        "asOf": "2026-08-27",
+        "slot": "dashboard",
+        "artifacts": {
+            "bootstrap": {
+                "key": key,
+                "declaredSha256": SHA_A,
+                "declaredBytes": 100,
+                "status": "UNKNOWN",
+                "actualSha256": None,
+                "actualBytes": None,
+            },
+        },
+    }]
+    second = json.loads(page(
+        ["2026-08-27"],
+        r2_request_cursor=token,
+        r2_head_count=1,
+        r2_index_sha=SHA_A,
+    ).decode())
+    second["r2HeadReceipts"] = [{
+        "asOf": "2026-08-27",
+        "releaseId": release_id,
+        "slot": "dashboard",
+        "artifactName": "bootstrap",
+        "key": key,
+        "declaredSha256": SHA_A,
+        "declaredBytes": 100,
+        "status": "MISSING",
+        "actualSha256": None,
+        "actualBytes": None,
+        "error": None,
+    }]
+    transport = FixtureTransport({
+        (None, None): (503, json.dumps(first, separators=(",", ":")).encode()),
+        (None, token): (200, json.dumps(second, separators=(",", ":")).encode()),
+    })
+    result = exporter(transport).collect()
+    assert not result.errors
+    details = result.bundle["r2Inventory"]["suspiciousGapDetails"]
+    target = next(item for item in details if item.get("key") == key)
+    assert target["status"] == "MISSING"
+    assert target.get("reason") is None
 
 
 def test_r2_pagination_allows_known_legacy_warning_but_rejects_fatal_reason() -> None:

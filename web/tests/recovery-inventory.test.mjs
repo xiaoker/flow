@@ -330,6 +330,21 @@ test("R2 missing hash keeps the exact bounded artifact receipt", async () => {
   assert.equal(artifact.actualSha256, null);
   assert.equal(artifact.actualBytes, 100);
   assert.equal(artifact.key, key);
+  const receipt = result.r2HeadReceipts.find((item) => item.key === key);
+  assert.deepEqual(receipt, {
+    asOf: "2026-08-27",
+    releaseId: result.dates[0].releases.dashboard[0].releaseId,
+    slot: "dashboard",
+    artifactName: "bootstrap",
+    key,
+    declaredSha256: dashboard.artifacts.bootstrap.sha256,
+    declaredBytes: dashboard.artifacts.bootstrap.bytes,
+    status: "HASH_MISSING",
+    actualSha256: null,
+    actualBytes: 100,
+    error: null,
+  });
+  assert.equal(result.r2HeadReceipts.length, result.usage.r2.headCount);
 });
 
 test("a release manifest without its declared hash cannot make a slot READY", async () => {
