@@ -68,6 +68,25 @@ def r2_cursor(key: str) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def coverage(*, truncated: set[str] | None = None) -> dict[str, dict[str, object]]:
+    truncated = truncated or set()
+    collections = (
+        "historicalSnapshots", "dashboardSnapshots", "releaseManifests", "sourceReadiness",
+        "artifactPointers", "models", "marketHistory", "pipelineWindows", "recoveries",
+        "activeReleaseSlots",
+    )
+    return {
+        name: {
+            "queried": True,
+            "rowLimit": 100,
+            "returnedRows": 1,
+            "truncated": name in truncated,
+            "reason": "ROW_LIMIT" if name in truncated else None,
+        }
+        for name in collections
+    }
+
+
 def page(
     data_dates: list[str],
     *,
@@ -92,6 +111,7 @@ def page(
         "status": status,
         "hasMore": has_more,
         "nextCursor": next_cursor,
+        "evidenceCoverage": coverage(),
         "activeReleaseSlots": [],
         "dates": dates,
         "usage": {"d1": {"queryCount": 1, "rowsRead": 10, "rowsWritten": 0, "rowsReadKnown": True, "rowsWrittenKnown": True}, "r2": {"classA": 0, "classB": r2_head_count, "headCount": r2_head_count, "headLimit": 64}, "truncated": False},
@@ -187,6 +207,24 @@ def test_fixture_bundle_validates_against_published_json_schema() -> None:
     assert not errors, [error.message for error in errors]
 
 
+def test_inventory_page_requires_explicit_collection_coverage() -> None:
+    body = json.loads(page(["2026-08-27"]).decode())
+    body.pop("evidenceCoverage")
+    instance = exporter(FixtureTransport({None: (200, json.dumps(body).encode())}))
+    result = instance.collect()
+    assert result.errors[-1]["code"] == "evidenceCoverage_missing"
+
+
+def test_inventory_page_rejects_unexplained_collection_truncation() -> None:
+    body = json.loads(page(["2026-08-27"]).decode())
+    body["evidenceCoverage"]["sourceReadiness"]["truncated"] = True
+    body["evidenceCoverage"]["sourceReadiness"]["reason"] = "ROW_LIMIT"
+    body["status"] = "COMPLETE"
+    instance = exporter(FixtureTransport({None: (200, json.dumps(body).encode())}))
+    result = instance.collect()
+    assert result.errors[-1]["code"] == "inventory_evidence_coverage_reason_missing"
+
+
 def test_r2_gap_summary_is_bounded_and_auditable() -> None:
     body = json.loads(page(["2026-08-27"]).decode())
     release_id = "release:2026-08-27:gap-fixture"
@@ -210,6 +248,10 @@ def test_r2_gap_summary_is_bounded_and_auditable() -> None:
     assert r2["suspiciousGapCount"] == 501
     assert r2["suspiciousGapsTruncated"] is True
     assert r2["suspiciousGapsSha256"] == canonical_sha256(sorted(expected_gaps))
+    assert r2["suspiciousGapDetailsCount"] == 501
+    assert r2["suspiciousGapDetailsTruncated"] is True
+    assert r2["suspiciousGapDetails"][0]["status"] == "HASH_MISSING"
+    assert r2["suspiciousGapDetails"][0]["releaseId"] == release_id
     validate_evidence_bundle(bundle)
     audit_result, second_hash = audit_twice(bundle, CONFIG)
     assert audit_result["budget"]["r2InventoryStatus"] == "INCOMPLETE"

@@ -7,7 +7,7 @@
   "required": [
     "schemaVersion", "contract", "campaignId", "capturedAt", "exportStatus", "errors",
     "scope", "pages", "inventory", "releaseManifests", "pipelineWindows", "r2Objects",
-    "activeReleaseSlots", "r2Inventory", "accountTelemetry", "accountTelemetryEvidence", "d1Audit",
+    "activeReleaseSlots", "evidenceCoverage", "r2Inventory", "accountTelemetry", "accountTelemetryEvidence", "d1Audit",
     "runtimeEvidence", "readOnlyAssertions", "protectedPathsTouched", "recoveryEstimate",
     "resourceUsage", "fingerprints"
   ],
@@ -83,7 +83,7 @@
       "type": "array", "maxItems": 250,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["kind", "requestCursor", "responseSha256", "responseBytes", "capturedAt", "dateCount", "hasMore", "nextCursor"],
+        "required": ["kind", "requestCursor", "responseSha256", "responseBytes", "capturedAt", "dateCount", "hasMore", "nextCursor", "evidenceCoverage"],
         "properties": {
           "kind": { "const": "recovery-inventory" },
           "requestCursor": { "type": ["string", "null"], "maxLength": 10 },
@@ -93,6 +93,7 @@
           "dateCount": { "type": "integer", "minimum": 0, "maximum": 100 },
           "hasMore": { "type": "boolean" },
           "nextCursor": { "type": ["string", "null"], "maxLength": 160 },
+          "evidenceCoverage": { "$ref": "#/$defs/evidenceCoverage" },
           "usage": { "$ref": "#/$defs/pageUsage" }
         }
       }
@@ -112,6 +113,7 @@
         }
       }
     },
+    "evidenceCoverage": { "$ref": "#/$defs/evidenceCoverage" },
     "inventory": {
       "type": "array", "maxItems": 10000,
       "items": {
@@ -214,6 +216,10 @@
         "suspiciousGapCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
         "suspiciousGapsSha256": { "$ref": "#/$defs/sha256" },
         "suspiciousGapsTruncated": { "type": "boolean" },
+        "suspiciousGapDetails": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/r2GapDetail" } },
+        "suspiciousGapDetailsCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "suspiciousGapDetailsSha256": { "$ref": "#/$defs/sha256" },
+        "suspiciousGapDetailsTruncated": { "type": "boolean" },
         "source": { "type": "string", "maxLength": 120 }
       }
     },
@@ -247,6 +253,50 @@
     "countOrUnknown": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "const": "unknown" }] },
     "metric": { "type": "object", "additionalProperties": false, "required": ["value", "measuredAt", "reason"], "properties": { "value": { "oneOf": [{ "type": "number", "minimum": 0 }, { "const": "unknown" }] }, "measuredAt": { "type": ["string", "null"] }, "reason": { "type": ["string", "null"], "maxLength": 512 }, "source": { "type": "string", "maxLength": 120 } } },
     "stageStatus": { "type": "object", "additionalProperties": false, "required": ["raw", "normalized", "model", "pcf_exact", "dashboard", "etf_penetration", "date_visible"], "properties": { "raw": { "type": "string" }, "normalized": { "type": "string" }, "model": { "type": "string" }, "pcf_exact": { "type": "string" }, "dashboard": { "type": "string" }, "etf_penetration": { "type": "string" }, "date_visible": { "type": "string" } } },
+    "evidenceCoverageEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["queried", "rowLimit", "returnedRows", "truncated", "reason"],
+      "properties": {
+        "queried": { "type": "boolean" },
+        "rowLimit": { "type": ["integer", "null"], "minimum": 0 },
+        "returnedRows": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "maxLength": 64 }
+      }
+    },
+    "evidenceCoverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["historicalSnapshots", "dashboardSnapshots", "releaseManifests", "sourceReadiness", "artifactPointers", "models", "marketHistory", "pipelineWindows", "recoveries", "activeReleaseSlots"],
+      "properties": {
+        "historicalSnapshots": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "dashboardSnapshots": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "releaseManifests": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "sourceReadiness": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "artifactPointers": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "models": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "marketHistory": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "pipelineWindows": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "recoveries": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "activeReleaseSlots": { "$ref": "#/$defs/evidenceCoverageEntry" }
+      }
+    },
+    "r2GapDetail": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dataDate", "releaseId", "slot", "artifactName", "status"],
+      "properties": {
+        "dataDate": { "$ref": "#/$defs/date" },
+        "releaseId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "slot": { "enum": ["dashboard", "etf_penetration"] },
+        "artifactName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "enum": ["HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE", "UNKNOWN"] },
+        "key": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "expectedSha256": { "$ref": "#/$defs/sha256" },
+        "actualSha256": { "$ref": "#/$defs/sha256" },
+        "expectedBytes": { "type": "integer", "minimum": 0 },
+        "actualBytes": { "type": "integer", "minimum": 0 },
+        "error": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
     "assertions": { "type": "object", "additionalProperties": false, "required": ["d1Writes", "r2Writes", "workflowDispatches", "activePointerChanges", "flagChanges"], "properties": { "d1Writes": { "$ref": "#/$defs/countOrUnknown" }, "r2Writes": { "$ref": "#/$defs/countOrUnknown" }, "workflowDispatches": { "$ref": "#/$defs/countOrUnknown" }, "activePointerChanges": { "$ref": "#/$defs/countOrUnknown" }, "flagChanges": { "$ref": "#/$defs/countOrUnknown" } } },
     "pageUsage": {
       "type": "object", "additionalProperties": false,

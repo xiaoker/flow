@@ -39,6 +39,18 @@ EVIDENCE_SCHEMA_VERSION = 2
 EVIDENCE_CONTRACT = "evidence-bundle-v2"
 INVENTORY_SCHEMA_VERSION = 1
 INVENTORY_CONTRACT = "recovery-inventory-v1"
+INVENTORY_EVIDENCE_COLLECTIONS = (
+    "historicalSnapshots",
+    "dashboardSnapshots",
+    "releaseManifests",
+    "sourceReadiness",
+    "artifactPointers",
+    "models",
+    "marketHistory",
+    "pipelineWindows",
+    "recoveries",
+    "activeReleaseSlots",
+)
 SCOPE_START = "2024-08-01"
 SCOPE_END = "2026-09-03"
 CAMPAIGN_ID = "r0d-reconciliation-through-20260903"
@@ -93,6 +105,7 @@ NON_FATAL_PAGINATED_REASONS = frozenset({
 # condition cannot silently change the evidence contract.
 SEMANTIC_INCOMPLETE_REASONS = frozenset({
     "D1_QUERY_LIMIT",
+    "D1_EVIDENCE_TRUNCATED",
     "D1_ROWS_READ_LIMIT",
     "D1_ROWS_READ_TELEMETRY_UNKNOWN",
     "D1_ROWS_WRITTEN_TELEMETRY_UNKNOWN",
@@ -358,6 +371,51 @@ def _safe_nonnegative(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _validate_evidence_coverage(value: Any, *, field: str = "evidenceCoverage") -> dict[str, dict[str, Any]]:
+    """Validate the per-query coverage receipt emitted by the inventory route.
+
+    A D1 ``LIMIT`` is otherwise indistinguishable from a complete result set.
+    Requiring a receipt for every collection makes a capped response explicit
+    and keeps the exporter fail-closed when an older endpoint is encountered.
+    """
+
+    if not isinstance(value, Mapping):
+        raise RecoveryEvidenceError(f"{field}_missing")
+    output: dict[str, dict[str, Any]] = {}
+    for collection in INVENTORY_EVIDENCE_COLLECTIONS:
+        item = value.get(collection)
+        if not isinstance(item, Mapping):
+            raise RecoveryEvidenceError(f"{field}_{collection}_invalid")
+        queried = item.get("queried")
+        row_limit = item.get("rowLimit")
+        returned_rows = item.get("returnedRows")
+        truncated = item.get("truncated")
+        reason = item.get("reason")
+        if not isinstance(queried, bool) or (row_limit is not None and _safe_nonnegative(row_limit) is None) or _safe_nonnegative(returned_rows) is None or not isinstance(truncated, bool):
+            raise RecoveryEvidenceError(f"{field}_{collection}_invalid")
+        if reason is not None and _bounded_text(reason, max_length=64) is None:
+            raise RecoveryEvidenceError(f"{field}_{collection}_invalid")
+        if queried and row_limit is None:
+            raise RecoveryEvidenceError(f"{field}_{collection}_limit_missing")
+        if not queried and returned_rows != 0:
+            raise RecoveryEvidenceError(f"{field}_{collection}_unqueried_rows")
+        if truncated and reason != "ROW_LIMIT":
+            raise RecoveryEvidenceError(f"{field}_{collection}_truncation_reason")
+        if not truncated and reason == "ROW_LIMIT":
+            raise RecoveryEvidenceError(f"{field}_{collection}_truncation_flag")
+        output[collection] = {
+            "queried": queried,
+            "rowLimit": row_limit,
+            "returnedRows": returned_rows,
+            "truncated": truncated,
+            "reason": reason,
+        }
+    unknown = set(value) - set(INVENTORY_EVIDENCE_COLLECTIONS)
+    if unknown:
+        raise RecoveryEvidenceError(f"{field}_unknown_collection")
+    return output
+
+
 def _metric_unknown(reason: str, measured_at: str | None = None) -> dict[str, Any]:
     return {"value": "unknown", "measuredAt": measured_at, "reason": reason}
 
@@ -571,6 +629,14 @@ class RecoveryEvidenceExporter:
             )
         if status_value == "INCOMPLETE" and not deferred_r2 and not semantic_incomplete:
             raise RecoveryEvidenceError("inventory_incomplete", ",".join(reasons) or "missing_reason")
+        coverage = _validate_evidence_coverage(body.get("evidenceCoverage"))
+        coverage_truncated = [name for name, item in coverage.items() if item["truncated"]]
+        if coverage_truncated and "D1_EVIDENCE_TRUNCATED" not in reasons:
+            raise RecoveryEvidenceError("inventory_evidence_coverage_reason_missing")
+        if "D1_EVIDENCE_TRUNCATED" in reasons and not coverage_truncated:
+            raise RecoveryEvidenceError("inventory_evidence_coverage_truncated_missing")
+        if status_value == "COMPLETE" and coverage_truncated:
+            raise RecoveryEvidenceError("inventory_truncated_complete")
         dates = body.get("dates")
         if not isinstance(dates, list) or len(dates) > MAX_DATES_PER_PAGE:
             raise RecoveryEvidenceError("inventory_dates_exceed_limit")
@@ -944,6 +1010,14 @@ def _domain_applicability(
     ):
         return "REQUIRED", "model_row"
 
+    historical_evidence = date_record.get("dateVisible")
+    if isinstance(historical_evidence, Mapping) and isinstance(historical_evidence.get("evidence"), list) and historical_evidence["evidence"]:
+        # Legacy snapshots prove that a date was visible, but this schema has
+        # no per-domain applicability/source record for those snapshots.  Keep
+        # the state UNKNOWN and expose the precise provenance gap instead of
+        # treating UI visibility as proof of a required source.
+        return "UNKNOWN", "legacy_provenance_not_recorded"
+
     return "UNKNOWN", "unknown"
 
 
@@ -1051,6 +1125,10 @@ def _domain_row(
             "sourceEvidence": bool(raw_items or matching_readiness or model_items or date_record_map.get("artifactPointers")),
             "sourceReadiness": matching_readiness,
             "applicabilitySource": applicability_source,
+            "applicabilityEvidence": {
+                "status": "NOT_RECORDED" if applicability_source == "legacy_provenance_not_recorded" else "AUTHORITATIVE" if applicability_source != "unknown" else "UNKNOWN",
+                "source": applicability_source,
+            },
         },
     }
 
@@ -1167,6 +1245,66 @@ def _r2_gap_summary(gaps: Sequence[str]) -> tuple[list[str], int, str, bool]:
     return sample, len(ordered), canonical_sha256(ordered), len(ordered) > len(sample)
 
 
+def _r2_gap_details(
+    dates: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], int, str, bool]:
+    """Keep a bounded, deterministic classification for every bad artifact."""
+
+    statuses = {"HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE", "UNKNOWN"}
+    details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for date_record in dates:
+        releases = date_record.get("releases") if isinstance(date_record.get("releases"), Mapping) else {}
+        for slot, values in releases.items():
+            if slot not in {"dashboard", "etf_penetration"} or not isinstance(values, list):
+                continue
+            for release in values:
+                if not isinstance(release, Mapping):
+                    continue
+                as_of = release.get("asOf")
+                release_id = release.get("releaseId")
+                if not _valid_date(as_of) or not isinstance(release_id, str) or not release_id:
+                    continue
+                artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), Mapping) else {}
+                for name, artifact in artifacts.items():
+                    if not isinstance(name, str) or not name or not isinstance(artifact, Mapping):
+                        continue
+                    status = artifact.get("status") if artifact.get("status") in statuses else "UNKNOWN"
+                    actual_sha = _hash_from_any(artifact.get("actualSha256"))
+                    actual_bytes = _safe_nonnegative(artifact.get("actualBytes"))
+                    if status == "READY" and actual_sha and actual_bytes is not None:
+                        continue
+                    detail: dict[str, Any] = {
+                        "dataDate": as_of,
+                        "releaseId": release_id,
+                        "slot": slot,
+                        "artifactName": name,
+                        "status": status,
+                    }
+                    key = _bounded_text(artifact.get("key"), max_length=MAX_R2_FAILURE_KEY_LENGTH)
+                    if key and key.startswith("market-data/releases/") and ".." not in key and "//" not in key:
+                        detail["key"] = key
+                    expected_sha = _hash_from_any(artifact.get("declaredSha256"))
+                    if expected_sha:
+                        detail["expectedSha256"] = expected_sha
+                    if actual_sha:
+                        detail["actualSha256"] = actual_sha
+                    expected_bytes = _safe_nonnegative(artifact.get("declaredBytes"))
+                    if expected_bytes is not None:
+                        detail["expectedBytes"] = expected_bytes
+                    if actual_bytes is not None:
+                        detail["actualBytes"] = actual_bytes
+                    error = _bounded_text(artifact.get("error"), max_length=128)
+                    if error:
+                        detail["error"] = error
+                    identity = (str(as_of), release_id, slot, name)
+                    details[identity] = detail
+    ordered = [details[key] for key in sorted(details)]
+    if len(ordered) > MAX_R2_GAP_COUNT:
+        raise RecoveryEvidenceError("r2_gap_detail_count_exceeds_limit", str(MAX_R2_GAP_COUNT))
+    sample = ordered[:MAX_R2_GAP_SAMPLES]
+    return sample, len(ordered), canonical_sha256(ordered), len(ordered) > len(sample)
+
+
 def _usage_summary(
     pages: Sequence[InventoryPage],
     *,
@@ -1258,6 +1396,50 @@ def _active_release_slots(pages: Sequence[InventoryPage]) -> list[dict[str, Any]
                 "activatedAt": item.get("activatedAt") if isinstance(item.get("activatedAt"), str) else None,
             }
     return sorted(values.values(), key=lambda item: (item["slot"], item["releaseId"]))[:2]
+
+
+def _aggregate_evidence_coverage(pages: Sequence[InventoryPage]) -> dict[str, dict[str, Any]]:
+    """Merge per-page D1 coverage without turning an omitted page into proof."""
+
+    output = {
+        collection: {
+            "queried": False,
+            "rowLimit": None,
+            "returnedRows": 0,
+            "truncated": False,
+            "reason": "NO_VALID_PAGE",
+        }
+        for collection in INVENTORY_EVIDENCE_COLLECTIONS
+    }
+    for page in pages:
+        raw = page.body.get("evidenceCoverage")
+        if not isinstance(raw, Mapping):
+            continue
+        for collection in INVENTORY_EVIDENCE_COLLECTIONS:
+            item = raw.get(collection)
+            if not isinstance(item, Mapping):
+                continue
+            merged = output[collection]
+            if item.get("queried") is True:
+                merged["queried"] = True
+                row_limit = _safe_nonnegative(item.get("rowLimit"))
+                if row_limit is not None:
+                    merged["rowLimit"] = max(merged["rowLimit"] or 0, row_limit)
+                returned = _safe_nonnegative(item.get("returnedRows")) or 0
+                merged["returnedRows"] += returned
+            if item.get("truncated") is True:
+                merged["truncated"] = True
+                merged["reason"] = "ROW_LIMIT"
+            elif merged["reason"] == "NO_VALID_PAGE" and isinstance(item.get("reason"), str):
+                merged["reason"] = item["reason"]
+            elif merged["reason"] in {"R2_CONTINUATION", "NO_VALID_PAGE"} and item.get("queried") is True:
+                merged["reason"] = None
+    for item in output.values():
+        if item["truncated"]:
+            item["reason"] = "ROW_LIMIT"
+        elif item["queried"] and item["reason"] in {"NO_VALID_PAGE", "R2_CONTINUATION"}:
+            item["reason"] = None
+    return output
 
 
 def _unknown_telemetry(reason: str, measured_at: str | None) -> dict[str, dict[str, Any]]:
@@ -1389,6 +1571,7 @@ def build_evidence_bundle(
         r2_gaps = sorted(set(r2_gaps))
     r2_gaps = sorted(set(r2_gaps))
     r2_gap_sample, r2_gap_count, r2_gap_sha256, r2_gaps_truncated = _r2_gap_summary(r2_gaps)
+    r2_gap_detail_sample, r2_gap_detail_count, r2_gap_detail_sha256, r2_gap_detail_truncated = _r2_gap_details(dates)
     r2_index_payload = {"objects": r2_objects, "gaps": r2_gaps, "source": "release-manifest-head-receipts"}
     r2_index_sha = next(
         (
@@ -1401,6 +1584,7 @@ def build_evidence_bundle(
     )
     d1_audit, usage = _usage_summary(pages, request_count=request_count, transport_pages=transport_pages)
     telemetry = dict(official_usage or _unknown_telemetry("official_usage_not_provided", captured_at))
+    evidence_coverage = _aggregate_evidence_coverage(pages)
     source_receipts = [
         {
             "kind": "recovery-inventory",
@@ -1411,6 +1595,7 @@ def build_evidence_bundle(
             "dateCount": len(page.body.get("dates") or []),
             "hasMore": page.body.get("hasMore"),
             "nextCursor": page.body.get("nextCursor"),
+            "evidenceCoverage": page.body.get("evidenceCoverage", {}),
             "usage": _page_usage(page),
         }
         for page in pages
@@ -1429,6 +1614,7 @@ def build_evidence_bundle(
         "scope": {"startDate": start, "endDateInclusive": end, "priorityDates": priority},
         "pages": source_receipts,
         "activeReleaseSlots": _active_release_slots(pages),
+        "evidenceCoverage": evidence_coverage,
         "inventory": inventory,
         "releaseManifests": releases,
         "pipelineWindows": pipelines,
@@ -1444,6 +1630,10 @@ def build_evidence_bundle(
             "suspiciousGapCount": r2_gap_count,
             "suspiciousGapsSha256": r2_gap_sha256,
             "suspiciousGapsTruncated": r2_gaps_truncated,
+            "suspiciousGapDetails": r2_gap_detail_sample,
+            "suspiciousGapDetailsCount": r2_gap_detail_count,
+            "suspiciousGapDetailsSha256": r2_gap_detail_sha256,
+            "suspiciousGapDetailsTruncated": r2_gap_detail_truncated,
             "source": "release-manifest-head-receipts",
         },
         "accountTelemetry": telemetry,
@@ -1520,6 +1710,11 @@ def validate_evidence_bundle(bundle: Mapping[str, Any]) -> None:
             raise RecoveryEvidenceError(f"evidence_{field}_invalid")
     if len(bundle["pages"]) > MAX_PAGES or len(bundle["r2Objects"]) > MAX_R2_OBJECTS or len(bundle["activeReleaseSlots"]) > 2:
         raise RecoveryEvidenceError("evidence_bound_exceeded")
+    _validate_evidence_coverage(bundle.get("evidenceCoverage"))
+    for page in bundle["pages"]:
+        if not isinstance(page, Mapping):
+            raise RecoveryEvidenceError("evidence_page_invalid")
+        _validate_evidence_coverage(page.get("evidenceCoverage"), field="evidence_page_coverage")
     r2_inventory = bundle.get("r2Inventory")
     if not isinstance(r2_inventory, Mapping):
         raise RecoveryEvidenceError("evidence_r2_inventory_invalid")
@@ -1540,6 +1735,28 @@ def validate_evidence_bundle(bundle: Mapping[str, Any]) -> None:
             raise RecoveryEvidenceError("evidence_r2_suspicious_gap_hash_mismatch")
     elif truncated:
         raise RecoveryEvidenceError("evidence_r2_suspicious_gap_hash_required")
+    gap_details = r2_inventory.get("suspiciousGapDetails", [])
+    if not isinstance(gap_details, list) or len(gap_details) > MAX_R2_GAP_SAMPLES:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_invalid")
+    detail_count = r2_inventory.get("suspiciousGapDetailsCount", len(gap_details))
+    if not isinstance(detail_count, int) or isinstance(detail_count, bool) or detail_count < len(gap_details) or detail_count > MAX_R2_GAP_COUNT:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_count_invalid")
+    detail_truncated = r2_inventory.get("suspiciousGapDetailsTruncated", detail_count > len(gap_details))
+    if not isinstance(detail_truncated, bool) or detail_truncated != (detail_count > len(gap_details)):
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_truncation_invalid")
+    detail_sha = _hash_from_any(r2_inventory.get("suspiciousGapDetailsSha256"))
+    if r2_inventory.get("suspiciousGapDetailsSha256") not in (None, "") and not detail_sha:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_hash_invalid")
+    if detail_truncated and not detail_sha:
+        raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_hash_required")
+    if detail_sha and not detail_truncated:
+        canonical_details: list[dict[str, Any]] = []
+        for item in gap_details:
+            if not isinstance(item, Mapping):
+                raise RecoveryEvidenceError("evidence_r2_suspicious_gap_detail_invalid")
+            canonical_details.append(dict(item))
+        if detail_sha != canonical_sha256(canonical_details):
+            raise RecoveryEvidenceError("evidence_r2_suspicious_gap_details_hash_mismatch")
     if bundle.get("exportStatus") == "COMPLETE" and (not bundle["pages"] or bundle["errors"]):
         raise RecoveryEvidenceError("complete_export_without_complete_pages")
     secret_path = _contains_secret_key(bundle)

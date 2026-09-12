@@ -365,6 +365,40 @@ test("D1 row-read hard cap fails closed before the bounded page can look complet
   assert.equal(overBudget.d1.calls.length, 1);
 });
 
+test("D1 evidence collection caps are explicit and fail closed", async () => {
+  const fixture = baseFixture();
+  fixture.d1.fixture.readiness = Array.from({ length: 500 }, (_, index) => ({
+    target_date: "2026-08-27",
+    source_id: `source-${index}`,
+    status: "ready",
+    required: 1,
+    observed_at: "2026-08-27T12:00:00.000Z",
+    deadline_at: null,
+    deadline_exceeded: 0,
+    observed_dates_json: "[]",
+    watermark_json: "{}",
+    reason: null,
+    evidence_json: JSON.stringify({}),
+    updated_at: "2026-08-27T12:00:00.000Z",
+  }));
+  const result = await collectRecoveryInventory(fixture, {
+    start: "2026-08-27",
+    end: "2026-08-27",
+    cursor: null,
+    limit: 1,
+  });
+  assert.equal(result.status, "INCOMPLETE", JSON.stringify(result));
+  assert.ok(result.incompleteReasons.includes("D1_EVIDENCE_TRUNCATED"));
+  assert.deepEqual(result.evidenceCoverage.sourceReadiness, {
+    queried: true,
+    rowLimit: 500,
+    returnedRows: 500,
+    truncated: true,
+    reason: "ROW_LIMIT",
+  });
+  assert.equal(result.usage.truncated, true);
+});
+
 test("mid-page D1 failure returns incomplete and does not claim an empty complete page", async () => {
   const fixture = baseFixture();
   fixture.d1.failOn = "SELECT release_id";
