@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import io
 import json
 import re
-import gzip
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,13 @@ SZSE_ETF = SourceSpec(
     dataset="etf_scale",
     url="https://fund.szse.cn/api/report/ShowReport",
     date_semantics="source_page_previous_trading_day",
+)
+SZSE_ETF_HISTORY = SourceSpec(
+    source_id="szse",
+    publisher="深圳证券交易所",
+    dataset="etf_scale",
+    url="https://fund.szse.cn/api/report/ShowReport/data",
+    date_semantics="source_historical_scale_size_date",
 )
 SSE_MARGIN = SourceSpec(
     source_id="sse",
@@ -220,6 +228,25 @@ def _iso_date(value: Any, *, field: str) -> str:
     if pd.isna(parsed):
         raise ValueError(f"{field} did not contain a valid date: {value!r}")
     return parsed.strftime("%Y-%m-%d")
+
+
+def _archive_file(root: Path, value: Any, *, field: str) -> Path:
+    """Resolve one recovery artifact without permitting path escapes."""
+
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"recovery archive {field} is missing")
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"recovery archive {field} escapes archive root") from exc
+    if not candidate.is_file():
+        raise ValueError(f"recovery archive {field} does not exist: {candidate}")
+    return candidate
 
 
 def _szse_etf_dates(
@@ -1047,6 +1074,136 @@ class OfficialMarketAdapters:
             }
         )
         return self._persist(normalized, artifact, trade_date)
+
+    def fetch_szse_etf_history(
+        self, archive_root: Path, trade_date: str
+    ) -> tuple[pd.DataFrame, FetchArtifact]:
+        """Load one exact-date SZSE ETF snapshot from a verified archive.
+
+        The live SZSE list is a moving workbook and cannot be relabelled for
+        an older recovery date.  ``recover_szse_etf_history.py`` stores the
+        original per-fund responses plus a normalized CSV under an isolated
+        archive root.  This adapter only accepts a manifest entry whose
+        requested date, source identity, raw hash, metadata and normalized
+        rows all agree; it never fetches or synthesizes a historical value.
+        """
+
+        requested_date = _iso_date(trade_date, field="trade_date")
+        root = archive_root.resolve()
+        manifest_path = _archive_file(root, root / "manifest.json", field="manifest")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError("recovery archive manifest is not valid JSON") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("recovery archive manifest must be an object")
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ValueError("recovery archive manifest artifacts must be an array")
+        matches = [
+            value
+            for value in artifacts
+            if isinstance(value, dict)
+            and str(value.get("requested_date") or "") == requested_date
+            and isinstance(value.get("source"), dict)
+            and value["source"].get("source_id") == "szse"
+            and value["source"].get("dataset") == "etf_scale"
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"recovery archive must contain exactly one SZSE ETF artifact for {requested_date}"
+            )
+        payload = matches[0]
+        source_payload = payload.get("source") or {}
+        if any(
+            (
+                source_payload.get("source_id") != SZSE_ETF_HISTORY.source_id,
+                source_payload.get("publisher") != SZSE_ETF_HISTORY.publisher,
+                source_payload.get("dataset") != SZSE_ETF_HISTORY.dataset,
+                source_payload.get("url") != SZSE_ETF_HISTORY.url,
+                source_payload.get("source_grade") != SZSE_ETF_HISTORY.source_grade,
+                source_payload.get("date_semantics") != SZSE_ETF_HISTORY.date_semantics,
+            )
+        ):
+            raise ValueError("recovery archive SZSE artifact is not historical-scale evidence")
+
+        raw_path = _archive_file(root, payload.get("raw_path"), field="raw_path")
+        metadata_path = _archive_file(root, payload.get("metadata_path"), field="metadata_path")
+        normalized_path = _archive_file(root, payload.get("normalized_path"), field="normalized_path")
+        raw_content = raw_path.read_bytes()
+        digest = hashlib.sha256(raw_content).hexdigest()
+        if digest != str(payload.get("sha256") or ""):
+            raise ValueError("recovery archive raw SHA-256 does not match manifest")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError("recovery archive metadata is not valid JSON") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("recovery archive metadata must be an object")
+        metadata_source = metadata.get("source") if isinstance(metadata.get("source"), dict) else metadata
+        if any(
+            (
+                metadata.get("sha256") != digest,
+                metadata.get("requested_date") != requested_date,
+                metadata_source.get("source_id") != "szse",
+                metadata_source.get("publisher") != SZSE_ETF_HISTORY.publisher,
+                metadata_source.get("dataset") != "etf_scale",
+                metadata_source.get("url") != SZSE_ETF_HISTORY.url,
+                metadata_source.get("source_grade") != SZSE_ETF_HISTORY.source_grade,
+                metadata_source.get("date_semantics") != SZSE_ETF_HISTORY.date_semantics,
+            )
+        ):
+            raise ValueError("recovery archive metadata does not match historical artifact")
+
+        try:
+            normalized = pd.read_csv(
+                normalized_path,
+                dtype={"instrument_code": str, "market": str},
+            )
+        except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+            raise ValueError("recovery archive normalized CSV is unreadable") from exc
+        required = {"trade_date", "market", "instrument_code", "instrument_name", "shares", "date_basis"}
+        missing = sorted(required - set(normalized.columns))
+        if missing or normalized.empty:
+            raise ValueError(f"recovery archive normalized CSV is incomplete: {missing}")
+        dates = sorted(normalized["trade_date"].dropna().astype(str).unique().tolist())
+        if dates != [requested_date]:
+            raise ValueError(
+                f"recovery archive normalized date mismatch: {dates!r} != {[requested_date]!r}"
+            )
+        if not normalized["market"].astype(str).eq("SZSE").all():
+            raise ValueError("recovery archive normalized market is not SZSE")
+        if not normalized["date_basis"].astype(str).eq(SZSE_ETF_HISTORY.date_semantics).all():
+            raise ValueError("recovery archive normalized date basis is not historical-scale evidence")
+        if not normalized["instrument_name"].fillna("").astype(str).str.strip().ne("").all():
+            raise ValueError("recovery archive contains an ETF without a name")
+        normalized["instrument_code"] = normalized["instrument_code"].astype(str).str.zfill(6)
+        if not normalized["instrument_code"].str.fullmatch(r"\d{6}").all():
+            raise ValueError("recovery archive contains an invalid ETF code")
+        shares = pd.to_numeric(normalized["shares"], errors="coerce")
+        if shares.isna().any() or (shares < 0).any():
+            raise ValueError("recovery archive contains invalid ETF shares")
+        if normalized.duplicated(["trade_date", "market", "instrument_code"]).any():
+            raise ValueError("recovery archive contains duplicate ETF business keys")
+
+        observed_at = str(payload.get("observed_at") or metadata.get("observed_at") or "")
+        status_code = int(metadata.get("status_code") or 200)
+        content_type = str(payload.get("content_type") or "application/json")
+        artifact = FetchArtifact(
+            source=SZSE_ETF_HISTORY,
+            requested_date=requested_date,
+            observed_at=observed_at,
+            status_code=status_code,
+            content_type=content_type,
+            raw_path=str(raw_path),
+            metadata_path=str(metadata_path),
+            sha256=digest,
+        )
+        normalized = normalized.copy()
+        normalized["source_id"] = SZSE_ETF_HISTORY.source_id
+        normalized["source_grade"] = SZSE_ETF_HISTORY.source_grade
+        normalized["observed_at"] = observed_at
+        return self._persist(normalized, artifact, requested_date)
 
     def fetch_sse_margin(
         self, start_date: str, end_date: str

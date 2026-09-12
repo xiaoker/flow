@@ -149,6 +149,7 @@ def collect_phase0(
     pcf_max_codes: int = DEFAULT_PCF_MAX_CODES,
     session: requests.Session | None = None,
     pcf_max_workers: int = 4,
+    szse_etf_history_root: Path | None = None,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -158,6 +159,11 @@ def collect_phase0(
         raise ValueError("pcf_max_codes must be a non-negative integer")
     if not isinstance(pcf_max_workers, int) or pcf_max_workers <= 0:
         raise ValueError("pcf_max_workers must be a positive integer")
+    if szse_etf_history_root is not None:
+        if not isinstance(szse_etf_history_root, Path):
+            raise ValueError("szse_etf_history_root must be a Path")
+        if not szse_etf_history_root.is_dir():
+            raise ValueError("szse_etf_history_root must be an existing directory")
     dates = sorted(dates)
     run_id = new_run_id()
     started_at = now_iso()
@@ -267,13 +273,26 @@ def collect_phase0(
             frames["sse_etf_nav"].append(frame)
             artifacts.append(artifact)
 
-    result = run_step(
-        "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
-    )
-    if result:
-        frame, artifact = result
-        frames["szse_etf"].append(frame)
-        artifacts.append(artifact)
+    if szse_etf_history_root is None:
+        result = run_step(
+            "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
+        )
+        if result:
+            frame, artifact = result
+            frames["szse_etf"].append(frame)
+            artifacts.append(artifact)
+    else:
+        for trade_date in dates:
+            result = run_step(
+                f"szse_etf:history:{trade_date}",
+                lambda date=trade_date: adapters.fetch_szse_etf_history(
+                    szse_etf_history_root, date
+                ),
+            )
+            if result:
+                frame, artifact = result
+                frames["szse_etf"].append(frame)
+                artifacts.append(artifact)
 
     result = run_step(
         f"sse_margin:{dates[0]}:{dates[-1]}",
@@ -489,6 +508,21 @@ def collect_phase0(
     quality["profiles"] = profiles
     quality["errors"] = errors
     quality["optional_errors"] = optional_errors
+    szse_frame = combined.get("szse_etf", pd.DataFrame())
+    szse_page_dates = (
+        []
+        if szse_frame.empty or "source_page_date" not in szse_frame.columns
+        else [
+            str(value)
+            for value in szse_frame["source_page_date"].dropna().astype(str).tolist()
+            if str(value).strip() and str(value).lower() != "nan"
+        ]
+    )
+    szse_trade_dates = (
+        []
+        if szse_frame.empty or "trade_date" not in szse_frame.columns
+        else [str(value) for value in szse_frame["trade_date"].dropna().astype(str).tolist()]
+    )
     manifest = {
         "run_id": run_id,
         "collection_window": collection_window,
@@ -496,16 +530,8 @@ def collect_phase0(
         "started_at": started_at,
         "finished_at": now_iso(),
         "requested_dates": dates,
-        "szse_etf_page_date": (
-            None
-            if combined.get("szse_etf", pd.DataFrame()).empty
-            else str(combined["szse_etf"]["source_page_date"].max())
-        ),
-        "szse_etf_trade_date": (
-            None
-            if combined.get("szse_etf", pd.DataFrame()).empty
-            else str(combined["szse_etf"]["trade_date"].max())
-        ),
+        "szse_etf_page_date": max(szse_page_dates) if szse_page_dates else None,
+        "szse_etf_trade_date": max(szse_trade_dates) if szse_trade_dates else None,
         "artifacts": [],
         "optional_errors": optional_errors,
         "combined_paths": combined_paths,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -206,6 +207,173 @@ def _post_child_request_reserve(manifest: dict[str, Any]) -> int:
     if not isinstance(artifacts, list) or not artifacts:
         raise LiveRecoveryError("live_recovery_history_artifacts_missing")
     return 2 + (len(artifacts) + 1) * 3
+
+
+def _szse_history_request_budget(scope: RecoveryScope) -> int:
+    """Read the explicit SZSE historical-source allocation from the plan.
+
+    Historical SZSE recovery is a per-fund request fan-out.  It must not
+    silently consume the generic recovery allowance because doing so could
+    starve the publish checkpoint or exceed the account's measured budget.
+    An approved plan therefore carries a dedicated, immutable allocation.
+    """
+
+    manifest = scope.budget_manifest
+    if not isinstance(manifest, dict):
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_budget_missing",
+            "budgetManifest must include szseHistoryMaxRequests",
+            status="BLOCKED_QUALITY",
+        )
+    value = manifest.get("szseHistoryMaxRequests")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_budget_missing",
+            "budgetManifest.szseHistoryMaxRequests must be a positive integer",
+            status="BLOCKED_QUALITY",
+        )
+    if value >= scope.max_requests:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_budget_invalid",
+            "historical allocation must leave room for the collector and publish checkpoints",
+            status="BLOCKED_QUALITY",
+        )
+    return value
+
+
+def _invoke_szse_etf_history(
+    *,
+    scope: RecoveryScope,
+    dates: list[str],
+    artifact_root: Path,
+    workspace_root: Path,
+    max_requests: int,
+) -> tuple[Path, int]:
+    """Fetch exact-date SZSE scale evidence into the isolated recovery root."""
+
+    if not dates or max_requests <= 0:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_budget_invalid",
+            "dates and max_requests are required",
+            status="BLOCKED_QUALITY",
+        )
+    output_root = artifact_root / "szse-etf-history"
+    output_root.mkdir(parents=True, exist_ok=True)
+    try:
+        min_interval = float(os.environ.get("FLOW_RECOVERY_SZSE_HISTORY_MIN_INTERVAL_SECONDS", "0.5"))
+        workers = int(os.environ.get("FLOW_RECOVERY_SZSE_HISTORY_WORKERS", "4"))
+    except ValueError as exc:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_limits_invalid",
+            "history workers and interval must be numeric",
+            status="BLOCKED_QUALITY",
+        ) from exc
+    if not math.isfinite(min_interval) or min_interval < 0.5:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_interval_too_short",
+            "minimum is 0.5 seconds",
+            status="BLOCKED_QUALITY",
+        )
+    if workers < 1 or workers > 8:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_workers_invalid",
+            "workers must be between 1 and 8",
+            status="BLOCKED_QUALITY",
+        )
+
+    command = [
+        sys.executable,
+        str(workspace_root / "scripts/recover_szse_etf_history.py"),
+        "--dates",
+        *dates,
+        "--output-root",
+        str(output_root),
+        "--workers",
+        str(workers),
+        "--max-requests",
+        str(max_requests),
+        "--min-interval",
+        str(min_interval),
+    ]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{workspace_root / 'src'}:{workspace_root}"
+    try:
+        subprocess.run(
+            command,
+            cwd=workspace_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Do not echo child output: a request error could contain query
+        # parameters or credentials supplied by the runner environment.
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_fetch_failed",
+            f"exit={exc.returncode}",
+            status="FAILED_RETRYABLE",
+        ) from exc
+
+    manifest_path = output_root / "manifest.json"
+    try:
+        manifest = _read_json(manifest_path)
+    except (OSError, ValueError) as exc:
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_manifest_invalid",
+            "history helper did not produce a valid manifest",
+            status="BLOCKED_QUALITY",
+        ) from exc
+    manifest_dates = manifest.get("dates")
+    artifacts = manifest.get("artifacts")
+    request_count = manifest.get("requestCount")
+    artifact_dates = (
+        [
+            artifact.get("requested_date") if isinstance(artifact, dict) else None
+            for artifact in artifacts
+        ]
+        if isinstance(artifacts, list)
+        else []
+    )
+    artifact_dates_are_strings = all(isinstance(value, str) for value in artifact_dates)
+    if (
+        manifest_dates != dates
+        or not isinstance(artifacts, list)
+        or len(artifacts) != len(dates)
+        or not artifact_dates_are_strings
+        or (
+            artifact_dates_are_strings
+            and (
+                sorted(artifact_dates) != sorted(dates)
+                or len(set(artifact_dates)) != len(dates)
+            )
+        )
+        or isinstance(request_count, bool)
+        or not isinstance(request_count, int)
+        or request_count < 0
+        or request_count > max_requests
+    ):
+        raise LiveRecoveryError(
+            "live_recovery_szse_history_manifest_invalid",
+            "history dates, artifact count or request budget do not match the approved scope",
+            status="BLOCKED_QUALITY",
+        )
+    for artifact in artifacts:
+        source = artifact.get("source") if isinstance(artifact, dict) else None
+        if (
+            not isinstance(artifact, dict)
+            or artifact.get("requested_date") not in dates
+            or not isinstance(source, dict)
+            or source.get("source_id") != "szse"
+            or source.get("dataset") != "etf_scale"
+            or source.get("date_semantics") != "source_historical_scale_size_date"
+        ):
+            raise LiveRecoveryError(
+                "live_recovery_szse_history_manifest_invalid",
+                "history artifact source or date semantics are invalid",
+                status="BLOCKED_QUALITY",
+            )
+    return output_root, request_count
 
 
 def _get_json(
@@ -534,6 +702,14 @@ def run_live_recovery(
         "FLOW_CF_ACCESS_CLIENT_ID": os.environ["FLOW_CF_ACCESS_CLIENT_ID"],
         "FLOW_CF_ACCESS_CLIENT_SECRET": os.environ["FLOW_CF_ACCESS_CLIENT_SECRET"],
     }
+    szse_history_budget = _szse_history_request_budget(scope)
+    parent_request_budget = scope.max_requests - szse_history_budget
+    if parent_request_budget <= 0:
+        raise LiveRecoveryError(
+            "live_recovery_request_budget_exceeded",
+            "historical SZSE allocation leaves no room for the collector",
+            status="FAILED_RETRYABLE",
+        )
     min_interval = float(os.environ.get("FLOW_RECOVERY_MIN_INTERVAL_SECONDS", "2"))
     if min_interval < 2:
         raise LiveRecoveryError("live_recovery_source_interval_too_short", "minimum is 2 seconds")
@@ -542,7 +718,7 @@ def run_live_recovery(
         # from the outer budget and could turn a 403/429 into a burst.  The
         # bounded runner owns retry/stop decisions explicitly.
         build_session(HttpSettings(total_retries=0)),
-        maximum=scope.max_requests,
+        maximum=parent_request_budget,
         min_interval_seconds=min_interval,
     )
     context_dates = discover_recent_trading_dates(
@@ -558,6 +734,13 @@ def run_live_recovery(
 
     required = set(scope.required_stages)
     stock_flow_required = bool(required.intersection({"etf_penetration", "stock_flow"}))
+    szse_history_root, szse_history_request_count = _invoke_szse_etf_history(
+        scope=scope,
+        dates=context_dates,
+        artifact_root=artifact_root,
+        workspace_root=workspace_root,
+        max_requests=szse_history_budget,
+    )
     collection = collect_phase0(
         dates=context_dates,
         data_root=data_root,
@@ -571,6 +754,7 @@ def run_live_recovery(
         pcf_max_codes=(0 if stock_flow_required else min(16, max(1, scope.max_requests // 4))),
         session=source_session,
         pcf_max_workers=1,
+        szse_etf_history_root=szse_history_root,
     )
     manifest = collection["manifest"]
     quality = collection["quality"]
@@ -579,14 +763,6 @@ def run_live_recovery(
     quality_path = report_root / run_id / "quality-summary.json"
     if int((quality.get("counts") or {}).get("fail", 0) or 0) > 0:
         raise LiveRecoveryError("live_recovery_quality_gate", "phase0 validation failed")
-    # The ordinary collector may have a valid current SZSE workbook whose
-    # preceding business date is newer than this recovery target.  Refuse that
-    # moving snapshot before it can become a confirmed historical release.
-    _assert_szse_current_snapshot_is_adjacent(
-        manifest=manifest,
-        target=target,
-        session=source_session,
-    )
     base_snapshot_path = source_bundle / "dashboard-snapshot-base.json"
     stock_catalog_path = source_bundle / "stock-flow-catalog.json"
     base_snapshot = build_dashboard_snapshot(
@@ -644,7 +820,12 @@ def run_live_recovery(
     post_child_request_reserve = 0
     if stock_flow_required:
         post_child_request_reserve = _post_child_request_reserve(manifest)
-        remaining_for_child = scope.max_requests - source_session.request_count - post_child_request_reserve
+        remaining_for_child = (
+            scope.max_requests
+            - szse_history_budget
+            - source_session.request_count
+            - post_child_request_reserve
+        )
         if remaining_for_child <= 0:
             raise LiveRecoveryError(
                 "live_recovery_request_budget_exceeded",
@@ -765,7 +946,11 @@ def run_live_recovery(
         headers=auth,
         session=source_session,
     )
-    request_count = source_session.request_count + stock_flow_request_count
+    request_count = (
+        szse_history_request_count
+        + source_session.request_count
+        + stock_flow_request_count
+    )
     if request_count > scope.max_requests:
         raise LiveRecoveryError(
             "live_recovery_request_budget_exceeded",
@@ -807,6 +992,8 @@ def run_live_recovery(
         "requiredStages": list(scope.required_stages),
         "producerBuildSha": producer_build_sha,
         "collectorRunId": run_id,
+        "szseHistoryRequestCount": szse_history_request_count,
+        "szseHistoryMaxRequests": szse_history_budget,
         "sourceRequestCount": source_session.request_count,
         "stockFlowRequestCount": stock_flow_request_count,
         "requestCount": request_count,
