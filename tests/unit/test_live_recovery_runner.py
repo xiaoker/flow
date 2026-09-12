@@ -11,13 +11,19 @@ from scripts.run_live_recovery import (
     LiveRecoveryError,
     _post_child_request_reserve,
     _assert_szse_current_snapshot_is_adjacent,
+    _szse_history_request_budget,
     _fetch_market_history,
     run_live_recovery,
 )
 from trading_desk.recovery_execution import build_recovery_plan
 
 
-def _plan(dates: list[str], *, window_date: str = "2026-08-28") -> dict:
+def _plan(
+    dates: list[str],
+    *,
+    window_date: str = "2026-08-28",
+    budget_manifest: dict[str, object] | None = None,
+) -> dict:
     return build_recovery_plan(
         campaign_id="recovery-20260904",
         recovery_id="recovery-20260904-live",
@@ -29,7 +35,8 @@ def _plan(dates: list[str], *, window_date: str = "2026-08-28") -> dict:
         max_dates=3,
         max_requests=100,
         deadline="2026-12-31T00:00:00.000Z",
-        budget_manifest={"source": "test", "measured": True},
+        budget_manifest=budget_manifest
+        or {"source": "test", "measured": True, "szseHistoryMaxRequests": 20},
     )
 
 
@@ -168,6 +175,11 @@ def offline_runner(monkeypatch):
         return {"version": 1, "history": {"asOf": snapshot["asOf"], "snapshot": snapshot, "artifacts": [{"releaseId": "fixture-source"}]}}
 
     monkeypatch.setattr(runner, "collect_phase0", collect)
+    monkeypatch.setattr(
+        runner,
+        "_invoke_szse_etf_history",
+        lambda **_kwargs: (None, 0),
+    )
     monkeypatch.setattr(runner, "build_dashboard_snapshot", snapshot)
     monkeypatch.setattr(runner, "build_history_bundle_from_files", bundle)
 
@@ -230,6 +242,30 @@ def test_budgeted_session_fails_closed_on_source_rejection(status_code: int) -> 
         session.get("https://source.example/rejected")
     assert session.request_count == 1
     assert len(transport.calls) == 1
+
+
+def test_szse_history_budget_must_be_explicit_and_leave_parent_capacity() -> None:
+    scope = runner.validate_recovery_plan(_plan(["2026-08-28"]))
+    assert _szse_history_request_budget(scope) == 20
+
+    missing_scope = runner.validate_recovery_plan(
+        _plan(["2026-08-28"], budget_manifest={"source": "test", "measured": True})
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_szse_history_budget_missing"):
+        _szse_history_request_budget(missing_scope)
+
+    too_large_scope = runner.validate_recovery_plan(
+        _plan(
+            ["2026-08-28"],
+            budget_manifest={
+                "source": "test",
+                "measured": True,
+                "szseHistoryMaxRequests": 100,
+            },
+        )
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_szse_history_budget_invalid"):
+        _szse_history_request_budget(too_large_scope)
 
 
 def test_historical_szse_snapshot_accepts_only_immediate_preceding_business_date(monkeypatch) -> None:

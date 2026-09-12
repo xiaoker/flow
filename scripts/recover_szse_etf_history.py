@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import html
 import json
+import math
 import re
 import subprocess
 import threading
@@ -50,7 +51,7 @@ class RequestBudget:
     def __init__(self, maximum: int | None, min_interval_seconds: float) -> None:
         if maximum is not None and maximum <= 0:
             raise ValueError("max_requests must be positive")
-        if min_interval_seconds < 0:
+        if not math.isfinite(min_interval_seconds) or min_interval_seconds < 0:
             raise ValueError("min_interval_seconds must be non-negative")
         self.maximum = maximum
         self.min_interval_seconds = min_interval_seconds
@@ -137,7 +138,13 @@ def _code_from_row(row: dict[str, Any]) -> str | None:
     return match.group(0) if match else None
 
 
-def _current_list(budget: RequestBudget | None = None) -> dict[str, dict[str, str]]:
+def _current_list(
+    budget: RequestBudget | None = None,
+    *,
+    max_workers: int = 1,
+) -> dict[str, dict[str, str]]:
+    if max_workers < 1 or max_workers > 8:
+        raise ValueError("max_workers must be between 1 and 8")
     first = _request_json(_session(), {**LIST_PARAMS, "tab1PAGENO": "1"}, budget=budget)
     metadata = first[0]["metadata"]
     page_count = int(metadata["pagecount"])
@@ -149,7 +156,7 @@ def _current_list(budget: RequestBudget | None = None) -> dict[str, dict[str, st
         )
         return payload[0].get("data") or []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(fetch_page, page) for page in range(2, page_count + 1)]
         for future in futures:
             pages.append(future.result())
@@ -255,7 +262,11 @@ def main() -> None:
     # A D1 export from the last known release is a safer and much cheaper
     # starting universe during recovery.  Only fall back to the paginated live
     # list when no substantial override set was supplied.
-    codes = dict(overrides) if len(overrides) >= 500 else _current_list(budget)
+    worker_count = max(1, min(args.workers, 8))
+    codes = dict(overrides) if len(overrides) >= 500 else _current_list(
+        budget,
+        max_workers=worker_count,
+    )
     if codes is not overrides:
         codes.update(overrides)
     ordered_codes = sorted(codes)
@@ -281,7 +292,7 @@ def main() -> None:
         return code
 
     failed: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.workers, 8))) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {executor.submit(fetch_and_cache, code): code for code in pending_codes}
         for index, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             code = futures[future]
@@ -372,10 +383,19 @@ def main() -> None:
         raw_path.write_bytes(raw_content)
         metadata = {
             "version": 1,
+            "source": {
+                "source_id": "szse",
+                "publisher": "深圳证券交易所",
+                "dataset": "etf_scale",
+                "url": REPORT_URL,
+                "source_grade": "A",
+                "date_semantics": "source_historical_scale_size_date",
+            },
             "source_id": "szse",
             "publisher": "深圳证券交易所",
             "dataset": "etf_scale",
             "source_url": REPORT_URL,
+            "source_grade": "A",
             "page_url": PAGE_URL,
             "requested_date": trade_date,
             "date_semantics": "source_historical_scale_size_date",
@@ -402,6 +422,7 @@ def main() -> None:
                     "publisher": "深圳证券交易所",
                     "dataset": "etf_scale",
                     "url": REPORT_URL,
+                    "source_grade": "A",
                     "date_semantics": "source_historical_scale_size_date",
                 },
                 "requested_date": trade_date,

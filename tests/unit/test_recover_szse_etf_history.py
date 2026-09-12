@@ -39,7 +39,7 @@ def test_request_budget_paces_concurrent_callers(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.parametrize(
     ("maximum", "interval"),
-    [(0, 0), (-1, 0), (1, -0.1)],
+    [(0, 0), (-1, 0), (1, -0.1), (1, float("nan"))],
 )
 def test_request_budget_rejects_invalid_bounds(maximum: int, interval: float) -> None:
     with pytest.raises(ValueError):

@@ -348,6 +348,65 @@ def _expected_szse_etf(content: bytes, trade_date: str) -> pd.DataFrame:
     )
 
 
+def _expected_szse_historical_etf(content: bytes, trade_date: str) -> pd.DataFrame:
+    """Rebuild exact-date SZSE rows from the retained fund_jjgm responses."""
+
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("SZSE historical ETF evidence is not JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("SZSE historical ETF evidence must be an object")
+    if payload.get("source") != "深圳证券交易所" or payload.get("dataset") != "etf_scale":
+        raise ValueError("SZSE historical ETF evidence has an invalid source identity")
+    if payload.get("requestedDate") != trade_date:
+        raise ValueError("SZSE historical ETF evidence date does not match the artifact")
+    responses = payload.get("responses")
+    if not isinstance(responses, list):
+        raise ValueError("SZSE historical ETF evidence responses are missing")
+
+    rows: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for entry in responses:
+        if not isinstance(entry, dict):
+            raise ValueError("SZSE historical ETF response entry is invalid")
+        request = entry.get("request")
+        response = entry.get("response")
+        if not isinstance(request, dict) or not isinstance(response, list):
+            raise ValueError("SZSE historical ETF response envelope is invalid")
+        code = str(request.get("code") or "").strip().zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            raise ValueError("SZSE historical ETF response has an invalid code")
+        for block in response:
+            if not isinstance(block, dict):
+                continue
+            data = block.get("data")
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                if not isinstance(item, dict) or str(item.get("size_date") or "") != trade_date:
+                    continue
+                shares = _number(item.get("current_size"), multiplier=10_000)
+                name = str(item.get("security_short_name") or "").strip()
+                if shares is None or not name:
+                    raise ValueError(f"SZSE historical ETF row is incomplete for {code}")
+                key = (trade_date, "SZSE", code)
+                if key in seen_keys:
+                    raise ValueError(f"duplicate SZSE historical ETF row for {code}")
+                seen_keys.add(key)
+                rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "market": "SZSE",
+                        "instrument_code": code,
+                        "instrument_name": name,
+                        "shares": shares,
+                        "nav": None,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
 def _expected_sse_margin(content: bytes) -> pd.DataFrame:
     rows = json.loads(content).get("result") or []
     return pd.DataFrame(
@@ -587,8 +646,13 @@ def validate_raw_to_normalized_mapping(
                     numeric_columns=["quantity", "creation_unit"],
                 )
             elif (source_id, dataset) == ("szse", "etf_scale"):
+                expected_szse = (
+                    _expected_szse_historical_etf(content, requested_date)
+                    if source.get("date_semantics") == "source_historical_scale_size_date"
+                    else _expected_szse_etf(content, requested_date)
+                )
                 result = _compare_frames(
-                    _expected_szse_etf(content, requested_date),
+                    expected_szse,
                     _read_csv(normalized_paths[0]),
                     keys=["trade_date", "market", "instrument_code"],
                     text_columns=["instrument_name"],
