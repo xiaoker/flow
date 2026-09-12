@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": {
+    "head": "5078035fa8d30bd5519a2ab72e73ad2f4a49dc2d",
+    "base": "main"
+  },
+  "mergeTarget": "main",
+  "observedTriggers": [
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "trigger": "push to main",
+      "effects": [
+        "run Python unit and data-QA tests",
+        "run web npm test (production build plus contract tests)",
+        "run web lint"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "trigger": "push to main when web/** or this workflow changes",
+      "effects": [
+        "install web dependencies",
+        "run web lint and production contract tests",
+        "apply pending D1 migrations remotely",
+        "deploy the Flow Worker and static assets",
+        "verify the deployed build identity through Cloudflare Access"
+      ],
+      "requiresProductionCredentials": true,
+      "remoteD1Migration": true,
+      "workerDeployment": true
+    }
+  ],
+  "notTriggeredByMerge": [
+    ".github/workflows/controlled-recovery-inventory.yml",
+    ".github/workflows/market-data-watchdog.yml",
+    ".github/workflows/market-data-collect.yml",
+    ".github/workflows/market-data-publish.yml",
+    ".github/workflows/pcf-v2-capture.yml",
+    ".github/workflows/r2-recovery-drill.yml"
+  ],
+  "currentPrScope": {
+    "readOnlyR2HeadReceipts": true,
+    "workflowDispatch": false,
+    "d1Writes": false,
+    "r2Writes": false,
+    "activePointerChanges": false,
+    "featureFlagChanges": false,
+    "recoveryOrBackfill": false
+  }
+}

@@ -90,6 +90,7 @@ MAX_R2_GAP_COUNT = MAX_R2_OBJECTS
 # objects without copying the full response into the error record.
 MAX_R2_FAILURE_ISSUES = 64
 MAX_R2_FAILURE_KEY_LENGTH = 1024
+R2_HEAD_RECEIPT_STATUSES = frozenset({"READY", "MISSING", "HASH_MISSING", "HASH_MISMATCH", "INCOMPLETE"})
 USAGE_MAX_AGE = timedelta(minutes=60)
 # These warnings are safe to carry while an R2 HEAD cursor is being drained.
 # Any other reason remains fatal so a 503 or incomplete response cannot be
@@ -288,7 +289,7 @@ def _r2_failure_evidence(body: Mapping[str, Any], reasons: Sequence[str]) -> dic
         if pagination_evidence:
             output["r2Pagination"] = pagination_evidence
 
-    bad_statuses = {"HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE"}
+    bad_statuses = {"HASH_MISSING", "HASH_MISMATCH", "MISSING", "INCOMPLETE", "UNKNOWN"}
     issues: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     dates = body.get("dates")
@@ -334,6 +335,8 @@ def _r2_failure_evidence(body: Mapping[str, Any], reasons: Sequence[str]) -> dic
                             "artifactName": name,
                             "status": status,
                         }
+                        if status == "UNKNOWN":
+                            issue["reason"] = "R2_HEAD_RECEIPT_MISSING"
                         key = _bounded_text(artifact.get("key"), max_length=MAX_R2_FAILURE_KEY_LENGTH)
                         if key and key.startswith("market-data/releases/") and ".." not in key and "//" not in key:
                             issue["key"] = key
@@ -413,6 +416,77 @@ def _validate_evidence_coverage(value: Any, *, field: str = "evidenceCoverage") 
     unknown = set(value) - set(INVENTORY_EVIDENCE_COLLECTIONS)
     if unknown:
         raise RecoveryEvidenceError(f"{field}_unknown_collection")
+    return output
+
+
+def _validate_r2_head_receipts(
+    value: Any,
+    *,
+    start: str,
+    end: str,
+    field: str = "r2HeadReceipts",
+) -> list[dict[str, Any]]:
+    """Validate the bounded receipt set for one inventory transport page.
+
+    A receipt is the durable identity of a single R2 HEAD attempt.  The
+    nested date/release tree is still accepted for compatibility, but callers
+    must be able to reconcile every billed HEAD by this independent key.
+    """
+
+    if not isinstance(value, list) or len(value) > MAX_R2_HEADS_PER_REQUEST:
+        raise RecoveryEvidenceError(f"{field}_invalid")
+    output: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise RecoveryEvidenceError(f"{field}_invalid")
+        as_of = item.get("asOf")
+        release_id = _bounded_text(item.get("releaseId"), max_length=512)
+        slot = item.get("slot")
+        artifact_name = _bounded_text(item.get("artifactName"), max_length=128)
+        key = _bounded_text(item.get("key"), max_length=512)
+        declared_sha = _hash_from_any(item.get("declaredSha256"))
+        declared_bytes = _safe_nonnegative(item.get("declaredBytes"))
+        status = item.get("status")
+        actual_sha = item.get("actualSha256")
+        actual_bytes = item.get("actualBytes")
+        error = item.get("error")
+        if (
+            not _valid_date(as_of) or as_of < start or as_of > end or release_id is None
+            or slot not in {"dashboard", "etf_penetration"} or artifact_name is None
+            or key is None or not key.startswith(f"market-data/releases/{as_of}/{release_id}/")
+            or ".." in key or "//" in key or "\n" in key or declared_sha is None
+            or declared_bytes is None or status not in R2_HEAD_RECEIPT_STATUSES
+        ):
+            raise RecoveryEvidenceError(f"{field}_invalid")
+        if key in seen_keys:
+            raise RecoveryEvidenceError(f"{field}_duplicate")
+        seen_keys.add(key)
+        if actual_sha is not None and _hash_from_any(actual_sha) is None:
+            raise RecoveryEvidenceError(f"{field}_invalid")
+        if actual_bytes is not None and _safe_nonnegative(actual_bytes) is None:
+            raise RecoveryEvidenceError(f"{field}_invalid")
+        if error is not None and _bounded_text(error, max_length=128) is None:
+            raise RecoveryEvidenceError(f"{field}_invalid")
+        if status == "READY" and (_hash_from_any(actual_sha) is None or _safe_nonnegative(actual_bytes) is None or error is not None):
+            raise RecoveryEvidenceError(f"{field}_ready_receipt_invalid")
+        if status == "MISSING" and (actual_sha is not None or actual_bytes is not None):
+            raise RecoveryEvidenceError(f"{field}_missing_receipt_invalid")
+        if status == "INCOMPLETE" and error is None:
+            raise RecoveryEvidenceError(f"{field}_incomplete_receipt_invalid")
+        output.append({
+            "asOf": as_of,
+            "releaseId": release_id,
+            "slot": slot,
+            "artifactName": artifact_name,
+            "key": key,
+            "declaredSha256": declared_sha,
+            "declaredBytes": declared_bytes,
+            "status": status,
+            "actualSha256": _hash_from_any(actual_sha),
+            "actualBytes": _safe_nonnegative(actual_bytes),
+            "error": error if isinstance(error, str) else None,
+        })
     return output
 
 
@@ -708,6 +782,9 @@ class RecoveryEvidenceExporter:
                 raise RecoveryEvidenceError("inventory_r2_telemetry_unknown")
         if _safe_nonnegative(r2.get("headCount")) > MAX_R2_HEADS_PER_REQUEST or _safe_nonnegative(r2.get("headLimit")) != MAX_R2_HEADS_PER_REQUEST:
             raise RecoveryEvidenceError("inventory_r2_head_limit_invalid")
+        receipts = _validate_r2_head_receipts(body.get("r2HeadReceipts"), start=self.start, end=self.end)
+        if len(receipts) != _safe_nonnegative(r2.get("headCount")):
+            raise RecoveryEvidenceError("inventory_r2_receipt_count_mismatch")
         return InventoryPage(
             body=body,
             request_cursor=request_cursor,
@@ -749,6 +826,57 @@ class RecoveryEvidenceExporter:
                         for name, artifact in source_artifacts.items():
                             if isinstance(artifact, Mapping):
                                 target_artifacts[name] = copy.deepcopy(dict(artifact))
+
+        def apply_r2_receipts(
+            target: dict[str, Any],
+            receipts: Mapping[str, Mapping[str, Any]],
+        ) -> None:
+            """Apply independent HEAD receipts after nested pages are merged.
+
+            Continuation responses may carry the same date tree, a partial
+            tree, or a tree assembled by a different transport layer.  The
+            receipt key is therefore authoritative for the observed R2
+            status; the nested artifact object is only the presentation
+            location that gets updated.
+            """
+
+            by_identity = {
+                (
+                    str(receipt.get("asOf")),
+                    str(receipt.get("releaseId")),
+                    str(receipt.get("slot")),
+                    str(receipt.get("artifactName")),
+                ): receipt
+                for receipt in receipts.values()
+            }
+            for date_record in target.get("dates", []):
+                if not isinstance(date_record, dict):
+                    continue
+                data_date = str(date_record.get("dataDate"))
+                releases = date_record.get("releases") if isinstance(date_record.get("releases"), Mapping) else {}
+                for slot, values in releases.items():
+                    if slot not in {"dashboard", "etf_penetration"} or not isinstance(values, list):
+                        continue
+                    for release in values:
+                        if not isinstance(release, dict):
+                            continue
+                        release_id = str(release.get("releaseId"))
+                        artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), dict) else {}
+                        for name, artifact in artifacts.items():
+                            if not isinstance(artifact, dict):
+                                continue
+                            receipt = receipts.get(str(artifact.get("key")))
+                            if receipt is None:
+                                receipt = by_identity.get((data_date, release_id, str(slot), str(name)))
+                            if receipt is None:
+                                continue
+                            artifact["status"] = receipt["status"]
+                            artifact["actualSha256"] = receipt["actualSha256"]
+                            artifact["actualBytes"] = receipt["actualBytes"]
+                            if receipt.get("error") is None:
+                                artifact.pop("error", None)
+                            else:
+                                artifact["error"] = receipt["error"]
 
         def refresh_stage_status(target: dict[str, Any]) -> None:
             date_values = target.get("dates") if isinstance(target.get("dates"), list) else []
@@ -795,6 +923,7 @@ class RecoveryEvidenceExporter:
             final_page: InventoryPage | None = None
             seen_r2_hashes: set[str] = set()
             r2_head_total = 0
+            r2_receipts: dict[str, dict[str, Any]] = {}
             for _ in range(MAX_R2_PAGES_PER_DATE_PAGE):
                 if self.request_count >= MAX_TOTAL_REQUESTS:
                     errors.append({"code": "inventory_request_limit", "detail": str(MAX_TOTAL_REQUESTS)})
@@ -831,6 +960,17 @@ class RecoveryEvidenceExporter:
                     break
                 seen_r2_hashes.add(page.response_sha256)
                 body = copy.deepcopy(dict(page.body))
+                for receipt in _validate_r2_head_receipts(
+                    body.get("r2HeadReceipts"), start=self.start, end=self.end
+                ):
+                    key = receipt["key"]
+                    existing = r2_receipts.get(key)
+                    if existing is not None and existing != receipt:
+                        errors.append({"code": "inventory_r2_receipt_conflict", "detail": key})
+                        break
+                    r2_receipts[key] = receipt
+                if errors:
+                    break
                 pagination = body["r2Pagination"]
                 page_index_sha = str(pagination["indexSha256"])
                 if r2_index_sha is None:
@@ -865,6 +1005,7 @@ class RecoveryEvidenceExporter:
                         "hasMore": False,
                         "indexSha256": r2_index_sha,
                     }
+                    apply_r2_receipts(aggregate_body, r2_receipts)
                     refresh_stage_status(aggregate_body)
                     aggregate_payload = _json_bytes(aggregate_body)
                     final_page = InventoryPage(
@@ -1202,8 +1343,12 @@ def _r2_rows(release_rows: Sequence[Mapping[str, Any]], dates: Sequence[Mapping[
                         continue
                     key = artifact.get("key")
                     actual_sha = artifact.get("actualSha256")
-                    if artifact.get("status") != "READY" or not isinstance(key, str) or not SHA256.fullmatch(str(actual_sha or "")):
-                        gaps.append(f"{release.get('asOf')}:{release.get('releaseId')}:{name}")
+                    status = artifact.get("status") if artifact.get("status") in R2_HEAD_RECEIPT_STATUSES | {"UNKNOWN"} else "UNKNOWN"
+                    if status != "READY" or not isinstance(key, str) or not SHA256.fullmatch(str(actual_sha or "")):
+                        gap = f"{release.get('asOf')}:{release.get('releaseId')}:{name}"
+                        if status == "UNKNOWN":
+                            gap = f"{gap}:r2_head_receipt_missing"
+                        gaps.append(gap)
                         continue
                     # A READY artifact must carry the byte count returned by
                     # the bounded R2 HEAD.  Falling back to the manifest's
@@ -1280,6 +1425,8 @@ def _r2_gap_details(
                         "artifactName": name,
                         "status": status,
                     }
+                    if status == "UNKNOWN":
+                        detail["reason"] = "R2_HEAD_RECEIPT_MISSING"
                     key = _bounded_text(artifact.get("key"), max_length=MAX_R2_FAILURE_KEY_LENGTH)
                     if key and key.startswith("market-data/releases/") and ".." not in key and "//" not in key:
                         detail["key"] = key
@@ -1303,6 +1450,24 @@ def _r2_gap_details(
         raise RecoveryEvidenceError("r2_gap_detail_count_exceeds_limit", str(MAX_R2_GAP_COUNT))
     sample = ordered[:MAX_R2_GAP_SAMPLES]
     return sample, len(ordered), canonical_sha256(ordered), len(ordered) > len(sample)
+
+
+def _r2_head_receipt_summary(
+    pages: Sequence[InventoryPage],
+) -> tuple[int, str]:
+    """Summarize all independent HEAD receipts without copying them unboundedly."""
+
+    receipts: dict[str, Mapping[str, Any]] = {}
+    for page in pages:
+        raw = page.body.get("r2HeadReceipts")
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if not isinstance(item, Mapping) or not isinstance(item.get("key"), str):
+                continue
+            receipts.setdefault(str(item["key"]), item)
+    ordered = [dict(receipts[key]) for key in sorted(receipts)]
+    return len(ordered), canonical_sha256(ordered)
 
 
 def _usage_summary(
@@ -1572,6 +1737,8 @@ def build_evidence_bundle(
     r2_gaps = sorted(set(r2_gaps))
     r2_gap_sample, r2_gap_count, r2_gap_sha256, r2_gaps_truncated = _r2_gap_summary(r2_gaps)
     r2_gap_detail_sample, r2_gap_detail_count, r2_gap_detail_sha256, r2_gap_detail_truncated = _r2_gap_details(dates)
+    receipt_source_pages = list(transport_pages if transport_pages is not None else pages)
+    r2_receipt_count, r2_receipt_sha256 = _r2_head_receipt_summary(receipt_source_pages)
     r2_index_payload = {"objects": r2_objects, "gaps": r2_gaps, "source": "release-manifest-head-receipts"}
     r2_index_sha = next(
         (
@@ -1634,6 +1801,9 @@ def build_evidence_bundle(
             "suspiciousGapDetailsCount": r2_gap_detail_count,
             "suspiciousGapDetailsSha256": r2_gap_detail_sha256,
             "suspiciousGapDetailsTruncated": r2_gap_detail_truncated,
+            "headReceiptCount": r2_receipt_count,
+            "headReceiptSha256": r2_receipt_sha256,
+            "headReceiptMissingCount": sum(1 for gap in r2_gaps if gap.endswith(":r2_head_receipt_missing")),
             "source": "release-manifest-head-receipts",
         },
         "accountTelemetry": telemetry,
@@ -1718,6 +1888,16 @@ def validate_evidence_bundle(bundle: Mapping[str, Any]) -> None:
     r2_inventory = bundle.get("r2Inventory")
     if not isinstance(r2_inventory, Mapping):
         raise RecoveryEvidenceError("evidence_r2_inventory_invalid")
+    receipt_count = r2_inventory.get("headReceiptCount")
+    receipt_sha = _hash_from_any(r2_inventory.get("headReceiptSha256"))
+    receipt_missing_count = r2_inventory.get("headReceiptMissingCount")
+    if (
+        not isinstance(receipt_count, int) or isinstance(receipt_count, bool) or not 0 <= receipt_count <= MAX_R2_OBJECTS
+        or receipt_sha is None
+        or not isinstance(receipt_missing_count, int) or isinstance(receipt_missing_count, bool)
+        or not 0 <= receipt_missing_count <= MAX_R2_OBJECTS
+    ):
+        raise RecoveryEvidenceError("evidence_r2_head_receipt_summary_invalid")
     gaps = r2_inventory.get("suspiciousGaps", [])
     if not isinstance(gaps, list) or len(gaps) > MAX_R2_GAP_SAMPLES:
         raise RecoveryEvidenceError("evidence_r2_suspicious_gaps_invalid")

@@ -626,6 +626,31 @@ export type RecoveryR2Pagination = {
   indexSha256: string | null;
 };
 
+/**
+ * One receipt is emitted for every bounded R2 HEAD attempt.  The receipt is
+ * deliberately independent from the nested release tree: date pages can be
+ * reassembled by a caller, while this identity remains stable across every
+ * R2 continuation response.
+ */
+export type RecoveryR2HeadReceipt = {
+  asOf: string;
+  releaseId: string;
+  slot: ReadModelSlot;
+  artifactName: string;
+  key: string;
+  declaredSha256: string;
+  declaredBytes: number;
+  status: "READY" | "MISSING" | "HASH_MISSING" | "HASH_MISMATCH" | "INCOMPLETE";
+  actualSha256: string | null;
+  actualBytes: number | null;
+  error: string | null;
+};
+
+type R2HeadEvidence = {
+  pagination: RecoveryR2Pagination;
+  receipts: RecoveryR2HeadReceipt[];
+};
+
 function releaseEvidence(row: ReleaseRow): { evidence: ReleaseEvidence; manifest: ReadModelManifest | null } {
   const manifestHashStatus = shaStatus(row.manifest_sha256);
   let manifest: ReadModelManifest | null = null;
@@ -962,7 +987,7 @@ async function addR2HeadEvidence(
   releaseEvidenceRows: Array<{ date: DateInventory; release: ReleaseEvidence; manifest: ReadModelManifest | null }>,
   bucket: ReadOnlyR2,
   query: Pick<InventoryQuery, "start" | "end" | "r2Cursor" | "r2CursorKey">,
-): Promise<RecoveryR2Pagination> {
+): Promise<R2HeadEvidence> {
   const candidatesByKey = new Map<string, R2HeadCandidate>();
   const gaps: string[] = [];
   for (const row of releaseEvidenceRows) {
@@ -1034,6 +1059,8 @@ async function addR2HeadEvidence(
     : null;
   if (hasMore) state.incompleteReasons.push("R2_HEAD_PAGE_REMAINS");
 
+  const receipts: RecoveryR2HeadReceipt[] = [];
+
   for (const candidate of pageCandidates) {
     state.usage.r2.headCount += 1;
     state.usage.r2.classB += 1;
@@ -1050,6 +1077,19 @@ async function addR2HeadEvidence(
         error: reason,
       };
       addR2Gap(gaps, `${candidate.release.asOf}:${candidate.release.releaseId}:${candidate.name}:${reason}`);
+      receipts.push({
+        asOf: candidate.release.asOf,
+        releaseId: candidate.release.releaseId,
+        slot: candidate.release.slot,
+        artifactName: candidate.name,
+        key: candidate.key,
+        declaredSha256: candidate.sha256,
+        declaredBytes: candidate.bytes,
+        status: "INCOMPLETE",
+        actualSha256: null,
+        actualBytes: null,
+        error: reason,
+      });
       continue;
     }
     const metadata = candidate.release.artifacts[candidate.name];
@@ -1057,6 +1097,19 @@ async function addR2HeadEvidence(
       state.incompleteReasons.push("R2_OBJECT_MISSING");
       candidate.release.artifacts[candidate.name] = { ...metadata, status: "MISSING" };
       addR2Gap(gaps, `${candidate.release.asOf}:${candidate.release.releaseId}:${candidate.name}:missing`);
+      receipts.push({
+        asOf: candidate.release.asOf,
+        releaseId: candidate.release.releaseId,
+        slot: candidate.release.slot,
+        artifactName: candidate.name,
+        key: candidate.key,
+        declaredSha256: candidate.sha256,
+        declaredBytes: candidate.bytes,
+        status: "MISSING",
+        actualSha256: null,
+        actualBytes: null,
+        error: null,
+      });
       continue;
     }
     const actualSha = object.customMetadata?.sha256 ?? null;
@@ -1075,15 +1128,31 @@ async function addR2HeadEvidence(
       actualSha256: actualSha,
       actualBytes: object.size,
     };
+    receipts.push({
+      asOf: candidate.release.asOf,
+      releaseId: candidate.release.releaseId,
+      slot: candidate.release.slot,
+      artifactName: candidate.name,
+      key: candidate.key,
+      declaredSha256: candidate.sha256,
+      declaredBytes: candidate.bytes,
+      status,
+      actualSha256: actualSha,
+      actualBytes: object.size,
+      error: null,
+    });
   }
 
   return {
-    cursor: query.r2Cursor ?? null,
-    nextCursor,
-    hasMore,
-    pageSize: pageCandidates.length,
-    candidateCount: candidates.length,
-    indexSha256,
+    pagination: {
+      cursor: query.r2Cursor ?? null,
+      nextCursor,
+      hasMore,
+      pageSize: pageCandidates.length,
+      candidateCount: candidates.length,
+      indexSha256,
+    },
+    receipts,
   };
 }
 
@@ -1110,6 +1179,7 @@ export type RecoveryInventoryResponse = {
   evidenceCoverage: RecoveryEvidenceCoverageMap;
   incompleteReasons: string[];
   r2Pagination: RecoveryR2Pagination;
+  r2HeadReceipts: RecoveryR2HeadReceipt[];
 };
 
 /**
@@ -1162,6 +1232,7 @@ export async function collectRecoveryInventory(
       evidenceCoverage: state.evidenceCoverage,
       incompleteReasons: ["STORAGE_UNAVAILABLE"],
       r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
+      r2HeadReceipts: [],
     };
   }
 
@@ -1183,6 +1254,7 @@ export async function collectRecoveryInventory(
       evidenceCoverage: state.evidenceCoverage,
       incompleteReasons: [...new Set(state.incompleteReasons)],
       r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
+      r2HeadReceipts: [],
     };
   }
   const candidateDates = [...new Set(dateRows.map((row) => row.data_date).filter(validDate))]
@@ -1212,6 +1284,7 @@ export async function collectRecoveryInventory(
     candidateCount: 0,
     indexSha256: null,
   };
+  let r2HeadReceipts: RecoveryR2HeadReceipt[] = [];
 
   if (firstDate && lastDate) {
     try {
@@ -1340,7 +1413,9 @@ export async function collectRecoveryInventory(
         releaseEvidenceRows.push({ date, release: parsed.evidence, manifest: parsed.manifest });
       }
       if (runtime.RAW_BUCKET) {
-        r2Pagination = await addR2HeadEvidence(state, releaseEvidenceRows, runtime.RAW_BUCKET, query);
+        const r2Evidence = await addR2HeadEvidence(state, releaseEvidenceRows, runtime.RAW_BUCKET, query);
+        r2Pagination = r2Evidence.pagination;
+        r2HeadReceipts = r2Evidence.receipts;
       } else {
         state.incompleteReasons.push("STORAGE_UNAVAILABLE");
       }
@@ -1394,5 +1469,6 @@ export async function collectRecoveryInventory(
     evidenceCoverage: state.evidenceCoverage,
     incompleteReasons: [...new Set(state.incompleteReasons)],
     r2Pagination,
+    r2HeadReceipts,
   };
 }
