@@ -4,7 +4,7 @@
   "title": "Flow R0-D recovery inventory",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "contract", "request", "status", "hasMore", "nextCursor", "dates", "usage", "incompleteReasons", "r2Pagination"],
+  "required": ["schemaVersion", "contract", "request", "status", "hasMore", "nextCursor", "dates", "usage", "evidenceCoverage", "incompleteReasons", "r2Pagination"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "contract": { "const": "recovery-inventory-v1" },
@@ -103,6 +103,23 @@
         "truncated": { "type": "boolean" }
       }
     },
+    "evidenceCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["historicalSnapshots", "dashboardSnapshots", "releaseManifests", "sourceReadiness", "artifactPointers", "models", "marketHistory", "pipelineWindows", "recoveries", "activeReleaseSlots"],
+      "properties": {
+        "historicalSnapshots": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "dashboardSnapshots": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "releaseManifests": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "sourceReadiness": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "artifactPointers": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "models": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "marketHistory": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "pipelineWindows": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "recoveries": { "$ref": "#/$defs/evidenceCoverageEntry" },
+        "activeReleaseSlots": { "$ref": "#/$defs/evidenceCoverageEntry" }
+      }
+    },
     "incompleteReasons": { "type": "array", "items": { "type": "string" } }
   },
   "allOf": [
@@ -110,5 +127,19 @@
       "if": { "properties": { "status": { "const": "COMPLETE" } } },
       "then": { "properties": { "incompleteReasons": { "maxItems": 0 }, "usage": { "properties": { "truncated": { "const": false } } } } }
     }
-  ]
+  ],
+  "$defs": {
+    "evidenceCoverageEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["queried", "rowLimit", "returnedRows", "truncated", "reason"],
+      "properties": {
+        "queried": { "type": "boolean" },
+        "rowLimit": { "type": ["integer", "null"], "minimum": 0 },
+        "returnedRows": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "maxLength": 64 }
+      }
+    }
+  }
 }

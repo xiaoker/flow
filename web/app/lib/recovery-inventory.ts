@@ -97,6 +97,31 @@ export type InventoryUsage = {
   truncated: boolean;
 };
 
+export const RECOVERY_EVIDENCE_COLLECTIONS = [
+  "historicalSnapshots",
+  "dashboardSnapshots",
+  "releaseManifests",
+  "sourceReadiness",
+  "artifactPointers",
+  "models",
+  "marketHistory",
+  "pipelineWindows",
+  "recoveries",
+  "activeReleaseSlots",
+] as const;
+
+export type RecoveryEvidenceCollection = (typeof RECOVERY_EVIDENCE_COLLECTIONS)[number];
+
+export type RecoveryEvidenceCoverage = {
+  queried: boolean;
+  rowLimit: number | null;
+  returnedRows: number;
+  truncated: boolean;
+  reason: string | null;
+};
+
+export type RecoveryEvidenceCoverageMap = Record<RecoveryEvidenceCollection, RecoveryEvidenceCoverage>;
+
 type D1Meta = {
   rows_read?: unknown;
   rows_written?: unknown;
@@ -657,7 +682,29 @@ function publishedReleaseReady(release: ReleaseEvidence): boolean {
 type RequestState = {
   usage: InventoryUsage;
   incompleteReasons: string[];
+  evidenceCoverage: RecoveryEvidenceCoverageMap;
 };
+
+function emptyEvidenceCoverage(): RecoveryEvidenceCoverageMap {
+  return Object.fromEntries(
+    RECOVERY_EVIDENCE_COLLECTIONS.map((collection) => [collection, {
+      queried: false,
+      rowLimit: null,
+      returnedRows: 0,
+      truncated: false,
+      reason: null,
+    }]),
+  ) as RecoveryEvidenceCoverageMap;
+}
+
+function markEvidenceNotQueried(
+  state: RequestState,
+  collection: RecoveryEvidenceCollection,
+  reason: string,
+): void {
+  const coverage = state.evidenceCoverage[collection];
+  if (!coverage.queried && !coverage.reason) coverage.reason = reason;
+}
 
 function addMeta(state: RequestState, meta: D1Meta | undefined): void {
   const rowsRead = safeInteger(meta?.rows_read);
@@ -674,24 +721,65 @@ function addMeta(state: RequestState, meta: D1Meta | undefined): void {
   if ((state.usage.d1.rowsRead ?? 0) > MAX_D1_ROWS_READ) state.incompleteReasons.push("D1_ROWS_READ_LIMIT");
 }
 
-async function readAll<T>(state: RequestState, db: ReadOnlyD1, sql: string, binds: unknown[]): Promise<T[]> {
+async function readAll<T>(
+  state: RequestState,
+  db: ReadOnlyD1,
+  sql: string,
+  binds: unknown[],
+  collection: RecoveryEvidenceCollection | null = null,
+  detectTruncation = true,
+): Promise<T[]> {
+  const coverage = collection ? state.evidenceCoverage[collection] : null;
+  if (coverage) {
+    coverage.queried = true;
+    const rowLimit = Number(binds.at(-1));
+    coverage.rowLimit = Number.isSafeInteger(rowLimit) && rowLimit >= 0 ? rowLimit : null;
+  }
   if (state.usage.d1.queryCount >= MAX_D1_QUERIES) {
     state.incompleteReasons.push("D1_QUERY_LIMIT");
+    if (coverage) {
+      coverage.queried = false;
+      coverage.reason = "D1_QUERY_LIMIT";
+    }
     return [];
   }
   if (!state.usage.d1.rowsReadKnown || !state.usage.d1.rowsWrittenKnown) {
     state.incompleteReasons.push("D1_ROWS_READ_TELEMETRY_UNKNOWN");
+    if (coverage) {
+      coverage.queried = false;
+      coverage.reason = "D1_ROWS_READ_TELEMETRY_UNKNOWN";
+    }
     return [];
   }
   if ((state.usage.d1.rowsRead ?? 0) >= MAX_D1_ROWS_READ) {
     state.incompleteReasons.push("D1_ROWS_READ_LIMIT");
+    if (coverage) {
+      coverage.queried = false;
+      coverage.reason = "D1_ROWS_READ_LIMIT";
+    }
     return [];
   }
   state.usage.d1.queryCount += 1;
   const result = await db.prepare(sql).bind(...binds).all<T>();
   addMeta(state, result.meta);
-  if ((state.usage.d1.rowsRead ?? 0) > MAX_D1_ROWS_READ) return [];
-  return result.results ?? [];
+  if ((state.usage.d1.rowsRead ?? 0) > MAX_D1_ROWS_READ) {
+    if (coverage) {
+      coverage.queried = false;
+      coverage.reason = "D1_ROWS_READ_LIMIT";
+    }
+    return [];
+  }
+  const rows = result.results ?? [];
+  if (coverage) {
+    coverage.returnedRows = rows.length;
+    if (detectTruncation && coverage.rowLimit !== null && rows.length >= coverage.rowLimit) {
+      coverage.truncated = true;
+      coverage.reason = "ROW_LIMIT";
+      state.usage.truncated = true;
+      state.incompleteReasons.push("D1_EVIDENCE_TRUNCATED");
+    }
+  }
+  return rows;
 }
 
 async function readDateCandidates(
@@ -1019,6 +1107,7 @@ export type RecoveryInventoryResponse = {
     dateVisible: { status: InventoryStageStatus; evidence: Record<string, unknown>[] };
   }>;
   usage: InventoryUsage;
+  evidenceCoverage: RecoveryEvidenceCoverageMap;
   incompleteReasons: string[];
   r2Pagination: RecoveryR2Pagination;
 };
@@ -1058,7 +1147,7 @@ export async function collectRecoveryInventory(
     r2: { classA: 0, classB: 0, headCount: 0, headLimit: MAX_R2_HEADS },
     truncated: false,
   };
-  const state: RequestState = { usage, incompleteReasons: [] };
+  const state: RequestState = { usage, incompleteReasons: [], evidenceCoverage: emptyEvidenceCoverage() };
   if (!runtime.DB || !runtime.RAW_BUCKET) {
     return {
       schemaVersion: RECOVERY_INVENTORY_SCHEMA_VERSION,
@@ -1070,6 +1159,7 @@ export async function collectRecoveryInventory(
       activeReleaseSlots: [],
       dates: [],
       usage,
+      evidenceCoverage: state.evidenceCoverage,
       incompleteReasons: ["STORAGE_UNAVAILABLE"],
       r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
     };
@@ -1090,6 +1180,7 @@ export async function collectRecoveryInventory(
       activeReleaseSlots: [],
       dates: [],
       usage,
+      evidenceCoverage: state.evidenceCoverage,
       incompleteReasons: [...new Set(state.incompleteReasons)],
       r2Pagination: { cursor: query.r2Cursor, nextCursor: null, hasMore: false, pageSize: 0, candidateCount: 0, indexSha256: null },
     };
@@ -1136,20 +1227,25 @@ export async function collectRecoveryInventory(
       // manifests: re-reading the seven independent domain tables would
       // multiply D1 rows and CPU for every 64-head page without changing the
       // release evidence that the exporter is draining.
-      const historical = r2Continuation ? [] : await readAll<HistoricalRow>(state, runtime.DB, HISTORICAL_SQL, [firstDate, lastDate, selected.length + 1]);
-      const dashboards = r2Continuation ? [] : await readAll<DashboardRow>(state, runtime.DB, DASHBOARD_SQL, [firstDate, lastDate, selected.length + 1]);
-      const releases = await readAll<ReleaseRow>(state, runtime.DB, RELEASE_SQL, [firstDate, lastDate, MAX_RELEASE_ROWS]);
-      const readiness = r2Continuation ? [] : await readAll<SourceReadinessRow>(state, runtime.DB, SOURCE_READINESS_SQL, [firstDate, lastDate, MAX_SOURCE_READINESS_ROWS]);
-      const pointers = r2Continuation ? [] : await readAll<PointerRow>(state, runtime.DB, POINTER_SQL, [firstDate, lastDate, MAX_POINTER_ROWS]);
-      const models = r2Continuation ? [] : await readAll<ModelRow>(state, runtime.DB, MODEL_SQL, [firstDate, lastDate, firstDate, lastDate, firstDate, lastDate, 900]);
-      const marketHistory = r2Continuation ? [] : await readAll<MarketHistoryRow>(state, runtime.DB, MARKET_HISTORY_SQL, [firstDate, lastDate, selected.length + 1]);
+      const historical = r2Continuation ? [] : await readAll<HistoricalRow>(state, runtime.DB, HISTORICAL_SQL, [firstDate, lastDate, selected.length + 1], "historicalSnapshots", false);
+      const dashboards = r2Continuation ? [] : await readAll<DashboardRow>(state, runtime.DB, DASHBOARD_SQL, [firstDate, lastDate, selected.length + 1], "dashboardSnapshots", false);
+      const releases = await readAll<ReleaseRow>(state, runtime.DB, RELEASE_SQL, [firstDate, lastDate, MAX_RELEASE_ROWS], "releaseManifests");
+      const readiness = r2Continuation ? [] : await readAll<SourceReadinessRow>(state, runtime.DB, SOURCE_READINESS_SQL, [firstDate, lastDate, MAX_SOURCE_READINESS_ROWS], "sourceReadiness");
+      const pointers = r2Continuation ? [] : await readAll<PointerRow>(state, runtime.DB, POINTER_SQL, [firstDate, lastDate, MAX_POINTER_ROWS], "artifactPointers");
+      const models = r2Continuation ? [] : await readAll<ModelRow>(state, runtime.DB, MODEL_SQL, [firstDate, lastDate, firstDate, lastDate, firstDate, lastDate, 900], "models");
+      const marketHistory = r2Continuation ? [] : await readAll<MarketHistoryRow>(state, runtime.DB, MARKET_HISTORY_SQL, [firstDate, lastDate, selected.length + 1], "marketHistory", false);
       const pipelines = expectedPipelineRows
-        ? r2Continuation ? [] : await readAll<PipelineRow>(state, runtime.DB, pipelineSql(), [pipelineStart, pipelineEnd, "daily-market-data", expectedPipelineRows + 1])
+        ? r2Continuation ? [] : await readAll<PipelineRow>(state, runtime.DB, pipelineSql(), [pipelineStart, pipelineEnd, "daily-market-data", expectedPipelineRows + 1], "pipelineWindows", false)
         : [];
       const recoveries = expectedPipelineRows
-        ? r2Continuation ? [] : await readAll<RecoveryRow>(state, runtime.DB, recoverySql(), [pipelineStart, pipelineEnd, expectedPipelineRows + 1])
+        ? r2Continuation ? [] : await readAll<RecoveryRow>(state, runtime.DB, recoverySql(), [pipelineStart, pipelineEnd, expectedPipelineRows + 1], "recoveries", false)
         : [];
-      const activeReleases = r2Continuation ? [] : await readAll<ActiveReleaseRow>(state, runtime.DB, ACTIVE_RELEASE_SQL, [2]);
+      const activeReleases = r2Continuation ? [] : await readAll<ActiveReleaseRow>(state, runtime.DB, ACTIVE_RELEASE_SQL, [2], "activeReleaseSlots", false);
+      if (r2Continuation) {
+        for (const collection of RECOVERY_EVIDENCE_COLLECTIONS) {
+          if (collection !== "releaseManifests") markEvidenceNotQueried(state, collection, "R2_CONTINUATION");
+        }
+      }
       applySourceReadiness(records, readiness);
       applyPointers(records, pointers);
       markModel(records, models);
@@ -1295,6 +1391,7 @@ export async function collectRecoveryInventory(
     activeReleaseSlots,
     dates,
     usage,
+    evidenceCoverage: state.evidenceCoverage,
     incompleteReasons: [...new Set(state.incompleteReasons)],
     r2Pagination,
   };
