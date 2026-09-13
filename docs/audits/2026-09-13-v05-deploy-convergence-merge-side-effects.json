@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.5",
+    "change": "deploy trigger and merge convergence guard",
+    "baseBranch": "main",
+    "baseSha": "f9f28751071cbdb34ee124a47d0fe9276c32eb8a",
+    "headBranch": "codex/v05-deploy-convergence"
+  },
+  "changedPaths": [
+    ".github/workflows/deploy-worker.yml",
+    "docs/audits/2026-09-13-v05-deploy-convergence-merge-side-effects.json",
+    "docs/branching-and-release.md",
+    "tests/unit/test_workflow_contract.py",
+    "web/README.md"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "productionFlagChanges": false,
+    "activePointerChanged": false
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/deploy-worker.yml",
+        "trigger": "pull_request closed on main, paths web/** or deploy-worker.yml, merged=true",
+        "jobs": ["deploy"],
+        "remoteDataWrites": true,
+        "productionDeploy": true,
+        "actions": [
+          "apply pending D1 migrations --remote",
+          "deploy Worker and static assets",
+          "verify exact merge_commit_sha via production canary"
+        ]
+      },
+      {
+        "path": "Cloudflare Workers Builds (account setting)",
+        "trigger": "existing external Git integration on main push",
+        "remoteDataWrites": "unknown",
+        "productionDeploy": "currently yes",
+        "actionRequired": "before production cutover, configure upload-only or disconnect; not changed by this PR"
+      }
+    ],
+    "d1Migration": {
+      "required": "existing deploy workflow checks pending migrations",
+      "destructive": false,
+      "dataRowsInserted": 0,
+      "dataRowsUpdated": 0
+    },
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "activePointerChanged": false,
+    "featureFlagsChanged": false
+  },
+  "resourceEffects": {
+    "d1RowsRead": "unknown_until_authorized_deploy",
+    "d1RowsWritten": "unknown_until_authorized_deploy",
+    "r2ClassAOperations": 0,
+    "r2ClassBOperations": 0,
+    "workerRequests": "unknown_until_canary",
+    "githubActionsMinutes": "unknown_until_run",
+    "budgetDecision": "UNKNOWN_NOT_A_PRODUCTION_EXECUTION"
+  },
+  "sideEffectGuards": {
+    "d1OrR2WriteInPr": false,
+    "workflowDispatchInPr": false,
+    "activePointerMutationInPr": false,
+    "featureFlagEnablement": false,
+    "productionReadPathMutation": false,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert PR before merge; if merged, disable the GitHub deploy workflow only after preserving canary evidence",
+    "productionDataMutationInPr": false,
+    "pointerRecoveryRequired": false,
+    "note": "The PR changes trigger semantics and documentation; it does not execute a workflow or modify Cloudflare account settings."
+  }
+}
