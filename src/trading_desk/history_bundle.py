@@ -18,6 +18,9 @@ from .models import FetchArtifact
 # Zero is the wire-contract sentinel for indefinite R2 retention. Raw objects
 # are additionally protected by an R2 bucket lock on market-data/raw/.
 HISTORY_RETENTION_DAYS = 0
+PIPELINE_RUN_KEY = re.compile(
+    r"daily-market-data:\d{4}-\d{2}-\d{2}:(?:evening|morning_exact|morning|reconcile):v\d+"
+)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -281,6 +284,7 @@ def build_history_bundle(
     started_at: str,
     finished_at: str,
     workspace_root: Path,
+    run_key: str | None = None,
 ) -> dict[str, Any]:
     artifact_list = list(artifacts)
     serialized = [
@@ -298,6 +302,10 @@ def build_history_bundle(
         "snapshot": snapshot,
         "artifacts": serialized,
     }
+    if run_key:
+        if not PIPELINE_RUN_KEY.fullmatch(run_key):
+            raise ValueError(f"Invalid pipeline run key: {run_key!r}")
+        history["runKey"] = run_key
     as_of = str(snapshot.get("asOf") or "")
     if as_of:
         adjacent = _build_official_etf_daily_changes_from_artifacts(
@@ -315,7 +323,7 @@ def build_history_bundle(
 
 
 def build_history_bundle_from_files(
-    *, snapshot_path: Path, manifest_path: Path, workspace_root: Path
+    *, snapshot_path: Path, manifest_path: Path, workspace_root: Path, run_key: str | None = None
 ) -> dict[str, Any]:
     snapshot = _read_json(snapshot_path)
     manifest = _read_json(manifest_path)
@@ -326,4 +334,5 @@ def build_history_bundle_from_files(
         started_at=str(manifest.get("started_at") or ""),
         finished_at=str(manifest.get("finished_at") or ""),
         workspace_root=workspace_root,
+        run_key=run_key,
     )

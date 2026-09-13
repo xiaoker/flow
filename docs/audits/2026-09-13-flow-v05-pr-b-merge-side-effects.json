@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.5",
+    "pr": "B",
+    "title": "feat: shadow-write source observation receipts",
+    "baseBranch": "main",
+    "baseSha": "ca26cf741a8a316346319d49bf63f2622b837fd2",
+    "headBranch": "codex/flow-v05-observation-shadow"
+  },
+  "changedPaths": [
+    ".github/workflows/market-data-collect.yml",
+    "docs/audits/2026-09-13-flow-v05-pr-b-merge-side-effects.json",
+    "docs/audits/2026-09-13-flow-v05-pr-b-observation-shadow.md",
+    "scripts/build_history_bundle.py",
+    "src/trading_desk/history_bundle.py",
+    "tests/unit/test_history_bundle.py",
+    "web/app/api/v1/admin/history-import/route.ts",
+    "web/app/lib/dashboard-store.ts",
+    "web/app/lib/source-observation.ts",
+    "web/tests/source-observation.test.mjs",
+    "web/wrangler.jsonc"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "sourceObservationShadow": "code path and default-off flag only; not executed in CI"
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "push on main",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/deploy-worker.yml",
+        "trigger": "push on main (paths: web/**)",
+        "jobs": ["deploy"],
+        "remoteDataWrites": true,
+        "productionDeploy": true,
+        "actions": ["apply pending D1 migrations --remote", "deploy Worker and static assets"]
+      }
+    ],
+    "deployWorker": true,
+    "d1Migration": {
+      "required": false,
+      "remote": false,
+      "newMigrations": [],
+      "destructive": false,
+      "dataRowsInserted": 0,
+      "dataRowsUpdated": 0,
+      "note": "PR A already supplied the additive source_observation table; PR B adds no schema migration. Existing deploy workflow may still run its idempotent pending-migration check."
+    },
+    "r2Writes": "only when SOURCE_OBSERVATION_SHADOW_ENABLED is explicitly enabled after merge; default 0",
+    "activePointerChanged": false,
+    "featureFlagsChanged": "default-off declaration only; no enablement",
+    "productionReadPathChanged": false,
+    "reason": "web/** changes match the existing path-filtered Worker deployment workflow."
+  },
+  "resourceEffects": {
+    "d1RowsRead": 0,
+    "d1RowsWritten": 0,
+    "r2ClassAOperations": 0,
+    "r2ClassBOperations": 0,
+    "r2Bytes": 0,
+    "workerRequests": "unknown_until_authorized_deploy_verification",
+    "githubActionsMinutes": {
+      "status": "UNKNOWN_UNTIL_RUN",
+      "note": "CI/deploy billing telemetry is not available in this local manifest; no collection workflow is dispatched by this PR."
+    },
+    "budgetDecision": "UNKNOWN_NOT_A_PRODUCTION_EXECUTION"
+  },
+  "sideEffectGuards": {
+    "d1OrR2WriteInPr": false,
+    "workflowDispatchInPr": false,
+    "activePointerMutationInPr": false,
+    "featureFlagEnablement": false,
+    "productionReadPathMutation": false,
+    "migration": false,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert_pr_before_merge_or disable shadow flag",
+    "productionDataMutationInPr": false,
+    "pointerRecoveryRequired": false,
+    "note": "Receipt objects and D1 rows are additive and content-addressed; the existing read path is unchanged."
+  }
+}

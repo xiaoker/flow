@@ -994,7 +994,7 @@ jobs:
             fi
 
       - name: Build full-source history archive bundle
-        run: python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json --output history-bundle.json
+        run: python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json --output history-bundle.json --run-key "$INPUT_RUN_KEY"
 
       - name: Archive all official raw and normalized sources
         env:
