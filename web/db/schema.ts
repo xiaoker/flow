@@ -88,6 +88,43 @@ export const activeReleases = sqliteTable("active_release", {
   activatedAt: text("activated_at").notNull(),
 });
 
+/**
+ * Immutable receipt for one official-source observation.  This is an
+ * additive v0.5 control-plane table; the producer does not write it until the
+ * later observation-receipt PR.  Unlike source_readiness (a mutable
+ * target-date projection), one row preserves the source request, publication
+ * date mapping, response hashes and content fingerprint that explain why a
+ * source was or was not ready.
+ */
+export const sourceObservations = sqliteTable("source_observation", {
+  observationId: text("observation_id").primaryKey(),
+  sourceId: text("source_id").notNull(),
+  dataset: text("dataset").notNull(),
+  targetDate: text("target_date").notNull(),
+  sourceBusinessDate: text("source_business_date"),
+  publishedDate: text("published_date"),
+  dateBasis: text("date_basis").notNull(),
+  status: text("status").notNull(),
+  officialUrl: text("official_url").notNull(),
+  requestParamsJson: text("request_params_json").notNull(),
+  httpStatus: integer("http_status"),
+  responseContentType: text("response_content_type"),
+  rawObjectKey: text("raw_object_key"),
+  rawBytes: integer("raw_bytes"),
+  rawSha256: text("raw_sha256"),
+  normalizedSha256: text("normalized_sha256"),
+  sourceFingerprint: text("source_fingerprint").notNull(),
+  contractVersion: text("contract_version").notNull(),
+  runKey: text("run_key"),
+  observedAt: text("observed_at").notNull(),
+  reasonCode: text("reason_code"),
+  evidenceJson: text("evidence_json").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("source_observation_fingerprint_uq").on(table.sourceFingerprint),
+  index("source_observation_target_source_idx").on(table.targetDate, table.sourceId, table.observedAt),
+]);
+
 export const marketHistoryDaily = sqliteTable("market_history_daily", {
   tradeDate: text("trade_date").primaryKey(),
   marginBalance: real("margin_balance"),

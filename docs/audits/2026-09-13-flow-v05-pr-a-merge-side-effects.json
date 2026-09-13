@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.5",
+    "pr": "A",
+    "title": "feat: add source observation receipt schema",
+    "baseBranch": "main",
+    "baseSha": "2d6e4deec6a33edf2b3273c0bda419fd41801ef6",
+    "headBranch": "codex/flow-v05-observation-schema"
+  },
+  "changedPaths": [
+    "docs/audits/2026-09-13-flow-v05-pr-a-merge-side-effects.json",
+    "docs/audits/2026-09-13-flow-v05-pr-a-observation-schema.md",
+    "schemas/source-observation-receipt.schema.json",
+    "tests/unit/test_observation_schema.py",
+    "web/db/schema.ts",
+    "web/drizzle/0013_unusual_zeigeist.sql",
+    "web/drizzle/meta/0013_snapshot.json",
+    "web/drizzle/meta/_journal.json"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "push on main",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/deploy-worker.yml",
+        "trigger": "push on main (paths: web/**)",
+        "jobs": ["deploy"],
+        "remoteDataWrites": true,
+        "productionDeploy": true,
+        "actions": ["apply pending D1 migrations --remote", "deploy Worker and static assets"]
+      }
+    ],
+    "deployWorker": true,
+    "d1Migration": {
+      "required": true,
+      "remote": true,
+      "migration": "web/drizzle/0013_unusual_zeigeist.sql",
+      "statements": [
+        "CREATE TABLE source_observation",
+        "CREATE UNIQUE INDEX source_observation_fingerprint_uq",
+        "CREATE INDEX source_observation_target_source_idx"
+      ],
+      "destructive": false,
+      "dataRowsInserted": 0,
+      "dataRowsUpdated": 0,
+      "requiresExplicitAuthorization": true
+    },
+    "r2Writes": false,
+    "activePointerChanged": false,
+    "featureFlagsChanged": false,
+    "productionReadPathChanged": false,
+    "reason": "deploy-worker.yml is path-filtered to web/**; schema.ts and Drizzle migration are under web/ and would trigger the existing deployment workflow after merge."
+  },
+  "resourceEffects": {
+    "d1RowsRead": 0,
+    "d1RowsWritten": "unknown_until_remote_migration",
+    "r2ClassAOperations": 0,
+    "r2ClassBOperations": 0,
+    "r2Bytes": 0,
+    "workerRequests": "unknown_until_deploy_verification",
+    "githubActionsMinutes": {
+      "status": "UNKNOWN_UNTIL_RUN",
+      "pullRequestConfiguredTimeoutMinutes": 25,
+      "mergeDeployConfiguredTimeoutMinutes": 20,
+      "note": "Actual billed minutes require GitHub telemetry; this PR stage does not authorize the merge-triggered deployment."
+    },
+    "budgetDecision": "UNKNOWN_NOT_A_REMOTE_EXECUTION"
+  },
+  "sideEffectGuards": {
+    "d1OrR2WriteInPr": false,
+    "workflowDispatchInPr": false,
+    "activePointerMutationInPr": false,
+    "featureFlagMutationInPr": false,
+    "productionReadPathMutationInPr": false,
+    "remoteMigrationOnMerge": true,
+    "workerDeployOnMerge": true,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert_pr_before_merge_or_apply_follow_up_schema_rollback_plan",
+    "productionDataMutationInPr": false,
+    "pointerRecoveryRequired": false,
+    "note": "The migration is additive and has no table/data rollback operation; merge must be separately authorized because the existing deploy workflow applies remote migrations."
+  }
+}
