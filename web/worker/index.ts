@@ -5,11 +5,21 @@ import { flowBuildHeaders } from "../app/lib/build-info";
 import {
   buildPipelineRunKey,
   claimPipelineWindow,
+  getPipelineWindow,
   markPipelineWindow,
   PIPELINE_WINDOW_CONTRACT_VERSION,
   shanghaiDate,
   type PipelineWindowName,
 } from "../app/lib/pipeline-window";
+import {
+  getMarketDayState,
+  parseMarketDayStateRow,
+  persistMarketDayProjection,
+  projectMarketDay,
+  shouldDispatchHeavyCollection,
+  type SourceObservationSummary,
+} from "../app/lib/market-day-projection";
+import { probeMarketDaySources } from "../app/lib/market-day-probe";
 
 interface Env {
   ASSETS: Fetcher;
@@ -18,6 +28,8 @@ interface Env {
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
   PIPELINE_WINDOW_GATE_ENABLED?: string;
+  /** v0.5 low-cost source probe; remains off until shadow validation is authorised. */
+  MARKET_DAY_PROBE_ENABLED?: string;
   /** Recovery control-plane gate; intentionally unset/disabled in production during R1. */
   PIPELINE_RECOVERY_ENABLED?: string;
   PIPELINE_WINDOW_CONTRACT_VERSION?: string;
@@ -46,6 +58,7 @@ const MARKET_DATA_COLLECT_DISPATCH_URL =
   "https://api.github.com/repos/xiaoker/flow/actions/workflows/market-data-collect.yml/dispatches";
 const DISPATCH_RETRY_DELAYS_MS = [0, 1_000, 3_000] as const;
 const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
+const MARKET_DAY_OBSERVATION_LIMIT = 64;
 
 export function collectionWindowForCron(cron: string): PipelineWindowName {
   if (cron.startsWith("45 23")) return "morning";
@@ -55,6 +68,76 @@ export function collectionWindowForCron(cron: string): PipelineWindowName {
 
 function isRetryableDispatchStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
+}
+
+function isEnabledFlag(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
+async function readMarketDayObservations(
+  db: D1Database,
+  targetDate: string,
+): Promise<SourceObservationSummary[]> {
+  const result = await db.prepare(`
+    SELECT observation_id, source_id, dataset, target_date,
+           source_business_date, published_date, status,
+           source_fingerprint, observed_at
+      FROM source_observation
+     WHERE target_date = ?
+     ORDER BY observed_at DESC, source_id ASC, dataset ASC
+     LIMIT ?
+  `).bind(targetDate, MARKET_DAY_OBSERVATION_LIMIT).all<SourceObservationSummary>();
+  return (result.results ?? []).map((row) => ({
+    observationId: String(row.observationId ?? (row as unknown as Record<string, unknown>).observation_id ?? ""),
+    sourceId: String(row.sourceId ?? (row as unknown as Record<string, unknown>).source_id ?? ""),
+    dataset: String(row.dataset ?? ""),
+    targetDate: String(row.targetDate ?? (row as unknown as Record<string, unknown>).target_date ?? ""),
+    sourceBusinessDate: (row.sourceBusinessDate ?? (row as unknown as Record<string, unknown>).source_business_date ?? null) as string | null,
+    publishedDate: (row.publishedDate ?? (row as unknown as Record<string, unknown>).published_date ?? null) as string | null,
+    status: String(row.status ?? ""),
+    sourceFingerprint: String(row.sourceFingerprint ?? (row as unknown as Record<string, unknown>).source_fingerprint ?? ""),
+    observedAt: String(row.observedAt ?? (row as unknown as Record<string, unknown>).observed_at ?? ""),
+  }));
+}
+
+async function coordinateMarketDay(
+  env: Env,
+  targetDate: string,
+  runKey: string,
+): Promise<{ shouldDispatch: boolean; probeFingerprint: string }> {
+  if (!env.DB) throw new Error("MARKET_DAY_PROBE_ENABLED requires DB");
+  const observedAt = new Date().toISOString();
+  // Probes are intentionally sequential and bounded.  They only retain
+  // response metadata/prefix hashes; the heavy collector remains the owner of
+  // raw bytes and full parsing.
+  const probes = await probeMarketDaySources(targetDate, observedAt);
+  const observations = await readMarketDayObservations(env.DB, targetDate);
+  const previousRow = await getMarketDayState(env.DB, targetDate);
+  const previous = previousRow ? parseMarketDayStateRow(previousRow) : null;
+  const projection = await projectMarketDay({
+    targetDate,
+    observations,
+    probes,
+    projectedAt: observedAt,
+  });
+  const pipeline = await getPipelineWindow(env.DB, runKey);
+  const shouldDispatch = shouldDispatchHeavyCollection(
+    previous,
+    projection,
+    pipeline?.status ?? null,
+  );
+  const persisted = await persistMarketDayProjection(env.DB, projection);
+  console.info("Market-day probe projection recorded", {
+    targetDate,
+    runKey,
+    state: projection.state,
+    nextAction: projection.nextAction,
+    shouldDispatch,
+    probeFingerprint: projection.probeFingerprint,
+    sourceFingerprint: projection.sourceFingerprint,
+    d1RowsWritten: persisted.rowsWritten,
+  });
+  return { shouldDispatch, probeFingerprint: projection.probeFingerprint };
 }
 
 async function dispatchDailyCollection(
@@ -71,6 +154,21 @@ async function dispatchDailyCollection(
   const runKey = buildPipelineRunKey(windowDate, window, contractVersion);
   const leaseOwner = `cloudflare:${window}:${controller.scheduledTime}`;
   const gateEnabled = env.PIPELINE_WINDOW_GATE_ENABLED === "1" || env.PIPELINE_WINDOW_GATE_ENABLED === "true";
+  let probeFingerprint: string | null = null;
+  if (isEnabledFlag(env.MARKET_DAY_PROBE_ENABLED)) {
+    if (!gateEnabled) throw new Error("MARKET_DAY_PROBE_ENABLED requires PIPELINE_WINDOW_GATE_ENABLED");
+    const coordination = await coordinateMarketDay(env, windowDate, runKey);
+    probeFingerprint = coordination.probeFingerprint;
+    if (!coordination.shouldDispatch) {
+      console.info("Market-day probe found no new source facts; skipping heavy collection", {
+        cron: controller.cron,
+        runKey,
+        targetDate: windowDate,
+        probeFingerprint,
+      });
+      return;
+    }
+  }
   const scheduleLagMs = Math.max(0, Date.now() - controller.scheduledTime);
   if (scheduleLagMs > LATE_SCHEDULE_THRESHOLD_MS) {
     console.warn("Cloudflare Cron delivered a late collection window", {
@@ -93,6 +191,7 @@ async function dispatchDailyCollection(
       // market data.
       targetDate: windowDate,
       leaseOwner,
+      sourceFingerprint: probeFingerprint,
     });
     if (claim.decision !== "acquired" && claim.decision !== "takeover") {
       console.info("Skipped duplicate daily collection window", {
