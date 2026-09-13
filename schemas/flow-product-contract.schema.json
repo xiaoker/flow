@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flow.xiaoker.com/schemas/flow-product-contract-v0.4.json",
+  "title": "Flow product and release contract v0.4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "classificationStatus",
+    "timezone",
+    "resourceBudgetRef",
+    "activation",
+    "stateDefinitions",
+    "capabilities",
+    "slo",
+    "fieldSemantics",
+    "prohibitedCombinations",
+    "contractMappings",
+    "retirementCandidates"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "contractVersion": {"const": "flow-product-v0.4"},
+    "classificationStatus": {"const": "PROPOSED_PENDING_USER_CONFIRMATION"},
+    "timezone": {"const": "Asia/Shanghai"},
+    "resourceBudgetRef": {"const": "config/resource-budget.json"},
+    "activation": {
+      "$ref": "#/$defs/activation"
+    },
+    "stateDefinitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "marketDay", "decisionRelease"],
+      "properties": {
+        "source": {"$ref": "#/$defs/stateMachine"},
+        "marketDay": {"$ref": "#/$defs/stateMachine"},
+        "decisionRelease": {"$ref": "#/$defs/stateMachine"}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/capability"}
+    },
+    "slo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "latestCompleteDecisionWithinMinutesAfterRequiredSources",
+        "normalTargetLocalTime",
+        "normalTargetTimezone",
+        "consecutiveTradingDaysWithoutManualRecovery",
+        "maxDuplicateHeavyRunsPerRunKey",
+        "maxActivePointerRollback",
+        "maxCrossDatePageCompositions",
+        "maxWorker1102",
+        "dailyBudgetSource",
+        "dailyBudgetTargets"
+      ],
+      "properties": {
+        "latestCompleteDecisionWithinMinutesAfterRequiredSources": {"type": "integer", "minimum": 1},
+        "normalTargetLocalTime": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"},
+        "normalTargetTimezone": {"const": "Asia/Shanghai"},
+        "consecutiveTradingDaysWithoutManualRecovery": {"type": "integer", "minimum": 1},
+        "maxDuplicateHeavyRunsPerRunKey": {"const": 0},
+        "maxActivePointerRollback": {"const": 0},
+        "maxCrossDatePageCompositions": {"const": 0},
+        "maxWorker1102": {"const": 0},
+        "dailyBudgetSource": {"const": "config/resource-budget.json"},
+        "dailyBudgetTargets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "d1RowsReadPerDay",
+            "d1RowsWrittenPerDay",
+            "workersRequestsPerDay",
+            "githubActionsMinutesPerMonth"
+          ],
+          "properties": {
+            "d1RowsReadPerDay": {"type": "string", "pattern": "^config/resource-budget\\.json#/targets/d1RowsReadPerDay$"},
+            "d1RowsWrittenPerDay": {"type": "string", "pattern": "^config/resource-budget\\.json#/targets/d1RowsWrittenPerDay$"},
+            "workersRequestsPerDay": {"type": "string", "pattern": "^config/resource-budget\\.json#/targets/workersRequestsPerDay$"},
+            "githubActionsMinutesPerMonth": {"type": "string", "pattern": "^config/resource-budget\\.json#/targets/githubActionsMinutesPerMonth$"}
+          }
+        }
+      }
+    },
+    "fieldSemantics": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/fieldSemantic"}
+    },
+    "prohibitedCombinations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "condition", "forbiddenOutcome"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "condition": {"type": "string", "minLength": 1},
+          "forbiddenOutcome": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "contractMappings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path", "authority", "concepts"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "path": {"type": "string", "minLength": 1},
+          "authority": {"type": "string", "minLength": 1},
+          "concepts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "retirementCandidates": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path", "candidateVersion", "requiredProof"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "path": {"type": "string", "minLength": 1},
+          "candidateVersion": {"enum": ["v0.9", "v1.0"]},
+          "requiredProof": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productionReadPathChanged", "featureFlagsChanged", "remoteWrites", "workflowDispatch", "activePointerChanged"],
+      "properties": {
+        "productionReadPathChanged": {"const": false},
+        "featureFlagsChanged": {"const": false},
+        "remoteWrites": {"const": false},
+        "workflowDispatch": {"const": false},
+        "activePointerChanged": {"const": false}
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "terminalStates", "transitions"],
+      "properties": {
+        "states": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"}},
+        "terminalStates": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"}},
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "reasonRequired"],
+            "properties": {
+              "from": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"},
+              "to": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"},
+              "reasonRequired": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "classification", "slot", "sourceDomains", "failurePolicy", "userSurface"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "classification": {"enum": ["REQUIRED_FOR_DECISION", "OPTIONAL_EXPLICIT", "NOT_APPLICABLE"]},
+        "slot": {"enum": ["dashboard", "etf_penetration"]},
+        "sourceDomains": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}},
+        "failurePolicy": {"type": "string", "minLength": 1},
+        "userSurface": {"type": "string", "minLength": 1}
+      }
+    },
+    "fieldSemantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "timezone", "meaning"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "timezone": {"type": ["string", "null"]},
+        "meaning": {"type": "string", "minLength": 1},
+        "mustNotSubstituteFor": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "mustBeConfirmedBy": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "mustEqualWithinRelease": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "mustBeAuditable": {"type": "boolean"},
+        "mustBeStableFor": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "mustNotUse": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}
