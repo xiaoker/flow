@@ -10,6 +10,7 @@ import {
 } from "@/app/lib/etf-flow-state";
 import { extractMarketHistoryPoint } from "@/app/lib/market-history";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
+import { recordSourceObservation } from "@/app/lib/source-observation";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ const MAX_ETF_DAILY_CHANGE_ROWS = 10_000;
 const HISTORY_RETENTION_DAYS = 0;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const PIPELINE_RUN_KEY = /^daily-market-data:\d{4}-\d{2}-\d{2}:(?:evening|morning_exact|morning|reconcile):v\d+$/;
 const REQUIRED_READINESS_DATASETS = new Set<HistoryArtifact["dataset"]>([
   "etf_scale",
   "margin_market_daily",
@@ -126,6 +128,8 @@ type HistoryBundle = {
      */
     expectedArtifacts?: string[];
     finalize?: boolean;
+    /** Stable cross-scheduler identity, carried into shadow receipts only. */
+    runKey?: string;
   };
 };
 
@@ -490,6 +494,8 @@ function isHistoryBundle(value: unknown): value is HistoryBundle {
         isOfficialEtfDailyChanges(history.officialEtfDailyChanges, history)) &&
       expectedArtifactsValid &&
       (history.finalize === undefined || typeof history.finalize === "boolean") &&
+      (history.runKey === undefined ||
+        (typeof history.runKey === "string" && PIPELINE_RUN_KEY.test(history.runKey))) &&
       (isDashboardSnapshot(history.snapshot) ||
         (!finalizeRequested && history.snapshot === undefined)) &&
       (history.snapshot === undefined || history.snapshot.asOf === history.asOf)
@@ -1259,6 +1265,9 @@ export async function POST(request: Request) {
     let archivedPointerCount = 0;
     let archivedReadinessCount = 0;
     let standardizedRows = 0;
+    let sourceObservationCount = 0;
+    let sourceObservationD1Unavailable = 0;
+    let sourceObservationR2Errors = 0;
     for (const artifact of history.artifacts) {
       try {
         const raw = decodeBase64(artifact.rawContentBase64);
@@ -1287,6 +1296,48 @@ export async function POST(request: Request) {
             customMetadata: { sha256: artifact.sha256 },
           },
         );
+        // v0.5 shadow mode records the immutable observation immediately
+        // after the raw object is safely archived.  It deliberately does not
+        // participate in publication or readiness decisions yet: D1 is a
+        // bounded projection and a later reconcile can replay the same R2
+        // receipt if this insert is temporarily unavailable.
+        if (isEnabledFlag(runtime.SOURCE_OBSERVATION_SHADOW_ENABLED)) {
+          try {
+            const observation = await recordSourceObservation(runtime.RAW_BUCKET, runtime.DB, {
+              sourceId: artifact.sourceId,
+              dataset: artifact.dataset,
+              targetDate: history.asOf,
+              requestedDate: artifact.requestedDate,
+              tradeDates: artifact.tradeDates,
+              observedAt: artifact.observedAt,
+              sourceUrl: artifact.sourceUrl,
+              dateBasis: artifact.dateBasis,
+              sha256: artifact.sha256,
+              contentType: artifact.contentType,
+              rawKey,
+              rawBytes: raw.byteLength,
+              metadata: artifact.metadata,
+              releaseId: artifact.releaseId,
+              archiveRunId: history.runId,
+              runKey: history.runKey ?? null,
+            });
+            sourceObservationCount += 1;
+            if (observation.d1Status === "unavailable") sourceObservationD1Unavailable += 1;
+          } catch (error) {
+            // A raw archive without a receipt is not publishable while the
+            // shadow contract is enabled.  Continue this bounded artifact
+            // loop so other sources can leave independent evidence, then
+            // return a retryable response before any release work begins.
+            sourceObservationR2Errors += 1;
+            const code = error instanceof Error ? error.message : "unknown_receipt_error";
+            console.error("source observation receipt failed", {
+              sourceId: artifact.sourceId,
+              dataset: artifact.dataset,
+              requestedDate: artifact.requestedDate,
+              code,
+            });
+          }
+        }
         const normalizedKeys: string[] = [];
         const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array; wireContent: Uint8Array }> = [];
         for (const normalized of artifact.normalized) {
@@ -1413,6 +1464,20 @@ export async function POST(request: Request) {
       }
     }
 
+    if (sourceObservationR2Errors > 0) {
+      return NextResponse.json(
+        {
+          error: "source_observation_receipt_failed",
+          asOf: history.asOf,
+          artifacts: history.artifacts.length,
+          sourceObservationCount,
+          sourceObservationD1Unavailable,
+          sourceObservationR2Errors,
+        },
+        { status: 503 },
+      );
+    }
+
     // Non-final chunks only checkpoint their artifact.  Avoid the expensive
     // expected-set R2 scan and snapshot serialization until the final chunk,
     // where completeness is checked exactly once before atomic publication.
@@ -1424,6 +1489,8 @@ export async function POST(request: Request) {
         standardizedRows,
         archivedPointerCount,
         archivedReadinessCount,
+        sourceObservationCount,
+        sourceObservationD1Unavailable,
       });
     }
 
@@ -1461,6 +1528,7 @@ export async function POST(request: Request) {
         finishedAt: history.finishedAt,
         retentionDays: history.retentionDays,
         asOf: history.asOf,
+        runKey: history.runKey ?? null,
         snapshotKey: shouldPublish ? snapshotKey : null,
         snapshotSha256,
         artifacts: manifestArtifacts,
@@ -1479,6 +1547,8 @@ export async function POST(request: Request) {
         historyImportMode: archiveOnly ? "archive_only" : "legacy_compatibility",
         artifacts: history.artifacts.length,
         standardizedRows,
+        sourceObservationCount,
+        sourceObservationD1Unavailable,
         snapshotSha256,
         snapshotKey: null,
         manifestKey,
@@ -1613,6 +1683,8 @@ export async function POST(request: Request) {
       standardizedRows,
       archivedPointerCount,
       archivedReadinessCount,
+      sourceObservationCount,
+      sourceObservationD1Unavailable,
       snapshotSha256,
       snapshotKey,
       manifestKey,
