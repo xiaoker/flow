@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flow.xiaoker.com/schemas/source-observation-receipt-v1.json",
+  "title": "Flow source observation receipt",
+  "description": "An immutable, append-only receipt for one official-source observation. It records source/date identity and provenance; source_readiness remains a mutable projection.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "observationId",
+    "sourceId",
+    "dataset",
+    "targetDate",
+    "dateBasis",
+    "status",
+    "officialUrl",
+    "requestParams",
+    "sourceFingerprint",
+    "contractVersion",
+    "observedAt",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "observationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "sourceId": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,119}$" },
+    "dataset": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,119}$" },
+    "targetDate": { "$ref": "#/$defs/date" },
+    "sourceBusinessDate": { "$ref": "#/$defs/nullableDate" },
+    "publishedDate": { "$ref": "#/$defs/nullableDate" },
+    "dateBasis": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "status": {
+      "enum": [
+        "NOT_PUBLISHED",
+        "SOURCE_UNAVAILABLE",
+        "OBSERVED",
+        "VERIFIED",
+        "REJECTED_QUALITY",
+        "SUPERSEDED_BY_REVISION"
+      ]
+    },
+    "officialUrl": { "type": "string", "pattern": "^https://", "maxLength": 2048 },
+    "requestParams": { "type": "object" },
+    "httpStatus": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
+    "responseContentType": { "type": ["string", "null"], "maxLength": 160 },
+    "rawObjectKey": { "type": ["string", "null"], "maxLength": 1024 },
+    "rawBytes": { "type": ["integer", "null"], "minimum": 0 },
+    "rawSha256": { "$ref": "#/$defs/nullableSha256" },
+    "normalizedSha256": { "$ref": "#/$defs/nullableSha256" },
+    "sourceFingerprint": { "$ref": "#/$defs/sha256" },
+    "contractVersion": { "type": "string", "pattern": "^flow-product-v[0-9]+(?:\\.[0-9]+)?$" },
+    "runKey": { "type": ["string", "null"], "maxLength": 240 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "reasonCode": { "type": ["string", "null"], "maxLength": 160 },
+    "evidence": { "type": "object", "minProperties": 1 },
+    "createdAt": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["OBSERVED", "VERIFIED"] } } },
+      "then": {
+        "required": ["sourceBusinessDate", "rawObjectKey", "rawSha256"],
+        "properties": {
+          "sourceBusinessDate": { "$ref": "#/$defs/date" },
+          "rawObjectKey": { "type": "string", "minLength": 1 },
+          "rawSha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["NOT_PUBLISHED", "SOURCE_UNAVAILABLE", "REJECTED_QUALITY"] } } },
+      "then": { "required": ["reasonCode"] }
+    }
+  ],
+  "$defs": {
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "nullableDate": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableSha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
