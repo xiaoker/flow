@@ -1,8 +1,14 @@
 name: Deploy Flow Worker
 
 on:
-  push:
+  # A merge can be represented by an empty commit when an earlier merge
+  # attempt already materialised the PR tree.  A push paths filter evaluates
+  # only that empty commit and would silently skip deployment.  The closed PR
+  # event evaluates the PR diff instead, so the merge still deploys exactly
+  # once even when the merge response was indeterminate.
+  pull_request:
     branches: [main]
+    types: [closed]
     paths:
       - "web/**"
       - ".github/workflows/deploy-worker.yml"
@@ -17,12 +23,19 @@ concurrency:
 
 jobs:
   deploy:
+    # The path filter selects relevant PRs; this condition prevents a closed
+    # but unmerged PR from deploying. Manual dispatch remains an explicit
+    # operator action.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
         working-directory: web
     env:
+      # For a merged PR this is the exact commit now on main. For a manual
+      # dispatch it is the commit selected by the operator.
+      FLOW_SOURCE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       FLOW_PUBLIC_URL: https://flow.xiaoker.com
@@ -32,6 +45,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0, Node 24
@@ -48,7 +63,7 @@ jobs:
         # step. Set the values before the contract test's build so the bundle
         # that is uploaded cannot fall back to the local identity.
         run: |
-          echo "FLOW_BUILD_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "FLOW_BUILD_SHA=${FLOW_SOURCE_SHA}" >> "$GITHUB_ENV"
           echo "FLOW_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Run Web lint and production contract tests
@@ -83,10 +98,10 @@ jobs:
               --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
               --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
               --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \
-              "$FLOW_PUBLIC_URL/api/v2/releases/latest?build_check=$GITHUB_SHA&attempt=$attempt")"
+              "$FLOW_PUBLIC_URL/api/v2/releases/latest?build_check=$FLOW_SOURCE_SHA&attempt=$attempt")"
             if [ "$status" = "200" ] \
-              && grep -Fqi "x-flow-build-sha: $GITHUB_SHA" "$headers_file" \
-              && jq -e --arg sha "$GITHUB_SHA" \
+              && grep -Fqi "x-flow-build-sha: $FLOW_SOURCE_SHA" "$headers_file" \
+              && jq -e --arg sha "$FLOW_SOURCE_SHA" \
                 '.buildSha == $sha and (.releaseId | type == "string") and (.asOf | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
                 "$body_file" >/dev/null; then
               verified=1
@@ -96,7 +111,7 @@ jobs:
             if [ "$attempt" -lt 20 ]; then sleep 2; fi
           done
           if [ "$verified" -ne 1 ]; then
-            echo "Deployed Worker did not expose build SHA $GITHUB_SHA within the rollout window." >&2
+            echo "Deployed Worker did not expose build SHA $FLOW_SOURCE_SHA within the rollout window." >&2
             grep -iE '^(HTTP/|x-flow-build-sha:|x-flow-deployed-at:|x-flow-release-id:|cache-control:)' "$headers_file" >&2 || true
             jq -c '{buildSha, releaseId, asOf}' "$body_file" >&2 || true
             exit 1

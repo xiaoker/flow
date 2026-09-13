@@ -354,8 +354,16 @@ def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
         encoding="utf-8"
     )
 
+    assert "pull_request:" in workflow
+    assert "types: [closed]" in workflow
+    assert '"web/**"' in workflow
+    assert "github.event.pull_request.merged == true" in workflow
+    assert "FLOW_SOURCE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}" in workflow
+    assert "ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}" in workflow
+    assert "push:" not in workflow
+
     assert "Set build metadata" in workflow
-    assert "FLOW_BUILD_SHA=${GITHUB_SHA}" in workflow
+    assert "FLOW_BUILD_SHA=${FLOW_SOURCE_SHA}" in workflow
     assert workflow.index("Set build metadata") < workflow.index(
         "Run Web lint and production contract tests"
     )
@@ -363,7 +371,7 @@ def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
         "Deploy Worker and static assets"
     )
     assert "for attempt in $(seq 1 20)" in workflow
-    assert "build_check=$GITHUB_SHA&attempt=$attempt" in workflow
+    assert "build_check=$FLOW_SOURCE_SHA&attempt=$attempt" in workflow
     assert '"Cache-Control: no-cache"' in workflow
     assert "Verified deployed Worker build identity" in workflow
     assert "did not expose build SHA" in workflow

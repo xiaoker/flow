@@ -34,7 +34,16 @@ npm run deploy
 
 ### GitHub Actions 自动部署
 
-仓库中的 `Deploy Flow Worker` workflow 会在 `main` 分支的 `web/` 代码变更合并后自动运行，也可以在 GitHub Actions 页面手动运行。它会依次执行生产构建、远端 D1 迁移和 `npm run deploy`；构建或凭证检查失败时不会部署 Worker。
+仓库中的 `Deploy Flow Worker` workflow 会在包含 `web/` 变更的 Pull Request
+合并关闭后自动运行，也可以在 GitHub Actions 页面手动运行。它会检出该 PR 的
+`merge_commit_sha`，依次执行生产构建、远端 D1 迁移和 `npm run deploy`；构建或凭证
+检查失败时不会部署 Worker。使用已合并 PR 事件而不是 `push.paths`，是为了覆盖
+“合并响应不明确、PR 树已先物化、最终 main 合并提交为空”的情况。
+
+GitHub Actions 是本仓库的规范生产部署通道，负责迁移、Worker 发布和 build-identity
+canary。Cloudflare Worker 账号中的 Workers Builds Git 集成是另一条独立通道；它
+必须在 Cloudflare 设置中改为仅 `npx wrangler versions upload` 或断开自动部署，否则
+不能把两条通道的成功状态混为一谈。该账号级设置不由仓库代码自动修改。
 
 在仓库 `Settings → Secrets and variables → Actions` 中配置以下 Secrets：
 
