@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.4",
+    "pr": "A",
+    "title": "chore: establish flow product contract v0.4",
+    "baseBranch": "main",
+    "baseSha": "44b080edf3e574fa134291e64761a19f8715848e",
+    "headBranch": "codex/flow-v04-contract-baseline"
+  },
+  "changedPaths": [
+    "config/flow-product-contract.json",
+    "docs/audits/2026-09-13-flow-product-contract-v0.4.md",
+    "docs/audits/2026-09-13-flow-v04-pr-a-merge-side-effects.json",
+    "schemas/flow-product-contract.schema.json",
+    "scripts/validate_flow_product_contract.py",
+    "src/trading_desk/product_contract.py",
+    "tests/unit/test_product_contract.py"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "push on main",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "deployWorker": false,
+    "d1Migration": false,
+    "r2Writes": false,
+    "activePointerChanged": false,
+    "featureFlagsChanged": false,
+    "productionReadPathChanged": false,
+    "reason": "deploy-worker.yml is path-filtered to web/** and its own workflow file; this PR changes neither."
+  },
+  "resourceEffects": {
+    "d1RowsRead": 0,
+    "d1RowsWritten": 0,
+    "r2ClassAOperations": 0,
+    "r2ClassBOperations": 0,
+    "r2Bytes": 0,
+    "workerRequests": 0,
+    "githubActionsMinutes": {
+      "status": "UNKNOWN_UNTIL_RUN",
+      "boundedByConfiguredTimeoutMinutes": 25,
+      "note": "The PR CI has 10-minute and 15-minute job timeouts; actual billed minutes require GitHub telemetry."
+    },
+    "budgetDecision": "UNKNOWN_NOT_PRODUCTION_EXECUTION"
+  },
+  "sideEffectGuards": {
+    "d1OrR2Write": false,
+    "workflowDispatch": false,
+    "activePointerMutation": false,
+    "featureFlagMutation": false,
+    "productionReadPathMutation": false,
+    "migration": false,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert_or_close_pr",
+    "productionDataMutation": false,
+    "pointerRecoveryRequired": false
+  }
+}

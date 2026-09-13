@@ -1,0 +1,311 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "flow-product-v0.4",
+  "classificationStatus": "PROPOSED_PENDING_USER_CONFIRMATION",
+  "timezone": "Asia/Shanghai",
+  "resourceBudgetRef": "config/resource-budget.json",
+  "activation": {
+    "productionReadPathChanged": false,
+    "featureFlagsChanged": false,
+    "remoteWrites": false,
+    "workflowDispatch": false,
+    "activePointerChanged": false
+  },
+  "stateDefinitions": {
+    "source": {
+      "states": [
+        "UNKNOWN",
+        "NOT_PUBLISHED",
+        "SOURCE_UNAVAILABLE",
+        "OBSERVED",
+        "VERIFIED",
+        "REJECTED_QUALITY",
+        "SUPERSEDED_BY_REVISION"
+      ],
+      "terminalStates": [
+        "SOURCE_UNAVAILABLE",
+        "VERIFIED",
+        "REJECTED_QUALITY",
+        "SUPERSEDED_BY_REVISION"
+      ],
+      "transitions": [
+        {"from": "UNKNOWN", "to": "NOT_PUBLISHED", "reasonRequired": true},
+        {"from": "UNKNOWN", "to": "SOURCE_UNAVAILABLE", "reasonRequired": true},
+        {"from": "UNKNOWN", "to": "OBSERVED", "reasonRequired": true},
+        {"from": "NOT_PUBLISHED", "to": "OBSERVED", "reasonRequired": true},
+        {"from": "OBSERVED", "to": "VERIFIED", "reasonRequired": true},
+        {"from": "OBSERVED", "to": "REJECTED_QUALITY", "reasonRequired": true},
+        {"from": "OBSERVED", "to": "SOURCE_UNAVAILABLE", "reasonRequired": true},
+        {"from": "VERIFIED", "to": "SUPERSEDED_BY_REVISION", "reasonRequired": true}
+      ]
+    },
+    "marketDay": {
+      "states": [
+        "WAITING_SOURCES",
+        "READY_TO_BUILD",
+        "BUILDING",
+        "QA_BLOCKED",
+        "CANDIDATE",
+        "ACTIVE",
+        "SUPERSEDED"
+      ],
+      "terminalStates": ["ACTIVE", "SUPERSEDED"],
+      "transitions": [
+        {"from": "WAITING_SOURCES", "to": "READY_TO_BUILD", "reasonRequired": true},
+        {"from": "READY_TO_BUILD", "to": "BUILDING", "reasonRequired": true},
+        {"from": "BUILDING", "to": "QA_BLOCKED", "reasonRequired": true},
+        {"from": "BUILDING", "to": "CANDIDATE", "reasonRequired": true},
+        {"from": "CANDIDATE", "to": "ACTIVE", "reasonRequired": true},
+        {"from": "ACTIVE", "to": "SUPERSEDED", "reasonRequired": true}
+      ]
+    },
+    "decisionRelease": {
+      "states": ["CANDIDATE", "ACTIVE", "SUPERSEDED", "REJECTED"],
+      "terminalStates": ["ACTIVE", "SUPERSEDED", "REJECTED"],
+      "transitions": [
+        {"from": "CANDIDATE", "to": "ACTIVE", "reasonRequired": true},
+        {"from": "CANDIDATE", "to": "REJECTED", "reasonRequired": true},
+        {"from": "ACTIVE", "to": "SUPERSEDED", "reasonRequired": true}
+      ]
+    }
+  },
+  "capabilities": [
+    {
+      "id": "dashboard",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_etf", "szse_etf", "sse_margin", "szse_margin", "bse_margin", "hkex_connect"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "market_overview"
+    },
+    {
+      "id": "etf_radar",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "etf_radar"
+    },
+    {
+      "id": "etf_periods",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "etf_period_selector"
+    },
+    {
+      "id": "national_team",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "national_team"
+    },
+    {
+      "id": "connect",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["hkex_connect"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "stock_connect"
+    },
+    {
+      "id": "margin",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_margin", "szse_margin", "bse_margin"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "margin"
+    },
+    {
+      "id": "rotation",
+      "classification": "REQUIRED_FOR_DECISION",
+      "slot": "dashboard",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "block_decision_release",
+      "userSurface": "sector_rotation"
+    },
+    {
+      "id": "etf_penetration",
+      "classification": "OPTIONAL_EXPLICIT",
+      "slot": "etf_penetration",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "publish_dashboard_with_explicit_gap",
+      "userSurface": "etf_to_stock_penetration"
+    },
+    {
+      "id": "stock_search",
+      "classification": "OPTIONAL_EXPLICIT",
+      "slot": "etf_penetration",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "publish_dashboard_with_explicit_gap",
+      "userSurface": "stock_search"
+    },
+    {
+      "id": "stock_detail",
+      "classification": "OPTIONAL_EXPLICIT",
+      "slot": "etf_penetration",
+      "sourceDomains": ["sse_etf", "szse_etf"],
+      "failurePolicy": "publish_dashboard_with_explicit_gap",
+      "userSurface": "stock_detail"
+    }
+  ],
+  "slo": {
+    "latestCompleteDecisionWithinMinutesAfterRequiredSources": 30,
+    "normalTargetLocalTime": "09:15",
+    "normalTargetTimezone": "Asia/Shanghai",
+    "consecutiveTradingDaysWithoutManualRecovery": 20,
+    "maxDuplicateHeavyRunsPerRunKey": 0,
+    "maxActivePointerRollback": 0,
+    "maxCrossDatePageCompositions": 0,
+    "maxWorker1102": 0,
+    "dailyBudgetSource": "config/resource-budget.json",
+    "dailyBudgetTargets": {
+      "d1RowsReadPerDay": "config/resource-budget.json#/targets/d1RowsReadPerDay",
+      "d1RowsWrittenPerDay": "config/resource-budget.json#/targets/d1RowsWrittenPerDay",
+      "workersRequestsPerDay": "config/resource-budget.json#/targets/workersRequestsPerDay",
+      "githubActionsMinutesPerMonth": "config/resource-budget.json#/targets/githubActionsMinutesPerMonth"
+    }
+  },
+  "fieldSemantics": {
+    "windowDate": {
+      "type": "business_date",
+      "timezone": "Asia/Shanghai",
+      "meaning": "Scheduler business window date; it identifies an execution window and is not proof of a market data date.",
+      "mustNotSubstituteFor": ["dataDate", "asOf"]
+    },
+    "dataDate": {
+      "type": "business_date",
+      "timezone": "Asia/Shanghai",
+      "meaning": "Actual date of the official source fact being collected or reconstructed.",
+      "mustBeConfirmedBy": ["official_source_or_calendar_evidence"]
+    },
+    "asOf": {
+      "type": "decision_date",
+      "timezone": "Asia/Shanghai",
+      "meaning": "The single market date represented by a decision release; one release cannot combine multiple dates.",
+      "mustEqualWithinRelease": ["required_capability_data_dates"]
+    },
+    "observedAt": {
+      "type": "instant",
+      "timezone": "UTC",
+      "meaning": "When the source evidence or release was observed, distinct from its business date.",
+      "mustNotSubstituteFor": ["dataDate", "asOf"]
+    },
+    "sourceDates": {
+      "type": "date_map",
+      "timezone": "source_defined",
+      "meaning": "Business dates for each official source used by a release; missing or incompatible dates remain explicit.",
+      "mustBeAuditable": true
+    },
+    "releaseId": {
+      "type": "immutable_identifier",
+      "timezone": null,
+      "meaning": "Content-addressed identity of one immutable release slot; it is not a scheduler run ID.",
+      "mustBeStableFor": ["release_content"]
+    },
+    "sourceFingerprint": {
+      "type": "content_fingerprint",
+      "timezone": null,
+      "meaning": "Canonical hash of sorted source identities, business dates, input object hashes and calculation contract versions.",
+      "mustNotUse": ["run_id", "observed_at", "random_value"]
+    }
+  },
+  "prohibitedCombinations": [
+    {
+      "id": "unknown_evidence_cannot_be_done",
+      "condition": "requiredEvidenceStatus=UNKNOWN",
+      "forbiddenOutcome": "DONE_OR_ACTIVE"
+    },
+    {
+      "id": "partial_capability_cannot_be_full_decision",
+      "condition": "requiredCapabilityStatus!=READY",
+      "forbiddenOutcome": "ACTIVE_DECISION_RELEASE"
+    },
+    {
+      "id": "dashboard_visibility_is_not_penetration",
+      "condition": "dashboardStatus=READY AND etf_penetrationStatus!=READY",
+      "forbiddenOutcome": "FULL_PRODUCT_RECOVERED"
+    },
+    {
+      "id": "cross_date_release_is_forbidden",
+      "condition": "capabilityAsOfValuesContainMoreThanOneDate",
+      "forbiddenOutcome": "ACTIVE_DECISION_RELEASE"
+    },
+    {
+      "id": "budget_unknown_is_not_allow",
+      "condition": "budgetStatus=UNKNOWN",
+      "forbiddenOutcome": "RECOVERY_READY_OR_ACTIVE"
+    },
+    {
+      "id": "workflow_success_is_not_release_success",
+      "condition": "workflowStatus=SUCCESS AND decisionReleaseStatus!=ACTIVE",
+      "forbiddenOutcome": "DATA_RECOVERED"
+    }
+  ],
+  "contractMappings": [
+    {
+      "id": "data_quality",
+      "path": "docs/data-quality-contract.md",
+      "authority": "authoritative",
+      "concepts": ["source_traceability", "date_alignment", "unit_recalculation", "missing_data_semantics"]
+    },
+    {
+      "id": "runtime",
+      "path": "docs/flow-runtime-architecture.md",
+      "authority": "authoritative",
+      "concepts": ["offline_build", "immutable_release", "worker_pointer_read", "single_as_of"]
+    },
+    {
+      "id": "read_models",
+      "path": "web/app/lib/read-model-contract.ts",
+      "authority": "implementation_contract",
+      "concepts": ["dashboard_slot", "etf_penetration_slot", "required_artifacts", "release_id"]
+    },
+    {
+      "id": "resource_budget",
+      "path": "config/resource-budget.json",
+      "authority": "numeric_source_of_truth",
+      "concepts": ["d1_limits", "worker_limits", "actions_limits", "read_only_budget"]
+    },
+    {
+      "id": "recovery_audit",
+      "path": "src/trading_desk/recovery_audit.py",
+      "authority": "bounded_recovery_reference",
+      "concepts": ["unknown_is_fail_closed", "protected_paths", "read_only_assertions", "plan_hash"]
+    }
+  ],
+  "retirementCandidates": [
+    {
+      "id": "compat_daily_data_workflow",
+      "path": ".github/workflows/daily-data.yml",
+      "candidateVersion": "v1.0",
+      "requiredProof": ["no_schedule_caller", "new_runner_equivalence", "rollback_window_complete"]
+    },
+    {
+      "id": "manifest_v2_writer",
+      "path": "legacy manifest v2 write path",
+      "candidateVersion": "v1.0",
+      "requiredProof": ["no_production_consumer", "v3_decision_release_stable"]
+    },
+    {
+      "id": "mutable_latest_cross_task_protocol",
+      "path": "reports/phase0/latest-*",
+      "candidateVersion": "v1.0",
+      "requiredProof": ["content_addressed_artifacts_used", "no_cross_task_identity_dependency"]
+    },
+    {
+      "id": "duplicate_recovery_entrypoints",
+      "path": "recovery inventory/provenance/repair workflows",
+      "candidateVersion": "v0.9",
+      "requiredProof": ["single_bounded_audit_entrypoint", "no_production_callers"]
+    },
+    {
+      "id": "long_yaml_business_branches",
+      "path": ".github/workflows/market-data-collect.yml",
+      "candidateVersion": "v1.0",
+      "requiredProof": ["pipeline_runner_equivalence", "ten_trading_day_observation"]
+    }
+  ]
+}
