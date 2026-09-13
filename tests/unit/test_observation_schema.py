@@ -104,8 +104,8 @@ def test_drizzle_schema_and_metadata_are_in_sync() -> None:
         assert field in schema
 
     journal = json.loads((ROOT / "web/drizzle/meta/_journal.json").read_text(encoding="utf-8"))
-    assert journal["entries"][-1]["idx"] == 13
-    assert journal["entries"][-1]["tag"] == MIGRATION.stem
+    assert journal["entries"][-1]["idx"] == 14
+    assert journal["entries"][-1]["tag"] == "0014_warm_morlocks"
     snapshot = json.loads((ROOT / "web/drizzle/meta/0013_snapshot.json").read_text(encoding="utf-8"))
     table = snapshot["tables"]["source_observation"]
     assert set(table["columns"]) == {

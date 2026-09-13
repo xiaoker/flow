@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.5",
+    "pr": "C",
+    "title": "feat: add market-day projection and bounded probes",
+    "baseBranch": "main",
+    "baseSha": "f432034f1b88da60da4251ea439e8cdc0b329f80",
+    "headBranch": "codex/flow-v05-market-day-projection"
+  },
+  "changedPaths": [
+    "docs/audits/2026-09-13-flow-v05-pr-c-market-day-projection.md",
+    "docs/audits/2026-09-13-flow-v05-pr-c-merge-side-effects.json",
+    "tests/unit/test_observation_schema.py",
+    "web/app/api/v1/admin/market-day-state/route.ts",
+    "web/app/lib/market-day-probe.ts",
+    "web/app/lib/market-day-projection.ts",
+    "web/app/lib/source-observation.ts",
+    "web/db/schema.ts",
+    "web/drizzle/0014_warm_morlocks.sql",
+    "web/drizzle/meta/0014_snapshot.json",
+    "web/drizzle/meta/_journal.json",
+    "web/tests/market-day-projection.test.mjs",
+    "web/worker/index.ts",
+    "web/wrangler.jsonc"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "probeRuntime": "not executed by CI; feature flag remains 0",
+    "activePointerChanged": false,
+    "productionReadPathChanged": false
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "push on main",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/deploy-worker.yml",
+        "trigger": "pull_request closed on main, web/** path and merged=true",
+        "jobs": ["deploy"],
+        "remoteDataWrites": true,
+        "productionDeploy": true,
+        "actions": [
+          "apply pending D1 migrations --remote",
+          "deploy Worker and static assets",
+          "verify exact merge commit via production canary"
+        ]
+      }
+    ],
+    "deployWorker": true,
+    "d1Migration": {
+      "required": true,
+      "remote": true,
+      "migration": "web/drizzle/0014_warm_morlocks.sql",
+      "statements": [
+        "CREATE TABLE market_day_state",
+        "CREATE INDEX market_day_state_action_idx"
+      ],
+      "destructive": false,
+      "dataRowsInserted": 0,
+      "dataRowsUpdated": 0,
+      "requiresExplicitAuthorization": true
+    },
+    "probeRuntime": {
+      "defaultEnabled": false,
+      "officialRequestsPerInvocation": 6,
+      "sequential": true,
+      "maxResponseBytesPerRequest": 65536,
+      "r2Writes": false,
+      "sourceObservationWrites": false,
+      "collectionDispatch": "only after explicit shadow enablement and existing pipeline_window claim"
+    },
+    "cloudflareNativeBuilds": {
+      "status": "disconnected by operator before this PR",
+      "changedByPr": false,
+      "duplicateDeployRisk": "none from the disconnected integration; GitHub deploy workflow remains canonical"
+    },
+    "r2Writes": false,
+    "activePointerChanged": false,
+    "featureFlagsChanged": "default-off declaration only; no enablement",
+    "productionReadPathChanged": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "reason": "web/** changes match the existing merged-PR deploy workflow; migration/deploy are separate authorized side effects."
+  },
+  "resourceEffects": {
+    "pullRequestD1RowsRead": 0,
+    "pullRequestD1RowsWritten": 0,
+    "pullRequestR2ClassAOperations": 0,
+    "pullRequestR2ClassBOperations": 0,
+    "probeR2Operations": 0,
+    "probeBodyBytesPerSourceUpperBound": 65536,
+    "mergeD1RowsRead": "unknown_until_authorized_deploy",
+    "mergeD1RowsWritten": "unknown_until_authorized_deploy",
+    "workerRequests": "unknown_until_deploy_verification",
+    "githubActionsMinutes": "unknown_until_run",
+    "budgetDecision": "UNKNOWN_NOT_A_REMOTE_EXECUTION"
+  },
+  "sideEffectGuards": {
+    "d1OrR2WriteInPr": false,
+    "workflowDispatchInPr": false,
+    "activePointerMutationInPr": false,
+    "featureFlagEnablement": false,
+    "productionReadPathMutation": false,
+    "collectionOrBackfill": false,
+    "remoteMigrationOnMerge": true,
+    "workerDeployOnMerge": true,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert PR before merge; if merged, preserve additive migration and use an authorized follow-up deployment",
+    "productionDataMutationInPr": false,
+    "pointerRecoveryRequired": false,
+    "note": "The new table is additive. No data rows are inserted by migration and the probe is disabled by default."
+  }
+}

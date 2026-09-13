@@ -125,6 +125,32 @@ export const sourceObservations = sqliteTable("source_observation", {
   index("source_observation_target_source_idx").on(table.targetDate, table.sourceId, table.observedAt),
 ]);
 
+/**
+ * Compact market-day projection produced by the v0.5 shadow coordinator.
+ * Immutable source observations remain the fact source; this row only keeps
+ * the latest bounded probe and derived readiness counts so schedulers can
+ * decide whether a heavy collection is worth starting.
+ */
+export const marketDayState = sqliteTable("market_day_state", {
+  targetDate: text("target_date").primaryKey(),
+  state: text("state").notNull(),
+  projectionVersion: text("projection_version").notNull(),
+  sourceFingerprint: text("source_fingerprint").notNull(),
+  probeFingerprint: text("probe_fingerprint").notNull(),
+  requiredSourceCount: integer("required_source_count").notNull(),
+  verifiedSourceCount: integer("verified_source_count").notNull(),
+  pendingSourceCount: integer("pending_source_count").notNull(),
+  unavailableSourceCount: integer("unavailable_source_count").notNull(),
+  nextAction: text("next_action").notNull(),
+  probeJson: text("probe_json").notNull(),
+  sourcesJson: text("sources_json").notNull(),
+  projectedAt: text("projected_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("market_day_state_action_idx").on(table.nextAction, table.updatedAt),
+]);
+
 export const marketHistoryDaily = sqliteTable("market_history_daily", {
   tradeDate: text("trade_date").primaryKey(),
   marginBalance: real("margin_balance"),

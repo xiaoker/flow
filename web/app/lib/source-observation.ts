@@ -133,7 +133,11 @@ function canonicalObservedAt(value: string): string {
   return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString();
 }
 
-function canonicalJson(value: unknown): string {
+/**
+ * Serialize JSON objects with sorted keys so content-addressed projections
+ * remain stable across runtimes and replay attempts.
+ */
+export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
   const record = value as Record<string, unknown>;
