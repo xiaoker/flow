@@ -242,7 +242,15 @@ def _build_official_etf_daily_changes_from_artifacts(
             and item.get("requestedDate") == str(payload.get("requested_date") or "")
             and item.get("sha256") == str(payload.get("sha256") or "")
         ]
-        if matching and eligible_dates:
+        # A source response can be newer than the snapshot selected for
+        # publication.  It is still immutable archive evidence, but it must
+        # not participate in the as-of-bounded adjacent-change contract.  The
+        # old condition checked ``matching and eligible_dates`` together and
+        # then raised when ``eligible_dates`` was empty, which made a valid
+        # fallback snapshot fail before its raw evidence could be archived.
+        if not eligible_dates:
+            continue
+        if matching:
             release_ids.append(str(matching[0]["releaseId"]))
         elif str(payload.get("sha256") or ""):
             # This branch is defensive for a malformed caller; normal bundle

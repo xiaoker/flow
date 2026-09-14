@@ -393,3 +393,88 @@ def test_history_bundle_generates_offline_etf_adjacent_changes_from_canonical_pa
         ("SSE", "510300", 30),
         ("SZSE", "159919", 50),
     }
+
+
+def test_history_bundle_archives_future_only_scale_response_without_blocking_fallback(
+    tmp_path: Path,
+) -> None:
+    """A later official response must not break an older complete snapshot."""
+
+    artifacts: list[dict[str, object]] = []
+    rows_by_artifact = [
+        ("sse", "2026-08-22", [("2026-08-21", 100), ("2026-08-22", 130)]),
+        ("szse", "2026-08-22", [("2026-08-21", 200), ("2026-08-22", 250)]),
+        # This response belongs to a later source date and contains no rows
+        # eligible for the fallback snapshot's as-of date.
+        ("szse", "2026-08-23", [("2026-08-23", 260)]),
+    ]
+    for index, (source_id, requested_date, rows) in enumerate(rows_by_artifact):
+        raw_path = tmp_path / f"data/raw/{source_id}/etf_scale/{requested_date}/{index}.json"
+        metadata_path = raw_path.with_name(f"{index}.metadata.json")
+        normalized_path = (
+            tmp_path / f"data/normalized/{source_id}_etf_scale/{requested_date}/{index}.csv"
+        )
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized_path.parent.mkdir(parents=True, exist_ok=True)
+        raw = f'{{"source":"{source_id}","date":"{requested_date}"}}'.encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        raw_path.write_bytes(raw)
+        metadata_path.write_text(json.dumps({"sha256": digest}), encoding="utf-8")
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": trade_date,
+                    "market": "SSE" if source_id == "sse" else "SZSE",
+                    "instrument_code": "510300" if source_id == "sse" else "159919",
+                    "instrument_name": "测试ETF",
+                    "shares": shares,
+                }
+                for trade_date, shares in rows
+            ]
+        ).to_csv(normalized_path, index=False)
+        artifacts.append(
+            {
+                "source": {
+                    "source_id": source_id,
+                    "dataset": "etf_scale",
+                    "url": f"https://{source_id}.example/etf-scale",
+                    "date_semantics": "source_published",
+                },
+                "requested_date": requested_date,
+                "observed_at": f"{requested_date}T18:00:00+08:00",
+                "content_type": "application/json",
+                "raw_path": str(raw_path.relative_to(tmp_path)),
+                "metadata_path": str(metadata_path.relative_to(tmp_path)),
+                "normalized_path": str(normalized_path.relative_to(tmp_path)),
+                "sha256": digest,
+            }
+        )
+
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps({"asOf": "2026-08-22"}), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "future-only-scale-test",
+                "started_at": "2026-08-23T09:00:00+08:00",
+                "finished_at": "2026-08-23T09:01:00+08:00",
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = build_history_bundle_from_files(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+        workspace_root=tmp_path,
+    )
+
+    adjacent = bundle["history"]["officialEtfDailyChanges"]
+    assert adjacent["asOf"] == "2026-08-22"
+    assert len(adjacent["sourceReleaseIds"]) == 2
+    assert any(
+        item["requestedDate"] == "2026-08-23"
+        for item in bundle["history"]["artifacts"]
+    )
