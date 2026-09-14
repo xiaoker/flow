@@ -1266,13 +1266,21 @@ jobs:
         if: ${{ success() && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
         shell: bash
         run: |
+          set -euo pipefail
           test -s dashboard-snapshot.json
           jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null
+          GATE_EXIT=0
           python scripts/verify_stock_flow_bundle.py \
             --snapshot dashboard-snapshot.json \
             --catalog stock-flow-catalog.json \
             --history stock-flow-history.json \
-            --history-status stock-flow-history-status.json
+            --history-status stock-flow-history-status.json \
+            > stock-flow-gate.json || GATE_EXIT=$?
+          if [[ ! -s stock-flow-gate.json ]]; then
+            jq -n '{valid:false,status:"BLOCKED_QUALITY",reason:"stock_flow_gate_no_decision"}' > stock-flow-gate.json
+          fi
+          cat stock-flow-gate.json
+          exit "$GATE_EXIT"
 
       - name: Upload immutable collection source bundle
         id: source_artifact
@@ -1284,6 +1292,7 @@ jobs:
           retention-days: 3
           path: |
             dashboard-snapshot.json
+            stock-flow-gate.json
             stock-flow-catalog.json
             stock-flow-history.json
             stock-flow-history-status.json
@@ -1618,15 +1627,17 @@ jobs:
           ERROR_CODE=""
           HISTORY_STATUS="$(jq -r '.status // "NOT_REQUIRED"' stock-flow-history-status.json 2>/dev/null || echo "NOT_REQUIRED")"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
+          STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
+          STOCK_FLOW_GATE_REASON="$(jq -r '.reason // empty' stock-flow-gate.json 2>/dev/null || true)"
           if [[ "$HISTORY_STATUS" == "BLOCKED_QUALITY" ]]; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
           elif [[ "$HISTORY_STATUS" == "FAILED_RETRYABLE" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"
-          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]] || [[ ! -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+          elif [[ "$STOCK_FLOW_GATE_VALID" == "false" ]]; then
             STATUS="BLOCKED_QUALITY"
-            ERROR_CODE="stock_flow_history_missing"
+            ERROR_CODE="${STOCK_FLOW_GATE_REASON:-stock_flow_history_incomplete}"
           elif [[ "${{ job.status }}" != "success" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="workflow_failed"

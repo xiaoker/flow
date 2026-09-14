@@ -588,6 +588,10 @@ def test_empty_unavailable_stock_flow_catalog_does_not_block_dashboard_bundle() 
     assert "scripts/verify_stock_flow_bundle.py" in collect
     assert "scripts/verify_stock_flow_bundle.py" in publish
     assert "STOCK_FLOW_DECISION" in publish
+    assert "stock-flow-gate.json" in collect
+    assert "stock-flow-gate.json" in publish
+    assert 'STOCK_FLOW_GATE_VALID="$(jq -r' in collect
+    assert 'STOCK_FLOW_GATE_VALID="$(jq -r' in publish
 
 
 def test_sse_relay_has_an_independent_scheduled_smoke_check() -> None:

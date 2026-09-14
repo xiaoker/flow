@@ -362,7 +362,7 @@ jobs:
             fi
             SOURCE_ROOT="$(dirname "${SNAPSHOTS[0]}")"
             cp "${SNAPSHOTS[0]}" "$SNAPSHOT"
-            for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json stock-flow-fetch-report.json pcf-inventory.json market-history.json previous-release.json recovery-evidence.json; do
+            for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-gate.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json stock-flow-fetch-report.json pcf-inventory.json market-history.json previous-release.json recovery-evidence.json; do
               if [[ -s "$SOURCE_ROOT/$file" ]]; then cp "$SOURCE_ROOT/$file" "$ROOT/$file"; fi
             done
             if [[ -d "$SOURCE_ROOT/stock-flow-partitions" ]]; then
@@ -417,7 +417,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .collection-source/dashboard-snapshot.json dashboard-snapshot.json
-          for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json market-history.json previous-release.json history-bundle.json ingest-bundle.json source-readiness.json source-readiness-response.json; do
+          for file in dashboard-snapshot-base.json etf-flow-state.json stock-flow-gate.json stock-flow-catalog.json stock-flow-history.json stock-flow-history-status.json market-history.json previous-release.json history-bundle.json ingest-bundle.json source-readiness.json source-readiness-response.json; do
             if [[ -s ".collection-source/$file" ]]; then cp ".collection-source/$file" "$file"; fi
           done
           if [[ -d .collection-source/stock-flow-partitions ]]; then
@@ -438,13 +438,19 @@ jobs:
           HISTORY_ARGS=()
           if [[ -s market-history.json ]]; then HISTORY_ARGS+=(--market-history market-history.json); fi
           if [[ -s previous-release.json ]]; then HISTORY_ARGS+=(--previous-manifest previous-release.json); fi
-          STOCK_FLOW_DECISION="$(python scripts/verify_stock_flow_bundle.py \
+          STOCK_FLOW_GATE_EXIT=0
+          python scripts/verify_stock_flow_bundle.py \
             --snapshot dashboard-snapshot.json \
             --catalog stock-flow-catalog.json \
             --history stock-flow-history.json \
-            --history-status stock-flow-history-status.json)"
+            --history-status stock-flow-history-status.json \
+            > stock-flow-gate.json || STOCK_FLOW_GATE_EXIT=$?
+          if [[ ! -s stock-flow-gate.json ]]; then
+            jq -n '{valid:false,status:"BLOCKED_QUALITY",reason:"stock_flow_gate_no_decision"}' > stock-flow-gate.json
+          fi
+          STOCK_FLOW_DECISION="$(cat stock-flow-gate.json)"
           HISTORY_STATUS="$(jq -r '.status' <<<"$STOCK_FLOW_DECISION")"
-          if [[ "$(jq -r '.valid' <<<"$STOCK_FLOW_DECISION")" != "true" ]]; then
+          if (( STOCK_FLOW_GATE_EXIT != 0 )) || [[ "$(jq -r '.valid' <<<"$STOCK_FLOW_DECISION")" != "true" ]]; then
             echo "ETF-to-stock history gate rejected the source bundle:" >&2
             jq . <<<"$STOCK_FLOW_DECISION" >&2
             exit 1
@@ -696,15 +702,17 @@ jobs:
           SOURCE_FINGERPRINT=""
           PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
+          STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
+          STOCK_FLOW_GATE_REASON="$(jq -r '.reason // empty' stock-flow-gate.json 2>/dev/null || true)"
           if [[ "$PENETRATION_STATUS" == "BLOCKED_QUALITY" ]]; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
           elif [[ "$PENETRATION_STATUS" == "FAILED_RETRYABLE" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"
-          elif [[ -s stock-flow-catalog.json && ! -s stock-flow-history.json ]] || [[ ! -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+          elif [[ "$STOCK_FLOW_GATE_VALID" == "false" ]]; then
             STATUS="BLOCKED_QUALITY"
-            ERROR_CODE="stock_flow_history_missing"
+            ERROR_CODE="${STOCK_FLOW_GATE_REASON:-stock_flow_history_incomplete}"
           elif [[ "${{ job.status }}" != "success" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="publish_workflow_failed"
@@ -803,6 +811,7 @@ jobs:
             dashboard-snapshot.json
             market-history.json
             previous-release.json
+            stock-flow-gate.json
             stock-flow-history.json
             stock-flow-history-status.json
             stock-pressure-catalog.json
