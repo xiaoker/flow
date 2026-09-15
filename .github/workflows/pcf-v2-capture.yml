@@ -25,12 +25,18 @@ concurrency:
 jobs:
   checkpoint-capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The previous ten-minute cap cancelled a healthy sequential capture
+    # after several hundred ETFs and made the finalizer label untouched
+    # checkpoints as failures.  Keep a bounded capture budget with enough
+    # wall-clock room for the official rate-limit-safe pacing.
+    timeout-minutes: 20
     env:
       FLOW_PUBLIC_URL: https://flow.xiaoker.com
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      PCF_CAPTURE_MAX_ITEMS: "600"
+      PCF_CAPTURE_MAX_SECONDS: "840"
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
 
@@ -89,10 +95,12 @@ jobs:
           set +e
           python -m scripts.capture_sse_pcf_v2 \
             --plan reports/pcf-v2/automatic-plan.json \
+            --max-items "$PCF_CAPTURE_MAX_ITEMS" \
+            --max-seconds "$PCF_CAPTURE_MAX_SECONDS" \
             --output "reports/pcf-v2/${TARGET_DATE}-capture.json"
           EXIT_CODE=$?
           set -e
-          jq '{targetDate,jobId,required,captured,skipped,failed,status,failures}' \
+          jq '{targetDate,jobId,required,captured,skipped,failed,deferred,status,stopReason,failures}' \
             "reports/pcf-v2/${TARGET_DATE}-capture.json" >> "$GITHUB_STEP_SUMMARY"
           exit "$EXIT_CODE"
 
@@ -110,7 +118,7 @@ jobs:
             --output "reports/pcf-v2/${TARGET_DATE}-finalize.json"
           EXIT_CODE=$?
           set -e
-          jq '{status,tradeDate,previousDate,jobId,revisionId,coverage,budget,productionPublishCalls}' \
+          jq '{status,tradeDate,previousDate,jobId,revisionId,coverage,pendingCodes,blockedCodes,unknownCodes,budget,productionPublishCalls}' \
             "reports/pcf-v2/${TARGET_DATE}-finalize.json" >> "$GITHUB_STEP_SUMMARY"
           exit "$EXIT_CODE"
 
