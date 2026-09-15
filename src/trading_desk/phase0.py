@@ -99,6 +99,38 @@ _REQUIRED_COVERAGE_DATASETS = {
     "stock_connect_summary",
 }
 
+# SZSE publishes its ETF scale and margin summaries after the SSE evening
+# window.  These feeds are intentionally deferred by the evening collector;
+# the morning/reconcile windows remain the single place where a complete
+# cross-market snapshot can be produced.  Keeping this contract in one helper
+# prevents the scheduler label from becoming a no-op hint again.
+_LATE_RELEASE_DATASETS = ("szse_etf", "szse_margin")
+_KNOWN_DATASETS = (
+    "sse_etf",
+    "sse_etf_nav",
+    "sse_etf_pcf",
+    "szse_etf",
+    "sse_margin",
+    "sse_margin_security",
+    "szse_margin",
+    "bse_margin",
+    "stock_connect_summary",
+    "stock_connect_top",
+)
+
+
+def _deferred_datasets_for_window(collection_window: str) -> list[str]:
+    """Return source datasets intentionally deferred by one collection window.
+
+    ``auto`` preserves the historical/manual behaviour and collects every
+    source.  Only the explicitly scheduled ``evening`` window is source
+    scoped; ``morning`` and ``reconcile`` are full-source windows and are the
+    only windows eligible to replace the active release.
+    """
+    if collection_window not in {"auto", "evening", "morning", "reconcile"}:
+        raise ValueError(f"unsupported collection window: {collection_window}")
+    return list(_LATE_RELEASE_DATASETS) if collection_window == "evening" else []
+
 
 def _pending_required_coverage_datasets(
     findings: list[QualityFinding],
@@ -165,6 +197,7 @@ def collect_phase0(
         if not szse_etf_history_root.is_dir():
             raise ValueError("szse_etf_history_root must be an existing directory")
     dates = sorted(dates)
+    deferred_datasets = _deferred_datasets_for_window(collection_window)
     run_id = new_run_id()
     started_at = now_iso()
     collection_session = session or build_session()
@@ -273,26 +306,27 @@ def collect_phase0(
             frames["sse_etf_nav"].append(frame)
             artifacts.append(artifact)
 
-    if szse_etf_history_root is None:
-        result = run_step(
-            "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
-        )
-        if result:
-            frame, artifact = result
-            frames["szse_etf"].append(frame)
-            artifacts.append(artifact)
-    else:
-        for trade_date in dates:
+    if "szse_etf" not in deferred_datasets:
+        if szse_etf_history_root is None:
             result = run_step(
-                f"szse_etf:history:{trade_date}",
-                lambda date=trade_date: adapters.fetch_szse_etf_history(
-                    szse_etf_history_root, date
-                ),
+                "szse_etf:current", lambda: adapters.fetch_szse_etf_current(dates)
             )
             if result:
                 frame, artifact = result
                 frames["szse_etf"].append(frame)
                 artifacts.append(artifact)
+        else:
+            for trade_date in dates:
+                result = run_step(
+                    f"szse_etf:history:{trade_date}",
+                    lambda date=trade_date: adapters.fetch_szse_etf_history(
+                        szse_etf_history_root, date
+                    ),
+                )
+                if result:
+                    frame, artifact = result
+                    frames["szse_etf"].append(frame)
+                    artifacts.append(artifact)
 
     result = run_step(
         f"sse_margin:{dates[0]}:{dates[-1]}",
@@ -318,15 +352,16 @@ def collect_phase0(
             frames["sse_margin_security"].append(frame)
             artifacts.append(artifact)
 
-    for trade_date in dates:
-        result = run_step(
-            f"szse_margin:{trade_date}",
-            lambda date=trade_date: adapters.fetch_szse_margin(date),
-        )
-        if result:
-            frame, artifact = result
-            frames["szse_margin"].append(frame)
-            artifacts.append(artifact)
+    if "szse_margin" not in deferred_datasets:
+        for trade_date in dates:
+            result = run_step(
+                f"szse_margin:{trade_date}",
+                lambda date=trade_date: adapters.fetch_szse_margin(date),
+            )
+            if result:
+                frame, artifact = result
+                frames["szse_margin"].append(frame)
+                artifacts.append(artifact)
 
     for trade_date in dates:
         result = run_step(
@@ -348,6 +383,14 @@ def collect_phase0(
             frames["stock_connect_summary"].append(summary)
             frames["stock_connect_top"].append(top)
             artifacts.append(artifact)
+
+    # Source-scoped windows deliberately leave deferred datasets untouched.
+    # Still materialize an empty, schema-valid CSV for every known dataset so
+    # downstream snapshot builders can distinguish "not collected in this
+    # window" from a missing path or a malformed manifest.
+    for dataset in _KNOWN_DATASETS:
+        if not frames.get(dataset):
+            frames[dataset].append(pd.DataFrame())
 
     combined: dict[str, pd.DataFrame] = {}
     combined_paths: dict[str, str] = {}
@@ -505,6 +548,9 @@ def collect_phase0(
             else ("proceed" if gate_status == "pass" else "do_not_proceed")
         )
     )
+    quality["collection_window"] = collection_window
+    quality["collection_scope"] = "early" if deferred_datasets else "full"
+    quality["deferred_datasets"] = deferred_datasets
     quality["profiles"] = profiles
     quality["errors"] = errors
     quality["optional_errors"] = optional_errors
@@ -526,6 +572,8 @@ def collect_phase0(
     manifest = {
         "run_id": run_id,
         "collection_window": collection_window,
+        "collection_scope": "early" if deferred_datasets else "full",
+        "deferred_datasets": deferred_datasets,
         "pcf_max_codes": pcf_max_codes,
         "started_at": started_at,
         "finished_at": now_iso(),

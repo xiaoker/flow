@@ -6,10 +6,8 @@ on:
   # collector only when the pipeline window is missing or recoverable.
   schedule:
     - cron: "45 10 * * 1-5"  # 18:45 Asia/Shanghai
-    - cron: "0 0 * * 1-5"    # 08:00 Asia/Shanghai
-    - cron: "55 0 * * 1-5"   # 08:55 Asia/Shanghai
-    - cron: "15 1 * * 1-5"   # 09:15 Asia/Shanghai
-    - cron: "45 1 * * 1-5"   # 09:45 Asia/Shanghai
+    - cron: "30 1 * * 1-5"   # 09:30 Asia/Shanghai (morning failover)
+    - cron: "0 2 * * 1-5"    # 10:00 Asia/Shanghai (reconcile failover)
   workflow_dispatch:
     inputs:
       collection_window:
@@ -66,8 +64,8 @@ jobs:
           if [[ "$WINDOW" == "auto" || -z "$WINDOW" ]]; then
             case "${{ github.event.schedule || '' }}" in
               "45 10 * * 1-5") WINDOW="evening" ;;
-              "0 0 * * 1-5") WINDOW="morning" ;;
-              "55 0 * * 1-5"|"15 1 * * 1-5"|"45 1 * * 1-5") WINDOW="reconcile" ;;
+              "30 1 * * 1-5") WINDOW="morning" ;;
+              "0 2 * * 1-5") WINDOW="reconcile" ;;
               *) WINDOW="reconcile" ;;
             esac
           fi

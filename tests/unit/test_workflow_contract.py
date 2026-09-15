@@ -24,17 +24,20 @@ def test_market_data_split_has_watchdog_and_cloudflare_dispatch() -> None:
     assert "schedule:" not in workflow
     assert "schedule:" in watchdog
     assert '- cron: "45 10 * * 1-5"' in watchdog
-    assert '- cron: "0 0 * * 1-5"' in watchdog
-    assert '- cron: "55 0 * * 1-5"' in watchdog
+    assert '- cron: "30 1 * * 1-5"' in watchdog
+    assert '- cron: "0 2 * * 1-5"' in watchdog
     assert "workflow_dispatch:" in workflow
     assert "workflow_dispatch:" in legacy
     assert "cancel-in-progress: false" in workflow
     assert "cancel-in-progress: false" in watchdog
     assert '"30 10 * * mon-fri"' in wrangler
-    assert '"45 23 * * sun-thu"' in wrangler
-    assert '"45 0 * * mon-fri"' in wrangler
+    assert '"15 1 * * mon-fri"' in wrangler
+    assert '"45 1 * * mon-fri"' in wrangler
     assert '"15 11 * * mon-fri"' in wrangler
-    assert 'cron.startsWith("15 1")' in worker
+    assert 'minute === "15"' in worker
+    assert 'minute === "45"' in worker
+    assert 'hour === "1"' in worker
+    assert 'hour === "0"' not in worker
     assert "GITHUB_ACTIONS_TOKEN" in worker
     assert "market-data-collect.yml/dispatches" in worker
     assert "market-data-publish.yml/dispatches" in workflow
@@ -66,8 +69,8 @@ def test_pr2_moves_full_schedules_to_a_lightweight_watchdog() -> None:
         for line in wrangler.splitlines()
         if "mon-fri" in line or "sun-thu" in line
     ]
-    assert len(github_schedules) == 5
-    assert len(cloudflare_schedules) == 5
+    assert len(github_schedules) == 3
+    assert len(cloudflare_schedules) == 4
     assert "group: market-data-collect" in workflow
     assert "group: market-data-watchdog" in watchdog
     assert "cancel-in-progress: false" in workflow
@@ -154,7 +157,7 @@ def test_pr2_publish_is_dispatch_only_and_uses_targeted_smoke() -> None:
 def test_pr2_watchdog_is_lightweight_and_dispatches_only_after_claim() -> None:
     workflow = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
 
-    assert workflow.count("- cron:") == 5
+    assert workflow.count("- cron:") == 3
     assert "pipeline-window-status.json" in workflow
     assert "pipeline-window-claim-request.json" in workflow
     assert "market-data-collect.yml/dispatches" in workflow

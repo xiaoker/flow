@@ -61,8 +61,9 @@ const LATE_SCHEDULE_THRESHOLD_MS = 5 * 60 * 1_000;
 const MARKET_DAY_OBSERVATION_LIMIT = 64;
 
 export function collectionWindowForCron(cron: string): PipelineWindowName {
-  if (cron.startsWith("45 23")) return "morning";
-  if (cron.startsWith("45 0") || cron.startsWith("55 0") || cron.startsWith("15 1")) return "reconcile";
+  const [minute = "", hour = ""] = cron.trim().split(/\s+/);
+  if ((minute === "15" || minute === "30") && hour === "1") return "morning";
+  if ((minute === "45" && hour === "1") || (minute === "0" && hour === "2")) return "reconcile";
   return "evening";
 }
 

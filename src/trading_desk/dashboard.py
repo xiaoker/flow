@@ -48,10 +48,16 @@ def _read_csv(workspace_root: Path, relative_path: str) -> pd.DataFrame:
     # loader only protected ETF codes; security-level margin rows would
     # otherwise turn SZSE/BSE codes such as 000001 into integers and fail the
     # market+code join later in the offline catalog build.
-    return pd.read_csv(
-        workspace_root / relative_path,
-        dtype={"instrument_code": str, "etf_code": str, "stock_code": str},
-    )
+    try:
+        return pd.read_csv(
+            workspace_root / relative_path,
+            dtype={"instrument_code": str, "etf_code": str, "stock_code": str},
+        )
+    except pd.errors.EmptyDataError:
+        # A source-scoped collection writes an explicit empty partition for a
+        # deferred feed.  Treat that as unavailable evidence, not as a
+        # malformed manifest or an exception that can abort the whole window.
+        return pd.DataFrame()
 
 
 def _signed(value: float, decimals: int = 2) -> str:
@@ -651,7 +657,12 @@ def build_dashboard_snapshot(
     )
     as_of = complete_as_of or target_as_of
     dates = [trade_date for trade_date in requested_dates if trade_date <= as_of]
-    publication_status = "confirmed" if complete_as_of else "pending"
+    # A prior complete day is useful as the active fallback, but it does not
+    # satisfy the current window.  The old predicate treated any
+    # ``complete_as_of`` as confirmed, which let an evening fallback close the
+    # target pipeline window before SZSE had published its data.
+    target_complete = complete_as_of == target_as_of
+    publication_status = "confirmed" if target_complete else "pending"
     # Coverage checks apply to every requested date. A newly requested but
     # still-unpublished day must not turn the already complete prior day into a
     # failed dashboard release. Non-coverage validation failures remain visible
@@ -917,13 +928,13 @@ def build_dashboard_snapshot(
             "targetAsOf": target_as_of,
             "pendingDomains": target_pending_domains,
             "detail": (
-                (
-                    "同一交易日的全部核心官方来源已确认"
-                    if as_of == target_as_of
-                    else f"已发布 {as_of} 完整数据；{target_as_of} 原始数据等待官方来源补齐"
+                "同一交易日的全部核心官方来源已确认"
+                if target_complete
+                else (
+                    f"已保留 {as_of} 完整数据；{target_as_of} 原始数据等待官方来源补齐"
+                    if complete_as_of
+                    else "已归档已到达的原始数据，等待其余官方来源后统一发布"
                 )
-                if publication_status == "confirmed"
-                else "已归档已到达的原始数据，等待其余官方来源后统一发布"
             ),
         },
         "metrics": [
