@@ -580,6 +580,12 @@ def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocki
     assert 'ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_fetch_failed}"' in publish_terminal
     assert 'if [[ "$STATUS" != "COMPLETED" ]]' in publish_terminal
     assert 'exit 1' in publish_terminal
+    assert 'publication_as_of_mismatch' in collect_terminal
+    assert 'publication_as_of_mismatch' in publish_terminal
+    assert 'completionAsOf' in collect_terminal
+    assert 'completionAsOf' in publish_terminal
+    assert 'publicationStatus' in collect_terminal
+    assert 'publicationStatus' in publish_terminal
     assert 'if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]' in publish
     assert 'HISTORY_STATUS="BLOCKED_QUALITY"' in publish
 
@@ -587,6 +593,22 @@ def test_incomplete_stock_flow_history_blocks_pipeline_completion_without_blocki
     # blocked, preserving the intentional slot separation.
     assert "--slot dashboard" in publish
     assert "--output-dir read-models-dashboard" in publish
+
+
+def test_ordinary_pipeline_completion_requires_exact_confirmed_target_date() -> None:
+    pipeline_window = (REPOSITORY_ROOT / "web/app/lib/pipeline-window.ts").read_text(encoding="utf-8")
+    status_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/status/route.ts").read_text(encoding="utf-8")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "pipeline_window_completion_proof_required" in pipeline_window
+    assert "pipeline_window_completion_not_confirmed" in pipeline_window
+    assert "pipeline_window_completion_date_mismatch" in pipeline_window
+    assert "target_date IS NOT NULL AND target_date = ?" in pipeline_window
+    assert "completionAsOf" in status_route
+    assert "publicationStatus" in status_route
+    # The delegated publisher must reject an older confirmed fallback before
+    # it can close the business window.
+    assert '.publication.status == "confirmed" and $targetDate != "" and .asOf == $targetDate' in publish
 
 
 def test_empty_unavailable_stock_flow_catalog_does_not_block_dashboard_bundle() -> None:

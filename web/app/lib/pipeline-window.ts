@@ -351,6 +351,14 @@ export async function markPipelineWindow(
     errorCode?: string | null;
     sourceFingerprint?: string | null;
     githubRunId?: string | null;
+    /**
+     * Proof carried by the publisher when it asks to close an ordinary
+     * window.  A window may only become COMPLETED when the published snapshot
+     * is confirmed for the exact target date stored in D1.  Recovery runs use
+     * the receipt-backed recovery endpoint instead.
+     */
+    completionAsOf?: string | null;
+    publicationStatus?: string | null;
   },
   now = new Date(),
 ): Promise<PipelineWindowRow> {
@@ -365,6 +373,29 @@ export async function markPipelineWindow(
   }
   if (input.githubRunId !== undefined && input.githubRunId !== null && !GITHUB_RUN_ID.test(input.githubRunId)) {
     throw new PipelineWindowError("invalid_github_run_id", 422);
+  }
+  if (input.completionAsOf !== undefined && input.completionAsOf !== null) {
+    validateDate(input.completionAsOf, "invalid_completion_as_of");
+  }
+
+  // Read the current row only to validate the completion proof.  The actual
+  // state transition below remains a lease-owner/expiry guarded UPDATE, so
+  // this read cannot introduce a SELECT-then-UPDATE race.
+  const current = await getPipelineWindow(db, input.runKey);
+  if (!current) throw new PipelineWindowError("pipeline_window_not_found", 404);
+  if (input.status === "COMPLETED") {
+    if (!input.completionAsOf) {
+      throw new PipelineWindowError("pipeline_window_completion_proof_required", 422);
+    }
+    if (input.publicationStatus !== "confirmed") {
+      throw new PipelineWindowError("pipeline_window_completion_not_confirmed", 422);
+    }
+    if (!current.target_date) {
+      throw new PipelineWindowError("pipeline_window_target_date_missing", 409);
+    }
+    if (input.completionAsOf !== current.target_date) {
+      throw new PipelineWindowError("pipeline_window_completion_date_mismatch", 409);
+    }
   }
   const nowIso = now.toISOString();
   const terminal = input.status === "COMPLETED" || input.status === "BLOCKED_QUALITY";
@@ -383,7 +414,11 @@ export async function markPipelineWindow(
             updated_at = ?
       WHERE run_key = ? AND lease_owner = ? AND recovery_id IS NULL
         AND status <> 'COMPLETED'
-        AND (lease_expires_at IS NULL OR lease_expires_at > ?)`,
+        AND (lease_expires_at IS NULL OR lease_expires_at > ?)
+        AND (
+          ? = 0
+          OR (target_date IS NOT NULL AND target_date = ?)
+        )`,
   ).bind(
     input.status,
     input.errorCode ?? null,
@@ -397,6 +432,8 @@ export async function markPipelineWindow(
     input.runKey,
     input.leaseOwner,
     nowIso,
+    input.status === "COMPLETED" ? 1 : 0,
+    input.status === "COMPLETED" ? input.completionAsOf : null,
   ).run();
   if (Number(result.meta?.changes ?? 0) !== 1) {
     throw new PipelineWindowError("pipeline_window_status_conflict", 409);
