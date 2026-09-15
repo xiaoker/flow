@@ -11,6 +11,7 @@ from scripts.run_live_recovery import (
     LiveRecoveryError,
     _post_child_request_reserve,
     _assert_szse_current_snapshot_is_adjacent,
+    _current_szse_etf_matches_target,
     _szse_history_request_budget,
     _fetch_market_history,
     run_live_recovery,
@@ -160,6 +161,7 @@ def offline_runner(monkeypatch):
             "run_id": "fixture",
             "artifacts": [{"releaseId": "fixture-source"}],
             "szse_etf_page_date": "2026-08-29",
+            "szse_etf_trade_date": "2026-08-28",
         }
         quality = {"counts": {"fail": 0}}
         runner._write_json(kwargs["report_root"] / "fixture" / "manifest.json", manifest)
@@ -175,6 +177,7 @@ def offline_runner(monkeypatch):
         return {"version": 1, "history": {"asOf": snapshot["asOf"], "snapshot": snapshot, "artifacts": [{"releaseId": "fixture-source"}]}}
 
     monkeypatch.setattr(runner, "collect_phase0", collect)
+    monkeypatch.setattr(runner, "_current_szse_etf_matches_target", lambda **_kwargs: False)
     monkeypatch.setattr(
         runner,
         "_invoke_szse_etf_history",
@@ -183,9 +186,16 @@ def offline_runner(monkeypatch):
     monkeypatch.setattr(runner, "build_dashboard_snapshot", snapshot)
     monkeypatch.setattr(runner, "build_history_bundle_from_files", bundle)
 
-    def execute(tmp_path, *, window_date="2026-08-28", archive_status="archived"):
+    def execute(tmp_path, *, window_date="2026-08-28", archive_status="archived", current_szse=False):
         transport = _RecoveryTransport(archive_status)
         monkeypatch.setattr(runner, "build_session", lambda _settings: transport)
+        monkeypatch.setattr(runner, "_current_szse_etf_matches_target", lambda **_kwargs: current_szse)
+        if current_szse:
+            monkeypatch.setattr(
+                runner,
+                "_invoke_szse_etf_history",
+                lambda **_kwargs: (_ for _ in ()).throw(AssertionError("current page must not fetch per-fund history")),
+            )
         plan = _plan(["2026-08-28"], window_date=window_date)
         result = runner.run_live_recovery(plan=plan, expected_plan_hash=plan["planHash"], attempt=1,
             producer_build_sha="a" * 64, workspace_root=tmp_path, base_url="https://flow.example")
@@ -200,8 +210,17 @@ def test_existing_etf_state_does_not_skip_missing_market_checkpoint(tmp_path, of
     assert result["status"] == "READY"
     assert result["requestCount"] == 5
     assert result["targetDate"] == "2026-08-28"
+    assert result["szseSourceMode"] == "history"
     assert len(result["historyPublications"]) == 1
     assert not any(method == "POST" and not url.endswith("/history-import") for method, url in transport.calls)
+
+
+def test_adjacent_current_page_skips_per_fund_history(tmp_path, offline_runner):
+    result, transport = offline_runner(tmp_path, current_szse=True)
+    assert result["szseSourceMode"] == "current"
+    assert result["szseHistoryRequestCount"] == 0
+    assert result["targetDate"] == "2026-08-28"
+    assert transport.events == ["state", "chunk", "finalize", "history", "latest_readonly"]
 
 
 def test_runner_keeps_window_date_separate_from_data_date(tmp_path, offline_runner):
@@ -308,6 +327,62 @@ def test_historical_szse_snapshot_rejects_missing_page_date() -> None:
             manifest={},
             target="2026-08-28",
             session=object(),
+        )
+
+
+class _SzseMetadataTransport(_Transport):
+    def __init__(self, page_date: str, scale_date: str) -> None:
+        super().__init__()
+        self.page_date = page_date
+        self.scale_date = scale_date
+
+    def request(self, method: str, url: str, **_kwargs: object):
+        self.calls.append((method, url))
+        return _JsonResponse([{"metadata": {
+            "subname": self.page_date,
+            "cols": {"dqgm": f"当前规模（{self.scale_date}）"},
+        }}])
+
+
+def test_current_szse_probe_uses_official_adjacent_page(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **_kwargs: ["2026-09-11", "2026-09-14"])
+    transport = _SzseMetadataTransport("2026-09-15", "2026-09-14")
+    session = BudgetedRateLimitedSession(transport, maximum=4, min_interval_seconds=0)
+    assert _current_szse_etf_matches_target(
+        session=session,
+        target="2026-09-14",
+        context_dates=["2026-09-10", "2026-09-11", "2026-09-14"],
+    )
+    assert session.request_count == 1
+    assert len(transport.calls) == 1
+
+
+def test_current_szse_probe_sends_later_page_to_exact_history(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **_kwargs: ["2026-09-14", "2026-09-15"])
+    session = BudgetedRateLimitedSession(
+        _SzseMetadataTransport("2026-09-16", "2026-09-15"),
+        maximum=4,
+        min_interval_seconds=0,
+    )
+    assert not _current_szse_etf_matches_target(
+        session=session,
+        target="2026-09-14",
+        context_dates=["2026-09-10", "2026-09-11", "2026-09-14"],
+    )
+
+
+def test_current_szse_probe_rejects_wrong_scale_label(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **_kwargs: ["2026-09-11", "2026-09-14"])
+    session = BudgetedRateLimitedSession(
+        _SzseMetadataTransport("2026-09-15", "2026-09-10"),
+        maximum=4,
+        min_interval_seconds=0,
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_szse_current_date_mismatch"):
+        _current_szse_etf_matches_target(
+            session=session,
+            target="2026-09-14",
+            context_dates=["2026-09-10", "2026-09-11", "2026-09-14"],
         )
 
 

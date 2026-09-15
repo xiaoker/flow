@@ -28,6 +28,11 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 
+from trading_desk.adapters.official import (
+    SZSE_ETF_METADATA_URL,
+    SZSE_ETF_PAGE_URL,
+    _szse_etf_dates,
+)
 from trading_desk.dashboard import build_dashboard_snapshot, discover_recent_trading_dates
 from trading_desk.etf_stock_flow import build_stock_flow, build_stock_flow_catalog
 from trading_desk.etf_flow_state import materialize_dashboard_snapshot
@@ -483,6 +488,59 @@ def _assert_szse_current_snapshot_is_adjacent(
         )
 
 
+def _current_szse_etf_matches_target(
+    *, session: BudgetedRateLimitedSession, target: str, context_dates: list[str]
+) -> bool:
+    """Use the moving workbook only when the official page proves this date.
+
+    The current workbook needs two source requests instead of a per-fund
+    history sweep.  Older dates still use exact-date retained history.  This
+    probe is counted by the same bounded session as the rest of the collector.
+    """
+
+    response = session.get(
+        SZSE_ETF_METADATA_URL,
+        params={
+            "SHOWTYPE": "JSON",
+            "CATALOGID": "1000_lf",
+            "TABKEY": "tab1",
+            "tab1PAGENO": "1",
+            "tab1PAGESIZE": "1",
+        },
+        headers={"Referer": SZSE_ETF_PAGE_URL, "User-Agent": "Mozilla/5.0"},
+    )
+    response.raise_for_status()
+    try:
+        page_date, effective_date, _header, displayed_date = _szse_etf_dates(
+            response.json(), context_dates
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise LiveRecoveryError(
+            "live_recovery_szse_current_metadata_invalid",
+            type(exc).__name__,
+            status="BLOCKED_QUALITY",
+        ) from exc
+    if effective_date != target:
+        return False
+    try:
+        _assert_szse_current_snapshot_is_adjacent(
+            manifest={"szse_etf_page_date": page_date}, target=target, session=session
+        )
+    except LiveRecoveryError as exc:
+        if exc.code == "live_recovery_historical_szse_source_required":
+            return False
+        raise
+    # The display label may be the page day or the underlying share day; a
+    # third date cannot support this recovery's source-date claim.
+    if displayed_date is not None and displayed_date not in {target, page_date}:
+        raise LiveRecoveryError(
+            "live_recovery_szse_current_date_mismatch",
+            f"target={target}, page_date={page_date}, displayed={displayed_date}",
+            status="BLOCKED_QUALITY",
+        )
+    return True
+
+
 def _assert_history_checkpoint(response: dict[str, Any], target: str) -> None:
     # HTTP 200 can also mean waiting_sources / archived_pending. Neither is
     # evidence that the target's normalized history checkpoint is readable.
@@ -703,13 +761,6 @@ def run_live_recovery(
         "FLOW_CF_ACCESS_CLIENT_SECRET": os.environ["FLOW_CF_ACCESS_CLIENT_SECRET"],
     }
     szse_history_budget = _szse_history_request_budget(scope)
-    parent_request_budget = scope.max_requests - szse_history_budget
-    if parent_request_budget <= 0:
-        raise LiveRecoveryError(
-            "live_recovery_request_budget_exceeded",
-            "historical SZSE allocation leaves no room for the collector",
-            status="FAILED_RETRYABLE",
-        )
     min_interval = float(os.environ.get("FLOW_RECOVERY_MIN_INTERVAL_SECONDS", "2"))
     if min_interval < 2:
         raise LiveRecoveryError("live_recovery_source_interval_too_short", "minimum is 2 seconds")
@@ -718,7 +769,7 @@ def run_live_recovery(
         # from the outer budget and could turn a 403/429 into a burst.  The
         # bounded runner owns retry/stop decisions explicitly.
         build_session(HttpSettings(total_retries=0)),
-        maximum=parent_request_budget,
+        maximum=scope.max_requests,
         min_interval_seconds=min_interval,
     )
     context_dates = discover_recent_trading_dates(
@@ -734,13 +785,29 @@ def run_live_recovery(
 
     required = set(scope.required_stages)
     stock_flow_required = bool(required.intersection({"etf_penetration", "stock_flow"}))
-    szse_history_root, szse_history_request_count = _invoke_szse_etf_history(
-        scope=scope,
-        dates=context_dates,
-        artifact_root=artifact_root,
-        workspace_root=workspace_root,
-        max_requests=szse_history_budget,
+    current_szse_matches = _current_szse_etf_matches_target(
+        session=source_session, target=target, context_dates=context_dates
     )
+    allocated_szse_budget = 0
+    szse_history_root: Path | None = None
+    szse_history_request_count = 0
+    if not current_szse_matches:
+        allocated_szse_budget = szse_history_budget
+        parent_request_budget = scope.max_requests - allocated_szse_budget
+        if parent_request_budget <= source_session.request_count:
+            raise LiveRecoveryError(
+                "live_recovery_request_budget_exceeded",
+                "historical SZSE allocation leaves no room for the collector",
+                status="FAILED_RETRYABLE",
+            )
+        source_session.maximum = parent_request_budget
+        szse_history_root, szse_history_request_count = _invoke_szse_etf_history(
+            scope=scope,
+            dates=context_dates,
+            artifact_root=artifact_root,
+            workspace_root=workspace_root,
+            max_requests=szse_history_budget,
+        )
     collection = collect_phase0(
         dates=context_dates,
         data_root=data_root,
@@ -758,6 +825,16 @@ def run_live_recovery(
     )
     manifest = collection["manifest"]
     quality = collection["quality"]
+    if current_szse_matches:
+        if manifest.get("szse_etf_trade_date") != target:
+            raise LiveRecoveryError(
+                "live_recovery_szse_current_date_mismatch",
+                f"expected={target}, observed={manifest.get('szse_etf_trade_date')}",
+                status="BLOCKED_QUALITY",
+            )
+        _assert_szse_current_snapshot_is_adjacent(
+            manifest=manifest, target=target, session=source_session
+        )
     run_id = str(manifest.get("run_id") or "")
     manifest_path = report_root / run_id / "manifest.json"
     quality_path = report_root / run_id / "quality-summary.json"
@@ -822,7 +899,7 @@ def run_live_recovery(
         post_child_request_reserve = _post_child_request_reserve(manifest)
         remaining_for_child = (
             scope.max_requests
-            - szse_history_budget
+            - allocated_szse_budget
             - source_session.request_count
             - post_child_request_reserve
         )
@@ -994,6 +1071,7 @@ def run_live_recovery(
         "collectorRunId": run_id,
         "szseHistoryRequestCount": szse_history_request_count,
         "szseHistoryMaxRequests": szse_history_budget,
+        "szseSourceMode": "current" if current_szse_matches else "history",
         "sourceRequestCount": source_session.request_count,
         "stockFlowRequestCount": stock_flow_request_count,
         "requestCount": request_count,
