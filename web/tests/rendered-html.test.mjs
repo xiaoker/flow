@@ -90,9 +90,8 @@ test("refreshes the latest dashboard and schedules collection through source rel
   assert.match(bootstrapSource, /cache: "no-store"/);
   assert.deepEqual(config.triggers.crons, [
     "30 10 * * mon-fri",
-    "45 23 * * sun-thu",
-    "45 0 * * mon-fri",
     "15 1 * * mon-fri",
+    "45 1 * * mon-fri",
     "15 11 * * mon-fri",
   ]);
   // PR4 rollout: the compatibility gate is now enabled after candidate and

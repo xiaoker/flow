@@ -136,8 +136,8 @@ jobs:
           if [[ -z "$WINDOW" || "$WINDOW" == "auto" ]]; then
             case "${{ github.event.schedule || '' }}" in
               "45 10 * * 1-5") WINDOW="evening" ;;
-              "0 0 * * 1-5") WINDOW="morning" ;;
-              "55 0 * * 1-5"|"15 1 * * 1-5"|"45 1 * * 1-5") WINDOW="reconcile" ;;
+              "30 1 * * 1-5") WINDOW="morning" ;;
+              "0 2 * * 1-5") WINDOW="reconcile" ;;
               *) WINDOW="evening" ;;
             esac
           fi
@@ -791,10 +791,8 @@ jobs:
           if [[ "$WINDOW" == "auto" ]]; then
             case "${{ github.event.schedule || '' }}" in
               "45 10 * * 1-5") WINDOW="evening" ;;
-              "0 0 * * 1-5") WINDOW="morning" ;;
-              "55 0 * * 1-5") WINDOW="reconcile" ;;
-              "15 1 * * 1-5") WINDOW="reconcile" ;;
-              "45 1 * * 1-5") WINDOW="reconcile" ;;
+              "30 1 * * 1-5") WINDOW="morning" ;;
+              "0 2 * * 1-5") WINDOW="reconcile" ;;
             esac
           fi
           echo "collection_window=$WINDOW" >> "$GITHUB_OUTPUT"
