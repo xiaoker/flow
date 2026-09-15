@@ -30,6 +30,10 @@ Cloudflare Worker
 - ETF `historyCoverage` 必须在离线构建阶段生成；请求时不得回退到 R2 rolling state。
 - 视图对象使用内容哈希和固定 key，重复运行不会覆盖原始对象。
 - `active_release` 只保存当前指针；切换前先把所有对象和清单写完。
+- 普通 pipeline window 只有在提交 `completionAsOf == targetDate` 且快照
+  `publication.status == confirmed` 的完成凭据后才能进入 `COMPLETED`；较早的
+  fallback 可以归档，但不能关闭当前交易日窗口。恢复任务继续使用 receipt-backed
+  recovery 状态接口。
 - manifest v2 与 v3 在迁移期并存；v3 使用 `observedAt` 对同一 `asOf` 的修订做单调排序，旧 v2 缺少该字段时按保守的较旧版本处理。
 - v3 manifest 额外声明 `sourceDates`、`pressureSchemaVersion=2`、8 个股票分片和固定 `requiredArtifacts`；发布日期 hash 同时覆盖这些控制字段。
 - v3 当前固定发布 18 个工件：`bootstrap` 只含首页摘要、板块周期矩阵和 ETF 搜索索引；`radar` 含完整 ETF 行；`radar_flow` 只在打开 ETF 详情后按同一 `releaseId` 延迟读取；`national` 只含国家队代码子集；`stock_search` 与 8 个股票分片按个股详情读取。

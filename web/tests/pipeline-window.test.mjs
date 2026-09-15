@@ -182,6 +182,8 @@ test("completed, retryable and blocked states are idempotent", async () => {
     runKey: completedKey,
     leaseOwner: "runner:00000001",
     status: "COMPLETED",
+    completionAsOf: "2026-08-29",
+    publicationStatus: "confirmed",
   }, now);
   assert.equal((await claimPipelineWindow(db, input(completedKey, "reconcile", "runner:00000002"), now)).decision, "skip_completed");
 
@@ -227,6 +229,52 @@ test("an expired lease can be taken over atomically", async () => {
   assert.equal(takeover.decision, "takeover");
   assert.equal(takeover.leaseOwner, "runner:00000002");
   assert.equal(takeover.attemptCount, 2);
+  db.close();
+});
+
+test("ordinary completion requires an exact confirmed target-date proof", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-08-29T00:00:00.000Z");
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  await claimPipelineWindow(db, input(runKey), now);
+
+  await assert.rejects(
+    markPipelineWindow(db, {
+      runKey,
+      leaseOwner: "runner:00000001",
+      status: "COMPLETED",
+    }, now),
+    /pipeline_window_completion_proof_required/,
+  );
+  await assert.rejects(
+    markPipelineWindow(db, {
+      runKey,
+      leaseOwner: "runner:00000001",
+      status: "COMPLETED",
+      completionAsOf: "2026-08-28",
+      publicationStatus: "confirmed",
+    }, now),
+    /pipeline_window_completion_date_mismatch/,
+  );
+  await assert.rejects(
+    markPipelineWindow(db, {
+      runKey,
+      leaseOwner: "runner:00000001",
+      status: "COMPLETED",
+      completionAsOf: "2026-08-29",
+      publicationStatus: "pending",
+    }, now),
+    /pipeline_window_completion_not_confirmed/,
+  );
+
+  const completed = await markPipelineWindow(db, {
+    runKey,
+    leaseOwner: "runner:00000001",
+    status: "COMPLETED",
+    completionAsOf: "2026-08-29",
+    publicationStatus: "confirmed",
+  }, now);
+  assert.equal(completed.status, "COMPLETED");
   db.close();
 });
 
@@ -312,10 +360,36 @@ test("protected claim and status routes expose bounded machine-readable response
   assert.equal(statusResponse.status, 200);
   assert.equal((await statusResponse.json()).status, "DISPATCHED");
 
+  const incompleteMarkResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/status", {
+      method: "POST",
+      body: JSON.stringify({
+        runKey,
+        leaseOwner: "runner:00000001",
+        status: "COMPLETED",
+      }),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(incompleteMarkResponse.status, 422);
+  assert.equal((await incompleteMarkResponse.json()).error, "pipeline_window_completion_proof_required");
+
   const markResponse = await worker.fetch(
     new Request("http://localhost/api/v1/admin/pipeline-window/status", {
       method: "POST",
-      body: JSON.stringify({ runKey, leaseOwner: "runner:00000001", githubRunId: "12345678", status: "COMPLETED" }),
+      body: JSON.stringify({
+        runKey,
+        leaseOwner: "runner:00000001",
+        githubRunId: "12345678",
+        status: "COMPLETED",
+        completionAsOf: "2026-08-29",
+        publicationStatus: "confirmed",
+      }),
       headers: {
         Authorization: "Bearer test-key",
         "Content-Type": "application/json",
