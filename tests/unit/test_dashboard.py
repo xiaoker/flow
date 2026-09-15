@@ -186,7 +186,7 @@ def test_dashboard_marks_deferred_pcf_codes_as_partial_capture(tmp_path: Path) -
     assert snapshot["etfStockFlow"]["coverage"]["deferredEtfCount"] == 12
 
 
-def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending(
+def test_dashboard_does_not_confirm_prior_day_while_newer_raw_data_is_pending(
     tmp_path: Path,
 ) -> None:
     dates = ["2026-07-29", "2026-07-30", "2026-07-31"]
@@ -264,13 +264,13 @@ def test_dashboard_publishes_latest_complete_day_while_newer_raw_data_is_pending
     )
 
     assert snapshot["asOf"] == "2026-07-30"
-    assert snapshot["gate"] == "conditional_pass"
+    assert snapshot["gate"] == "blocked"
     assert snapshot["quality"]["fail"] == 0
     assert snapshot["publication"] == {
-        "status": "confirmed",
+        "status": "pending",
         "targetAsOf": "2026-07-31",
         "pendingDomains": ["深交所 ETF", "深交所融资融券"],
-        "detail": "已发布 2026-07-30 完整数据；2026-07-31 原始数据等待官方来源补齐",
+        "detail": "已保留 2026-07-30 完整数据；2026-07-31 原始数据等待官方来源补齐",
     }
     assert snapshot["marginSeries"][-1]["date"] == "07-30"
 

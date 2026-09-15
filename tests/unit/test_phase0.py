@@ -3,6 +3,7 @@ from __future__ import annotations
 from trading_desk.models import QualityFinding
 from trading_desk.phase0 import (
     DEFAULT_PCF_MAX_CODES,
+    _deferred_datasets_for_window,
     _pending_required_coverage_datasets,
     _resolve_phase0_gate,
 )
@@ -57,3 +58,11 @@ def test_same_window_without_gaps_can_pass_or_warn_conditionally() -> None:
 
 def test_daily_pcf_enrichment_has_a_bounded_default() -> None:
     assert 0 < DEFAULT_PCF_MAX_CODES <= 32
+
+
+def test_collection_windows_defer_only_late_szse_sources() -> None:
+    assert _deferred_datasets_for_window("evening") == ["szse_etf", "szse_margin"]
+    assert _deferred_datasets_for_window("morning") == []
+    assert _deferred_datasets_for_window("reconcile") == []
+    # Manual/legacy invocations keep the complete-source behaviour.
+    assert _deferred_datasets_for_window("auto") == []
