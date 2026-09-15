@@ -51,6 +51,9 @@ class ExpiredExactWindow(RuntimeError):
     """Raised after one rolled PCF proves the target exact window has expired."""
 
 
+LEASE_REFRESH_SECONDS = 4 * 60
+
+
 def _ascii_http_header(value: str, *, max_length: int = 120) -> str:
     """Return a bounded ASCII diagnostic that is safe for HTTP/1 headers."""
 
@@ -313,8 +316,25 @@ def capture_plan(
     sleep_fn: Callable[[float], None] = time.sleep,
     random_fn: Callable[[float, float], float] = random.uniform,
     no_sleep: bool = False,
+    max_items: int | None = None,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Submit and capture a plan, stopping the window on rate limiting."""
+    """Submit and capture a plan, stopping the window on rate limiting.
+
+    ``max_items`` and ``max_seconds`` are safety bounds for one invocation,
+    not a new completeness rule.  Items outside the bound remain in the
+    control-plane job as ``PENDING`` and are picked up by a later invocation
+    with the same deterministic plan.  Returning a partial result before the
+    workflow timeout keeps cancellation from being misreported as per-item
+    source failure.
+    """
+
+    if max_items is not None and (not isinstance(max_items, int) or max_items < 0):
+        raise CaptureError("max_items_invalid")
+    if max_seconds is not None and (
+        not isinstance(max_seconds, (int, float)) or not float(max_seconds) > 0
+    ):
+        raise CaptureError("max_seconds_invalid")
 
     target_date = str(plan.get("targetDate") or "")
     client = session or requests.Session()
@@ -338,8 +358,10 @@ def capture_plan(
             "captured": 0,
             "skipped": 0,
             "failed": 0,
+            "deferred": 0,
             "failures": [],
             "status": plan.get("status"),
+            "stopReason": None,
         }
     owner = f"pcf-script-{uuid.uuid4().hex[:16]}"
     lease(
@@ -367,16 +389,47 @@ def capture_plan(
             if isinstance(item, dict) and item.get("state") in {"CAPTURED", "VALID"}
         }
         completed = 0
-        skipped = 0
         failures: list[dict[str, str]] = []
         required = _required_items(plan)
-        for index, item in enumerate(required):
+        required_codes = {str(item["etfCode"]) for item in required}
+        skipped = len(completed_codes & required_codes)
+        pending_items = [
+            item for item in required if str(item["etfCode"]) not in completed_codes
+        ]
+        if max_items is None or max_items == 0:
+            selected_items = pending_items
+        else:
+            selected_items = pending_items[:max_items]
+        started_monotonic = time.monotonic()
+        next_lease_refresh = started_monotonic + LEASE_REFRESH_SECONDS
+        processed = 0
+        stop_reason: str | None = None
+        for index, item in enumerate(selected_items):
+            if max_seconds is not None and time.monotonic() - started_monotonic >= max_seconds:
+                stop_reason = "time_limit"
+                break
+            if time.monotonic() >= next_lease_refresh:
+                # The D1 lease is ten minutes long.  Refresh it before the
+                # bounded capture can outlive that lease; a failed refresh
+                # fails closed instead of allowing a second worker to race.
+                lease(
+                    client,
+                    base_url=base_url,
+                    api_key=api_key,
+                    job_id=job_id,
+                    owner=owner,
+                    action="acquire",
+                    access_client_id=access_client_id,
+                    access_client_secret=access_client_secret,
+                )
+                next_lease_refresh = time.monotonic() + LEASE_REFRESH_SECONDS
             code = str(item["etfCode"])
-            if code in completed_codes:
-                skipped += 1
-                continue
-            if completed + skipped and not no_sleep:
+            if index and not no_sleep:
                 sleep_fn(random_fn(0.8, 1.3))
+                if max_seconds is not None and time.monotonic() - started_monotonic >= max_seconds:
+                    stop_reason = "time_limit"
+                    break
+            processed += 1
             try:
                 raw_xml = fetch_xml(client, code=code, target_date=target_date, sleep_fn=sleep_fn)
                 try:
@@ -455,6 +508,9 @@ def capture_plan(
                 raise
             except CaptureError as exc:
                 failures.append({"code": code, "reason": str(exc)})
+        deferred = len(pending_items) - processed
+        if deferred and stop_reason is None:
+            stop_reason = "item_limit"
         return {
             "jobId": job_id,
             "targetDate": target_date,
@@ -462,8 +518,10 @@ def capture_plan(
             "captured": completed,
             "skipped": skipped,
             "failed": len(failures),
+            "deferred": deferred,
             "failures": failures,
-            "status": "COMPLETE" if not failures else "PARTIAL",
+            "status": "COMPLETE" if not failures and deferred == 0 else "PARTIAL",
+            "stopReason": stop_reason,
             "budget": {
                 "sourceRequests": completed + len(failures),
                 "r2ClassA": completed + len(failures),
@@ -494,6 +552,18 @@ def main() -> int:
     parser.add_argument("--access-client-id", default=os.environ.get("FLOW_CF_ACCESS_CLIENT_ID", ""))
     parser.add_argument("--access-client-secret", default=os.environ.get("FLOW_CF_ACCESS_CLIENT_SECRET", ""))
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=0,
+        help="maximum number of pending ETFs in this invocation; 0 means no item limit",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=0,
+        help="stop before this many seconds of capture work; 0 means no time limit",
+    )
     parser.add_argument("--no-sleep", action="store_true", help="testing only; do not use for production collection")
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
@@ -507,6 +577,8 @@ def main() -> int:
             access_client_id=args.access_client_id or None,
             access_client_secret=args.access_client_secret or None,
             no_sleep=args.no_sleep,
+            max_items=args.max_items or None,
+            max_seconds=args.max_seconds or None,
         )
     except ExpiredExactWindow as exc:
         result = {"status": "EXPIRED_EXACT_WINDOW", "reason": str(exc)}

@@ -9,7 +9,7 @@ import pandas as pd
 
 from scripts.audit_pcf_v2_legacy_history import audit_legacy_history
 from scripts.build_pcf_v2_plan import build_plan
-from scripts.finalize_sse_pcf_v2 import finalize_plan
+from scripts.finalize_sse_pcf_v2 import classify_capture_items, finalize_plan
 from scripts.summarize_pcf_v2_history import summarize_jobs
 from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
@@ -40,11 +40,12 @@ class Response:
 
 
 class FinalizeSession:
-    def __init__(self, plan: dict) -> None:
+    def __init__(self, plan: dict, checkpoint_items: list[dict] | None = None) -> None:
         self.plan = plan
         self.job_id = f"pcf:{plan['targetDate']}:{plan['planSha256'][:16]}"
         self.put_calls: list[dict] = []
         self.post_calls: list[dict] = []
+        self.checkpoint_items = checkpoint_items or [{"etfCode": "510300", "state": "CAPTURED"}]
 
     def post(self, url: str, **kwargs: object) -> Response:
         self.post_calls.append({"url": url, **kwargs})
@@ -54,7 +55,7 @@ class FinalizeSession:
 
     def get(self, url: str, **kwargs: object) -> Response:
         if url.endswith("/pcf-capture"):
-            return Response(payload={"items": [{"etfCode": "510300", "state": "CAPTURED"}]})
+            return Response(payload={"items": self.checkpoint_items})
         raw = FIXTURE.read_bytes()
         wire = gzip.compress(raw, compresslevel=6, mtime=0)
         rows, _, warnings = parse_sse_etf_pcf_xml(
@@ -130,6 +131,66 @@ def test_finalize_builds_exact_canonical_and_never_publishes_product_read_model(
     finalize_call = next(call for call in session.post_calls if call["url"].endswith("/finalize"))
     assert finalize_call["json"]["validatedItems"][0]["tradingDay"] == "2026-08-21"
     assert len(finalize_call["json"]["validatedItems"][0]["normalizedSha256"]) == 64
+
+
+def test_capture_classification_does_not_call_deferred_items_failures() -> None:
+    result = classify_capture_items(
+        {"510300", "510500", "510700", "510900"},
+        [
+            {"etfCode": "510300", "state": "CAPTURED"},
+            {"etfCode": "510500", "state": "PENDING"},
+            {"etfCode": "510700", "state": "BLOCKED", "failureReason": "http_403", "attempts": 1},
+        ],
+    )
+
+    assert result["capturedCodes"] == ["510300"]
+    assert result["pendingCodes"] == ["510500"]
+    assert result["blockedCodes"] == ["510700"]
+    assert result["unknownCodes"] == ["510900"]
+    assert result["unavailableCodes"] == ["510500", "510700", "510900"]
+    assert result["blockedItems"] == [{"code": "510700", "reason": "http_403", "attempts": 1}]
+
+
+def test_finalize_reports_pending_separately_from_blocked_items() -> None:
+    plan = {
+        "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
+        "calculationVersion": "pcf-capture-v2",
+        "hardLimit": 2000,
+        "status": "PLANNED",
+        "planSha256": "b" * 64,
+        "items": [
+            {"etfCode": "510300", "required": True},
+            {"etfCode": "510500", "required": True},
+            {"etfCode": "510700", "required": True},
+        ],
+    }
+    session = FinalizeSession(
+        plan,
+        checkpoint_items=[
+            {"etfCode": "510300", "state": "CAPTURED"},
+            {"etfCode": "510500", "state": "PENDING"},
+            {"etfCode": "510700", "state": "BLOCKED", "failureReason": "http_403", "attempts": 1},
+        ],
+    )
+
+    result = finalize_plan(plan, base_url="https://flow.example", api_key="secret", session=session)
+
+    assert result["status"] == "PARTIAL"
+    assert result["coverage"] == {
+        "required": 3,
+        "captured": 1,
+        "valid": 0,
+        "failed": 1,
+        "pending": 1,
+        "unknown": 0,
+    }
+    assert result["pendingCodes"] == ["510500"]
+    assert result["blockedCodes"] == ["510700"]
+    assert result["unknownCodes"] == []
+    assert result["blockedItems"][0]["reason"] == "http_403"
+    assert result["unavailableCodes"] == ["510500", "510700"]
+    assert session.put_calls == []
 
 
 def test_legacy_next_day_baskets_are_explicitly_ineligible_for_v2() -> None:

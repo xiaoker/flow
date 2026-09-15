@@ -28,6 +28,60 @@ from trading_desk.pcf_xml import hash_normalized_pcf_rows, parse_sse_etf_pcf_xml
 
 
 MAX_WIRE_BYTES = 5 * 1024 * 1024
+CAPTURED_STATES = frozenset({"CAPTURED", "VALID"})
+PENDING_STATES = frozenset({"PENDING", "RUNNING", "RETRYABLE"})
+
+
+def classify_capture_items(
+    required_codes: set[str],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify required checkpoints without treating missing work as failure.
+
+    A job can be finalized only when every required item is captured.  Before
+    that point, the control plane must retain the distinction between work
+    that has not run yet (or is retryable), an item explicitly blocked by a
+    source/quality result, and an item whose state is absent or unknown.  The
+    old implementation collapsed all three into ``failed``, which made a
+    workflow timeout look like a source failure and hid the resumable work.
+    """
+
+    by_code = {
+        str(item.get("etfCode")): item
+        for item in items
+        if isinstance(item, dict) and str(item.get("etfCode") or "") in required_codes
+    }
+    captured: list[str] = []
+    pending: list[str] = []
+    blocked: list[str] = []
+    unknown: list[str] = []
+    for code in sorted(required_codes):
+        item = by_code.get(code)
+        state = str(item.get("state") or "MISSING") if item else "MISSING"
+        if state in CAPTURED_STATES:
+            captured.append(code)
+        elif state in PENDING_STATES:
+            pending.append(code)
+        elif state == "BLOCKED":
+            blocked.append(code)
+        else:
+            unknown.append(code)
+    unavailable = pending + blocked + unknown
+    return {
+        "capturedCodes": captured,
+        "pendingCodes": pending,
+        "blockedCodes": blocked,
+        "unknownCodes": unknown,
+        "unavailableCodes": unavailable,
+        "blockedItems": [
+            {
+                "code": code,
+                "reason": by_code[code].get("failureReason"),
+                "attempts": by_code[code].get("attempts"),
+            }
+            for code in blocked
+        ],
+    }
 
 
 def _json_response(response: requests.Response, *, label: str) -> dict[str, Any]:
@@ -199,27 +253,38 @@ def finalize_plan(
         access_client_id=access_client_id,
         access_client_secret=access_client_secret,
     )
-    item_states = {
-        str(item.get("etfCode")): str(item.get("state"))
-        for item in status.get("items", [])
-        if isinstance(item, dict)
-    }
-    unavailable = sorted(code for code in required_by_code if item_states.get(code) not in {"CAPTURED", "VALID"})
+    raw_items = status.get("items")
+    checkpoint_items = raw_items if isinstance(raw_items, list) else []
+    classification = classify_capture_items(set(required_by_code), checkpoint_items)
+    unavailable = classification["unavailableCodes"]
     if unavailable:
+        status_job = status.get("job") if isinstance(status.get("job"), Mapping) else {}
+        job_status = str(status_job.get("status") or "")
+        partial_status = (
+            job_status
+            if job_status in {"BLOCKED_QUALITY", "BLOCKED_UNIVERSE_ANOMALY", "EXPIRED_EXACT_WINDOW"}
+            else "PARTIAL"
+        )
         return {
             "schemaVersion": 1,
             "shadowOnly": True,
-            "status": "PARTIAL",
+            "status": partial_status,
             "tradeDate": target_date,
             "previousDate": previous_date,
             "jobId": job_id,
             "coverage": {
                 "required": len(required),
-                "captured": len(required) - len(unavailable),
+                "captured": len(classification["capturedCodes"]),
                 "valid": 0,
-                "failed": len(unavailable),
+                "failed": len(classification["blockedCodes"]),
+                "pending": len(classification["pendingCodes"]),
+                "unknown": len(classification["unknownCodes"]),
             },
-            "unavailableCodes": unavailable[:100],
+            "pendingCodes": classification["pendingCodes"],
+            "blockedCodes": classification["blockedCodes"],
+            "unknownCodes": classification["unknownCodes"],
+            "blockedItems": classification["blockedItems"],
+            "unavailableCodes": unavailable,
         }
 
     raw_xml: dict[str, bytes] = {}

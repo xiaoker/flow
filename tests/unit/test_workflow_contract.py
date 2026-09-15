@@ -181,6 +181,11 @@ def test_pr2_pcf_workflow_is_independent_and_checkpoint_resumable() -> None:
     assert "--official-live" in workflow
     assert "Capture exact PCF v2 items with D1 checkpoints" in workflow
     assert "capture_sse_pcf_v2" in workflow
+    assert "--max-items \"$PCF_CAPTURE_MAX_ITEMS\"" in workflow
+    assert "--max-seconds \"$PCF_CAPTURE_MAX_SECONDS\"" in workflow
+    assert "PCF_CAPTURE_MAX_ITEMS: \"600\"" in workflow
+    assert "PCF_CAPTURE_MAX_SECONDS: \"840\"" in workflow
+    assert "timeout-minutes: 20" in workflow
     assert "Finalize independent PCF v2 canonical checkpoint" in workflow
     assert "finalize_sse_pcf_v2" in workflow
     assert "summarize_pcf_v2_history" in workflow
@@ -497,6 +502,9 @@ def test_pcf_v2_exact_capture_is_owned_by_independent_workflow() -> None:
     assert "reports/pcf-v2/checkpoint-summary.json" in pcf_workflow
     assert '--arg requiredDays "1"' in collect_workflow
     assert "DATE_MISMATCH" in capture
+    assert "pendingCodes" in finalize
+    assert "blockedCodes" in finalize
+    assert "unknownCodes" in finalize
     assert "market-data/pcf-v2/degraded" not in finalize
     assert "productionPublishCalls" in finalize
     assert "export async function GET" in object_route

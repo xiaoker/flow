@@ -44,10 +44,11 @@ class FakeSession:
 
 
 class CaptureSession:
-    def __init__(self) -> None:
+    def __init__(self, checkpoint_codes: tuple[str, ...] = ("510500",)) -> None:
         self.get_calls: list[dict[str, object]] = []
         self.put_calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
+        self.checkpoint_codes = checkpoint_codes
 
     def post(self, *args: object, **kwargs: object) -> FakeResponse:
         self.post_calls.append(kwargs)
@@ -60,7 +61,8 @@ class CaptureSession:
     def get(self, *args: object, **kwargs: object) -> FakeResponse:
         self.get_calls.append(kwargs)
         if kwargs.get("params") == {"jobId": "pcf:2026-08-21:0123456789abcdef"}:
-            return FakeResponse(200, content=b'{"items":[{"etfCode":"510500","state":"CAPTURED"}]}' )
+            items = [{"etfCode": code, "state": "CAPTURED"} for code in self.checkpoint_codes]
+            return FakeResponse(200, content=json.dumps({"items": items}).encode())
         return FakeResponse(200, content=FIXTURE.read_bytes(), content_type="application/xml")
 
     def put(self, *args: object, **kwargs: object) -> FakeResponse:
@@ -233,3 +235,63 @@ def test_capture_plan_skips_items_already_checkpointed_by_control_plane() -> Non
     assert result["captured"] == 1
     assert len(session.put_calls) == 1
     assert len(session.get_calls) == 2
+
+
+def test_capture_plan_bounds_one_invocation_and_reports_deferred_checkpoints() -> None:
+    session = CaptureSession()
+    plan = {
+        "status": "PLANNED",
+        "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
+        "items": [
+            {"etfCode": "510300", "required": True},
+            {"etfCode": "510500", "required": True},
+            {"etfCode": "510700", "required": True},
+        ],
+    }
+
+    result = capture_plan(
+        plan,
+        base_url="https://flow.example",
+        api_key="secret",
+        session=session,
+        no_sleep=True,
+        max_items=1,
+    )
+
+    assert result["skipped"] == 1
+    assert result["captured"] == 1
+    assert result["failed"] == 0
+    assert result["deferred"] == 1
+    assert result["status"] == "PARTIAL"
+    assert result["stopReason"] == "item_limit"
+    assert len(session.put_calls) == 1
+
+
+def test_capture_plan_stops_before_time_budget_without_marking_items_failed() -> None:
+    session = CaptureSession()
+    plan = {
+        "status": "PLANNED",
+        "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
+        "items": [
+            {"etfCode": "510300", "required": True},
+            {"etfCode": "510500", "required": True},
+        ],
+    }
+
+    result = capture_plan(
+        plan,
+        base_url="https://flow.example",
+        api_key="secret",
+        session=session,
+        no_sleep=True,
+        max_seconds=1e-12,
+    )
+
+    assert result["captured"] == 0
+    assert result["failed"] == 0
+    assert result["deferred"] == 1
+    assert result["status"] == "PARTIAL"
+    assert result["stopReason"] == "time_limit"
+    assert session.put_calls == []
