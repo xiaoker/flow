@@ -388,8 +388,10 @@ jobs:
           else
             jq -e --arg targetDate "$INPUT_TARGET_DATE" '
             (.asOf | type == "string") and
-            (.publication.status == "confirmed" or .publication.status == "pending") and
-            (.asOf <= $targetDate or $targetDate == "")
+            (
+              (.publication.status == "confirmed" and $targetDate != "" and .asOf == $targetDate) or
+              (.publication.status == "pending" and (.asOf <= $targetDate or $targetDate == ""))
+            )
             ' .collection-source/dashboard-snapshot.json >/dev/null
           fi
           if [[ -s .collection-source/market-history.json ]]; then
@@ -700,6 +702,8 @@ jobs:
           LATEST_RECEIPT_KEY=""
           LATEST_RECEIPT_SHA256=""
           SOURCE_FINGERPRINT=""
+          COMPLETION_AS_OF="$(jq -r '.asOf // empty' dashboard-snapshot.json 2>/dev/null || true)"
+          PUBLICATION_STATUS="$(jq -r '.publication.status // empty' dashboard-snapshot.json 2>/dev/null || true)"
           PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
@@ -719,6 +723,13 @@ jobs:
           elif [[ ! -s dashboard-snapshot.json ]] || ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null 2>&1; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="source_not_ready"
+          elif [[ "$COMPLETION_AS_OF" != "$INPUT_TARGET_DATE" || "$PUBLICATION_STATUS" != "confirmed" ]]; then
+            # A successful publisher must prove that the snapshot it is
+            # closing is confirmed for this exact business window.  Older
+            # fallback snapshots are valid archives, but never a COMPLETED
+            # pipeline window.
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="publication_as_of_mismatch"
           elif [[ -s dashboard-snapshot.json ]] && jq -e '(.errors | length > 0) or (.phase0_gate_status == "blocked")' dashboard-snapshot.json >/dev/null 2>&1; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
@@ -774,7 +785,9 @@ jobs:
               --arg githubRunId "${{ github.run_id }}" \
               --arg status "$STATUS" \
               --arg errorCode "$ERROR_CODE" \
-              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              --arg completionAsOf "$COMPLETION_AS_OF" \
+              --arg publicationStatus "$PUBLICATION_STATUS" \
+              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end),completionAsOf:(if $status == "COMPLETED" then (if $completionAsOf == "" then null else $completionAsOf end) else null end),publicationStatus:(if $status == "COMPLETED" then (if $publicationStatus == "" then null else $publicationStatus end) else null end)}' \
               > pipeline-window-terminal.json
             TERMINAL_URL="$FLOW_PIPELINE_WINDOW_URL/status"
             TERMINAL_PAYLOAD="pipeline-window-terminal.json"

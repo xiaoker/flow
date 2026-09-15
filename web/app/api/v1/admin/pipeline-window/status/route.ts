@@ -100,6 +100,12 @@ export async function POST(request: Request): Promise<Response> {
   const githubRunId = value.githubRunId === null
     ? null
     : typeof value.githubRunId === "string" ? value.githubRunId : undefined;
+  const completionAsOf = value.completionAsOf === null
+    ? null
+    : typeof value.completionAsOf === "string" ? value.completionAsOf : undefined;
+  const publicationStatus = value.publicationStatus === null
+    ? null
+    : typeof value.publicationStatus === "string" ? value.publicationStatus : undefined;
   if (!runKey || !leaseOwner || !ALLOWED_STATUSES.includes(statusValue as PipelineWindowStatus)) {
     return response({ error: "invalid_status_request" }, 422);
   }
@@ -112,6 +118,8 @@ export async function POST(request: Request): Promise<Response> {
       errorCode,
       sourceFingerprint,
       githubRunId,
+      completionAsOf,
+      publicationStatus,
     });
     return response(serialize(row));
   } catch (error: unknown) {

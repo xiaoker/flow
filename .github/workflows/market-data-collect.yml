@@ -1623,6 +1623,8 @@ jobs:
           set -euo pipefail
           STATUS="COMPLETED"
           ERROR_CODE=""
+          COMPLETION_AS_OF="$(jq -r '.asOf // empty' dashboard-snapshot.json 2>/dev/null || true)"
+          PUBLICATION_STATUS="$(jq -r '.publication.status // empty' dashboard-snapshot.json 2>/dev/null || true)"
           HISTORY_STATUS="$(jq -r '.status // "NOT_REQUIRED"' stock-flow-history-status.json 2>/dev/null || echo "NOT_REQUIRED")"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
@@ -1649,6 +1651,12 @@ jobs:
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
           fi
+          if [[ "$STATUS" == "COMPLETED" && ("$COMPLETION_AS_OF" != "$INPUT_TARGET_DATE" || "$PUBLICATION_STATUS" != "confirmed") ]]; then
+            # A prior-day fallback may be archived for the next reconciliation
+            # window, but it cannot close the current business window.
+            STATUS="FAILED_RETRYABLE"
+            ERROR_CODE="publication_as_of_mismatch"
+          fi
           if [[ -n "$INPUT_RECOVERY_ID" ]]; then
             if [[ -z "$INPUT_RECOVERY_ATTEMPT_COUNT" || ! "$INPUT_RECOVERY_ATTEMPT_COUNT" =~ ^[0-9]+$ ]]; then
               echo "Recovery terminal update is missing a valid attempt count." >&2
@@ -1673,7 +1681,9 @@ jobs:
               --arg githubRunId "${{ github.run_id }}" \
               --arg status "$STATUS" \
               --arg errorCode "$ERROR_CODE" \
-              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end)}' \
+              --arg completionAsOf "$COMPLETION_AS_OF" \
+              --arg publicationStatus "$PUBLICATION_STATUS" \
+              '{runKey:$runKey,leaseOwner:$leaseOwner,githubRunId:$githubRunId,status:$status,errorCode:(if $errorCode == "" then null else $errorCode end),completionAsOf:(if $status == "COMPLETED" then (if $completionAsOf == "" then null else $completionAsOf end) else null end),publicationStatus:(if $status == "COMPLETED" then (if $publicationStatus == "" then null else $publicationStatus end) else null end)}' \
               > pipeline-window-terminal.json
             TERMINAL_URL="$FLOW_PIPELINE_WINDOW_URL/status"
             TERMINAL_PAYLOAD="pipeline-window-terminal.json"

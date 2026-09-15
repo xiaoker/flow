@@ -140,6 +140,8 @@ async function completedWindow(db, windowName = "evening") {
     runKey,
     leaseOwner: "normal:owner01",
     status: "COMPLETED",
+    completionAsOf: "2026-09-03",
+    publicationStatus: "confirmed",
   }, new Date("2026-09-03T01:00:01.000Z"));
   const row = await getPipelineWindow(db, runKey);
   assert.ok(row);
