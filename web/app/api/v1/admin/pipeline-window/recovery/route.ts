@@ -3,12 +3,21 @@ import {
   getPipelineWindowRecovery,
   PipelineWindowError,
   registerPipelineWindowRecovery,
+  validatePipelineRecoveryRegistrationInput,
 } from "@/app/lib/pipeline-window-recovery";
 import { getPipelineWindow } from "@/app/lib/pipeline-window";
+import {
+  recoveryPlanObjectKey,
+  storeImmutableRecoveryPlan,
+} from "@/app/lib/pipeline-recovery-plan";
 
 export const dynamic = "force-dynamic";
 
-const MAX_BODY_BYTES = 300_000;
+// The request carries the exact plan bytes and the approved pre-recovery
+// state as JSON strings. Escaping can nearly double their encoded size, so
+// keep the outer envelope bounded without making the inner 300 KB plan limit
+// impossible to satisfy.
+const MAX_BODY_BYTES = 1_100_000;
 
 function secureEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
@@ -131,15 +140,24 @@ export async function POST(request: Request): Promise<Response> {
   const runtime = await runtimeEnv();
   if (!authorized(request, runtime.INGEST_API_KEY ?? "")) return response({ error: "unauthorized" }, 401);
   if (!enabled(runtime)) return response({ error: "pipeline_recovery_disabled" }, 404);
-  if (!runtime.DB) return response({ error: "database_unavailable" }, 503);
+  if (!runtime.DB || !runtime.RAW_BUCKET) return response({ error: "storage_unavailable" }, 503);
   try {
     const body = await readBody(request);
-    const result = await registerPipelineWindowRecovery(runtime.DB, {
-      recoveryId: requiredString(body, "recoveryId"),
-      runKey: requiredString(body, "runKey"),
-      planKey: requiredString(body, "planKey"),
-      planSha256: requiredString(body, "planSha256"),
-      scopeSha256: requiredString(body, "scopeSha256"),
+    const recoveryId = requiredString(body, "recoveryId");
+    const runKey = requiredString(body, "runKey");
+    const planSha256 = requiredString(body, "planSha256");
+    const scopeSha256 = requiredString(body, "scopeSha256");
+    const planJson = requiredString(body, "planJson");
+    const planKey = recoveryPlanObjectKey(recoveryId, scopeSha256);
+    if (body.planKey !== undefined && body.planKey !== planKey) {
+      throw new PipelineWindowError("invalid_plan_key", 422);
+    }
+    const registration = {
+      recoveryId,
+      runKey,
+      planKey,
+      planSha256,
+      scopeSha256,
       expectedAttemptCount: requiredInteger(body, "expectedAttemptCount"),
       expectedUpdatedAt: requiredString(body, "expectedUpdatedAt"),
       previousStateJson: requiredString(body, "previousStateJson"),
@@ -147,13 +165,25 @@ export async function POST(request: Request): Promise<Response> {
       approvalReference: requiredString(body, "approvalReference"),
       authorizedAt: requiredString(body, "authorizedAt"),
       expiresAt: requiredString(body, "expiresAt"),
-    });
+    };
+    validatePipelineRecoveryRegistrationInput(registration);
+    if (!(await getPipelineWindow(runtime.DB, runKey))) {
+      throw new PipelineWindowError("pipeline_window_not_found", 404);
+    }
+    const stored = await storeImmutableRecoveryPlan(
+      runtime.RAW_BUCKET,
+      new TextEncoder().encode(planJson),
+      { recoveryId, runKey, planSha256, scopeSha256 },
+    );
+    const result = await registerPipelineWindowRecovery(runtime.DB, registration);
     return response({
       decision: result.decision,
       recoveryId: result.recovery.recovery_id,
       runKey: result.pipeline.run_key,
       status: result.recovery.status,
       pipelineStatus: result.pipeline.status,
+      planKey: stored.key,
+      planStorageDecision: stored.decision,
     }, result.decision === "registered" ? 201 : 200);
   } catch (error: unknown) {
     if (error instanceof PipelineWindowError) return response({ error: error.message }, error.status);

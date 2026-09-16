@@ -14,6 +14,11 @@ import {
   markPipelineWindowRecovery,
   registerPipelineWindowRecovery,
 } from "../app/lib/pipeline-window-recovery.ts";
+import {
+  canonicalJson,
+  recoveryPlanObjectKey,
+  sha256Hex,
+} from "../app/lib/pipeline-recovery-plan.ts";
 
 class D1Statement {
   constructor(database, sql, rowsWritten = 0) {
@@ -77,6 +82,68 @@ class LocalD1 {
   }
 }
 
+class MemoryR2 {
+  constructor() {
+    this.objects = new Map();
+    this.putCount = 0;
+  }
+
+  async head(key) {
+    const item = this.objects.get(key);
+    if (!item) return null;
+    return {
+      key,
+      size: item.bytes.byteLength,
+      customMetadata: { ...item.customMetadata },
+      httpMetadata: { ...item.httpMetadata },
+    };
+  }
+
+  async get(key) {
+    const item = this.objects.get(key);
+    if (!item) return null;
+    const bytes = new Uint8Array(item.bytes);
+    return {
+      key,
+      size: bytes.byteLength,
+      customMetadata: { ...item.customMetadata },
+      async arrayBuffer() {
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      },
+    };
+  }
+
+  async put(key, value, options = {}) {
+    let bytes;
+    if (typeof value === "string") {
+      bytes = new TextEncoder().encode(value);
+    } else if (value instanceof Uint8Array) {
+      bytes = new Uint8Array(value);
+    } else if (value instanceof ArrayBuffer) {
+      bytes = new Uint8Array(value.slice(0));
+    } else if (value && typeof value.arrayBuffer === "function") {
+      bytes = new Uint8Array(await value.arrayBuffer());
+    } else {
+      throw new Error("unsupported_r2_value");
+    }
+    this.putCount += 1;
+    this.objects.set(key, {
+      bytes,
+      customMetadata: { ...(options.customMetadata ?? {}) },
+      httpMetadata: { ...(options.httpMetadata ?? {}) },
+    });
+    return this.head(key);
+  }
+
+  seed(key, bytes, customMetadata) {
+    this.objects.set(key, {
+      bytes: new Uint8Array(bytes),
+      customMetadata: { ...customMetadata },
+      httpMetadata: { contentType: "application/json" },
+    });
+  }
+}
+
 async function applyMigration(db, name) {
   const text = await readFile(new URL("../drizzle/" + name, import.meta.url), "utf8");
   for (const statement of text.split("--> statement-breakpoint")) {
@@ -122,6 +189,35 @@ function registrationInput(runKey, row, recoveryId = "recovery-20260903-01", ext
     authorizedAt: "2026-09-03T00:00:00.000Z",
     expiresAt: "2026-09-04T23:59:59.000Z",
     ...extras,
+  };
+}
+
+async function recoveryPlanFixture(runKey, recoveryId = "recovery-20260903-01") {
+  const base = {
+    artifactRoot: `.recovery/${recoveryId}`,
+    budgetManifest: { schemaVersion: 1, source: "test-fixture" },
+    campaignId: "flow-recovery-test",
+    contractVersion: "recovery-execution-v1",
+    dataDates: ["2026-09-03"],
+    deadline: "2026-09-30T00:00:00Z",
+    maxDates: 1,
+    maxRequests: 50,
+    recoveryId,
+    requiredStages: ["core_collection", "dashboard", "publish"],
+    runKey,
+    schemaVersion: 1,
+    stateDir: `.recovery/${recoveryId}/state`,
+  };
+  const planSha256 = await sha256Hex(new TextEncoder().encode(canonicalJson(base)));
+  const plan = { ...base, planHash: planSha256 };
+  const planJson = JSON.stringify(plan);
+  const scopeSha256 = await sha256Hex(new TextEncoder().encode(planJson));
+  return {
+    plan,
+    planJson,
+    planSha256,
+    scopeSha256,
+    planKey: recoveryPlanObjectKey(recoveryId, scopeSha256),
   };
 }
 
@@ -643,7 +739,13 @@ test("recovery routes fail closed when disabled and require existing authenticat
   const db = await createDatabase();
   try {
     const setup = await completedWindow(db);
+    const bucket = new MemoryR2();
+    const plan = await recoveryPlanFixture(setup.runKey);
     const recoveryBody = registrationInput(setup.runKey, setup.row, "recovery-20260903-01", {
+      planKey: undefined,
+      planSha256: plan.planSha256,
+      scopeSha256: plan.scopeSha256,
+      planJson: plan.planJson,
       authorizedAt: new Date(Date.now() - 1_000).toISOString(),
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     });
@@ -653,11 +755,49 @@ test("recovery routes fail closed when disabled and require existing authenticat
       headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
     }), {
       DB: db,
+      RAW_BUCKET: bucket,
       INGEST_API_KEY: "test-key",
       PIPELINE_RECOVERY_ENABLED: "1",
       ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
     }, context);
     assert.equal(registerResponse.status, 201);
+    const registered = await registerResponse.json();
+    assert.equal(registered.planKey, plan.planKey);
+    assert.equal(registered.planStorageDecision, "stored");
+    assert.equal(bucket.putCount, 1);
+
+    const repeatResponse = await worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", {
+      method: "POST",
+      body: JSON.stringify(recoveryBody),
+      headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
+    }), {
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      PIPELINE_RECOVERY_ENABLED: "1",
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, context);
+    assert.equal(repeatResponse.status, 200);
+    const repeated = await repeatResponse.json();
+    assert.equal(repeated.decision, "already_registered");
+    assert.equal(repeated.planStorageDecision, "already_stored");
+    assert.equal(bucket.putCount, 1);
+
+    const planResponse = await worker.fetch(new Request(
+      `http://localhost/api/v1/admin/pipeline-window/recovery/plan?recoveryId=${recoveryBody.recoveryId}`,
+      { headers: { Authorization: "Bearer test-key" } },
+    ), {
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      PIPELINE_RECOVERY_ENABLED: "1",
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, context);
+    assert.equal(planResponse.status, 200);
+    const readBack = await planResponse.json();
+    assert.equal(readBack.plan.planHash, plan.planSha256);
+    assert.equal(readBack.scopeSha256, plan.scopeSha256);
+
     const claimResponse = await worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery/claim", {
       method: "POST",
       body: JSON.stringify({
@@ -668,6 +808,7 @@ test("recovery routes fail closed when disabled and require existing authenticat
       headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
     }), {
       DB: db,
+      RAW_BUCKET: bucket,
       INGEST_API_KEY: "test-key",
       PIPELINE_RECOVERY_ENABLED: "1",
       ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
@@ -677,4 +818,73 @@ test("recovery routes fail closed when disabled and require existing authenticat
   } finally {
     db.close();
   }
+});
+
+test("recovery registration rejects invalid bytes and conflicting R2 metadata before D1 authorization", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("pipeline-window-recovery-plan-test", String(process.pid) + "-" + String(Date.now()));
+  const worker = (await import(workerUrl.href)).default;
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const db = await createDatabase();
+  try {
+    const setup = await completedWindow(db);
+    const plan = await recoveryPlanFixture(setup.runKey, "recovery-invalid-plan");
+    const bucket = new MemoryR2();
+    const body = registrationInput(setup.runKey, setup.row, "recovery-invalid-plan", {
+      planKey: undefined,
+      planSha256: plan.planSha256,
+      scopeSha256: plan.scopeSha256,
+      planJson: plan.planJson + " ",
+      authorizedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
+    const invalid = await worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
+    }), {
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      PIPELINE_RECOVERY_ENABLED: "1",
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, context);
+    assert.equal(invalid.status, 422);
+    assert.equal((await invalid.json()).error, "plan_object_sha256_mismatch");
+    assert.equal(bucket.putCount, 0);
+    assert.equal(await getPipelineWindowRecovery(db, body.recoveryId), null);
+
+    bucket.seed(plan.planKey, new TextEncoder().encode(plan.planJson), {
+      sha256: plan.scopeSha256,
+      recoveryId: body.recoveryId,
+      runKey: setup.runKey,
+      planSha256: "f".repeat(64),
+    });
+    body.planJson = plan.planJson;
+    const conflict = await worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
+    }), {
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      PIPELINE_RECOVERY_ENABLED: "1",
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, context);
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error, "plan_object_not_verified");
+    assert.equal(await getPipelineWindowRecovery(db, body.recoveryId), null);
+  } finally {
+    db.close();
+  }
+});
+
+test("manual recovery-plan workflow can only register and verify one immutable plan", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/register-recovery-plan.yml", import.meta.url), "utf8");
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /Register plan through the audited control plane/);
+  assert.match(workflow, /recovery\/plan\?recoveryId=/);
+  assert.doesNotMatch(workflow, /^\s+schedule:/m);
+  assert.doesNotMatch(workflow, /repository_dispatch|workflow_run|actions:\s*write|gh workflow run|market-data-(?:collect|publish|watchdog)\.yml/);
 });

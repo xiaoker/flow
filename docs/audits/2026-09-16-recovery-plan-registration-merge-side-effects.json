@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "title": "fix: close immutable recovery-plan registration path",
+    "baseBranch": "main",
+    "baseSha": "fc637aee399f32339964599a283e6dc8c572a713",
+    "headBranch": "codex/recovery-plan-registration"
+  },
+  "changedPaths": [
+    ".github/workflows/register-recovery-plan.yml",
+    "docs/audits/2026-09-16-recovery-plan-registration-merge-side-effects.json",
+    "tests/unit/test_workflow_contract.py",
+    "web/app/api/v1/admin/pipeline-window/recovery/plan/route.ts",
+    "web/app/api/v1/admin/pipeline-window/recovery/route.ts",
+    "web/app/lib/pipeline-recovery-plan.ts",
+    "web/app/lib/pipeline-window-recovery.ts",
+    "web/tests/pipeline-window-recovery.test.mjs"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "d1Writes": false,
+    "r2Writes": false,
+    "activePointerChanged": false,
+    "featureFlagChanged": false
+  },
+  "mergeToMainEffects": {
+    "deployWorker": true,
+    "deployTrigger": "merged pull_request closed on main with web/** changes",
+    "actions": [
+      "run Web lint and complete Web test suite",
+      "run the existing pending-migration check; this PR adds no migration",
+      "deploy the Worker and static assets",
+      "verify the exact merge commit through the production build-identity canary"
+    ],
+    "automaticRecoveryPlanRegistration": false,
+    "automaticR2WritesFromThisFeature": false,
+    "automaticD1WritesFromThisFeature": false,
+    "automaticCollectorOrPublisherDispatch": false,
+    "activePointerChanged": false,
+    "featureFlagChanged": false,
+    "productionReadPathChanged": false
+  },
+  "manualWorkflowEffects": {
+    "path": ".github/workflows/register-recovery-plan.yml",
+    "trigger": "workflow_dispatch only",
+    "requiresExistingSecrets": [
+      "FLOW_INGEST_API_KEY",
+      "FLOW_CF_ACCESS_CLIENT_ID",
+      "FLOW_CF_ACCESS_CLIENT_SECRET"
+    ],
+    "boundedScope": "one explicitly approved recovery plan",
+    "r2": {
+      "writes": "at most one content-addressed immutable plan object",
+      "reads": "bounded HEAD/GET verification of that exact key only",
+      "listOperations": 0
+    },
+    "d1": {
+      "writes": "at most one pipeline_window_recovery authorization row",
+      "reads": "bounded indexed reads for one runKey, recoveryId and plan hash"
+    },
+    "collectorDispatch": false,
+    "publisherDispatch": false,
+    "watchdogDispatch": false,
+    "activePointerChanged": false,
+    "pipelineWindowMutation": false,
+    "note": "The workflow validates the exact byte hash and semantic planHash, registers idempotently, reads the plan back, and then stops. Running it requires a separate explicit authorization after deployment."
+  },
+  "resourceEffects": {
+    "pullRequestD1RowsRead": 0,
+    "pullRequestD1RowsWritten": 0,
+    "pullRequestR2Operations": 0,
+    "mergeD1DataRowsWrittenByThisPr": 0,
+    "mergeR2DataWritesByThisPr": 0,
+    "githubActionsMinutes": "unknown_until_ci_and_deploy_run",
+    "manualRegistrationBudget": "one small R2 object plus one D1 authorization row when separately dispatched"
+  },
+  "sideEffectGuards": {
+    "protectedPathsTouched": false,
+    "protectedPaths": [
+      "reports/phase0/latest-*",
+      "memory/"
+    ],
+    "migrationAdded": false,
+    "productionDataMutationInPr": false,
+    "workflowDispatchInPr": false,
+    "collectionOrBackfillInPr": false,
+    "recoveryFlagMutationInPr": false
+  },
+  "rollback": {
+    "beforeManualRegistration": "revert the PR and redeploy; no recovery data was written",
+    "afterManualRegistration": "leave the immutable R2 plan and audit row intact, disable the recovery flag if needed, and revoke through an audited follow-up rather than deleting evidence",
+    "pointerRecoveryRequired": false
+  }
+}

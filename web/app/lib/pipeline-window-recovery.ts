@@ -279,7 +279,7 @@ function serializeRecoveryRow(value: Record<string, unknown>): PipelineWindowRec
   };
 }
 
-function validateRegistration(input: PipelineRecoveryRegistrationInput): void {
+export function validatePipelineRecoveryRegistrationInput(input: PipelineRecoveryRegistrationInput): void {
   const parsed = parsePipelineRunKey(input.runKey);
   if (!parsed) throw new PipelineWindowError("invalid_run_key", 422);
   if (!IDENTIFIER.test(input.recoveryId)) throw new PipelineWindowError("invalid_recovery_id", 422);
@@ -433,7 +433,7 @@ export async function registerPipelineWindowRecovery(
   input: PipelineRecoveryRegistrationInput,
   now = new Date(),
 ): Promise<PipelineRecoveryRegistration> {
-  validateRegistration(input);
+  validatePipelineRecoveryRegistrationInput(input);
   const pipeline = await readPipelineWindow(db, input.runKey);
   if (!pipeline) throw new PipelineWindowError("pipeline_window_not_found", 404);
 
