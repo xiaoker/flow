@@ -28,7 +28,6 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 
-from scripts.recover_szse_etf_history import PAGE_URL as SZSE_CURL_PAGE_URL
 from trading_desk.adapters.official import (
     SZSE_ETF_METADATA_URL,
     SZSE_ETF_PAGE_URL,
@@ -58,6 +57,13 @@ class LiveRecoveryError(RuntimeError):
         self.status = status
         message = code if not detail else f"{code}: {detail}"
         super().__init__(message)
+
+
+# Keep the runner executable both as ``python -m`` and as the workflow's
+# ``python scripts/run_live_recovery.py`` entry point.  Importing the sibling
+# script package is not reliable in the latter mode, while the URL is a stable
+# official referer used by both recovery paths.
+SZSE_CURL_PAGE_URL = "https://fund.szse.cn/marketdata/fundslist/index.html"
 
 
 @dataclass
