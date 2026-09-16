@@ -263,6 +263,75 @@ def test_budgeted_session_fails_closed_on_source_rejection(status_code: int) -> 
     assert len(transport.calls) == 1
 
 
+def test_budgeted_session_uses_bounded_official_curl_for_szse(monkeypatch) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return runner.subprocess.CompletedProcess(command, 0, stdout=b"[]", stderr=b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=2, min_interval_seconds=0, szse_curl=True
+    )
+    response = session.get(
+        runner.SZSE_ETF_METADATA_URL,
+        params={"SHOWTYPE": "JSON", "tab1PAGESIZE": "1"},
+        headers={"Referer": runner.SZSE_ETF_PAGE_URL, "User-Agent": "fixture"},
+    )
+    assert response.status_code == 200
+    assert response.content == b"[]"
+    assert session.request_count == 1
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:7] == ["curl", "--silent", "--show-error", "--fail", "--retry", "0", "--max-time"]
+    assert "--resolve" not in command
+    assert "--retry" in command and command[command.index("--retry") + 1] == "0"
+    assert kwargs["timeout"] == 90
+
+
+def test_budgeted_session_accepts_an_explicit_valid_szse_resolver(monkeypatch) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return runner.subprocess.CompletedProcess(command, 0, stdout=b"[]", stderr=b"")
+
+    monkeypatch.setenv("FLOW_RECOVERY_SZSE_RESOLVE", "fund.szse.cn:443:203.0.113.10")
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=1, min_interval_seconds=0, szse_curl=True
+    )
+    session.get(runner.SZSE_ETF_METADATA_URL)
+    command, _kwargs = calls[0]
+    assert command[command.index("--resolve") + 1] == "fund.szse.cn:443:203.0.113.10"
+
+
+def test_budgeted_session_rejects_an_invalid_szse_resolver(monkeypatch) -> None:
+    monkeypatch.setenv("FLOW_RECOVERY_SZSE_RESOLVE", "fund.szse.cn:443:not-an-ip")
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=1, min_interval_seconds=0, szse_curl=True
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_source_unavailable") as caught:
+        session.get(runner.SZSE_ETF_METADATA_URL)
+    assert caught.value.status == "BLOCKED_QUALITY"
+    assert session.request_count == 0
+
+
+def test_szse_curl_failure_is_retryable_without_echoing_response(monkeypatch) -> None:
+    def run(_command, **_kwargs):
+        return runner.subprocess.CompletedProcess([], 22, stdout=b"secret-body", stderr=b"secret-url")
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=1, min_interval_seconds=0, szse_curl=True
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_source_unavailable") as caught:
+        session.get(runner.SZSE_ETF_METADATA_URL)
+    assert "secret" not in str(caught.value)
+    assert session.request_count == 1
+
+
 def test_szse_history_budget_must_be_explicit_and_leave_parent_capacity() -> None:
     scope = runner.validate_recovery_plan(_plan(["2026-08-28"]))
     assert _szse_history_request_budget(scope) == 20

@@ -18,6 +18,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import re
 import subprocess
 import threading
@@ -31,10 +32,10 @@ import requests
 
 PAGE_URL = "https://fund.szse.cn/marketdata/fundslist/index.html"
 REPORT_URL = "https://fund.szse.cn/api/report/ShowReport/data"
-# The desktop resolver currently returns a synthetic 198.18/15 address for
-# this host.  This is an official SZSE edge address returned by public DNS and
-# keeps the evidence request on the same HTTPS hostname/SNI.
-SZSE_RESOLVE = "fund.szse.cn:443:114.94.127.138"
+# Optional resolver override for environments whose DNS path is unreliable.
+# Do not bake a volatile exchange edge address into the recovery contract;
+# leaving this unset lets curl resolve the current official public address.
+SZSE_RESOLVE_ENV = "FLOW_RECOVERY_SZSE_RESOLVE"
 LIST_PARAMS = {
     "SHOWTYPE": "JSON",
     "CATALOGID": "1000_lf",
@@ -95,6 +96,9 @@ def _request_json(
     # argument list (never a shell string) so all query values are escaped.
     if budget is not None:
         budget.before_request()
+    resolve = os.environ.get(SZSE_RESOLVE_ENV, "").strip()
+    if resolve and not re.fullmatch(r"fund\.szse\.cn:443:(?:\d{1,3}\.){3}\d{1,3}", resolve):
+        raise RuntimeError("invalid_szse_resolver")
     command = [
         "curl",
         "--silent",
@@ -104,14 +108,14 @@ def _request_json(
         "0",
         "--max-time",
         "30",
-        "--resolve",
-        SZSE_RESOLVE,
         "-A",
         "Mozilla/5.0",
         "-H",
         f"Referer: {PAGE_URL}",
         "--get",
     ]
+    if resolve:
+        command[8:8] = ["--resolve", resolve]
     for key, value in params.items():
         command.extend(["--data-urlencode", f"{key}={value}"])
     command.append(REPORT_URL)
