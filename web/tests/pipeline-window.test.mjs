@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  bindPipelineTargetDate,
   buildPipelineRunKey,
   claimPipelineWindow,
   getPipelineWindow,
@@ -278,6 +279,138 @@ test("ordinary completion requires an exact confirmed target-date proof", async 
   db.close();
 });
 
+test("target-date binding is one-time, lease guarded and completion compatible", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-09-16T00:00:00.000Z");
+  const runKey = buildPipelineRunKey("2026-09-16", "reconcile");
+  const owner = "runner:00000001";
+  await claimPipelineWindow(db, input(runKey, "reconcile", owner, { windowDate: "2026-09-16", targetDate: null }), now);
+
+  await assert.rejects(
+    markPipelineWindow(db, {
+      runKey,
+      leaseOwner: owner,
+      status: "COMPLETED",
+      completionAsOf: "2026-09-15",
+      publicationStatus: "confirmed",
+    }, now),
+    /pipeline_window_target_date_missing/,
+  );
+
+  const bound = await bindPipelineTargetDate(db, {
+    runKey,
+    leaseOwner: owner,
+    targetDate: "2026-09-15",
+    sourceFingerprint: "sha256:source-20260915",
+  }, now);
+  assert.equal(bound.decision, "bound");
+  assert.equal(bound.targetDate, "2026-09-15");
+  assert.equal(bound.rowsWritten, 1);
+
+  const repeated = await bindPipelineTargetDate(db, {
+    runKey,
+    leaseOwner: owner,
+    targetDate: "2026-09-15",
+    sourceFingerprint: "sha256:other-fingerprint",
+  }, now);
+  assert.equal(repeated.decision, "already_bound");
+  assert.equal(repeated.rowsWritten, 0);
+  assert.equal((await getPipelineWindow(db, runKey)).source_fingerprint, "sha256:source-20260915");
+
+  await assert.rejects(
+    bindPipelineTargetDate(db, { runKey, leaseOwner: owner, targetDate: "2026-09-14" }, now),
+    /pipeline_window_target_date_conflict/,
+  );
+
+  await assert.rejects(
+    markPipelineWindow(db, {
+      runKey,
+      leaseOwner: owner,
+      status: "COMPLETED",
+      completionAsOf: "2026-09-14",
+      publicationStatus: "confirmed",
+    }, now),
+    /pipeline_window_completion_date_mismatch/,
+  );
+  const completed = await markPipelineWindow(db, {
+    runKey,
+    leaseOwner: owner,
+    status: "COMPLETED",
+    completionAsOf: "2026-09-15",
+    publicationStatus: "confirmed",
+  }, now);
+  assert.equal(completed.status, "COMPLETED");
+
+  await assert.rejects(
+    bindPipelineTargetDate(db, { runKey, leaseOwner: owner, targetDate: "2026-09-15" }, now),
+    /pipeline_window_target_not_bindable/,
+  );
+  db.close();
+});
+
+test("target-date binding rejects wrong owners, expired leases and malformed identities", async () => {
+  const db = await createDatabase();
+  const claimedAt = new Date("2026-09-16T00:00:00.000Z");
+  const owner = "runner:00000001";
+  const runKey = buildPipelineRunKey("2026-09-16", "morning");
+  await claimPipelineWindow(db, input(runKey, "morning", owner, { windowDate: "2026-09-16", targetDate: null }), claimedAt);
+
+  await assert.rejects(
+    bindPipelineTargetDate(db, {
+      runKey,
+      leaseOwner: "runner:00000002",
+      targetDate: "2026-09-15",
+    }, claimedAt),
+    /pipeline_window_target_owner_mismatch/,
+  );
+  await assert.rejects(
+    bindPipelineTargetDate(db, {
+      runKey,
+      leaseOwner: owner,
+      targetDate: "2026-09-15",
+    }, new Date(claimedAt.getTime() + 15 * 60 * 1_000)),
+    /pipeline_window_target_lease_expired/,
+  );
+  await assert.rejects(
+    bindPipelineTargetDate(db, {
+      runKey: "daily-market-data:2026-09-16:morning:v2",
+      leaseOwner: owner,
+      targetDate: "2026-09-15",
+    }, claimedAt),
+    /invalid_run_key/,
+  );
+  await assert.rejects(
+    bindPipelineTargetDate(db, {
+      runKey,
+      leaseOwner: owner,
+      targetDate: "2026-02-30",
+    }, claimedAt),
+    /invalid_target_date/,
+  );
+  db.close();
+});
+
+test("concurrent target-date bindings have a single winning date", async () => {
+  const db = await createDatabase();
+  const now = new Date("2026-09-16T00:00:00.000Z");
+  const runKey = buildPipelineRunKey("2026-09-16", "evening");
+  await claimPipelineWindow(db, input(runKey, "evening", "runner:00000001", { windowDate: "2026-09-16", targetDate: null }), now);
+  const results = await Promise.all([
+    bindPipelineTargetDate(db, { runKey, leaseOwner: "runner:00000001", targetDate: "2026-09-15" }, now),
+    bindPipelineTargetDate(db, { runKey, leaseOwner: "runner:00000001", targetDate: "2026-09-14" }, now),
+  ].map(async (promise) => {
+    try {
+      return await promise;
+    } catch (error) {
+      return error;
+    }
+  }));
+  assert.equal(results.filter((result) => result && result.decision === "bound").length, 1);
+  assert.equal(results.filter((result) => result instanceof Error && /pipeline_window_target_date_conflict/.test(result.message)).length, 1);
+  assert.equal((await getPipelineWindow(db, runKey)).target_date, "2026-09-15");
+  db.close();
+});
+
 test("invalid identities and ownership cannot claim or update", async () => {
   const db = await createDatabase();
   const now = new Date("2026-08-29T00:00:00.000Z");
@@ -401,6 +534,91 @@ test("protected claim and status routes expose bounded machine-readable response
   assert.equal(markResponse.status, 200);
   assert.equal((await markResponse.json()).status, "COMPLETED");
   assert.equal((await getPipelineWindow(db, runKey)).github_run_id, "12345678");
+  db.close();
+});
+
+test("target-date route is authenticated and returns an idempotent binding decision", async () => {
+  const worker = await loadWorker();
+  const db = await createDatabase();
+  const env = {
+    DB: db,
+    INGEST_API_KEY: "test-key",
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const runKey = buildPipelineRunKey("2026-09-16", "reconcile");
+  const claimRequest = {
+    runKey,
+    windowDate: "2026-09-16",
+    windowName: "reconcile",
+    contractVersion: "v1",
+    targetDate: null,
+    leaseOwner: "runner:00000001",
+  };
+  const claimResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/claim", {
+      method: "POST",
+      body: JSON.stringify(claimRequest),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(claimResponse.status, 200);
+
+  const targetRequest = {
+    runKey,
+    leaseOwner: "runner:00000001",
+    targetDate: "2026-09-15",
+    sourceFingerprint: "sha256:source-20260915",
+  };
+  const unauthenticated = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/target", {
+      method: "POST",
+      body: JSON.stringify(targetRequest),
+      headers: { "Content-Type": "application/json" },
+    }),
+    env,
+    context,
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const targetResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/target", {
+      method: "POST",
+      body: JSON.stringify(targetRequest),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(targetResponse.status, 200);
+  const targetBody = await targetResponse.json();
+  assert.equal(targetBody.decision, "bound");
+  assert.equal(targetBody.targetDate, "2026-09-15");
+  assert.equal(targetBody.rowsWritten, 1);
+  assert.ok(Number.isSafeInteger(targetBody.rowsRead) && targetBody.rowsRead >= 0);
+
+  const repeatedResponse = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/pipeline-window/target", {
+      method: "POST",
+      body: JSON.stringify(targetRequest),
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+    }),
+    env,
+    context,
+  );
+  assert.equal(repeatedResponse.status, 200);
+  assert.equal((await repeatedResponse.json()).decision, "already_bound");
   db.close();
 });
 

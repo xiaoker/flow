@@ -75,6 +75,27 @@ export type PipelineWindowClaim = {
   rowsWritten: number;
 };
 
+export type PipelineWindowTargetBindingInput = {
+  runKey: string;
+  leaseOwner: string;
+  targetDate: string;
+  sourceFingerprint?: string | null;
+};
+
+export type PipelineWindowTargetBindingDecision = "bound" | "already_bound";
+
+export type PipelineWindowTargetBinding = {
+  runKey: string;
+  decision: PipelineWindowTargetBindingDecision;
+  status: string;
+  targetDate: string;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  rowsRead: number;
+  rowsWritten: number;
+  row: PipelineWindowRow;
+};
+
 type D1Result = {
   meta?: { changes?: unknown; rows_read?: unknown; rows_written?: unknown };
 };
@@ -205,6 +226,136 @@ function rowDecision(row: PipelineWindowRow, nowIso: string): PipelineWindowDeci
   // A conditional write that reports no changes can only be a protected
   // state. Keep this explicit so an unexpected status fails closed.
   return "skip_leased";
+}
+
+function rowsReadFromD1(result: D1Result): number {
+  // Some local D1-compatible adapters do not expose physical read metadata.
+  // Treat an omitted value as zero, while rejecting malformed production
+  // metadata so callers cannot silently hide an unbounded operation.
+  if (result.meta?.rows_read === undefined) return 0;
+  return requireD1NonNegativeInteger(result.meta.rows_read, "pipeline_window_read_meta_invalid");
+}
+
+function activeTargetLease(row: PipelineWindowRow, leaseOwner: string, nowIso: string): boolean {
+  return (
+    row.recovery_id === null &&
+    (row.status === "DISPATCHED" || row.status === "RUNNING") &&
+    row.lease_owner === leaseOwner &&
+    row.lease_expires_at !== null &&
+    row.lease_expires_at > nowIso
+  );
+}
+
+/**
+ * Bind the real source data date to an ordinary scheduler window exactly
+ * once.  The guarded UPDATE is the linearization point: no SELECT-then-
+ * UPDATE sequence can let two owners bind different dates.
+ */
+export async function bindPipelineTargetDate(
+  db: D1Like,
+  input: PipelineWindowTargetBindingInput,
+  now = new Date(),
+): Promise<PipelineWindowTargetBinding> {
+  const parsed = parsePipelineRunKey(input.runKey);
+  if (!parsed) throw new PipelineWindowError("invalid_run_key", 422);
+  validateDate(input.targetDate, "invalid_target_date");
+  if (!OWNER.test(input.leaseOwner)) throw new PipelineWindowError("invalid_lease_owner", 422);
+  if (
+    input.sourceFingerprint !== undefined &&
+    input.sourceFingerprint !== null &&
+    !SOURCE_FINGERPRINT.test(input.sourceFingerprint)
+  ) {
+    throw new PipelineWindowError("invalid_source_fingerprint", 422);
+  }
+
+  const nowIso = now.toISOString();
+  const result = await db.prepare(
+    `UPDATE pipeline_window
+        SET target_date = ?,
+            source_fingerprint = COALESCE(NULLIF(?, ''), source_fingerprint),
+            updated_at = ?
+      WHERE run_key = ?
+        AND lease_owner = ?
+        AND status IN ('DISPATCHED', 'RUNNING')
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > ?
+        AND target_date IS NULL
+        AND recovery_id IS NULL`,
+  ).bind(
+    input.targetDate,
+    input.sourceFingerprint ?? null,
+    nowIso,
+    input.runKey,
+    input.leaseOwner,
+    nowIso,
+  ).run();
+  const changes = requireD1NonNegativeInteger(
+    result.meta?.changes,
+    "pipeline_window_target_change_meta_invalid",
+  );
+  if (changes > 1) throw new PipelineWindowError("pipeline_window_target_multirow_mutation", 503);
+  const rowsWritten = requireD1NonNegativeInteger(
+    result.meta?.rows_written,
+    "pipeline_window_target_write_meta_invalid",
+  );
+  const rowsRead = rowsReadFromD1(result);
+  const row = await getPipelineWindow(db, input.runKey);
+  if (!row) throw new PipelineWindowError("pipeline_window_not_found", 404);
+
+  if (changes === 1) {
+    if (row.target_date !== input.targetDate) {
+      throw new PipelineWindowError("pipeline_window_target_binding_lost", 503);
+    }
+    return {
+      runKey: input.runKey,
+      decision: "bound",
+      status: row.status,
+      targetDate: row.target_date,
+      leaseOwner: row.lease_owner,
+      leaseExpiresAt: row.lease_expires_at,
+      rowsRead,
+      rowsWritten,
+      row,
+    };
+  }
+
+  if (row.target_date !== null) {
+    if (row.target_date !== input.targetDate) {
+      throw new PipelineWindowError("pipeline_window_target_date_conflict", 409);
+    }
+    if (activeTargetLease(row, input.leaseOwner, nowIso)) {
+      return {
+        runKey: input.runKey,
+        decision: "already_bound",
+        status: row.status,
+        targetDate: row.target_date,
+        leaseOwner: row.lease_owner,
+        leaseExpiresAt: row.lease_expires_at,
+        rowsRead,
+        rowsWritten,
+        row,
+      };
+    }
+    if (row.status === "COMPLETED" || row.status === "BLOCKED_QUALITY" || row.recovery_id !== null) {
+      throw new PipelineWindowError("pipeline_window_target_not_bindable", 409);
+    }
+  } else if (row.status === "COMPLETED" || row.status === "BLOCKED_QUALITY" || row.recovery_id !== null) {
+    throw new PipelineWindowError("pipeline_window_target_not_bindable", 409);
+  }
+
+  if (row.lease_owner !== input.leaseOwner) {
+    throw new PipelineWindowError("pipeline_window_target_owner_mismatch", 409);
+  }
+  if (
+    row.lease_expires_at === null ||
+    row.lease_expires_at <= nowIso
+  ) {
+    throw new PipelineWindowError("pipeline_window_target_lease_expired", 409);
+  }
+  if (row.status !== "DISPATCHED" && row.status !== "RUNNING") {
+    throw new PipelineWindowError("pipeline_window_target_not_bindable", 409);
+  }
+  throw new PipelineWindowError("pipeline_window_target_binding_conflict", 409);
 }
 
 /**
