@@ -17,7 +17,7 @@ on:
         type: choice
         options: [auto, evening, morning, reconcile]
       target_date:
-        description: "Optional Shanghai business date (YYYY-MM-DD)"
+        description: "Optional scheduler window date (YYYY-MM-DD), not a source data date"
         required: false
         default: ""
         type: string
@@ -69,15 +69,15 @@ jobs:
               *) WINDOW="reconcile" ;;
             esac
           fi
-          TARGET_DATE="${{ inputs.target_date }}"
-          if [[ -z "$TARGET_DATE" ]]; then
-            TARGET_DATE="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
+          WINDOW_DATE="${{ inputs.target_date }}"
+          if [[ -z "$WINDOW_DATE" ]]; then
+            WINDOW_DATE="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
           fi
-          if [[ ! "$TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            echo "Invalid target_date: $TARGET_DATE" >&2
+          if [[ ! "$WINDOW_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Invalid scheduler window date: $WINDOW_DATE" >&2
             exit 1
           fi
-          RUN_KEY="daily-market-data:${TARGET_DATE}:${WINDOW}:v1"
+          RUN_KEY="daily-market-data:${WINDOW_DATE}:${WINDOW}:v1"
           LEASE_OWNER="github-watchdog:${GITHUB_RUN_ID}"
           AUTH_ARGS=(
             --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
@@ -134,13 +134,12 @@ jobs:
           jq -n \
             --arg runKey "$RUN_KEY" \
             --arg pipeline "daily-market-data" \
-            --arg windowDate "$TARGET_DATE" \
+            --arg windowDate "$WINDOW_DATE" \
             --arg windowName "$WINDOW" \
             --arg contractVersion "v1" \
-            --arg targetDate "$TARGET_DATE" \
             --arg leaseOwner "$LEASE_OWNER" \
             --arg githubRunId "$GITHUB_RUN_ID" \
-            '{runKey:$runKey,pipeline:$pipeline,windowDate:$windowDate,windowName:$windowName,contractVersion:$contractVersion,targetDate:$targetDate,leaseOwner:$leaseOwner,githubRunId:$githubRunId}' \
+            '{runKey:$runKey,pipeline:$pipeline,windowDate:$windowDate,windowName:$windowName,contractVersion:$contractVersion,targetDate:null,leaseOwner:$leaseOwner,githubRunId:$githubRunId}' \
             > pipeline-window-claim-request.json
           CLAIM_CODE="$(curl --silent --show-error "${AUTH_ARGS[@]}" \
             --header 'Content-Type: application/json' \
@@ -169,10 +168,9 @@ jobs:
             --arg window "$WINDOW" \
             --arg runKey "$RUN_KEY" \
             --arg windowName "$WINDOW" \
-            --arg targetDate "$TARGET_DATE" \
             --arg leaseOwner "$LEASE_OWNER" \
             --arg contractVersion "v1" \
-            '{ref:$ref,inputs:{dates:$dates,collection_window:$window,run_key:$runKey,window_name:$windowName,target_date:$targetDate,lease_owner:$leaseOwner,contract_version:$contractVersion,run_pcf_shadow:"false",delegate_publish:"true"}}' \
+            '{ref:$ref,inputs:{dates:$dates,collection_window:$window,run_key:$runKey,window_name:$windowName,target_date:"",lease_owner:$leaseOwner,contract_version:$contractVersion,run_pcf_shadow:"false",delegate_publish:"true"}}' \
             > collect-dispatch-request.json
           DISPATCH_CODE="$(curl --silent --show-error \
             --header "Accept: application/vnd.github+json" \

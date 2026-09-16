@@ -269,7 +269,8 @@ def test_pr1_pipeline_window_gate_precedes_heavy_collection() -> None:
     assert "decision !== \"acquired\" && claim.decision !== \"takeover\"" in worker
     assert 'run_key: runKey' in worker
     assert 'window_name: window' in worker
-    assert 'target_date: windowDate' in worker
+    assert 'targetDate: null' in worker
+    assert 'target_date: ""' in worker
     assert 'lease_owner: leaseOwner' in worker
     assert "pipeline_window" in migration
     assert "CREATE INDEX `pipeline_window_status_lease_idx`" in migration
@@ -609,6 +610,48 @@ def test_ordinary_pipeline_completion_requires_exact_confirmed_target_date() -> 
     # The delegated publisher must reject an older confirmed fallback before
     # it can close the business window.
     assert '.publication.status == "confirmed" and $targetDate != "" and .asOf == $targetDate' in publish
+
+
+def test_ordinary_collection_binds_verified_snapshot_date_before_publish() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")
+    worker = (REPOSITORY_ROOT / "web/worker/index.ts").read_text(encoding="utf-8")
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    # Every scheduler carries only the window date. The source date is bound
+    # after the collector verifies the immutable confirmed snapshot.
+    assert "targetDate: null" in worker
+    assert "target_date: \"\"" in worker
+    assert "targetDate:null" in watchdog
+    assert "target_date:\"\"" in watchdog
+    assert "--argjson targetDate null" in collect
+    assert 'echo "target_date="' in collect
+    assert "resolved_target_date" in collect
+    assert "/target" in collect
+    assert 'steps.target_binding.outcome == \'success\'' in collect
+    assert '--arg targetDate "$RESOLVED_TARGET_DATE"' in collect
+    assert '"$COMPLETION_AS_OF" != "$RESOLVED_TARGET_DATE"' in collect
+    assert "Refuse publication when pipeline window gate is disabled" in collect
+    assert "refusing publication without an atomic target-date binding" in collect
+    source_step = collect.split("- name: Verify immutable collection source bundle", maxsplit=1)[1].split(
+        "- name: Upload immutable collection source bundle", maxsplit=1
+    )[0]
+    assert "delegate_publish" not in source_step
+    assert collect.index("Verify immutable collection source bundle") < collect.index(
+        "Bind pipeline window to verified source date"
+    ) < collect.index("Upload immutable collection source bundle") < collect.index(
+        "Dispatch resumable market-data publish workflow"
+    )
+
+    # The publisher consumes the resolved date and keeps the exact confirmed
+    # equality proof; pending/older fallback snapshots cannot be published.
+    assert "Resolved source snapshot date (must equal snapshot.asOf)" in publish
+    assert ".publication.status == \"confirmed\" and $targetDate != \"\" and .asOf == $targetDate" in publish
+    assert "publication_as_of_mismatch windowDate=" in publish
+    assert 'SNAPSHOT_PATH=".collection-source/dashboard-snapshot.json"' in publish
+    assert ".publication.status == \"pending\"" not in publish.split(
+        "- name: Verify source artifact identity", maxsplit=1
+    )[1].split("- uses: actions/setup-python", maxsplit=1)[0]
 
 
 def test_empty_unavailable_stock_flow_catalog_does_not_block_dashboard_bundle() -> None:

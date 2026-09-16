@@ -651,7 +651,14 @@ test("Cloudflare scheduler claims before dispatch and skips a duplicate window",
     const body = JSON.parse(dispatched[0].options.body);
     assert.equal(body.inputs.run_key, "daily-market-data:2026-08-29:evening:v1");
     assert.equal(body.inputs.window_name, "evening");
-    assert.equal(body.inputs.target_date, "2026-08-29");
+    // The scheduler date is only the window/runKey anchor. The collector
+    // binds the verified source snapshot date before publication.
+    assert.equal(body.inputs.target_date, "");
+    const claimed = await db.prepare(
+      "SELECT window_date, target_date FROM pipeline_window WHERE run_key = ? LIMIT 1",
+    ).bind("daily-market-data:2026-08-29:evening:v1").first();
+    assert.equal(claimed.window_date, "2026-08-29");
+    assert.equal(claimed.target_date, null);
 
     const duplicatePending = [];
     await worker.scheduled(controller, env, {
