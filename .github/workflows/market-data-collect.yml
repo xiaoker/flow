@@ -28,7 +28,7 @@ on:
         default: ""
         type: string
       target_date:
-        description: "Shanghai business date associated with the scheduler window"
+        description: "Optional scheduler window date (YYYY-MM-DD), not a source data date"
         required: false
         default: ""
         type: string
@@ -90,6 +90,7 @@ jobs:
       gate_enabled: ${{ steps.gate.outputs.gate_enabled }}
       run_key: ${{ steps.gate.outputs.run_key }}
       window_name: ${{ steps.gate.outputs.window_name }}
+      window_date: ${{ steps.gate.outputs.window_date }}
       target_date: ${{ steps.gate.outputs.target_date }}
       lease_owner: ${{ steps.gate.outputs.lease_owner }}
       contract_version: ${{ steps.gate.outputs.contract_version }}
@@ -161,12 +162,16 @@ jobs:
           else
             DELEGATE_PUBLISH="true"
           fi
-          TARGET_DATE="${INPUT_TARGET_DATE:-$WINDOW_DATE}"
           LEASE_OWNER="${INPUT_LEASE_OWNER:-github:${GITHUB_RUN_ID}}"
           {
             echo "run_key=$RUN_KEY"
             echo "window_name=$WINDOW"
-            echo "target_date=$TARGET_DATE"
+            # The scheduler date is an idempotency anchor only. The collector
+            # binds the verified source snapshot date immediately before
+            # publication, so ordinary runs must not export a fabricated
+            # target date.
+            echo "window_date=$WINDOW_DATE"
+            echo "target_date="
             echo "lease_owner=$LEASE_OWNER"
             echo "contract_version=$CONTRACT_VERSION"
             echo "delegate_publish=$DELEGATE_PUBLISH"
@@ -334,7 +339,7 @@ jobs:
             --arg windowDate "$WINDOW_DATE" \
             --arg windowName "$WINDOW" \
             --arg contractVersion "$CONTRACT_VERSION" \
-            --arg targetDate "$TARGET_DATE" \
+            --argjson targetDate null \
             --arg leaseOwner "$LEASE_OWNER" \
             --arg githubRunId "$GITHUB_RUN_ID" \
             '{runKey:$runKey,pipeline:$pipeline,windowDate:$windowDate,windowName:$windowName,contractVersion:$contractVersion,targetDate:$targetDate,leaseOwner:$leaseOwner,githubRunId:$githubRunId}' \
@@ -626,6 +631,7 @@ jobs:
       INPUT_COLLECTION_WINDOW: ${{ needs.pipeline_window_gate.outputs.window_name }}
       INPUT_RUN_KEY: ${{ needs.pipeline_window_gate.outputs.run_key }}
       INPUT_WINDOW_NAME: ${{ needs.pipeline_window_gate.outputs.window_name }}
+      INPUT_WINDOW_DATE: ${{ needs.pipeline_window_gate.outputs.window_date }}
       INPUT_TARGET_DATE: ${{ needs.pipeline_window_gate.outputs.target_date }}
       INPUT_LEASE_OWNER: ${{ needs.pipeline_window_gate.outputs.lease_owner }}
       INPUT_CONTRACT_VERSION: ${{ needs.pipeline_window_gate.outputs.contract_version }}
@@ -1261,7 +1267,9 @@ jobs:
 
       - name: Verify immutable collection source bundle
         id: source_bundle
-        if: ${{ success() && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
+        # Both delegated and local publication paths must verify the same
+        # immutable source bundle before resolving its real data date.
+        if: ${{ success() && steps.collection.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1280,9 +1288,74 @@ jobs:
           cat stock-flow-gate.json
           exit "$GATE_EXIT"
 
+      - name: Bind pipeline window to verified source date
+        id: target_binding
+        if: ${{ success() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && steps.source_bundle.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dashboard-snapshot.json
+          OBSERVED_AS_OF="$(jq -r '.asOf // empty' dashboard-snapshot.json)"
+          PUBLICATION_STATUS="$(jq -r '.publication.status // empty' dashboard-snapshot.json)"
+          if [[ "$PUBLICATION_STATUS" != "confirmed" ]]; then
+            echo "Verified source snapshot is not confirmed; refusing to bind a target date." >&2
+            exit 1
+          fi
+          if [[ ! "$OBSERVED_AS_OF" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Verified source snapshot has an invalid asOf date: $OBSERVED_AS_OF" >&2
+            exit 1
+          fi
+          python - "$OBSERVED_AS_OF" <<'PY'
+          from datetime import date
+          import sys
+
+          try:
+              date.fromisoformat(sys.argv[1])
+          except ValueError as exc:
+              raise SystemExit(f"invalid calendar date: {sys.argv[1]}") from exc
+          PY
+          SOURCE_FINGERPRINT="$(jq -r 'if (.sourceFingerprint | type) == "string" then .sourceFingerprint else "" end' dashboard-snapshot.json)"
+          jq -n \
+            --arg runKey "$INPUT_RUN_KEY" \
+            --arg leaseOwner "$INPUT_LEASE_OWNER" \
+            --arg targetDate "$OBSERVED_AS_OF" \
+            --arg sourceFingerprint "$SOURCE_FINGERPRINT" \
+            '{runKey:$runKey,leaseOwner:$leaseOwner,targetDate:$targetDate,sourceFingerprint:(if $sourceFingerprint == "" then null else $sourceFingerprint end)}' \
+            > pipeline-window-target-request.json
+          STATUS_CODE="$(curl --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header 'Content-Type: application/json' \
+            --data-binary @pipeline-window-target-request.json \
+            --output pipeline-window-target.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/target" || true)"
+          if [[ "$STATUS_CODE" != "200" ]]; then
+            echo "Pipeline-window target binding failed with HTTP $STATUS_CODE; refusing publication." >&2
+            jq . pipeline-window-target.json >&2 || true
+            exit 1
+          fi
+          jq -e '.decision == "bound" or .decision == "already_bound"' pipeline-window-target.json >/dev/null
+          RESOLVED_TARGET_DATE="$(jq -r '.targetDate // empty' pipeline-window-target.json)"
+          if [[ "$RESOLVED_TARGET_DATE" != "$OBSERVED_AS_OF" ]]; then
+            echo "Pipeline-window target binding returned an unexpected date; refusing publication." >&2
+            exit 1
+          fi
+          printf '%s\n' "$RESOLVED_TARGET_DATE" > resolved_target_date.txt
+          echo "resolved_target_date=$RESOLVED_TARGET_DATE" >> "$GITHUB_OUTPUT"
+          echo "Bound runKey=$INPUT_RUN_KEY to verified source date $RESOLVED_TARGET_DATE (publicationStatus=$PUBLICATION_STATUS)."
+
+      - name: Refuse publication when pipeline window gate is disabled
+        if: ${{ success() && needs.pipeline_window_gate.outputs.gate_enabled != 'true' && steps.source_bundle.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        shell: bash
+        run: |
+          echo "PIPELINE_WINDOW_GATE_ENABLED is disabled; refusing publication without an atomic target-date binding." >&2
+          exit 1
+
       - name: Upload immutable collection source bundle
         id: source_artifact
-        if: ${{ success() && steps.collection.outcome == 'success' && steps.source_bundle.outcome == 'success' && steps.collection.outputs.pending != 'true' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
+        if: ${{ success() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && steps.collection.outcome == 'success' && steps.source_bundle.outcome == 'success' && steps.target_binding.outcome == 'success' && steps.collection.outputs.pending != 'true' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
         with:
           name: market-data-collection-source-${{ github.run_id }}
@@ -1298,6 +1371,9 @@ jobs:
             previous-release.json
             source-readiness.json
             source-readiness-response.json
+            pipeline-window-target-request.json
+            pipeline-window-target.json
+            resolved_target_date.txt
             pipeline-recovery-claim-request.json
             pipeline-recovery-claim.json
             pipeline-recovery-running.json
@@ -1306,19 +1382,24 @@ jobs:
 
       - name: Dispatch resumable market-data publish workflow
         id: publish_dispatch
-        if: ${{ !cancelled() && needs.pipeline_window_gate.outputs.delegate_publish == 'true' && steps.source_artifact.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        if: ${{ !cancelled() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && needs.pipeline_window_gate.outputs.delegate_publish == 'true' && steps.source_artifact.outcome == 'success' && steps.target_binding.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_ACTIONS_TOKEN || github.token }}
+          RESOLVED_TARGET_DATE: ${{ steps.target_binding.outputs.resolved_target_date }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "$RESOLVED_TARGET_DATE" ]]; then
+            echo "The verified source date was not bound; refusing to dispatch publish." >&2
+            exit 1
+          fi
           PUBLISH_WORKFLOW_URL="https://api.github.com/repos/xiaoker/flow/actions/workflows/market-data-publish.yml/dispatches"
           ARTIFACT_NAME="market-data-collection-source-${{ github.run_id }}"
           jq -n \
             --arg ref "main" \
             --arg runKey "$INPUT_RUN_KEY" \
             --arg windowName "$INPUT_WINDOW_NAME" \
-            --arg targetDate "$INPUT_TARGET_DATE" \
+            --arg targetDate "$RESOLVED_TARGET_DATE" \
             --arg leaseOwner "$INPUT_LEASE_OWNER" \
             --arg contractVersion "$INPUT_CONTRACT_VERSION" \
             --arg sourceRunId "${{ github.run_id }}" \
@@ -1618,6 +1699,8 @@ jobs:
         # close the pipeline window. A collection failure or failed dispatch
         # still closes it as FAILED_RETRYABLE/BLOCKED_QUALITY here.
         if: always() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && steps.publish_dispatch.outcome != 'success'
+        env:
+          RESOLVED_TARGET_DATE: ${{ steps.target_binding.outputs.resolved_target_date }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1651,7 +1734,7 @@ jobs:
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
           fi
-          if [[ "$STATUS" == "COMPLETED" && ("$COMPLETION_AS_OF" != "$INPUT_TARGET_DATE" || "$PUBLICATION_STATUS" != "confirmed") ]]; then
+          if [[ "$STATUS" == "COMPLETED" && ("$COMPLETION_AS_OF" != "$RESOLVED_TARGET_DATE" || "$PUBLICATION_STATUS" != "confirmed") ]]; then
             # A prior-day fallback may be archived for the next reconciliation
             # window, but it cannot close the current business window.
             STATUS="FAILED_RETRYABLE"
@@ -1743,6 +1826,9 @@ jobs:
             reports/phase0/latest-release-qa.json
             reports/pcf-shadow/*.json
             reports/budget/core-collection.json
+            pipeline-window-target-request.json
+            pipeline-window-target.json
+            resolved_target_date.txt
             publish-dispatch-request.json
             publish-dispatch-response.json
             publish-dispatch-evidence.json

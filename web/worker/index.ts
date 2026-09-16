@@ -164,7 +164,7 @@ async function dispatchDailyCollection(
       console.info("Market-day probe found no new source facts; skipping heavy collection", {
         cron: controller.cron,
         runKey,
-        targetDate: windowDate,
+        windowDate,
         probeFingerprint,
       });
       return;
@@ -187,10 +187,11 @@ async function dispatchDailyCollection(
       windowDate,
       windowName: window,
       contractVersion,
-      // The workflow resolves the exact trading date after checkout.  This is
-      // the Shanghai business date of the scheduling window, not fabricated
-      // market data.
-      targetDate: windowDate,
+      // The collector resolves and atomically binds the exact source date
+      // after it verifies the immutable snapshot. The scheduler date is only
+      // the idempotency/window anchor and must never be presented as market
+      // data.
+      targetDate: null,
       leaseOwner,
       sourceFingerprint: probeFingerprint,
     });
@@ -229,7 +230,9 @@ async function dispatchDailyCollection(
               collection_window: window,
               run_key: runKey,
               window_name: window,
-              target_date: windowDate,
+              // Leave the source date empty. The collector binds the verified
+              // dashboard snapshot date before dispatching the publisher.
+              target_date: "",
               lease_owner: leaseOwner,
               contract_version: contractVersion,
               delegate_publish: "true",
