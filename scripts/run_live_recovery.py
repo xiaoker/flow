@@ -28,6 +28,7 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 
+from scripts.recover_szse_etf_history import PAGE_URL as SZSE_CURL_PAGE_URL
 from trading_desk.adapters.official import (
     SZSE_ETF_METADATA_URL,
     SZSE_ETF_PAGE_URL,
@@ -74,6 +75,7 @@ class BudgetedRateLimitedSession:
     min_interval_seconds: float = 2.0
     request_count: int = 0
     last_by_host: dict[str, float] | None = None
+    szse_curl: bool = False
 
     def __post_init__(self) -> None:
         if self.maximum <= 0:
@@ -95,7 +97,7 @@ class BudgetedRateLimitedSession:
     def headers(self) -> Any:
         return self.session.headers
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def _reserve_request(self, url: str) -> None:
         if self.request_count >= self.maximum:
             raise LiveRecoveryError(
                 "live_recovery_request_budget_exceeded",
@@ -113,10 +115,100 @@ class BudgetedRateLimitedSession:
                 time.sleep(delay)
         self.request_count += 1
         self.last_by_host[host] = time.monotonic()
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        self._reserve_request(url)
         return self.session.request(method, url, **kwargs)
 
+    def _request_szse_with_curl(self, url: str, **kwargs: Any) -> requests.Response:
+        """Fetch an official SZSE response through the bounded curl path.
+
+        GitHub-hosted runners have intermittently had their Python TLS
+        connection reset by ``fund.szse.cn``.  The historical recovery helper
+        already uses curl with a conservative timeout and no retries.  Reuse
+        that transport for the small current-metadata probe (and any current
+        workbook request) while keeping the outer request budget and per-host
+        pacing authoritative.  A resolver override is optional because the
+        exchange's public address can change; when supplied it is validated by
+        the helper's ``FLOW_RECOVERY_SZSE_RESOLVE`` contract.
+        """
+
+        params = kwargs.get("params")
+        headers = kwargs.get("headers")
+        resolve = os.environ.get("FLOW_RECOVERY_SZSE_RESOLVE", "").strip()
+        if resolve and not re.fullmatch(r"fund\.szse\.cn:443:(?:\d{1,3}\.){3}\d{1,3}", resolve):
+            raise LiveRecoveryError(
+                "live_recovery_source_unavailable",
+                "invalid_szse_resolver",
+                status="BLOCKED_QUALITY",
+            )
+        self._reserve_request(url)
+        command = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--retry",
+            "0",
+            "--max-time",
+            "90",
+            "-A",
+            str(headers.get("User-Agent") if isinstance(headers, dict) and headers.get("User-Agent") else "Mozilla/5.0"),
+            "-H",
+            f"Referer: {headers.get('Referer') if isinstance(headers, dict) and headers.get('Referer') else SZSE_CURL_PAGE_URL}",
+            "--get",
+        ]
+        if resolve:
+            command[8:8] = ["--resolve", resolve]
+        if isinstance(headers, dict) and headers.get("Accept"):
+            command.extend(["-H", f"Accept: {headers['Accept']}"])
+        if isinstance(params, dict):
+            for key, value in params.items():
+                values = value if isinstance(value, (list, tuple)) else (value,)
+                for item in values:
+                    command.extend(["--data-urlencode", f"{key}={item}"])
+        command.append(url)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=None,
+                check=False,
+                capture_output=True,
+                timeout=90,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LiveRecoveryError(
+                "live_recovery_source_unavailable",
+                "szse_curl_timeout",
+                status="FAILED_RETRYABLE",
+            ) from exc
+        except OSError as exc:
+            raise LiveRecoveryError(
+                "live_recovery_source_unavailable",
+                "szse_curl_unavailable",
+                status="FAILED_RETRYABLE",
+            ) from exc
+        if result.returncode != 0:
+            raise LiveRecoveryError(
+                "live_recovery_source_unavailable",
+                f"szse_curl_exit={result.returncode}",
+                status="FAILED_RETRYABLE",
+            )
+        content = result.stdout if isinstance(result.stdout, bytes) else str(result.stdout).encode("utf-8")
+        response = requests.Response()
+        response.status_code = 200
+        response.url = url
+        response.headers["Content-Type"] = "application/octet-stream"
+        response._content = content
+        response.encoding = "utf-8"
+        return response
+
     def get(self, url: str, **kwargs: Any) -> requests.Response:
-        response = self._request("GET", url, **kwargs)
+        parsed = urlparse(url)
+        if self.szse_curl and parsed.hostname and parsed.hostname.lower() == "fund.szse.cn":
+            response = self._request_szse_with_curl(url, **kwargs)
+        else:
+            response = self._request("GET", url, **kwargs)
         if getattr(response, "status_code", None) in {403, 429}:
             # Do not let the generic official adapter turn a WAF/rate-limit
             # response into an ordinary quality warning and continue with the
@@ -771,6 +863,7 @@ def run_live_recovery(
         build_session(HttpSettings(total_retries=0)),
         maximum=scope.max_requests,
         min_interval_seconds=min_interval,
+        szse_curl=True,
     )
     context_dates = discover_recent_trading_dates(
         end_date=date.fromisoformat(target),
