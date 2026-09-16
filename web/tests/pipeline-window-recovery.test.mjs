@@ -885,6 +885,11 @@ test("manual recovery-plan workflow can only register and verify one immutable p
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /Register plan through the audited control plane/);
   assert.match(workflow, /recovery\/plan\?recoveryId=/);
+  // jq -n has no input object: every envelope property must explicitly
+  // reference its --arg/--rawfile variable. Naked object shorthand silently
+  // serializes nulls and makes the control-plane request fail closed.
+  assert.match(workflow, /\{recoveryId:\$recoveryId, runKey:\$runKey, planSha256:\$planSha256, scopeSha256:\$scopeSha256/);
+  assert.doesNotMatch(workflow, /\{recoveryId, runKey, planSha256, scopeSha256, planJson,/);
   assert.doesNotMatch(workflow, /^\s+schedule:/m);
   assert.doesNotMatch(workflow, /repository_dispatch|workflow_run|actions:\s*write|gh workflow run|market-data-(?:collect|publish|watchdog)\.yml/);
 });

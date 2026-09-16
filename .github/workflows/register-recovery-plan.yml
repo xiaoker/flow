@@ -126,7 +126,7 @@ jobs:
             --arg approvalReference "$APPROVAL_REFERENCE" \
             --arg authorizedAt "$AUTHORIZED_AT" \
             --arg expiresAt "$EXPIRES_AT" \
-            '{recoveryId, runKey, planSha256, scopeSha256, planJson, expectedAttemptCount, expectedUpdatedAt, previousStateJson, reasonCode, approvalReference, authorizedAt, expiresAt}' \
+            '{recoveryId:$recoveryId, runKey:$runKey, planSha256:$planSha256, scopeSha256:$scopeSha256, planJson:$planJson, expectedAttemptCount:$expectedAttemptCount, expectedUpdatedAt:$expectedUpdatedAt, previousStateJson:$previousStateJson, reasonCode:$reasonCode, approvalReference:$approvalReference, authorizedAt:$authorizedAt, expiresAt:$expiresAt}' \
             > "$PAYLOAD_FILE"
 
           {
