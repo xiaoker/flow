@@ -676,6 +676,7 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     live_runner = (REPOSITORY_ROOT / "scripts/run_live_recovery.py").read_text(encoding="utf-8")
     receipt_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/receipt/route.ts").read_text(encoding="utf-8")
     plan_route = (REPOSITORY_ROOT / "web/app/api/v1/admin/pipeline-window/recovery/plan/route.ts").read_text(encoding="utf-8")
+    plan_helper = (REPOSITORY_ROOT / "web/app/lib/pipeline-recovery-plan.ts").read_text(encoding="utf-8")
     receipt_helper = (REPOSITORY_ROOT / "web/app/lib/recovery-receipt.ts").read_text(encoding="utf-8")
 
     assert "recovery_plan_sha256" in collect
@@ -700,10 +701,11 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     assert "receipt" in receipt_route
     assert "MAX_RECEIPT_BYTES" in receipt_route
     assert "immutable_receipt_conflict" in receipt_route
-    assert "plan_object_not_verified" in plan_route
-    assert "plan_semantic_sha256_mismatch" in plan_route
+    assert "readRecoveryPlanObject" in plan_route
+    assert "plan_object_not_verified" in plan_helper
+    assert "plan_semantic_sha256_mismatch" in plan_helper
     assert "scope_sha256" in plan_route
-    assert "MAX_PLAN_BYTES" in plan_route
+    assert "MAX_RECOVERY_PLAN_BYTES" in plan_helper
     assert "verifyRecoveryReceipt" in receipt_helper
     assert "receipt_output_date_mismatch" in receipt_helper
     assert "receipt_scope_binding_mismatch" in receipt_helper
