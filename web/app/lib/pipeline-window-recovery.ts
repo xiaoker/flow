@@ -60,6 +60,12 @@ export type PipelineRecoveryRegistrationInput = {
   approvalReference: string;
   authorizedAt: string;
   expiresAt: string;
+  /**
+   * Optional expired PAUSED authorization that is being replaced.  This is
+   * intentionally part of the registration contract so replacing a stale
+   * control-plane generation cannot be done with an ad-hoc D1 UPDATE.
+   */
+  supersedesRecoveryId?: string;
 };
 
 export type PipelineRecoveryClaimInput = {
@@ -302,6 +308,12 @@ export function validatePipelineRecoveryRegistrationInput(input: PipelineRecover
   if (!validInstant(input.expiresAt) || Date.parse(input.expiresAt) <= Date.parse(input.authorizedAt)) {
     throw new PipelineWindowError("invalid_recovery_expiry", 422);
   }
+  if (
+    input.supersedesRecoveryId !== undefined &&
+    (typeof input.supersedesRecoveryId !== "string" || !IDENTIFIER.test(input.supersedesRecoveryId))
+  ) {
+    throw new PipelineWindowError("invalid_supersedes_recovery_id", 422);
+  }
 }
 
 function validateClaim(input: PipelineRecoveryClaimInput): void {
@@ -330,6 +342,12 @@ function leaseExpired(row: PipelineWindowRow, nowIso: string): boolean {
 
 type AtomicPairResult = {
   changes: [number, number];
+  rowsWritten: number;
+  rowsRead: number;
+};
+
+type AtomicRecoverySupersedeResult = {
+  changes: [number, number, number];
   rowsWritten: number;
   rowsRead: number;
 };
@@ -407,6 +425,145 @@ async function runAtomicPair(
   }
 }
 
+/**
+ * Atomically retire one expired PAUSED recovery generation, unbind its
+ * pipeline row, and insert the replacement authorization.  The partial
+ * unique index on active/paused generations means this must be one SQLite
+ * transaction; separate UPDATE/INSERT calls can leave a stale generation
+ * permanently blocking the next plan.
+ */
+async function runAtomicRecoverySupersede(
+  db: D1Like,
+  runKey: string,
+  oldRecoveryId: string,
+  newInput: PipelineRecoveryRegistrationInput,
+  createdAt: string,
+  nowIso: string,
+): Promise<AtomicRecoverySupersedeResult | null> {
+  const batch = requireBatch(db);
+  const pipelineMutation = db.prepare(
+    `UPDATE pipeline_window
+        SET recovery_id = NULL
+      WHERE run_key = ? AND recovery_id = ? AND status = 'FAILED_RETRYABLE'
+        AND lease_owner IS NULL
+        AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+        AND attempt_count = ? AND updated_at = ?`,
+  ).bind(
+    runKey,
+    oldRecoveryId,
+    nowIso,
+    newInput.expectedAttemptCount,
+    newInput.expectedUpdatedAt,
+  );
+  const pipelineGuard = db.prepare(
+    `INSERT INTO pipeline_window (
+       run_key, pipeline, window_date, window_name, contract_version, status,
+       created_at, updated_at
+     )
+     SELECT run_key, pipeline, window_date, window_name, contract_version,
+            status, created_at, updated_at
+       FROM pipeline_window
+      WHERE run_key = ? AND changes() <> 1
+     UNION ALL
+     SELECT NULL, '', '', '', '', '', '', ''
+       WHERE changes() <> 1
+         AND NOT EXISTS (SELECT 1 FROM pipeline_window WHERE run_key = ?)`,
+  ).bind(runKey, runKey);
+  const oldRecoveryMutation = db.prepare(
+    `UPDATE pipeline_window_recovery
+        SET status = 'REVOKED', updated_at = ?
+      WHERE recovery_id = ? AND run_key = ? AND status = 'PAUSED'
+        AND expires_at <= ?`,
+  ).bind(nowIso, oldRecoveryId, runKey, nowIso);
+  const oldRecoveryGuard = db.prepare(
+    `INSERT INTO pipeline_window_recovery (
+       recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
+       expected_attempt_count, expected_updated_at, previous_state_json,
+       reason_code, approval_reference, authorized_at, expires_at, status,
+       created_at, updated_at
+     )
+     SELECT recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
+            expected_attempt_count, expected_updated_at, previous_state_json,
+            reason_code, approval_reference, authorized_at, expires_at, status,
+            created_at, updated_at
+       FROM pipeline_window_recovery
+      WHERE recovery_id = ? AND changes() <> 1
+     UNION ALL
+     SELECT NULL, '', '', '', '', 0, '', '', '', '', '', '', '', '', ''
+       WHERE changes() <> 1
+         AND NOT EXISTS (SELECT 1 FROM pipeline_window_recovery WHERE recovery_id = ?)`,
+  ).bind(oldRecoveryId, oldRecoveryId);
+  const newRecoveryInsert = db.prepare(
+    `INSERT INTO pipeline_window_recovery (
+       recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
+       expected_attempt_count, expected_updated_at, previous_state_json,
+       reason_code, approval_reference, authorized_at, expires_at, status,
+       latest_receipt_key, latest_receipt_sha256, created_at, updated_at, completed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTHORIZED', NULL, NULL, ?, ?, NULL)`,
+  ).bind(
+    newInput.recoveryId,
+    newInput.runKey,
+    newInput.planKey,
+    newInput.planSha256,
+    newInput.scopeSha256,
+    newInput.expectedAttemptCount,
+    newInput.expectedUpdatedAt,
+    newInput.previousStateJson,
+    newInput.reasonCode,
+    newInput.approvalReference,
+    newInput.authorizedAt,
+    newInput.expiresAt,
+    createdAt,
+    createdAt,
+  );
+  const newRecoveryGuard = db.prepare(
+    `INSERT INTO pipeline_window_recovery (
+       recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
+       expected_attempt_count, expected_updated_at, previous_state_json,
+       reason_code, approval_reference, authorized_at, expires_at, status,
+       created_at, updated_at
+     )
+     SELECT recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
+            expected_attempt_count, expected_updated_at, previous_state_json,
+            reason_code, approval_reference, authorized_at, expires_at, status,
+            created_at, updated_at
+       FROM pipeline_window_recovery
+      WHERE recovery_id = ? AND changes() <> 1
+     UNION ALL
+     SELECT NULL, '', '', '', '', 0, '', '', '', '', '', '', '', '', ''
+       WHERE changes() <> 1
+         AND NOT EXISTS (SELECT 1 FROM pipeline_window_recovery WHERE recovery_id = ?)`,
+  ).bind(newInput.recoveryId, newInput.recoveryId);
+
+  try {
+    const results = await batch([
+      pipelineMutation,
+      pipelineGuard,
+      oldRecoveryMutation,
+      oldRecoveryGuard,
+      newRecoveryInsert,
+      newRecoveryGuard,
+    ]);
+    const pipelineChanges = requireChanges(results[0]);
+    const oldRecoveryChanges = requireChanges(results[2]);
+    const newRecoveryChanges = requireChanges(results[4]);
+    if (pipelineChanges !== 1 || oldRecoveryChanges !== 1 || newRecoveryChanges !== 1) {
+      throw new PipelineWindowError("pipeline_recovery_supersede_invariant", 503);
+    }
+    return {
+      changes: [pipelineChanges, oldRecoveryChanges, newRecoveryChanges],
+      rowsWritten: sumRowsWritten(results),
+      rowsRead: sumRowsRead(results),
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/(?:UNIQUE|NOT NULL) constraint failed:\s*(?:pipeline_window|pipeline_window_recovery)\./i.test(message)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function readPipelineWindow(db: D1Like, runKey: string): Promise<PipelineWindowRow | null> {
   const row = await db.prepare(`${selectPipelineSql()} WHERE run_key = ? LIMIT 1`).bind(runKey).first<Record<string, unknown>>();
   return row ? serializePipelineRow(row) : null;
@@ -422,12 +579,15 @@ export async function getPipelineWindowRecovery(
 }
 
 export type PipelineRecoveryRegistration = {
-  decision: "registered" | "already_registered";
+  decision: "registered" | "already_registered" | "superseded";
   recovery: PipelineWindowRecoveryRow;
   pipeline: PipelineWindowRow;
+  supersededRecoveryId?: string;
+  rowsWritten: number;
+  rowsRead: number;
 };
 
-/** Register an authorization without touching pipeline_window. */
+/** Register an authorization, optionally replacing one expired generation atomically. */
 export async function registerPipelineWindowRecovery(
   db: D1Like,
   input: PipelineRecoveryRegistrationInput,
@@ -440,7 +600,7 @@ export async function registerPipelineWindowRecovery(
   const existingById = await getPipelineWindowRecovery(db, input.recoveryId);
   if (existingById) {
     if (!sameRegistration(existingById, input)) throw new PipelineWindowError("recovery_registration_conflict", 409);
-    return { decision: "already_registered", recovery: existingById, pipeline };
+    return { decision: "already_registered", recovery: existingById, pipeline, rowsWritten: 0, rowsRead: 0 };
   }
   const existingByPlan = await db.prepare(
     `${selectRecoverySql()} WHERE run_key = ? AND plan_sha256 = ? LIMIT 1`,
@@ -451,12 +611,65 @@ export async function registerPipelineWindowRecovery(
       throw new PipelineWindowError("recovery_scope_conflict", 409);
     }
     if (!sameRegistration(existing, input)) throw new PipelineWindowError("recovery_scope_conflict", 409);
-    return { decision: "already_registered", recovery: existing, pipeline };
+    return { decision: "already_registered", recovery: existing, pipeline, rowsWritten: 0, rowsRead: 0 };
   }
 
   const createdAt = now.toISOString();
+  if (input.supersedesRecoveryId !== undefined) {
+    if (input.supersedesRecoveryId === input.recoveryId) {
+      throw new PipelineWindowError("recovery_supersede_self_conflict", 409);
+    }
+    const oldRecovery = await getPipelineWindowRecovery(db, input.supersedesRecoveryId);
+    if (!oldRecovery) throw new PipelineWindowError("superseded_recovery_not_found", 404);
+    if (oldRecovery.run_key !== input.runKey) {
+      throw new PipelineWindowError("superseded_recovery_run_key_mismatch", 409);
+    }
+    if (oldRecovery.status !== "PAUSED" || Date.parse(oldRecovery.expires_at) > now.getTime()) {
+      throw new PipelineWindowError("superseded_recovery_not_expired", 409);
+    }
+    if (
+      pipeline.recovery_id !== oldRecovery.recovery_id ||
+      pipeline.status !== "FAILED_RETRYABLE" ||
+      pipeline.lease_owner !== null ||
+      !leaseExpired(pipeline, createdAt) ||
+      pipeline.attempt_count !== input.expectedAttemptCount ||
+      pipeline.updated_at !== input.expectedUpdatedAt
+    ) {
+      throw new PipelineWindowError("recovery_supersede_state_conflict", 409);
+    }
+    const transaction = await runAtomicRecoverySupersede(
+      db,
+      input.runKey,
+      oldRecovery.recovery_id,
+      input,
+      createdAt,
+      createdAt,
+    );
+    if (!transaction) {
+      const concurrent = await getPipelineWindowRecovery(db, input.recoveryId);
+      if (concurrent && sameRegistration(concurrent, input)) {
+        const nextPipeline = await readPipelineWindow(db, input.runKey);
+        if (!nextPipeline) throw new PipelineWindowError("pipeline_window_not_found", 404);
+        return { decision: "already_registered", recovery: concurrent, pipeline: nextPipeline, rowsWritten: 0, rowsRead: 0 };
+      }
+      throw new PipelineWindowError("recovery_supersede_conflict", 409);
+    }
+    const recovery = await getPipelineWindowRecovery(db, input.recoveryId);
+    const nextPipeline = await readPipelineWindow(db, input.runKey);
+    if (!recovery || !nextPipeline) throw new PipelineWindowError("recovery_supersede_not_found", 503);
+    return {
+      decision: "superseded",
+      recovery,
+      pipeline: nextPipeline,
+      supersededRecoveryId: oldRecovery.recovery_id,
+      rowsWritten: transaction.rowsWritten,
+      rowsRead: transaction.rowsRead,
+    };
+  }
+
+  let registrationResult: D1Result;
   try {
-    await db.prepare(
+    registrationResult = await db.prepare(
       `INSERT INTO pipeline_window_recovery (
          recovery_id, run_key, plan_key, plan_sha256, scope_sha256,
          expected_attempt_count, expected_updated_at, previous_state_json,
@@ -484,7 +697,7 @@ export async function registerPipelineWindowRecovery(
     // row and reject any scope collision rather than guessing which plan won.
     const concurrent = await getPipelineWindowRecovery(db, input.recoveryId);
     if (concurrent && sameRegistration(concurrent, input)) {
-      return { decision: "already_registered", recovery: concurrent, pipeline };
+      return { decision: "already_registered", recovery: concurrent, pipeline, rowsWritten: 0, rowsRead: 0 };
     }
     const concurrentByPlan = await db.prepare(
       `${selectRecoverySql()} WHERE run_key = ? AND plan_sha256 = ? LIMIT 1`,
@@ -492,7 +705,7 @@ export async function registerPipelineWindowRecovery(
     if (concurrentByPlan) {
       const existing = serializeRecoveryRow(concurrentByPlan);
       if (existing.recovery_id === input.recoveryId && sameRegistration(existing, input)) {
-        return { decision: "already_registered", recovery: existing, pipeline };
+        return { decision: "already_registered", recovery: existing, pipeline, rowsWritten: 0, rowsRead: 0 };
       }
       throw new PipelineWindowError("recovery_scope_conflict", 409);
     }
@@ -501,7 +714,13 @@ export async function registerPipelineWindowRecovery(
   }
   const recovery = await getPipelineWindowRecovery(db, input.recoveryId);
   if (!recovery) throw new PipelineWindowError("recovery_registration_not_found", 503);
-  return { decision: "registered", recovery, pipeline };
+  return {
+    decision: "registered",
+    recovery,
+    pipeline,
+    rowsWritten: rowsWritten(registrationResult),
+    rowsRead: rowsRead(registrationResult),
+  };
 }
 
 function makeClaimResult(
