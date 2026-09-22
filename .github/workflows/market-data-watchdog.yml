@@ -21,6 +21,11 @@ on:
         required: false
         default: ""
         type: string
+      probe_only:
+        description: "Read one pipeline window status without claim or dispatch (temporary probe)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -45,7 +50,61 @@ jobs:
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
       GH_TOKEN: ${{ secrets.GITHUB_ACTIONS_TOKEN || github.token }}
     steps:
+      - name: Read one pipeline window status without mutation
+        if: ${{ inputs.probe_only == true }}
+        shell: bash
+        env:
+          PROBE_WINDOW: ${{ inputs.collection_window || 'reconcile' }}
+          PROBE_DATE: ${{ inputs.target_date }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PROBE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "probe_only requires target_date YYYY-MM-DD" >&2
+            exit 2
+          fi
+          case "$PROBE_WINDOW" in
+            evening|morning|reconcile) ;;
+            *) echo "probe_only requires a controlled window name" >&2; exit 2 ;;
+          esac
+          if [[ -z "$FLOW_INGEST_API_KEY" || -z "$FLOW_CF_ACCESS_CLIENT_ID" || -z "$FLOW_CF_ACCESS_CLIENT_SECRET" ]]; then
+            echo "Watchdog status probe requires the existing read credentials." >&2
+            exit 2
+          fi
+          run_key="daily-market-data:${PROBE_DATE}:${PROBE_WINDOW}:v1"
+          encoded_run_key="$(jq -rn --arg value "$run_key" '$value|@uri')"
+          auth_args=(
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY"
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID"
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET"
+          )
+          http_code="$(curl --silent --show-error "${auth_args[@]}" \
+            --output pipeline-window-status.json \
+            --write-out '%{http_code}' \
+            "$FLOW_PIPELINE_WINDOW_URL/status?runKey=$encoded_run_key")"
+          if [[ "$http_code" != "200" ]]; then
+            echo "pipeline status probe failed with HTTP $http_code" >&2
+            jq -c '{error,detail}' pipeline-window-status.json >&2 || true
+            exit 1
+          fi
+          jq -e --arg runKey "$run_key" '
+            .runKey == $runKey and
+            (.status | type == "string") and
+            (.attemptCount | type == "number") and
+            (.updatedAt | type == "string")
+          ' pipeline-window-status.json >/dev/null
+          jq '{runKey,status,targetDate,leaseOwner,leaseExpiresAt,sourceFingerprint,githubRunId,attemptCount,lastErrorCode,createdAt,updatedAt,completedAt,recoveryId}' pipeline-window-status.json
+
+      - name: Upload read-only pipeline status probe
+        if: ${{ inputs.probe_only == true && always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pipeline-status-probe-${{ github.run_id }}
+          path: pipeline-window-status.json
+          if-no-files-found: warn
+          retention-days: 1
+
       - name: Check and recover one market-data window
+        if: ${{ inputs.probe_only != true }}
         shell: bash
         run: |
           set -euo pipefail
