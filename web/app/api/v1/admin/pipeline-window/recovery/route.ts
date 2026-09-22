@@ -165,6 +165,9 @@ export async function POST(request: Request): Promise<Response> {
       approvalReference: requiredString(body, "approvalReference"),
       authorizedAt: requiredString(body, "authorizedAt"),
       expiresAt: requiredString(body, "expiresAt"),
+      ...(body.supersedesRecoveryId === undefined || body.supersedesRecoveryId === ""
+        ? {}
+        : { supersedesRecoveryId: requiredString(body, "supersedesRecoveryId") }),
     };
     validatePipelineRecoveryRegistrationInput(registration);
     if (!(await getPipelineWindow(runtime.DB, runKey))) {
@@ -184,6 +187,9 @@ export async function POST(request: Request): Promise<Response> {
       pipelineStatus: result.pipeline.status,
       planKey: stored.key,
       planStorageDecision: stored.decision,
+      supersededRecoveryId: result.supersededRecoveryId ?? null,
+      rowsWritten: result.rowsWritten,
+      rowsRead: result.rowsRead,
     }, result.decision === "registered" ? 201 : 200);
   } catch (error: unknown) {
     if (error instanceof PipelineWindowError) return response({ error: error.message }, error.status);

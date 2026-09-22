@@ -652,6 +652,15 @@ test("invalid run keys and expired approvals are rejected", async () => {
       )),
       /invalid_run_key/,
     );
+    await assert.rejects(
+      registerPipelineWindowRecovery(db, registrationInput(
+        setup.runKey,
+        setup.row,
+        "recovery-invalid-supersede-id",
+        { supersedesRecoveryId: 42 },
+      )),
+      /invalid_supersedes_recovery_id/,
+    );
     const registration = await registerPipelineWindowRecovery(
       db,
       registrationInput(setup.runKey, setup.row, "recovery-expired", {
@@ -702,6 +711,112 @@ test("a new plan revision can be registered while an older authorization is stil
       ),
       /pipeline_window_recovery_bound/,
     );
+  } finally {
+    db.close();
+  }
+});
+
+test("an expired PAUSED generation is atomically superseded before a replacement can claim", async () => {
+  const db = await createDatabase();
+  try {
+    const setup = await registerCompleted(db);
+    const oldId = setup.registration.recovery.recovery_id;
+    const oldClaim = await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner01"),
+      new Date("2026-09-03T03:00:00.000Z"),
+    );
+    assert.equal(oldClaim.decision, "acquired");
+    await markPipelineWindowRecovery(db, {
+      recoveryId: oldId,
+      runKey: setup.runKey,
+      leaseOwner: "recovery:owner01",
+      expectedAttemptCount: oldClaim.attemptCount,
+      status: "FAILED_RETRYABLE",
+      errorCode: "source_not_ready",
+    }, new Date("2026-09-03T03:01:00.000Z"));
+    const before = await getPipelineWindow(db, setup.runKey);
+    const replacement = await registerPipelineWindowRecovery(
+      db,
+      registrationInput(setup.runKey, before, "recovery-20260903-replacement", {
+        planKey: "repair-plan-20260903-v2",
+        planSha256: "c".repeat(64),
+        scopeSha256: "d".repeat(64),
+        authorizedAt: "2026-09-05T00:00:00.000Z",
+        expiresAt: "2026-09-06T23:59:59.000Z",
+        supersedesRecoveryId: oldId,
+      }),
+      new Date("2026-09-05T00:01:00.000Z"),
+    );
+    assert.equal(replacement.decision, "superseded");
+    assert.equal(replacement.supersededRecoveryId, oldId);
+    assert.equal(replacement.recovery.status, "AUTHORIZED");
+    const oldRecovery = await getPipelineWindowRecovery(db, oldId);
+    assert.equal(oldRecovery.status, "REVOKED");
+    const unbound = await getPipelineWindow(db, setup.runKey);
+    assert.equal(unbound.recovery_id, null);
+    assert.equal(unbound.status, "FAILED_RETRYABLE");
+    assert.equal(unbound.attempt_count, before.attempt_count);
+    assert.equal(unbound.updated_at, before.updated_at);
+
+    const claimed = await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner02", { recoveryId: replacement.recovery.recovery_id }),
+      new Date("2026-09-05T00:02:00.000Z"),
+    );
+    assert.equal(claimed.decision, "acquired");
+  } finally {
+    db.close();
+  }
+});
+
+test("supersede CAS conflict and mid-transaction failure leave the old generation intact", async () => {
+  const db = await createDatabase();
+  try {
+    const setup = await registerCompleted(db);
+    const oldId = setup.registration.recovery.recovery_id;
+    const oldClaim = await claimPipelineWindowRecovery(
+      db,
+      input(setup.runKey, "recovery:owner01"),
+      new Date("2026-09-03T03:00:00.000Z"),
+    );
+    await markPipelineWindowRecovery(db, {
+      recoveryId: oldId,
+      runKey: setup.runKey,
+      leaseOwner: "recovery:owner01",
+      expectedAttemptCount: oldClaim.attemptCount,
+      status: "FAILED_RETRYABLE",
+      errorCode: "source_not_ready",
+    }, new Date("2026-09-03T03:01:00.000Z"));
+    const before = await getPipelineWindow(db, setup.runKey);
+    await assert.rejects(
+      registerPipelineWindowRecovery(db, registrationInput(setup.runKey, before, "recovery-20260903-cas", {
+        planSha256: "c".repeat(64),
+        scopeSha256: "d".repeat(64),
+        expectedAttemptCount: before.attempt_count + 1,
+        supersedesRecoveryId: oldId,
+        authorizedAt: "2026-09-05T00:00:00.000Z",
+        expiresAt: "2026-09-06T23:59:59.000Z",
+      }), new Date("2026-09-05T00:01:00.000Z")),
+      /recovery_supersede_state_conflict/,
+    );
+    assert.equal((await getPipelineWindowRecovery(db, oldId)).status, "PAUSED");
+
+    db.failAtBatchIndex = 4;
+    await assert.rejects(
+      registerPipelineWindowRecovery(db, registrationInput(setup.runKey, before, "recovery-20260903-atomic-failure", {
+        planSha256: "e".repeat(64),
+        scopeSha256: "f".repeat(64),
+        supersedesRecoveryId: oldId,
+        authorizedAt: "2026-09-05T00:00:00.000Z",
+        expiresAt: "2026-09-06T23:59:59.000Z",
+      }), new Date("2026-09-05T00:01:00.000Z")),
+      /injected_mid_transaction_failure/,
+    );
+    const afterFailure = await getPipelineWindow(db, setup.runKey);
+    assert.equal(afterFailure.recovery_id, oldId);
+    assert.equal((await getPipelineWindowRecovery(db, oldId)).status, "PAUSED");
+    assert.equal(await getPipelineWindowRecovery(db, "recovery-20260903-atomic-failure"), null);
   } finally {
     db.close();
   }
@@ -884,6 +999,8 @@ test("manual recovery-plan workflow can only register and verify one immutable p
   const workflow = await readFile(new URL("../../.github/workflows/register-recovery-plan.yml", import.meta.url), "utf8");
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /Register plan through the audited control plane/);
+  assert.match(workflow, /supersedes_recovery_id/);
+  assert.match(workflow, /supersedesRecoveryId/);
   assert.match(workflow, /recovery\/plan\?recoveryId=/);
   // jq -n has no input object: every envelope property must explicitly
   // reference its --arg/--rawfile variable. Naked object shorthand silently

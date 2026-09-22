@@ -40,6 +40,11 @@ on:
         description: "Authorization expiry in UTC ISO-8601 format"
         required: true
         type: string
+      supersedes_recovery_id:
+        description: "Optional expired PAUSED recovery generation to replace atomically"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
       APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
       AUTHORIZED_AT: ${{ inputs.authorized_at }}
       EXPIRES_AT: ${{ inputs.expires_at }}
+      SUPERSEDES_RECOVERY_ID: ${{ inputs.supersedes_recovery_id }}
     steps:
       - name: Validate immutable plan and approval inputs
         id: validate
@@ -83,6 +89,10 @@ jobs:
           fi
           if [[ ! "$EXPECTED_ATTEMPT_COUNT" =~ ^[0-9]+$ ]]; then
             echo "expected_attempt_count must be a non-negative integer." >&2
+            exit 2
+          fi
+          if [[ -n "$SUPERSEDES_RECOVERY_ID" && ! "$SUPERSEDES_RECOVERY_ID" =~ ^[A-Za-z0-9:_./-]{1,200}$ ]]; then
+            echo "supersedes_recovery_id is invalid." >&2
             exit 2
           fi
 
@@ -126,7 +136,8 @@ jobs:
             --arg approvalReference "$APPROVAL_REFERENCE" \
             --arg authorizedAt "$AUTHORIZED_AT" \
             --arg expiresAt "$EXPIRES_AT" \
-            '{recoveryId:$recoveryId, runKey:$runKey, planSha256:$planSha256, scopeSha256:$scopeSha256, planJson:$planJson, expectedAttemptCount:$expectedAttemptCount, expectedUpdatedAt:$expectedUpdatedAt, previousStateJson:$previousStateJson, reasonCode:$reasonCode, approvalReference:$approvalReference, authorizedAt:$authorizedAt, expiresAt:$expiresAt}' \
+            --arg supersedesRecoveryId "$SUPERSEDES_RECOVERY_ID" \
+            '{recoveryId:$recoveryId, runKey:$runKey, planSha256:$planSha256, scopeSha256:$scopeSha256, planJson:$planJson, expectedAttemptCount:$expectedAttemptCount, expectedUpdatedAt:$expectedUpdatedAt, previousStateJson:$previousStateJson, reasonCode:$reasonCode, approvalReference:$approvalReference, authorizedAt:$authorizedAt, expiresAt:$expiresAt} | if $supersedesRecoveryId == "" then . else . + {supersedesRecoveryId:$supersedesRecoveryId} end' \
             > "$PAYLOAD_FILE"
 
           {
@@ -165,7 +176,7 @@ jobs:
           jq -e \
             --arg recoveryId "${{ steps.validate.outputs.recovery_id }}" \
             --arg runKey "${{ steps.validate.outputs.run_key }}" \
-            '.recoveryId == $recoveryId and .runKey == $runKey and (.decision == "registered" or .decision == "already_registered") and (.planStorageDecision == "stored" or .planStorageDecision == "already_stored")' \
+            '.recoveryId == $recoveryId and .runKey == $runKey and (.decision == "registered" or .decision == "already_registered" or .decision == "superseded") and (.planStorageDecision == "stored" or .planStorageDecision == "already_stored")' \
             "$WORK_DIR/register-response.json" >/dev/null
 
       - name: Verify registered plan is readable and hash-bound
