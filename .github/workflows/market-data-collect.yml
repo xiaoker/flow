@@ -577,6 +577,18 @@ jobs:
             if jq -e '.status == "BLOCKED_QUALITY"' "$FAILURE_FILE" >/dev/null 2>&1; then
               STATUS="BLOCKED_QUALITY"
             fi
+            # Keep a bounded, non-hidden diagnostic copy. The runner's
+            # detailed error is sanitized (no credentials or response
+            # bodies); truncating it here makes the evidence safe to inspect
+            # from the Actions artifact without enabling hidden-file uploads.
+            jq '{schemaVersion: (.schemaVersion // 1), status: (.status // "FAILED_RETRYABLE"), errorCode: (.errorCode // "live_recovery_runner_failed"), detail: ((.detail // "") | tostring | .[0:240]), measuredAt: (.measuredAt // null)}' \
+              "$FAILURE_FILE" > recovery-live-failure.json
+          else
+            jq -n \
+              --arg status "$STATUS" \
+              --arg errorCode "$ERROR_CODE" \
+              '{schemaVersion:1,status:$status,errorCode:$errorCode,detail:"runner did not produce a failure evidence file",measuredAt:null}' \
+              > recovery-live-failure.json
           fi
           jq -n \
             --arg recoveryId "$INPUT_RECOVERY_ID" \
@@ -611,6 +623,7 @@ jobs:
             pipeline-recovery-running-response.json
             pipeline-recovery-failure.json
             pipeline-recovery-failure-response.json
+            recovery-live-failure.json
             publish-dispatch-request.json
             publish-dispatch-response.json
             publish-dispatch-evidence.json

@@ -31,11 +31,15 @@ import requests
 
 
 PAGE_URL = "https://fund.szse.cn/marketdata/fundslist/index.html"
+WWW_PAGE_URL = "https://www.szse.cn/market/product/fund/etf/"
 REPORT_URL = "https://fund.szse.cn/api/report/ShowReport/data"
+WWW_REPORT_URL = "https://www.szse.cn/api/report/ShowReport/data"
 # Optional resolver override for environments whose DNS path is unreliable.
 # Do not bake a volatile exchange edge address into the recovery contract;
 # leaving this unset lets curl resolve the current official public address.
 SZSE_RESOLVE_ENV = "FLOW_RECOVERY_SZSE_RESOLVE"
+SZSE_HOST_ENV = "FLOW_RECOVERY_SZSE_HOST"
+SZSE_HOSTS = ("www.szse.cn", "fund.szse.cn")
 LIST_PARAMS = {
     "SHOWTYPE": "JSON",
     "CATALOGID": "1000_lf",
@@ -59,6 +63,7 @@ class RequestBudget:
         self.request_count = 0
         self._last_request_at = 0.0
         self._lock = threading.Lock()
+        self._active_host: str | None = None
 
     def before_request(self) -> None:
         with self._lock:
@@ -70,6 +75,36 @@ class RequestBudget:
                 time.sleep(delay)
             self.request_count += 1
             self._last_request_at = time.monotonic()
+
+    def host_order(self) -> tuple[str, ...]:
+        configured = os.environ.get(SZSE_HOST_ENV, "").strip()
+        if configured and configured not in SZSE_HOSTS:
+            raise ValueError("invalid_szse_host")
+        if os.environ.get(SZSE_RESOLVE_ENV, "").strip():
+            return ("fund.szse.cn",)
+        preferred = configured or SZSE_HOSTS[0]
+        with self._lock:
+            active = self._active_host
+        if active:
+            return (active,) + tuple(host for host in SZSE_HOSTS if host != active)
+        return (preferred,) + tuple(host for host in SZSE_HOSTS if host != preferred)
+
+    def mark_host_success(self, host: str) -> None:
+        with self._lock:
+            self._active_host = host
+
+    @property
+    def active_host(self) -> str | None:
+        with self._lock:
+            return self._active_host
+
+
+def _report_url(host: str) -> str:
+    return WWW_REPORT_URL if host == "www.szse.cn" else REPORT_URL
+
+
+def _page_url(host: str) -> str:
+    return WWW_PAGE_URL if host == "www.szse.cn" else PAGE_URL
 
 
 def _session() -> requests.Session:
@@ -94,41 +129,73 @@ def _request_json(
     # of Python TLS sessions, while curl's connection reuse/retry path remains
     # stable.  Keep this recovery path conservative and invoke curl with an
     # argument list (never a shell string) so all query values are escaped.
-    if budget is not None:
-        budget.before_request()
     resolve = os.environ.get(SZSE_RESOLVE_ENV, "").strip()
     if resolve and not re.fullmatch(r"fund\.szse\.cn:443:(?:\d{1,3}\.){3}\d{1,3}", resolve):
         raise RuntimeError("invalid_szse_resolver")
-    command = [
-        "curl",
-        "--silent",
-        "--show-error",
-        "--fail",
-        "--retry",
-        "0",
-        "--max-time",
-        "30",
-        "-A",
-        "Mozilla/5.0",
-        "-H",
-        f"Referer: {PAGE_URL}",
-        "--get",
-    ]
-    if resolve:
-        command[8:8] = ["--resolve", resolve]
-    for key, value in params.items():
-        command.extend(["--data-urlencode", f"{key}={value}"])
-    command.append(REPORT_URL)
-    result = subprocess.run(command, capture_output=True, text=True, timeout=90)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"SZSE history request failed: {params}: "
-            f"{result.stderr.strip() or result.stdout.strip()}"
-        )
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"SZSE history response was not JSON: {params}") from exc
+    if budget is not None:
+        hosts = budget.host_order()
+    else:
+        configured = os.environ.get(SZSE_HOST_ENV, "").strip()
+        if configured and configured not in SZSE_HOSTS:
+            raise RuntimeError("invalid_szse_host")
+        if resolve:
+            hosts = ("fund.szse.cn",)
+        else:
+            preferred = configured or "www.szse.cn"
+            hosts = (preferred,) + tuple(host for host in SZSE_HOSTS if host != preferred)
+    if any(host not in SZSE_HOSTS for host in hosts):
+        raise RuntimeError("invalid_szse_host")
+    failures: list[str] = []
+    for host in hosts:
+        if budget is not None:
+            try:
+                budget.before_request()
+            except RuntimeError as exc:
+                if str(exc) == "recovery_request_budget_exceeded":
+                    failures.append("budget_exhausted")
+                    break
+                raise
+        command = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--retry",
+            "0",
+            "--max-time",
+            "30",
+            "-A",
+            "Mozilla/5.0",
+            "-H",
+            f"Referer: {_page_url(host)}",
+            "--get",
+        ]
+        if resolve:
+            command[8:8] = ["--resolve", resolve]
+        for key, value in params.items():
+            command.extend(["--data-urlencode", f"{key}={value}"])
+        endpoint = _report_url(host)
+        command.append(endpoint)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            failures.append(f"{host}:timeout")
+            continue
+        except OSError:
+            failures.append(f"{host}:unavailable")
+            continue
+        if result.returncode != 0:
+            failures.append(f"{host}:exit={result.returncode}")
+            continue
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            failures.append(f"{host}:invalid_json")
+            continue
+        if budget is not None:
+            budget.mark_host_success(host)
+        return payload
+    raise RuntimeError("SZSE history request failed: " + ",".join(failures))
 
 
 def _strip_anchor(value: Any) -> str:
@@ -226,7 +293,14 @@ def _historical_response(
         },
         budget=budget,
     )
-    return code, {"request": {"code": code, "start": start_date, "end": end_date}, "response": payload}
+    host = budget.active_host if budget is not None and budget.active_host else (
+        "fund.szse.cn" if os.environ.get(SZSE_RESOLVE_ENV, "").strip() else "www.szse.cn"
+    )
+    return code, {
+        "request": {"code": code, "start": start_date, "end": end_date},
+        "response": payload,
+        "source_url": _report_url(host),
+    }
 
 
 def _number_of_shares(value: Any) -> int:
@@ -328,6 +402,11 @@ def main() -> None:
         raise RuntimeError(f"SZSE history recovery incomplete: {missing[:20]} ({len(missing)} missing)")
 
     observed_at = _now()
+    transport_host = budget.active_host or (
+        "fund.szse.cn" if os.environ.get(SZSE_RESOLVE_ENV, "").strip() else "www.szse.cn"
+    )
+    transport_report_url = _report_url(transport_host)
+    transport_page_url = _page_url(transport_host)
     artifacts: list[dict[str, Any]] = []
     for trade_date in dates:
         rows: list[dict[str, Any]] = []
@@ -370,8 +449,8 @@ def main() -> None:
         raw_payload = {
             "source": "深圳证券交易所",
             "dataset": "etf_scale",
-            "endpoint": REPORT_URL,
-            "page": PAGE_URL,
+            "endpoint": transport_report_url,
+            "page": transport_page_url,
             "requestedDate": trade_date,
             "queryRange": {"start": start_date, "end": end_date},
             "retrievedAt": observed_at,
@@ -391,16 +470,16 @@ def main() -> None:
                 "source_id": "szse",
                 "publisher": "深圳证券交易所",
                 "dataset": "etf_scale",
-                "url": REPORT_URL,
+                "url": transport_report_url,
                 "source_grade": "A",
                 "date_semantics": "source_historical_scale_size_date",
             },
             "source_id": "szse",
             "publisher": "深圳证券交易所",
             "dataset": "etf_scale",
-            "source_url": REPORT_URL,
+            "source_url": transport_report_url,
             "source_grade": "A",
-            "page_url": PAGE_URL,
+            "page_url": transport_page_url,
             "requested_date": trade_date,
             "date_semantics": "source_historical_scale_size_date",
             "query_range": {"start": start_date, "end": end_date},
@@ -425,7 +504,7 @@ def main() -> None:
                     "source_id": "szse",
                     "publisher": "深圳证券交易所",
                     "dataset": "etf_scale",
-                    "url": REPORT_URL,
+                    "url": transport_report_url,
                     "source_grade": "A",
                     "date_semantics": "source_historical_scale_size_date",
                 },

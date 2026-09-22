@@ -290,6 +290,69 @@ def test_budgeted_session_uses_bounded_official_curl_for_szse(monkeypatch) -> No
     assert kwargs["timeout"] == 90
 
 
+def test_budgeted_session_prefers_official_www_host_and_records_transport(monkeypatch) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return runner.subprocess.CompletedProcess(command, 0, stdout=b"[]", stderr=b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    params = {"SHOWTYPE": "JSON", "_flow_internal": "must-not-be-sent"}
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=2, min_interval_seconds=0, szse_curl=True
+    )
+    response = session.get(
+        runner.SZSE_ETF_METADATA_URL,
+        params=params,
+        headers={"Referer": runner.SZSE_CURL_PAGE_URL, "User-Agent": "fixture"},
+    )
+
+    command, _kwargs = calls[0]
+    assert command[-1] == "https://www.szse.cn/api/report/ShowReport/data"
+    assert "_flow_internal" not in command
+    assert params["_flow_transport"] == "curl_www_szse_cn"
+    assert params["_flow_source_url"] == response.url
+    assert response.headers["X-Flow-Source-Transport"] == "curl_www.szse.cn"
+    assert session.szse_active_host == "www.szse.cn"
+    assert session.request_count == 1
+
+
+def test_budgeted_session_falls_back_to_fund_host_once(monkeypatch) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            return runner.subprocess.CompletedProcess(command, 22, stdout=b"", stderr=b"")
+        return runner.subprocess.CompletedProcess(command, 0, stdout=b"[]", stderr=b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=2, min_interval_seconds=0, szse_curl=True
+    )
+    response = session.get(runner.SZSE_ETF_METADATA_URL)
+
+    assert [call[0][-1] for call in calls] == [
+        "https://www.szse.cn/api/report/ShowReport/data",
+        runner.SZSE_ETF_METADATA_URL,
+    ]
+    assert response.url == runner.SZSE_ETF_METADATA_URL
+    assert session.szse_active_host == "fund.szse.cn"
+    assert session.request_count == 2
+
+
+def test_budgeted_session_rejects_an_invalid_szse_host(monkeypatch) -> None:
+    monkeypatch.setenv("FLOW_RECOVERY_SZSE_HOST", "evil.example")
+    session = BudgetedRateLimitedSession(
+        _Transport(), maximum=2, min_interval_seconds=0, szse_curl=True
+    )
+    with pytest.raises(LiveRecoveryError, match="live_recovery_source_unavailable") as caught:
+        session.get(runner.SZSE_ETF_METADATA_URL)
+    assert caught.value.status == "BLOCKED_QUALITY"
+    assert session.request_count == 0
+
+
 def test_budgeted_session_accepts_an_explicit_valid_szse_resolver(monkeypatch) -> None:
     calls = []
 
