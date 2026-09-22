@@ -61,9 +61,16 @@ class LiveRecoveryError(RuntimeError):
 
 # Keep the runner executable both as ``python -m`` and as the workflow's
 # ``python scripts/run_live_recovery.py`` entry point.  Importing the sibling
-# script package is not reliable in the latter mode, while the URL is a stable
-# official referer used by both recovery paths.
+# script package is not reliable in the latter mode.  The exchange exposes the
+# same official report API on two hosts; the www host is preferred because the
+# fund host intermittently rejects GitHub-hosted runner egress with a WAF/TLS
+# response.  A successful host is remembered for the rest of one invocation so
+# a transient failure does not turn a 2,200-request historical sweep into a
+# burst against both hosts.
 SZSE_CURL_PAGE_URL = "https://fund.szse.cn/marketdata/fundslist/index.html"
+SZSE_WWW_PAGE_URL = "https://www.szse.cn/market/product/fund/etf/"
+SZSE_CURL_HOSTS = ("www.szse.cn", "fund.szse.cn")
+SZSE_CURL_HOST_ENV = "FLOW_RECOVERY_SZSE_HOST"
 
 
 @dataclass
@@ -82,6 +89,7 @@ class BudgetedRateLimitedSession:
     request_count: int = 0
     last_by_host: dict[str, float] | None = None
     szse_curl: bool = False
+    szse_active_host: str | None = None
 
     def __post_init__(self) -> None:
         if self.maximum <= 0:
@@ -126,6 +134,52 @@ class BudgetedRateLimitedSession:
         self._reserve_request(url)
         return self.session.request(method, url, **kwargs)
 
+    @staticmethod
+    def _szse_hosts() -> tuple[str, ...]:
+        """Return a validated, deterministic order of official SZSE hosts."""
+
+        configured = os.environ.get(SZSE_CURL_HOST_ENV, "").strip()
+        if configured and configured not in SZSE_CURL_HOSTS:
+            raise LiveRecoveryError(
+                "live_recovery_source_unavailable",
+                "invalid_szse_host",
+                status="BLOCKED_QUALITY",
+            )
+        preferred = configured or SZSE_CURL_HOSTS[0]
+        if os.environ.get("FLOW_RECOVERY_SZSE_RESOLVE", "").strip():
+            # --resolve is intentionally scoped to the legacy fund hostname;
+            # never apply an operator-supplied address to another host.
+            preferred = "fund.szse.cn"
+            return (preferred,)
+        alternate = next(host for host in SZSE_CURL_HOSTS if host != preferred)
+        return (preferred, alternate)
+
+    @staticmethod
+    def _szse_url(url: str, host: str) -> str:
+        parsed = urlparse(url)
+        if parsed.hostname not in SZSE_CURL_HOSTS:
+            return url
+        return parsed._replace(netloc=host).geturl()
+
+    @staticmethod
+    def _szse_page_url(host: str) -> str:
+        return SZSE_WWW_PAGE_URL if host == "www.szse.cn" else SZSE_CURL_PAGE_URL
+
+    @staticmethod
+    def _curl_body_matches_endpoint(url: str, content: bytes) -> bool:
+        """Reject HTTP-200 WAF pages before they reach a parser."""
+
+        path = (urlparse(url).path or "").rstrip("/")
+        if path.endswith("/data"):
+            try:
+                json.loads(content.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False
+            return True
+        if path.endswith("/ShowReport"):
+            return content[:2] == b"PK"
+        return True
+
     def _request_szse_with_curl(self, url: str, **kwargs: Any) -> requests.Response:
         """Fetch an official SZSE response through the bounded curl path.
 
@@ -148,70 +202,129 @@ class BudgetedRateLimitedSession:
                 "invalid_szse_resolver",
                 status="BLOCKED_QUALITY",
             )
-        self._reserve_request(url)
-        command = [
-            "curl",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--retry",
-            "0",
-            "--max-time",
-            "90",
-            "-A",
-            str(headers.get("User-Agent") if isinstance(headers, dict) and headers.get("User-Agent") else "Mozilla/5.0"),
-            "-H",
-            f"Referer: {headers.get('Referer') if isinstance(headers, dict) and headers.get('Referer') else SZSE_CURL_PAGE_URL}",
-            "--get",
-        ]
+        # A resolver override deliberately disables the alternate path because
+        # its address is only valid for fund.szse.cn.  It also wins over a
+        # previously remembered host, so a session cannot apply the fund
+        # address to the www hostname.
         if resolve:
-            command[8:8] = ["--resolve", resolve]
-        if isinstance(headers, dict) and headers.get("Accept"):
-            command.extend(["-H", f"Accept: {headers['Accept']}"])
-        if isinstance(params, dict):
-            for key, value in params.items():
+            hosts = ("fund.szse.cn",)
+        elif self.szse_active_host:
+            # If an active host later fails, try the other allowlisted host
+            # once and remember the winner.
+            hosts = (self.szse_active_host,) + tuple(
+                host for host in self._szse_hosts() if host != self.szse_active_host
+            )
+        else:
+            hosts = self._szse_hosts()
+        safe_params = {
+            key: value
+            for key, value in (params.items() if isinstance(params, dict) else [])
+            if not str(key).startswith("_flow_")
+        }
+        failures: list[str] = []
+        for host in hosts:
+            request_url = self._szse_url(url, host)
+            provided_referer = (
+                str(headers.get("Referer"))
+                if isinstance(headers, dict) and headers.get("Referer")
+                else ""
+            )
+            referer_host = (urlparse(provided_referer).hostname or "").lower()
+            referer = (
+                self._szse_page_url(host)
+                if referer_host in SZSE_CURL_HOSTS and referer_host != host
+                else (provided_referer or self._szse_page_url(host))
+            )
+            command = [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--retry",
+                "0",
+                "--max-time",
+                "90",
+                "-A",
+                str(
+                    headers.get("User-Agent")
+                    if isinstance(headers, dict) and headers.get("User-Agent")
+                    else "Mozilla/5.0"
+                ),
+                "-H",
+                f"Referer: {referer}",
+                "--get",
+            ]
+            if resolve:
+                command[8:8] = ["--resolve", resolve]
+            if isinstance(headers, dict) and headers.get("Accept"):
+                command.extend(["-H", f"Accept: {headers['Accept']}"])
+            for key, value in safe_params.items():
                 values = value if isinstance(value, (list, tuple)) else (value,)
                 for item in values:
                     command.extend(["--data-urlencode", f"{key}={item}"])
-        command.append(url)
-        try:
-            result = subprocess.run(
-                command,
-                cwd=None,
-                check=False,
-                capture_output=True,
-                timeout=90,
+            command.append(request_url)
+            try:
+                self._reserve_request(request_url)
+            except LiveRecoveryError as exc:
+                # A failed first transport must not turn an exhausted
+                # allowance into a misleading budget error. Preserve the
+                # source-unavailable outcome and make the bounded fallback
+                # decision observable without issuing another request.
+                if exc.code == "live_recovery_request_budget_exceeded":
+                    failures.append("budget_exhausted")
+                    break
+                raise
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=None,
+                    check=False,
+                    capture_output=True,
+                    timeout=90,
+                )
+            except subprocess.TimeoutExpired:
+                failures.append(f"{host}:timeout")
+                continue
+            except OSError:
+                failures.append(f"{host}:unavailable")
+                continue
+            if result.returncode != 0:
+                failures.append(f"{host}:exit={result.returncode}")
+                continue
+            content = (
+                result.stdout
+                if isinstance(result.stdout, bytes)
+                else str(result.stdout).encode("utf-8")
             )
-        except subprocess.TimeoutExpired as exc:
-            raise LiveRecoveryError(
-                "live_recovery_source_unavailable",
-                "szse_curl_timeout",
-                status="FAILED_RETRYABLE",
-            ) from exc
-        except OSError as exc:
-            raise LiveRecoveryError(
-                "live_recovery_source_unavailable",
-                "szse_curl_unavailable",
-                status="FAILED_RETRYABLE",
-            ) from exc
-        if result.returncode != 0:
-            raise LiveRecoveryError(
-                "live_recovery_source_unavailable",
-                f"szse_curl_exit={result.returncode}",
-                status="FAILED_RETRYABLE",
+            if not self._curl_body_matches_endpoint(request_url, content):
+                failures.append(f"{host}:unexpected_body")
+                continue
+            self.szse_active_host = host
+            if isinstance(params, dict):
+                # Keep source provenance in the existing request metadata
+                # without sending internal fields upstream.
+                params["_flow_transport"] = f"curl_{host.replace('.', '_')}"
+                params["_flow_source_url"] = request_url
+            response = requests.Response()
+            response.status_code = 200
+            response.url = request_url
+            response.headers["Content-Type"] = (
+                "application/json" if request_url.rstrip("/").endswith("/data")
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        content = result.stdout if isinstance(result.stdout, bytes) else str(result.stdout).encode("utf-8")
-        response = requests.Response()
-        response.status_code = 200
-        response.url = url
-        response.headers["Content-Type"] = "application/octet-stream"
-        response._content = content
-        response.encoding = "utf-8"
-        return response
+            response.headers["X-Flow-Source-Transport"] = f"curl_{host}"
+            response._content = content
+            response.encoding = "utf-8"
+            return response
+        raise LiveRecoveryError(
+            "live_recovery_source_unavailable",
+            "szse_curl_failed_hosts=" + ",".join(failures),
+            status="FAILED_RETRYABLE",
+        )
 
     def get(self, url: str, **kwargs: Any) -> requests.Response:
         parsed = urlparse(url)
-        if self.szse_curl and parsed.hostname and parsed.hostname.lower() == "fund.szse.cn":
+        if self.szse_curl and parsed.hostname and parsed.hostname.lower() in SZSE_CURL_HOSTS:
             response = self._request_szse_with_curl(url, **kwargs)
         else:
             response = self._request("GET", url, **kwargs)

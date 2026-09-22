@@ -766,6 +766,15 @@ def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_co
     assert "Protected recovery path" in collect
 
 
+def test_recovery_failure_evidence_is_bounded_and_visible_without_hidden_uploads() -> None:
+    collect = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "recovery-live-failure.json" in collect
+    assert "detail: ((.detail // \"\") | tostring | .[0:240])" in collect
+    assert "runner did not produce a failure evidence file" in collect
+    assert "include-hidden-files: true" not in collect
+
+
 def test_r2_recovery_contract_commands_are_offline_and_bounded() -> None:
     executor = (REPOSITORY_ROOT / "scripts/execute_recovery_plan.py").read_text(encoding="utf-8")
     module = (REPOSITORY_ROOT / "src/trading_desk/recovery_execution.py").read_text(encoding="utf-8")
