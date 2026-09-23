@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   buildSourceObservationReceipt,
+  isSourceObservationStorageError,
   recordSourceObservation,
   sha256Hex,
 } from "../app/lib/source-observation.ts";
@@ -14,18 +15,22 @@ const TARGET_DATE = "2026-09-13";
 const RUN_KEY = `daily-market-data:${TARGET_DATE}:evening:v1`;
 
 class FakeBucket {
-  constructor() {
+  constructor({ failHead = false, failPut = false } = {}) {
     this.objects = new Map();
     this.putCount = 0;
+    this.failHead = failHead;
+    this.failPut = failPut;
   }
 
   async head(key) {
+    if (this.failHead) throw new Error("r2_head_transport_detail");
     const object = this.objects.get(key);
     return object ? { size: object.body.byteLength, customMetadata: object.metadata } : null;
   }
 
   async put(key, body, options = {}) {
     this.putCount += 1;
+    if (this.failPut) throw new Error("r2_put_transport_detail");
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : new Uint8Array(body);
     this.objects.set(key, {
       body: bytes,
@@ -123,9 +128,46 @@ test("D1 failure keeps the immutable R2 receipt and is reported as unavailable",
   const bucket = new FakeBucket();
   const result = await recordSourceObservation(bucket, new FakeD1({ fail: true }), await artifact());
   assert.equal(result.d1Status, "unavailable");
+  assert.equal(result.d1ErrorCode, "source_observation_d1_unavailable");
   assert.equal(result.r2Status, "created");
   assert.equal(bucket.objects.size, 1);
   assert.equal(bucket.putCount, 1);
+});
+
+test("R2 head failure is a bounded sidecar error without leaking provider details", async () => {
+  await assert.rejects(
+    recordSourceObservation(new FakeBucket({ failHead: true }), new FakeD1(), await artifact()),
+    (error) => {
+      assert.equal(isSourceObservationStorageError(error), true);
+      assert.equal(error.code, "source_observation_r2_head_failed");
+      assert.doesNotMatch(error.message, /transport_detail/);
+      return true;
+    },
+  );
+});
+
+test("R2 put failure is distinguishable from receipt validation and conflicts", async () => {
+  await assert.rejects(
+    recordSourceObservation(new FakeBucket({ failPut: true }), new FakeD1(), await artifact()),
+    (error) => {
+      assert.equal(isSourceObservationStorageError(error), true);
+      assert.equal(error.code, "source_observation_r2_put_failed");
+      assert.doesNotMatch(error.message, /transport_detail/);
+      return true;
+    },
+  );
+});
+
+test("receipt identity conflicts remain hard failures", async () => {
+  const bucket = new FakeBucket();
+  const input = await artifact();
+  await recordSourceObservation(bucket, new FakeD1(), input);
+  const [key] = bucket.objects.keys();
+  bucket.objects.get(key).metadata.sourceFingerprint = "a".repeat(64);
+  await assert.rejects(
+    recordSourceObservation(bucket, new FakeD1(), input),
+    /source_observation_receipt_conflict/,
+  );
 });
 
 test("source publication states preserve an explicit unavailable reason", async () => {
@@ -156,6 +198,12 @@ test("shadow integration is opt-in and does not touch the active pointer", async
   const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(route, /SOURCE_OBSERVATION_SHADOW_ENABLED/);
   assert.match(route, /recordSourceObservation/);
+  assert.match(route, /if \(!isSourceObservationStorageError\(error\)\) throw error/);
+  assert.match(route, /sourceObservationR2Unavailable/);
+  assert.match(route, /sourceObservationStatus/);
+  assert.match(route, /return "disabled"/);
+  assert.match(route, /return d1Unavailable > 0 \|\| r2Unavailable > 0 \? "degraded" : "recorded"/);
+  assert.doesNotMatch(route, /source_observation_receipt_failed/);
   assert.doesNotMatch(route, /UPDATE\s+active_release/i);
   assert.match(wrangler, /"SOURCE_OBSERVATION_SHADOW_ENABLED"\s*:\s*"0"/);
 });
