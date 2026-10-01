@@ -8,9 +8,11 @@ import {
   getMarketDayState,
   persistMarketDayProjection,
   projectMarketDay,
+  decideHeavyCollection,
   shouldDispatchHeavyCollection,
 } from "../app/lib/market-day-projection.ts";
 import { probeMarketDaySources } from "../app/lib/market-day-probe.ts";
+import { resolveMarketDayProbeMode } from "../app/lib/market-day-mode.ts";
 
 globalThis.crypto ??= webcrypto;
 
@@ -24,6 +26,7 @@ function observation(definition, overrides = {}) {
     targetDate: TARGET_DATE,
     sourceBusinessDate: TARGET_DATE,
     publishedDate: TARGET_DATE,
+    candidateBusinessDate: TARGET_DATE,
     status: "VERIFIED",
     sourceFingerprint: "a".repeat(64),
     observedAt: "2026-09-13T10:00:00.000Z",
@@ -102,6 +105,91 @@ test("canonical probe and collection decisions are stable across retries", async
     probes: probes.map((item) => ({ ...item, status: "SOURCE_UNAVAILABLE", httpStatus: 503 })),
   });
   assert.equal(shouldDispatchHeavyCollection(null, unavailable, null), false);
+});
+
+test("probe mode has one explicit contract and rejects conflicting legacy values", () => {
+  assert.deepEqual(resolveMarketDayProbeMode({}), { mode: "OFF", source: "default" });
+  assert.deepEqual(resolveMarketDayProbeMode({ legacyEnabled: "0" }), { mode: "OFF", source: "legacy" });
+  assert.deepEqual(resolveMarketDayProbeMode({ legacyEnabled: "1" }), { mode: "ENFORCE", source: "legacy" });
+  assert.deepEqual(resolveMarketDayProbeMode({ mode: "observe" }), { mode: "OBSERVE", source: "mode" });
+  assert.deepEqual(resolveMarketDayProbeMode({ mode: "OFF", legacyEnabled: "0" }), { mode: "OFF", source: "both" });
+  assert.throws(() => resolveMarketDayProbeMode({ mode: "OBSERVE", legacyEnabled: "1" }), /mode_conflict/);
+  assert.throws(() => resolveMarketDayProbeMode({ mode: "maybe" }), /mode_invalid/);
+});
+
+test("candidate business date is only a probe hint and never formal target binding", async () => {
+  const projection = await projectMarketDay({
+    windowDate: TARGET_DATE,
+    probes: [probe("sse_etf", {
+      sourceBusinessDate: "2026-09-12",
+      candidateBusinessDate: "2026-09-12",
+      publishedDate: "2026-09-12",
+    })],
+    observations: [],
+  });
+  assert.equal(projection.windowDate, TARGET_DATE);
+  assert.equal(projection.targetDate, TARGET_DATE);
+  assert.equal(projection.candidateBusinessDate, "2026-09-12");
+  assert.equal(projection.formalTargetDate, null);
+});
+
+test("empty 200 responses are not publication evidence and do not dispatch", async () => {
+  const calls = [];
+  const fakeFetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return new Response("", { status: 200, headers: { "content-length": "0" } });
+  };
+  const probes = await probeMarketDaySources(TARGET_DATE, "2026-09-13T10:00:00.000Z", fakeFetch);
+  assert.equal(probes.every((item) => item.status === "EMPTY_RESPONSE"), true);
+  const projection = await projectMarketDay({ windowDate: TARGET_DATE, probes, observations: [] });
+  const decision = decideHeavyCollection(null, projection, null, "ENFORCE");
+  assert.equal(decision.wouldDispatch, false);
+  assert.equal(decision.reason, "empty_response_not_evidence");
+  assert.equal(calls.length, 6);
+});
+
+test("tail reconciliation changes fingerprint when an unchanged prefix has a revised tail", async () => {
+  const prefix = `{"STAT_DATE":"${TARGET_DATE}","rows":`;
+  let tail = "A".repeat(1024);
+  const fakeFetch = async (url, options) => {
+    const range = options.headers.Range;
+    const content = range.startsWith("bytes=0-") ? `${prefix}${"0".repeat(70_000)}` : tail;
+    return new Response(content, {
+      status: 200,
+      headers: { "content-length": "70000", "content-type": "application/json" },
+    });
+  };
+  const first = await probeMarketDaySources(TARGET_DATE, "2026-09-13T10:00:00.000Z", fakeFetch);
+  tail = "B".repeat(1024);
+  const second = await probeMarketDaySources(TARGET_DATE, "2026-09-13T10:01:00.000Z", fakeFetch);
+  assert.equal(first.length, 6);
+  assert.equal(second.length, 6);
+  assert.notEqual(first[0].fingerprint, second[0].fingerprint);
+});
+
+test("READY_TO_BUILD remains reusable until a release is complete", async () => {
+  const probes = MARKET_DAY_SOURCE_DEFINITIONS.filter((item) => item.required).map((item) => probe(item.key));
+  const ready = await projectMarketDay({ windowDate: TARGET_DATE, probes, observations: allRequiredObservations() });
+  const afterCrash = decideHeavyCollection(ready, ready, null, "ENFORCE");
+  assert.equal(afterCrash.wouldDispatch, true);
+  assert.equal(afterCrash.reason, "ready_to_build_without_completed_release");
+  const completed = decideHeavyCollection(ready, ready, "COMPLETED", "ENFORCE");
+  assert.equal(completed.wouldDispatch, false);
+});
+
+test("weekend or holiday-like no-publication probes remain waiting without natural-date inference", async () => {
+  const probes = MARKET_DAY_SOURCE_DEFINITIONS.filter((item) => item.required).map((item) => probe(item.key, {
+    status: "NOT_PUBLISHED",
+    sourceBusinessDate: null,
+    candidateBusinessDate: null,
+    publishedDate: null,
+    httpStatus: 404,
+  }));
+  const projection = await projectMarketDay({ windowDate: "2026-10-03", probes, observations: [] });
+  const decision = decideHeavyCollection(null, projection, null, "ENFORCE");
+  assert.equal(projection.candidateBusinessDate, null);
+  assert.equal(decision.wouldDispatch, false);
+  assert.equal(decision.reason, "no_published_probe");
 });
 
 test("probe uses fixed allowlisted URLs, bounded response reads and no parallel burst", async () => {
@@ -185,7 +273,9 @@ test("projection persistence is one bounded upsert and route reads use one key l
   assert.ok(result.rowsWritten <= 4);
   const row = await getMarketDayState(db, TARGET_DATE);
   assert.equal(row.target_date, TARGET_DATE);
-  assert.match(row.probe_json, /^\[/);
+  assert.match(row.probe_json, /"probes"/);
+  const parsed = (await import("../app/lib/market-day-projection.ts")).parseMarketDayStateRow(row);
+  assert.equal(parsed.formalTargetDate, null);
   databaseHandle.close();
 });
 
@@ -193,6 +283,10 @@ test("worker probe flag is opt-in and runs before the existing dispatch path", a
   const worker = await import(new URL("../dist/server/index.js", import.meta.url).href + `?market-day-test=${process.pid}-${Date.now()}`);
   const workerSource = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(workerSource, /MARKET_DAY_PROBE_ENABLED/);
+  assert.match(workerSource, /MARKET_DAY_PROBE_MODE/);
+  assert.match(workerSource, /resolveMarketDayProbeMode/);
+  assert.match(workerSource, /legacy dispatch remains unchanged/);
+  assert.match(workerSource, /wouldDispatch/);
   assert.match(workerSource, /probeMarketDaySources/);
   assert.match(workerSource, /getPipelineWindow/);
   assert.match(workerSource, /sourceFingerprint: probeFingerprint/);
