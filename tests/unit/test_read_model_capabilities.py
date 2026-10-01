@@ -15,6 +15,7 @@ from trading_desk.read_model_capabilities import (
     CAPABILITY_IDS,
     ETF_PERIOD_IDS,
     ETF_PERIOD_METRICS,
+    build_capability_states,
 )
 from trading_desk.read_models import build_read_models
 from scripts.split_read_model_slots import SLOT_ARTIFACTS, split
@@ -164,7 +165,36 @@ def test_invalid_declared_period_coverage_fails_closed() -> None:
     )
     period_state = manifest["capabilityContract"]["capabilities"]["etf_periods"]
     assert period_state["status"] == "UNKNOWN"
+    assert period_state["reasonCode"] == "period_coverage_evidence_invalid"
     assert period_state["periods"]["1d"]["shares"]["status"] == "UNKNOWN"
+
+
+def test_empty_independent_capabilities_are_not_marked_ready() -> None:
+    snapshot = _snapshot()
+    for item, code in zip(snapshot["etfTerminal"]["instruments"], ("512999", "159999"), strict=True):
+        item["code"] = code
+    payloads, manifest = build_read_models(
+        snapshot,
+        require_materialized=True,
+        stock_catalog=_empty_stock_catalog(),
+        capability_contract_version=CAPABILITY_CONTRACT_VERSION,
+    )
+    payloads["rotation"]["data"]["groupPeriods"] = []
+    states = build_capability_states(
+        scope="full",
+        as_of=snapshot["asOf"],
+        source_dates=manifest["sourceDates"],
+        snapshot=snapshot,
+        payloads=payloads,
+        stock_catalog=_empty_stock_catalog(),
+        artifact_names=set(manifest["artifacts"]),
+    )
+
+    assert states["etf_daily_core"]["status"] == "READY"
+    assert states["national_team"]["status"] == "MISSING"
+    assert states["national_team"]["coverage"]["sampleCount"] == 0
+    assert states["rotation"]["status"] == "MISSING"
+    assert states["rotation"]["coverage"]["sampleCount"] == 0
 
 
 def test_v4_slot_split_rebinds_exact_artifacts_and_keeps_other_slot_unknown(tmp_path: Path) -> None:
@@ -216,3 +246,26 @@ def test_v4_slot_split_rebinds_exact_artifacts_and_keeps_other_slot_unknown(tmp_
     (damaged_source / "manifest.json").write_text(json.dumps(damaged_manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="source capability artifact reference mismatch"):
         split(damaged_source, tmp_path / "rejected", "dashboard")
+
+    damaged_ready = tmp_path / "damaged-ready-source"
+    shutil.copytree(source, damaged_ready)
+    damaged_manifest = json.loads((damaged_ready / "manifest.json").read_text(encoding="utf-8"))
+    damaged_manifest["capabilityContract"]["capabilities"]["rotation"]["coverage"]["sampleCount"] = 0
+    (damaged_ready / "manifest.json").write_text(json.dumps(damaged_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="source READY rotation proof is invalid"):
+        split(damaged_ready, tmp_path / "rejected-ready", "etf_penetration")
+
+    damaged_period = tmp_path / "damaged-period-source"
+    shutil.copytree(source, damaged_period)
+    damaged_manifest = json.loads((damaged_period / "manifest.json").read_text(encoding="utf-8"))
+    damaged_manifest["capabilityContract"]["capabilities"]["etf_periods"]["periods"]["1d"]["shares"]["availableSampleCount"] = 999
+    (damaged_period / "manifest.json").write_text(json.dumps(damaged_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="source etf_periods evidence is inconsistent"):
+        split(damaged_period, tmp_path / "rejected-period", "etf_penetration")
+
+    damaged_other_artifact = tmp_path / "damaged-other-slot-artifact"
+    shutil.copytree(source, damaged_other_artifact)
+    rotation_path = damaged_other_artifact / "rotation.json"
+    rotation_path.write_bytes(rotation_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="source artifact digest mismatch: rotation"):
+        split(damaged_other_artifact, tmp_path / "rejected-other-slot", "etf_penetration")
