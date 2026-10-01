@@ -48,7 +48,7 @@
     "rawSha256": { "$ref": "#/$defs/nullableSha256" },
     "normalizedSha256": { "$ref": "#/$defs/nullableSha256" },
     "sourceFingerprint": { "$ref": "#/$defs/sha256" },
-    "contractVersion": { "type": "string", "pattern": "^flow-product-v[0-9]+(?:\\.[0-9]+)?$" },
+    "contractVersion": { "type": "string", "pattern": "^flow-product-v[0-9]+(?:\\.[0-9]+){0,2}$" },
     "runKey": { "type": ["string", "null"], "maxLength": 240 },
     "observedAt": { "type": "string", "format": "date-time" },
     "reasonCode": { "type": ["string", "null"], "maxLength": 160 },

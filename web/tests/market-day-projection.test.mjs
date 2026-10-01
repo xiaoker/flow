@@ -91,6 +91,31 @@ test("date-mismatched observations cannot satisfy the market-day gate", async ()
   assert.equal(projection.nextAction, "investigate_source");
 });
 
+test("same-time verified evidence supersedes an earlier raw-only observation", async () => {
+  const observations = allRequiredObservations();
+  const verified = observations.find((item) => item.sourceId === "sse" && item.dataset === "etf_scale");
+  assert.ok(verified);
+  const rawOnly = {
+    ...verified,
+    observationId: `${verified.observationId}:z-raw-only`,
+    sourceFingerprint: "b".repeat(64),
+    status: "OBSERVED",
+  };
+  const normalized = {
+    ...verified,
+    observationId: `${verified.observationId}:a-normalized`,
+    sourceFingerprint: "c".repeat(64),
+    status: "VERIFIED",
+  };
+  const projection = await projectMarketDay({
+    windowDate: TARGET_DATE,
+    observations: [...observations.filter((item) => item !== verified), rawOnly, normalized],
+  });
+  const source = projection.sources.find((item) => item.key === "sse_etf");
+  assert.equal(source.status, "VERIFIED");
+  assert.equal(source.observationId, normalized.observationId);
+});
+
 test("canonical probe and collection decisions are stable across retries", async () => {
   const probes = MARKET_DAY_SOURCE_DEFINITIONS.filter((item) => item.required).map((item) => probe(item.key));
   const first = await projectMarketDay({ targetDate: TARGET_DATE, probes, observations: [] });

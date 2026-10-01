@@ -176,6 +176,18 @@ function sourceKey(definition: (typeof MARKET_DAY_SOURCE_DEFINITIONS)[number]): 
   return definition.key;
 }
 
+function observationStatusPriority(status: string): number {
+  switch (status) {
+    case "SUPERSEDED_BY_REVISION": return 5;
+    case "REJECTED_QUALITY": return 4;
+    case "VERIFIED": return 3;
+    case "NOT_PUBLISHED":
+    case "SOURCE_UNAVAILABLE": return 2;
+    case "OBSERVED": return 1;
+    default: return 0;
+  }
+}
+
 function latestObservations(observations: SourceObservationSummary[], targetDate: string): Map<MarketDaySourceKey, SourceObservationSummary> {
   const latest = new Map<MarketDaySourceKey, SourceObservationSummary>();
   for (const observation of observations) {
@@ -185,8 +197,14 @@ function latestObservations(observations: SourceObservationSummary[], targetDate
     if (!definition) continue;
     const key = sourceKey(definition);
     const previous = latest.get(key);
-    if (!previous || Date.parse(observation.observedAt) > Date.parse(previous.observedAt) ||
-      (observation.observedAt === previous.observedAt && observation.observationId > previous.observationId)) {
+    const observedAt = Date.parse(observation.observedAt);
+    const previousObservedAt = previous ? Date.parse(previous.observedAt) : Number.NEGATIVE_INFINITY;
+    if (!previous || observedAt > previousObservedAt ||
+      (observedAt === previousObservedAt && (
+        observationStatusPriority(observation.status) > observationStatusPriority(previous.status) ||
+        (observationStatusPriority(observation.status) === observationStatusPriority(previous.status) &&
+          observation.observationId > previous.observationId)
+      ))) {
       latest.set(key, observation);
     }
   }

@@ -1200,7 +1200,13 @@ test("archives full-source history with server-side hash verification", async ()
       headers: { authorization: "Bearer test-key", "content-type": "application/json" },
       body: JSON.stringify(bundle),
     }),
-    { ...env, DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key" },
+    {
+      ...env,
+      DB: db,
+      RAW_BUCKET: bucket,
+      INGEST_API_KEY: "test-key",
+      SOURCE_OBSERVATION_SHADOW_ENABLED: "1",
+    },
     context,
   );
   assert.equal(response.status, 200);
@@ -1246,6 +1252,28 @@ test("archives full-source history with server-side hash verification", async ()
     values.includes("sse_etf") &&
     values.some((value) => typeof value === "string" && value.includes('"archiveVerified":true')),
   ));
+  const etfObservationRow = statements.find(({ sql, values }) =>
+    sql.includes("INSERT INTO source_observation") &&
+    values[1] === "sse" &&
+    values[2] === "etf_scale",
+  );
+  assert.ok(etfObservationRow);
+  assert.equal(etfObservationRow.values[7], "VERIFIED");
+  assert.equal(etfObservationRow.values[15], etfNormalizedSha256);
+  const etfObservationEntry = [...objects.entries()].find(([key]) =>
+    key.startsWith("market-data/source-observations/") &&
+    key.includes("/sse/etf_scale/"),
+  );
+  assert.ok(etfObservationEntry);
+  const etfObservationReceipt = JSON.parse(Buffer.from(etfObservationEntry[1]).toString("utf8"));
+  assert.deepEqual(etfObservationReceipt.evidence.normalizedFiles, [
+    {
+      name: "data",
+      sha256: etfNormalizedSha256,
+      rowCount: 1,
+      tradeDates: [snapshot.asOf],
+    },
+  ]);
   const manifest = [...objects.entries()].find(([key]) => key.includes("history-manifests/"));
   assert.ok(manifest);
   assert.match(String(manifest[1]), /"officialEtfDailyChanges"/);
