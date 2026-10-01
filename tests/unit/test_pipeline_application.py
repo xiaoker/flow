@@ -141,6 +141,68 @@ def test_identity_rejects_window_and_run_key_date_mismatch() -> None:
         )
 
 
+def test_identity_accepts_exact_github_sha_length() -> None:
+    identity = build_application_identity(
+        run_key="daily-market-data:2026-09-30:reconcile:v1",
+        window_date="2026-09-30",
+        producer_build_sha="a" * 40,
+    )
+    assert identity.as_dict()["producerBuildSha"] == "a" * 40
+
+
+def test_failed_stage_is_a_barrier_for_all_later_stages() -> None:
+    identity = _identity()
+    calls: list[str] = []
+
+    def runner(stage: str, input_sha: str):
+        calls.append(stage)
+        status = "BLOCKED_QUALITY" if stage == "verify" else "COMPLETED"
+        return build_checkpoint(
+            identity=identity,
+            stage=stage,
+            status=status,
+            input_sha256=input_sha,
+            output_sha256=None if status != "COMPLETED" else "e" * 64,
+        )
+
+    result = execute_application_plan(
+        identity=identity,
+        stages=["build", "verify", "publish", "verify_visible"],
+        stage_inputs={stage: "b" * 64 for stage in ("build", "verify", "publish", "verify_visible")},
+        stage_runner=runner,
+    )
+
+    assert result["status"] == "BLOCKED_QUALITY"
+    assert calls == ["build", "verify"]
+    assert [record["stage"] for record in result["records"]] == ["build", "verify"]
+
+
+def test_executor_persists_each_verified_checkpoint_immediately() -> None:
+    identity = _identity()
+    progress: list[list[str]] = []
+
+    def runner(stage: str, input_sha: str):
+        return build_checkpoint(
+            identity=identity,
+            stage=stage,
+            status="COMPLETED",
+            input_sha256=input_sha,
+            output_sha256="e" * 64,
+        )
+
+    execute_application_plan(
+        identity=identity,
+        stages=["build", "verify"],
+        stage_inputs={"build": "b" * 64, "verify": "c" * 64},
+        stage_runner=runner,
+        checkpoint_progress=lambda checkpoints: progress.append(
+            [str(item["stage"]) for item in checkpoints]
+        ),
+    )
+
+    assert progress == [["build"], ["build", "verify"]]
+
+
 def test_retry_policy_is_bounded_and_keeps_side_effects_injected() -> None:
     calls: list[int] = []
 

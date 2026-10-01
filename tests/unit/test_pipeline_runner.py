@@ -27,12 +27,12 @@ def _payload() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def _run(payload: dict, tmp_path: Path) -> dict:
+def _run(payload: dict, tmp_path: Path, *, producer_sha: str = PRODUCER_SHA) -> dict:
     return run_pipeline_request(
         payload,
         state_dir=tmp_path / "state",
         output_path=tmp_path / "result.json",
-        producer_build_sha=PRODUCER_SHA,
+        producer_build_sha=producer_sha,
         dependency_lock_paths=[LOCK],
         project_root=ROOT,
         now=datetime(2026, 10, 1, 12, tzinfo=timezone.utc),
@@ -170,3 +170,29 @@ def test_cli_entry_is_the_same_bounded_fixture_runner(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     output = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
     assert output["status"] == "COMPLETED"
+
+
+def test_runner_accepts_exact_github_sha_and_persists_before_later_stage_error(tmp_path: Path) -> None:
+    payload = _payload()
+    producer_sha = "f" * 40
+    payload["identity"]["producerBuildSha"] = producer_sha
+    payload["stageResults"].pop("publish")
+
+    with pytest.raises(PipelineRunnerError, match="stage_result_missing"):
+        _run(payload, tmp_path, producer_sha=producer_sha)
+
+    saved = json.loads((tmp_path / "state" / "checkpoints.json").read_text(encoding="utf-8"))
+    assert saved["identity"]["producerBuildSha"] == producer_sha
+    assert [checkpoint["stage"] for checkpoint in saved["checkpoints"]] == [
+        "core_collection",
+        "normalize",
+        "build",
+        "verify",
+    ]
+
+
+def test_candidate_workflow_installs_runtime_dependencies_before_cli() -> None:
+    workflow = (ROOT / ".github/workflows/pipeline-executor-candidate.yml").read_text(encoding="utf-8")
+    install = workflow.index("python -m pip install --disable-pip-version-check -e .")
+    run_cli = workflow.index("trading_desk.cli pipeline")
+    assert install < run_cli

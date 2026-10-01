@@ -35,6 +35,7 @@ from .pipeline_application import (
 EXECUTOR_SCHEMA_VERSION = 1
 EXECUTOR_CONTRACT_VERSION = "pipeline-executor-v1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
 _MODES = {"ordinary", "recovery"}
 _AUTH_KINDS = {"existing-admin", "approved-recovery"}
@@ -52,6 +53,14 @@ class PipelineRunnerError(ValueError):
 def _sha(value: Any, field: str) -> str:
     if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
         raise PipelineRunnerError(f"invalid_{field}")
+    return value
+
+
+def _producer_sha(value: Any) -> str:
+    """Validate a Git object ID, distinct from SHA-256 artifact digests."""
+
+    if not isinstance(value, str) or not _GIT_OBJECT_ID_RE.fullmatch(value):
+        raise PipelineRunnerError("invalid_producer_build_sha")
     return value
 
 
@@ -198,7 +207,7 @@ def build_execution_context(
         _date(target_date, "target_date")
     if identity_payload.get("contractVersion") not in {None, APPLICATION_CONTRACT_VERSION}:
         raise PipelineRunnerError("unknown_application_contract_version")
-    producer_build_sha = _sha(producer_build_sha, "producer_build_sha")
+    producer_build_sha = _producer_sha(producer_build_sha)
     declared_sha = identity_payload.get("producerBuildSha")
     if declared_sha is not None and declared_sha != producer_build_sha:
         raise PipelineRunnerError("producer_build_sha_mismatch")
@@ -376,21 +385,24 @@ def run_pipeline_request(
             value=value,
         )
 
+    def persist_progress(checkpoints: Sequence[Mapping[str, Any]]) -> None:
+        _write_json_atomic(
+            checkpoints_path,
+            {
+                "schemaVersion": EXECUTOR_SCHEMA_VERSION,
+                "executorContractVersion": EXECUTOR_CONTRACT_VERSION,
+                "identity": context.identity.as_dict(),
+                "checkpoints": list(checkpoints),
+            },
+        )
+
     result = execute_application_plan(
         identity=context.identity,
         stages=stages,
         stage_inputs=stage_inputs,
         stage_runner=stage_runner,
         existing_checkpoints=existing,
-    )
-    _write_json_atomic(
-        checkpoints_path,
-        {
-            "schemaVersion": EXECUTOR_SCHEMA_VERSION,
-            "executorContractVersion": EXECUTOR_CONTRACT_VERSION,
-            "identity": context.identity.as_dict(),
-            "checkpoints": result["checkpoints"],
-        },
+        checkpoint_progress=persist_progress,
     )
     latest_data_date = payload.get("latestDataDate")
     if latest_data_date is not None:
