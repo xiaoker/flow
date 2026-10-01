@@ -1,0 +1,60 @@
+{
+  "stage": "070-B",
+  "purpose": "Add an offline bounded ETF period dependency and minimum downstream rebuild planner.",
+  "baseMainSha": "e7868f91099406b6173e5f61a118fcfbee01f594",
+  "branch": "codex/070b-period-dependency-20261001",
+  "pullRequest": {
+    "number": 140,
+    "url": "https://github.com/xiaoker/flow/pull/140",
+    "base": "main",
+    "head": "codex/070b-period-dependency-20261001",
+    "state": "OPEN"
+  },
+  "files": [
+    "docs/audits/2026-10-01-070b-period-dependency-contract.md",
+    "docs/audits/2026-10-01-070b-period-dependency-merge-side-effects.json",
+    "docs/audits/flow-convergence-progress.md",
+    "scripts/plan_etf_period_rebuild.py",
+    "src/trading_desk/etf_period_dependencies.py",
+    "tests/unit/test_etf_period_dependencies.py"
+  ],
+  "mergeSideEffects": {
+    "pullRequestChecks": [
+      "Flow CI and data QA run on the pull request and consume GitHub Actions minutes.",
+      "A main-branch CI run consumes GitHub Actions minutes after merge."
+    ],
+    "automaticDeployment": {
+      "trigger": "No Worker deployment is expected: this change has no web/** runtime files and does not change deploy-worker.yml.",
+      "workerCodeChanges": false,
+      "newD1MigrationInThisPR": false,
+      "remoteMigrationCommandRuns": false,
+      "featureFlagsChanged": false,
+      "productionReadPathChanged": false,
+      "activeReleasePointerChangedByCode": false
+    },
+    "dataAndExternalWrites": {
+      "collectionOrRecoveryDispatched": false,
+      "candidateManifestUploaded": false,
+      "r2OrD1DataMutationRequestedByThisPR": false,
+      "scheduledCronChanged": false,
+      "recoveryOrPCFRun": false
+    },
+    "newPlannerBehavior": {
+      "networkAccess": false,
+      "d1RowsReadWritten": 0,
+      "r2GetsPuts": 0,
+      "outputExecutionStatus": "NOT_RUN",
+      "futureBuildCost": "UNKNOWN until real execution telemetry is supplied"
+    },
+    "resourceBounds": {
+      "targetDates": 280,
+      "officialCalendarDates": 533,
+      "sourceEvidenceRows": 1066,
+      "existingModelRows": 11200,
+      "inputJsonBytes": 8388608,
+      "actionsBudget": "Each PR update and the post-merge main CI consume GitHub Actions minutes. This PR has implementation, audit-sync, and review-fix commits; actual billed minutes depend on runner usage. Remaining account quota was not queried."
+    },
+    "rollbackAndStop": "No runtime or stored data is changed by this PR. If CI fails, fix within this PR only; do not start 070-C or execute the generated plan."
+  },
+  "reviewState": "Local full Python suite, Web lint, and 144 Web tests/build passed. PR #140 is open; a review fix tightened iterable/file input bounds and added negative-path tests, so hosted checks must pass on the latest head before merge. No merge, deployment, migration, production data operation, candidate upload, flag change, or read-path switch has occurred."
+}
