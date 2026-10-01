@@ -47,6 +47,7 @@ SLOT_ARTIFACTS: dict[str, tuple[str, ...]] = {
         "stock_7",
     ),
 }
+MAX_SOURCE_ARTIFACT_BYTES = 5_000_000
 
 
 def canonical_json(value: Any) -> bytes:
@@ -73,17 +74,47 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
 
     names = SLOT_ARTIFACTS[slot]
     payloads: dict[str, bytes] = {}
-    for name in names:
+    if schema_version == CAPABILITY_MANIFEST_SCHEMA_VERSION:
+        source_contract = source_manifest.get("capabilityContract")
+        validate_capability_contract_for_split(source_contract, source_manifest)
+        full_names = tuple(dict.fromkeys(name for slot_names in SLOT_ARTIFACTS.values() for name in slot_names))
+        required = source_manifest.get("requiredArtifacts")
+        if (
+            set(source_artifacts) != set(full_names)
+            or not isinstance(required, list)
+            or len(required) != len(full_names)
+            or set(required) != set(full_names)
+        ):
+            raise ValueError("source v4 manifest artifact inventory is incomplete")
+        # A slot projection must not hide a corrupt READY capability owned by
+        # the other slot. The v4 source is a bounded, complete offline build.
+        source_names = full_names
+    else:
+        source_names = names
+
+    for name in source_names:
         if name not in source_artifacts:
             raise ValueError(f"source manifest is missing required artifact: {name}")
         path = source_dir / f"{name}.json"
         if not path.is_file():
             raise ValueError(f"source artifact is missing: {path}")
+        if path.stat().st_size > MAX_SOURCE_ARTIFACT_BYTES:
+            raise ValueError(f"source artifact exceeds size limit: {name}")
         content = path.read_bytes()
         declared = source_artifacts[name]
-        if not isinstance(declared, dict) or declared.get("bytes") != len(content) or declared.get("sha256") != sha256(content):
+        if (
+            not isinstance(declared, dict)
+            or not isinstance(declared.get("bytes"), int)
+            or isinstance(declared.get("bytes"), bool)
+            or declared.get("bytes") <= 0
+            or declared.get("bytes") > MAX_SOURCE_ARTIFACT_BYTES
+            or declared.get("bytes") != len(content)
+            or declared.get("sha256") != sha256(content)
+        ):
             raise ValueError(f"source artifact digest mismatch: {name}")
         payloads[name] = content
+    if schema_version == CAPABILITY_MANIFEST_SCHEMA_VERSION:
+        payloads = {name: payloads[name] for name in names}
 
     release_contract = {
         "slot": slot,
@@ -96,7 +127,6 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
     capability_states = None
     if schema_version == CAPABILITY_MANIFEST_SCHEMA_VERSION:
         source_contract = source_manifest.get("capabilityContract")
-        validate_capability_contract_for_split(source_contract, source_manifest)
         capability_states = states_from_capability_contract(source_contract, slot)
         release_contract["capabilityContract"] = capability_contract_identity(capability_states, slot)
     release_id = f"release:{as_of}:{sha256(canonical_json(release_contract))[:16]}"

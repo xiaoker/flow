@@ -1,0 +1,40 @@
+{
+  "stage": "070-A-follow-up",
+  "purpose": "Reject empty READY claims, validate the complete schema-v4 source before slot projection, and preserve precise period evidence reasons.",
+  "baseMainSha": "0052e7225805f0445f6090a1dce4ad769dd61e84",
+  "branch": "codex/070a-capability-contract-fix-20261001",
+  "mergeSideEffects": {
+    "pullRequestChecks": [
+      "Flow CI and data QA run on the pull request and consume GitHub Actions minutes.",
+      "A main-branch CI run consumes GitHub Actions minutes after merge."
+    ],
+    "automaticDeployment": {
+      "trigger": "No Worker deployment is triggered: the PR changes no web/** runtime files and does not modify the deploy workflow.",
+      "workerCodeChanges": false,
+      "newD1MigrationInThisPR": false,
+      "remoteMigrationCommandRuns": false,
+      "featureFlagsChanged": false,
+      "productionReadPathChanged": false,
+      "activeReleasePointerChangedByCode": false
+    },
+    "dataAndExternalWrites": {
+      "collectionOrRecoveryDispatched": false,
+      "candidateManifestUploaded": false,
+      "r2OrD1DataMutationRequestedByThisPR": false,
+      "scheduledCronChanged": false,
+      "recoveryOrPCFRun": false
+    },
+    "runtimeCompatibility": {
+      "readModelV2V3": "Unchanged and retained.",
+      "schemaV4": "Remains opt-in and candidate-only; importer requires stage_only and activation rejects it.",
+      "defaultProducer": "Remains schema v3; no production workflow opts into v4."
+    },
+    "resourceBounds": {
+      "d1RowsReadWrittenByNewCode": "None.",
+      "r2ObjectsReadByNewCode": "None during deployment; local slot splitting verifies the fixed 18-artifact schema-v4 inventory with a 5,000,000-byte per-artifact limit.",
+      "actionsBudget": "One PR CI run is required; merge adds main-branch CI."
+    },
+    "rollbackAndStop": "If Worker deploy or build-identity verification fails, do not run data workflows or switch any pointer. v2/v3 production reads remain unchanged."
+  },
+  "reviewState": "Local Python, Web lint, Web build and Web test checks passed; awaiting PR CI."
+}

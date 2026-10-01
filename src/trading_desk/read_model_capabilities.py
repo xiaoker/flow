@@ -293,6 +293,101 @@ def _period_states(terminal: dict[str, Any], as_of: str) -> tuple[str, dict[str,
     }
 
 
+def _is_nonnegative_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _period_contract_is_consistent(state: dict[str, Any]) -> bool:
+    """Mirror the Worker period matrix checks before a full contract is split."""
+
+    periods = state.get("periods")
+    coverage = state.get("coverage")
+    if (
+        not isinstance(periods, dict)
+        or set(periods) != set(ETF_PERIOD_IDS)
+        or not isinstance(coverage, dict)
+        or coverage.get("periodCount") != len(ETF_PERIOD_IDS)
+        or coverage.get("expectedPeriodMetricCount") != len(ETF_PERIOD_IDS) * len(ETF_PERIOD_METRICS)
+    ):
+        return False
+
+    ready_count = 0
+    present_count = 0
+    unknown_count = 0
+    for period in ETF_PERIOD_IDS:
+        metrics = periods.get(period)
+        if not isinstance(metrics, dict) or set(metrics) != set(ETF_PERIOD_METRICS):
+            return False
+        for metric in ETF_PERIOD_METRICS:
+            value = metrics.get(metric)
+            if not isinstance(value, dict):
+                return False
+            status = value.get("status")
+            sample_count = value.get("sampleCount")
+            available = value.get("availableSampleCount")
+            missing = value.get("missingSampleCount")
+            reason = value.get("reasonCode")
+            if (
+                status not in {"READY", "PARTIAL", "MISSING", "UNKNOWN"}
+                or not all(_is_nonnegative_count(count) for count in (sample_count, available, missing))
+                or available + missing != sample_count
+                or (reason is not None and (not isinstance(reason, str) or not reason))
+            ):
+                return False
+            if status == "READY":
+                if sample_count == 0 or available != sample_count or missing != 0 or reason is not None:
+                    return False
+                ready_count += 1
+                present_count += 1
+            elif status == "PARTIAL":
+                if sample_count == 0 or available == 0 or available >= sample_count or reason is None:
+                    return False
+                present_count += 1
+            elif status == "MISSING":
+                if sample_count == 0 or available != 0 or reason is None:
+                    return False
+            else:
+                if reason is None:
+                    return False
+                unknown_count += 1
+
+    if (
+        not _is_nonnegative_count(coverage.get("readyPeriodMetricCount"))
+        or coverage["readyPeriodMetricCount"] != ready_count
+    ):
+        return False
+    expected = len(ETF_PERIOD_IDS) * len(ETF_PERIOD_METRICS)
+    status = state.get("status")
+    if status == "READY":
+        return ready_count == expected and state.get("reasonCode") is None
+    if status == "PARTIAL":
+        return present_count > 0 and ready_count < expected and unknown_count == 0 and isinstance(state.get("reasonCode"), str)
+    if status == "MISSING":
+        return present_count == 0 and unknown_count == 0 and isinstance(state.get("reasonCode"), str)
+    if status == "UNKNOWN":
+        return unknown_count > 0 and isinstance(state.get("reasonCode"), str)
+    return False
+
+
+def _period_reason(status: str, periods: dict[str, Any]) -> str:
+    if status != "UNKNOWN":
+        return "period_windows_incomplete"
+    reasons = {
+        metric_state.get("reasonCode")
+        for window in periods.values()
+        if isinstance(window, dict)
+        for metric_state in window.values()
+        if isinstance(metric_state, dict)
+        and metric_state.get("status") == "UNKNOWN"
+        and isinstance(metric_state.get("reasonCode"), str)
+    }
+    if len(reasons) == 1:
+        return next(iter(reasons))
+    if reasons:
+        return "multiple_period_evidence_issues"
+    return "period_evidence_unknown"
+
+
 def build_capability_states(
     *,
     scope: str,
@@ -369,6 +464,9 @@ def build_capability_states(
         count = len(data.get("etfTerminal", {}).get("instruments", [])) if capability_id == "national_team" and isinstance(data.get("etfTerminal"), dict) else (
             len(data.get("groupPeriods", [])) if capability_id == "rotation" and isinstance(data.get("groupPeriods"), list) else len(instruments)
         )
+        if status == "READY" and count == 0:
+            status = "MISSING"
+            reason = f"{capability_id}_sample_universe_empty"
         states[capability_id] = _entry(
             status=status,
             as_of=as_of if status == "READY" else None,
@@ -428,9 +526,7 @@ def build_capability_states(
             as_of=as_of if period_status in {"READY", "PARTIAL"} else None,
             source_dates=_source_dates_for("etf", source_dates),
             artifact_names=CAPABILITY_ARTIFACTS["etf_periods"],
-            reason_code=None if period_status == "READY" else (
-                "etf_daily_core_not_ready" if period_status == "UNKNOWN" else "period_windows_incomplete"
-            ),
+            reason_code=None if period_status == "READY" else _period_reason(period_status, periods),
             coverage=coverage,
             periods=periods,
         )
@@ -621,6 +717,15 @@ def validate_capability_contract_for_split(contract: Any, manifest: dict[str, An
             status != "READY" and (not isinstance(reason, str) or not reason)
         ):
             raise ValueError(f"source capability readiness evidence is invalid: {capability_id}")
+        source_dates = state.get("sourceDates")
+        coverage = state.get("coverage")
+        if (
+            not isinstance(source_dates, dict)
+            or any(value is not None and not _is_date(value) for value in source_dates.values())
+            or not isinstance(coverage, dict)
+            or any(not _is_nonnegative_count(value) for value in coverage.values())
+        ):
+            raise ValueError(f"source capability evidence shape is invalid: {capability_id}")
         refs = state.get("artifactRefs")
         expected_names = CAPABILITY_ARTIFACTS[capability_id]
         if not isinstance(refs, list) or len(refs) != len(expected_names):
@@ -636,6 +741,8 @@ def validate_capability_contract_for_split(contract: Any, manifest: dict[str, An
                 or ref.get("bytes") != descriptor.get("bytes")
             ):
                 raise ValueError(f"source capability artifact reference mismatch: {capability_id}:{name}")
+        if capability_id == "etf_periods" and not _period_contract_is_consistent(state):
+            raise ValueError("source etf_periods evidence is inconsistent")
 
     core = capabilities["etf_daily_core"]
     if core["status"] == "READY":
@@ -660,6 +767,28 @@ def validate_capability_contract_for_split(contract: Any, manifest: dict[str, An
         for name in ("etf_radar", "rotation", "national_team", "etf_periods")
     ) and core["status"] != "READY":
         raise ValueError("source READY ETF capability lacks core proof")
+    for capability_id in ("etf_radar", "rotation", "national_team"):
+        state = capabilities[capability_id]
+        if state["status"] != "READY":
+            continue
+        dates = state.get("sourceDates")
+        if (
+            not isinstance(dates, dict)
+            or dates.get("sseEtfAsOf") != as_of
+            or dates.get("szseEtfAsOf") != as_of
+            or not _is_nonnegative_count(state.get("coverage", {}).get("sampleCount"))
+            or state["coverage"]["sampleCount"] == 0
+        ):
+            raise ValueError(f"source READY {capability_id} proof is invalid")
+
+    for capability_id, date_key in (("connect", "connectAsOf"), ("margin", "marginAsOf")):
+        state = capabilities[capability_id]
+        if state["status"] == "READY" and (
+            state["sourceDates"].get(date_key) != as_of
+            or not _is_nonnegative_count(state["coverage"].get("recordCount"))
+            or state["coverage"]["recordCount"] == 0
+        ):
+            raise ValueError(f"source READY {capability_id} proof is invalid")
 
     penetration = capabilities["etf_penetration"]
     if penetration["status"] == "READY":
@@ -680,6 +809,21 @@ def validate_capability_contract_for_split(contract: Any, manifest: dict[str, An
             raise ValueError("source READY etf_penetration proof is invalid")
     if any(capabilities[name]["status"] == "READY" for name in ("stock_search", "stock_detail")) and penetration["status"] != "READY":
         raise ValueError("source READY stock capability lacks penetration proof")
+    if penetration["status"] == "READY":
+        penetration_dates = penetration["sourceDates"]
+        for capability_id in ("stock_search", "stock_detail"):
+            state = capabilities[capability_id]
+            if state["status"] != "READY":
+                continue
+            dates = state["sourceDates"]
+            if (
+                dates.get("pcfEffectiveAsOf") != as_of
+                or dates.get("pcfAsOf") != penetration_dates.get("pcfAsOf")
+                or dates.get("pcfEffectiveAsOf") != penetration_dates.get("pcfEffectiveAsOf")
+                or not _is_nonnegative_count(state["coverage"].get("stockCount"))
+                or state["coverage"]["stockCount"] == 0
+            ):
+                raise ValueError(f"source READY {capability_id} proof is invalid")
 
 
 __all__ = [
