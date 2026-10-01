@@ -30,6 +30,27 @@ function artifact(value: unknown): value is { key: string; sha256: string; rows?
 type ManifestArtifact = { key: string; sha256: string; rows?: number; members?: number };
 type ValidatedItem = { etfCode: string; tradingDay: string; preTradingDay: string; componentCount: number; normalizedSha256: string };
 
+function validSourceWindow(value: unknown, tradeDate: string, previousDate: string): value is {
+  version: "sse-pcf-exact-v1"; provider: "sse"; dataset: "etf_pcf"; targetDate: string; previousDate: string;
+  probeCode: string; exactDateRule: string; windowClass: "official_exact";
+} {
+  return isRecord(value) && value.version === "sse-pcf-exact-v1" && value.provider === "sse" && value.dataset === "etf_pcf" &&
+    typeof value.probeCode === "string" && value.probeCode.length <= 32 && value.targetDate === tradeDate && value.previousDate === previousDate &&
+    typeof value.exactDateRule === "string" && value.windowClass === "official_exact";
+}
+
+function validEligibility(value: unknown): value is { status: "ELIGIBLE"; basis: string; setSha256: string; codes: string[] } {
+  return isRecord(value) && value.status === "ELIGIBLE" && typeof value.basis === "string" && typeof value.setSha256 === "string" && SHA256.test(value.setSha256) &&
+    Array.isArray(value.codes) && value.codes.every((code) => typeof code === "string" && /^\d{6}$/.test(code));
+}
+
+function validQualification(value: unknown, tradeDate: string, eligibleSetSha256: string): value is {
+  version: "pcf-qualification-v1"; status: "QUALIFIED"; captureDate: string; qualificationDate: string; eligibleSetSha256: string; evidence: Record<string, unknown>;
+} {
+  return isRecord(value) && value.version === "pcf-qualification-v1" && value.status === "QUALIFIED" && value.captureDate === tradeDate &&
+    value.qualificationDate === tradeDate && value.eligibleSetSha256 === eligibleSetSha256 && isRecord(value.evidence);
+}
+
 function validatedItem(value: unknown): value is ValidatedItem {
   return isRecord(value) && typeof value.etfCode === "string" && /^\d{6}$/.test(value.etfCode) &&
     typeof value.tradingDay === "string" && ISO_DATE.test(value.tradingDay) &&
@@ -63,6 +84,11 @@ export async function POST(request: Request): Promise<Response> {
   const universe = isRecord(manifest.universe) ? manifest.universe : null;
   const artifacts = isRecord(manifest.artifacts) ? manifest.artifacts : null;
   const tradeDate = typeof manifest.tradeDate === "string" ? manifest.tradeDate : "";
+  const previousDate = typeof manifest.previousDate === "string" ? manifest.previousDate : "";
+  const sourceWindow = manifest.sourceWindow;
+  const sourceEvidence = manifest.sourceEvidence;
+  const eligibility = manifest.eligibility;
+  const qualification = manifest.qualification;
   const jobId = typeof manifest.jobId === "string" ? manifest.jobId : "";
   const revisionId = typeof value.revisionId === "string" ? value.revisionId : "";
   const manifestKey = typeof value.manifestKey === "string" ? value.manifestKey : "";
@@ -70,24 +96,43 @@ export async function POST(request: Request): Promise<Response> {
   const validatedItems = Array.isArray(value.validatedItems) && value.validatedItems.every(validatedItem)
     ? value.validatedItems as ValidatedItem[]
     : null;
-  if (manifest.schemaVersion !== 2 || manifest.dataset !== "sse_etf_pcf" || manifest.calculationVersion !== "pcf-capture-v2" || !ISO_DATE.test(tradeDate) || !jobId || !/^[a-f0-9]{24}$/.test(revisionId) || manifestKey !== `market-data/pcf-v2/manifests/${tradeDate}/${revisionId}.json` || !SHA256.test(manifestSha256) || !coverage || !universe || !artifacts || !artifact(artifacts.headers) || !artifact(artifacts.components) || !artifact(artifacts.data) || !artifact(artifacts.rawPack) || !validatedItems) return bad("invalid_pcf_manifest", 422);
+  if (manifest.schemaVersion !== 2 || manifest.dataset !== "sse_etf_pcf" || manifest.calculationVersion !== "pcf-capture-v2" || !ISO_DATE.test(tradeDate) || !ISO_DATE.test(previousDate) || !jobId || !/^[a-f0-9]{24}$/.test(revisionId) || manifestKey !== `market-data/pcf-v2/manifests/${tradeDate}/${revisionId}.json` || !SHA256.test(manifestSha256) || !coverage || !universe || !artifacts || !artifact(artifacts.headers) || !artifact(artifacts.components) || !artifact(artifacts.data) || !artifact(artifacts.rawPack) || !validatedItems || !validSourceWindow(sourceWindow, tradeDate, previousDate) || !isRecord(sourceEvidence) || !validEligibility(eligibility) || !validQualification(qualification, tradeDate, eligibility.setSha256)) return bad("invalid_pcf_manifest", 422);
   const required = Number(universe.required);
   const captured = Number(coverage.captured);
   const valid = Number(coverage.valid);
   const failed = Number(coverage.failed);
   if (![required, captured, valid, failed].every((item) => Number.isSafeInteger(item) && item >= 0) || required !== captured || captured !== valid || failed !== 0) return bad("pcf_coverage_incomplete", 409);
-  const canonicalArtifacts = {
-    headers: artifacts.headers as ManifestArtifact,
-    components: artifacts.components as ManifestArtifact,
-    data: artifacts.data as ManifestArtifact,
-    rawPack: artifacts.rawPack as ManifestArtifact,
-  };
+    const canonicalArtifacts = {
+      headers: artifacts.headers as ManifestArtifact,
+      components: artifacts.components as ManifestArtifact,
+      data: artifacts.data as ManifestArtifact,
+      rawPack: artifacts.rawPack as ManifestArtifact,
+    };
+    const qualificationEvidence = (qualification as { evidence: Record<string, unknown> }).evidence;
+    const artifactEvidence = isRecord(qualificationEvidence.artifactSha256) ? qualificationEvidence.artifactSha256 : null;
+    if (qualificationEvidence.rawPackSha256 !== canonicalArtifacts.rawPack.sha256 || !artifactEvidence ||
+        artifactEvidence.headers !== canonicalArtifacts.headers.sha256 || artifactEvidence.components !== canonicalArtifacts.components.sha256 || artifactEvidence.data !== canonicalArtifacts.data.sha256 ||
+        Number(qualificationEvidence.validatedCount) !== valid || !isRecord(qualificationEvidence.normalizedSha256s)) {
+      return bad("pcf_qualification_evidence_mismatch", 409);
+    }
 
   try {
     const job = await runtime.DB.prepare("SELECT * FROM pcf_capture_job WHERE job_id = ? LIMIT 1").bind(jobId).first<Record<string, unknown>>();
     if (!job || job.target_date !== tradeDate) return bad("pcf_capture_job_not_found", 404);
     if (String(job.previous_date) !== String(manifest.previousDate) || Number(job.required_count) !== required || Number(job.captured_count) !== required) {
       return bad("pcf_capture_job_coverage_mismatch", 409);
+    }
+    let persistedEvidence: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(String(job.error_json || "{}"));
+      if (isRecord(parsed)) persistedEvidence = parsed;
+    } catch {
+      return bad("pcf_plan_evidence_invalid", 409);
+    }
+    const planEvidence = isRecord(persistedEvidence.planEvidence) ? persistedEvidence.planEvidence : null;
+    if (!planEvidence || !validSourceWindow(planEvidence.sourceWindow, tradeDate, String(job.previous_date)) ||
+        !isRecord(planEvidence.eligibility) || planEvidence.eligibility.setSha256 !== eligibility.setSha256) {
+      return bad("pcf_plan_evidence_mismatch", 409);
     }
     const requiredItems = await runtime.DB.prepare(
       `SELECT etf_code AS etfCode, state, source_trading_day AS tradingDay,

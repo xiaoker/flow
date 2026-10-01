@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "stage": "051-C",
+  "baseCommit": "5cfd2dd8d301bf6e10daf81f6806173742ec2584",
+  "generatedAt": "2026-10-01T11:36:41Z",
+  "scope": {
+    "files": [
+      "src/trading_desk/pcf_capture.py",
+      "src/trading_desk/pcf_canonical.py",
+      "scripts/build_pcf_v2_plan.py",
+      "scripts/capture_sse_pcf_v2.py",
+      "scripts/finalize_sse_pcf_v2.py",
+      "web/app/lib/pcf-capture-contract.ts",
+      "web/app/api/v1/admin/pcf-capture/route.ts",
+      "web/app/api/v1/admin/pcf-capture/lease/route.ts",
+      "web/app/api/v1/admin/pcf-capture/finalize/route.ts",
+      "tests/unit/test_pcf_capture.py",
+      "docs/audits/flow-convergence-progress.md"
+    ],
+    "migrations": [],
+    "workflowChanges": false,
+    "productionFlagsChanged": false,
+    "activeReleaseChanged": false,
+    "collectionOrRecoveryDispatched": false
+  },
+  "mergeEffects": {
+    "ci": [
+      "pull_request: ci.yml unit-and-contract-tests",
+      "pull_request: ci.yml web-ci"
+    ],
+    "deploy": {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "trigger": "pull_request closed on main when web/** changes",
+      "actions": [
+        "npm ci",
+        "npm run lint",
+        "npm test",
+        "wrangler d1 migrations apply flow --remote (no pending migration expected)",
+        "npm run deploy",
+        "production build identity verification"
+      ],
+      "concurrency": "flow-production-deploy; cancel-in-progress=true"
+    }
+  },
+  "runtimeBoundary": {
+    "pcfReadFlag": "unchanged/off",
+    "capture": "not run",
+    "qualification": "code-only; no five-day observation started",
+    "productionHeavyDispatchChanged": false
+  },
+  "rollback": "Revert the standalone PR before any PCF observation or read-path cutover; no data cleanup or active-release mutation is required."
+}

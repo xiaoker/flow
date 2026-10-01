@@ -14,7 +14,7 @@ import pandas as pd
 import requests
 
 from scripts.capture_sse_pcf_v2 import fetch_xml
-from trading_desk.pcf_capture import build_changed_etf_capture_plan
+from trading_desk.pcf_capture import build_changed_etf_capture_plan, default_source_window
 from trading_desk.pcf_xml import parse_sse_etf_pcf_xml
 
 
@@ -70,6 +70,8 @@ def build_plan(
         target_date=trade_date,
         previous_date=previous_date,
         hard_limit=hard_limit,
+        source_window=default_source_window(trade_date, previous_date, probe_code="plan-input"),
+        source_evidence={"mode": "local_share_snapshot", "shareSnapshotSha256": hashlib.sha256(shares_path.read_bytes()).hexdigest()},
     )
 
 
@@ -166,12 +168,24 @@ def build_current_official_plan(
 
     current, current_raw = fetch_sse_share_snapshot(client, trade_date=target_date)
     previous, previous_raw = fetch_sse_share_snapshot(client, trade_date=previous_date)
+    source_window = default_source_window(target_date, previous_date, probe_code=probe_code)
+    source_evidence = {
+        "schemaVersion": 1,
+        "probeCode": probe_code,
+        "pcfProbeSha256": hashlib.sha256(probe_xml).hexdigest(),
+        "shareSnapshots": {
+            target_date: hashlib.sha256(current_raw).hexdigest(),
+            previous_date: hashlib.sha256(previous_raw).hexdigest(),
+        },
+    }
     plan = build_changed_etf_capture_plan(
         current,
         previous,
         target_date=target_date,
         previous_date=previous_date,
         hard_limit=hard_limit,
+        source_window=source_window,
+        source_evidence=source_evidence,
     )
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +203,8 @@ def build_current_official_plan(
                 previous_date: hashlib.sha256(previous_raw).hexdigest(),
             },
             "dateContract": "PCF TradingDay/PreTradingDay select the exact SSE share snapshots",
+            "sourceWindow": source_window,
+            "sourceEvidence": source_evidence,
         }
         (evidence_dir / f"{target_date}-date-evidence.json").write_text(
             json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
@@ -230,12 +246,24 @@ def build_live_official_plan(
 
     current, current_raw = fetch_sse_share_snapshot(client, trade_date=target_date)
     previous, previous_raw = fetch_sse_share_snapshot(client, trade_date=previous_date)
+    source_window = default_source_window(target_date, previous_date, probe_code=probe_code)
+    source_evidence = {
+        "schemaVersion": 1,
+        "probeCode": probe_code,
+        "pcfProbeSha256": hashlib.sha256(probe_xml).hexdigest(),
+        "shareSnapshots": {
+            target_date: hashlib.sha256(current_raw).hexdigest(),
+            previous_date: hashlib.sha256(previous_raw).hexdigest(),
+        },
+    }
     plan = build_changed_etf_capture_plan(
         current,
         previous,
         target_date=target_date,
         previous_date=previous_date,
         hard_limit=hard_limit,
+        source_window=source_window,
+        source_evidence=source_evidence,
     )
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -254,6 +282,8 @@ def build_live_official_plan(
             },
             "dateContract": "PCF TradingDay/PreTradingDay select the exact SSE share snapshots",
             "universeSource": "live_sse_scale_snapshot",
+            "sourceWindow": source_window,
+            "sourceEvidence": source_evidence,
         }
         (evidence_dir / f"{target_date}-date-evidence.json").write_text(
             json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",

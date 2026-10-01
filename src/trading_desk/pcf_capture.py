@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 PCF_CAPTURE_CALCULATION_VERSION = "pcf-capture-v2"
+PCF_SOURCE_WINDOW_VERSION = "sse-pcf-exact-v1"
+PCF_QUALIFICATION_VERSION = "pcf-qualification-v1"
 PCF_PLAN_HARD_LIMIT = 2000
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -195,6 +197,9 @@ class PcfCaptureJobContract(BaseModel):
     raw_pack_key: str | None = Field(default=None, alias="rawPackKey")
     raw_pack_sha256: str | None = Field(default=None, alias="rawPackSha256")
     error_json: dict[str, Any] = Field(default_factory=dict, alias="errorJson")
+    source_window: dict[str, Any] = Field(default_factory=dict, alias="sourceWindow")
+    eligibility: dict[str, Any] = Field(default_factory=dict)
+    qualification: dict[str, Any] = Field(default_factory=dict)
     started_at: str = Field(alias="startedAt")
     completed_at: str | None = Field(default=None, alias="completedAt")
     updated_at: str = Field(alias="updatedAt")
@@ -218,6 +223,9 @@ class PcfCaptureJobContract(BaseModel):
         if self.status in {"READY", "READY_NO_CHANGE"}:
             if self.failed_count or self.valid_count != self.required_count:
                 raise ValueError("ready job requires complete valid coverage")
+            qualification = self.qualification
+            if not qualification or qualification.get("status") not in {"QUALIFIED", "READY"}:
+                raise ValueError("ready job requires qualified PCF evidence")
         return self
 
 
@@ -251,6 +259,10 @@ class PcfManifestContract(BaseModel):
     artifacts: dict[str, PcfArtifactContract]
     quality: dict[str, int]
     observed_at: str = Field(alias="observedAt")
+    source_window: dict[str, Any] = Field(default_factory=dict, alias="sourceWindow")
+    source_evidence: dict[str, Any] = Field(default_factory=dict, alias="sourceEvidence")
+    eligibility: dict[str, Any] = Field(default_factory=dict)
+    qualification: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("trade_date", "previous_date", mode="before")
     @classmethod
@@ -272,6 +284,13 @@ class PcfManifestContract(BaseModel):
             raise ValueError("manifest coverage counters must be non-negative integers")
         if valid > captured or captured > required or failed > required:
             raise ValueError("manifest coverage counters are inconsistent")
+        qualification = self.qualification
+        if qualification:
+            if qualification.get("version") not in {None, PCF_QUALIFICATION_VERSION}:
+                raise ValueError("manifest qualification version is unsupported")
+            if qualification.get("status") == "QUALIFIED":
+                if qualification.get("captureDate") != self.trade_date or qualification.get("qualificationDate") != self.trade_date:
+                    raise ValueError("qualified manifest dates must match tradeDate")
         return self
 
 
@@ -308,6 +327,52 @@ def _records(value: Iterable[Mapping[str, Any]] | pd.DataFrame | None) -> list[d
     if isinstance(value, pd.DataFrame):
         return value.to_dict(orient="records")
     return [dict(item) for item in value]
+
+
+def _canonical_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def eligible_set_sha256(items: Iterable[Mapping[str, Any]]) -> str:
+    """Hash the exact, sorted ETF set eligible for PCF capture.
+
+    The set hash is deliberately independent of ordering, observation time and
+    share values.  It is the join key between planning, checkpointing and
+    qualification evidence.
+    """
+
+    codes = sorted(
+        f"{str(item.get('market') or '').upper()}:{_code(item.get('etfCode', item.get('etf_code', item.get('code'))))}"
+        for item in items
+        if bool(item.get("required"))
+    )
+    return _canonical_hash(codes)
+
+
+def default_source_window(target_date: str, previous_date: str, *, probe_code: str = "plan-input") -> dict[str, Any]:
+    return {
+        "version": PCF_SOURCE_WINDOW_VERSION,
+        "provider": "sse",
+        "dataset": "etf_pcf",
+        "probeCode": probe_code,
+        "targetDate": target_date,
+        "previousDate": previous_date,
+        "exactDateRule": "TradingDay == targetDate and PreTradingDay == previousDate",
+        "windowClass": "official_exact",
+    }
+
+
+def pending_qualification(target_date: str, eligible_sha256: str) -> dict[str, Any]:
+    return {
+        "version": PCF_QUALIFICATION_VERSION,
+        "status": "PENDING",
+        "captureDate": target_date,
+        "qualificationDate": None,
+        "eligibleSetSha256": eligible_sha256,
+        "evidence": {},
+    }
 
 
 def _normalise_universe(
@@ -348,6 +413,8 @@ def build_changed_etf_capture_plan(
     previous_date: str,
     calculation_version: str = PCF_CAPTURE_CALCULATION_VERSION,
     hard_limit: int = PCF_PLAN_HARD_LIMIT,
+    source_window: Mapping[str, Any] | None = None,
+    source_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic outer-join PCF capture plan.
 
@@ -412,12 +479,27 @@ def build_changed_etf_capture_plan(
         status = "BLOCKED_QUALITY"
     else:
         status = "READY_NO_CHANGE" if not required_items else "PLANNED"
+    eligible_sha256 = eligible_set_sha256(required_items)
+    source_window_value = dict(source_window or default_source_window(target_date, previous_date))
+    if source_window_value.get("targetDate") != target_date or source_window_value.get("previousDate") != previous_date:
+        raise ValueError("source_window_date_mismatch")
+    eligibility_status = "ELIGIBLE" if status not in {"BLOCKED_QUALITY", "BLOCKED_UNIVERSE_ANOMALY"} else "BLOCKED"
+    eligibility = {
+        "status": eligibility_status,
+        "basis": "COMPARABLE_CHANGED exact share delta",
+        "setSha256": eligible_sha256,
+        "codes": [item["etfCode"] for item in required_items],
+    }
     plan_payload = {
         "targetDate": target_date,
         "previousDate": previous_date,
         "calculationVersion": calculation_version,
         "hardLimit": hard_limit,
         "status": status,
+        "sourceWindow": source_window_value,
+        "sourceEvidence": dict(source_evidence or {}),
+        "eligibility": eligibility,
+        "qualification": pending_qualification(target_date, eligible_sha256),
         "items": items,
     }
     canonical = json.dumps(plan_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
