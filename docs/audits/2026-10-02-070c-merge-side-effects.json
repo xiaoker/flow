@@ -5,7 +5,7 @@
   "baseRef": "main",
   "baseSha": "8769d93485af63d751acae9936f29b103c18d87e",
   "changeScope": {
-    "businessCodeFiles": 8,
+    "businessCodeFiles": 13,
     "newMigrations": [],
     "workflowFilesChanged": [],
     "productionReadPathChanged": false,
@@ -26,8 +26,13 @@
         "live Worker build-identity verification"
       ],
       "newMigrationInThisPullRequest": false,
-      "remotePendingMigrationInventory": "unknown_not_checked",
-      "risk": "The workflow applies any migration pending on the remote D1 database, even though this pull request adds no migration. Verify pending remote migration status before merge authorization."
+      "remotePendingMigrationInventory": {
+        "checkedAt": "2026-10-02T01:53:57+08:00",
+        "command": "wrangler d1 migrations list flow --remote",
+        "result": "No migrations to apply!",
+        "migrationsApplied": false
+      },
+      "risk": "No migration was pending at the read-only check time, so this merge currently has no D1 migration to apply. The workflow remains structurally coupled to migrations and would apply any unrelated migration that becomes pending before a later deployment; split that behavior in a separate PR."
     },
     "candidateRuntimeReads": {
       "manifestLookup": "At most one release_manifest primary-key row per explicit request; exact release_id and STAGED status; no enumeration.",
@@ -35,9 +40,10 @@
       "writes": "None"
     },
     "security": {
-      "credential": "Existing INGEST_API_KEY is entered into the page, held in JavaScript memory, and sent over HTTPS in an Authorization header; it is not stored in URL/localStorage/sessionStorage.",
-      "accessPolicyVerified": false,
-      "operatorConstraint": "Use only a trusted access-controlled device/entry point; clear the page session after use."
+      "credential": "The browser uses the Cloudflare Access session cookie for same-origin API calls; no INGEST_API_KEY is accepted by the page or sent by the candidate client.",
+      "accessPolicyVerified": true,
+      "accessPolicyEvidence": "Cloudflare dashboard showed flow.xiaoker.com app with a flow-only-me Allow policy restricted to the operator account and a separate flow-github-actions Service Auth policy. Candidate Worker verifies Cf-Access-Jwt-Assertion RS256 signature, issuer, audience, and temporal claims.",
+      "cookieHardeningFollowUp": "HttpOnly and binding-cookie options were observed disabled and were not changed by this PR; review separately before changing session behavior."
     },
     "productionState": "No collection, recovery, history backfill, candidate upload/activation, active pointer change, flag change, or production read-path switch is part of this pull request."
   },

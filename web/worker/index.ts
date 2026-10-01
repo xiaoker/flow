@@ -28,6 +28,8 @@ interface Env {
   GITHUB_ACTIONS_TOKEN: string;
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
+  CANDIDATE_ACCESS_ISSUER?: string;
+  CANDIDATE_ACCESS_AUD?: string;
   PIPELINE_WINDOW_GATE_ENABLED?: string;
   /** v0.5 compatibility input; 0=OFF, 1=ENFORCE. */
   MARKET_DAY_PROBE_ENABLED?: string;

@@ -69,7 +69,6 @@ async function requireOk(response: Response): Promise<void> {
 export async function readCandidateManifest(
   fetcher: typeof fetch,
   releaseId: string,
-  apiKey: string,
   signal: AbortSignal,
 ): Promise<CandidateEnvelope> {
   const response = await fetcher(`/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(releaseId)}`, {
@@ -78,7 +77,7 @@ export async function readCandidateManifest(
     credentials: "same-origin",
     redirect: "error",
     signal,
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    headers: { Accept: "application/json" },
   });
   await requireOk(response);
   const value: unknown = await response.json();
@@ -101,7 +100,6 @@ export async function readCandidateArtifact<T>(
   identity: CandidateIdentity,
   artifact: string,
   descriptor: Pick<ReadModelArtifactDescriptor, "sha256" | "bytes">,
-  apiKey: string,
   signal: AbortSignal,
 ): Promise<T> {
   if (!/^[a-f0-9]{64}$/.test(descriptor.sha256) || !Number.isSafeInteger(descriptor.bytes) || descriptor.bytes <= 0 || descriptor.bytes > 5_000_000) {
@@ -118,7 +116,7 @@ export async function readCandidateArtifact<T>(
     credentials: "same-origin",
     redirect: "error",
     signal,
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    headers: { Accept: "application/json" },
   });
   await requireOk(response);
   requireIdentityHeaders(response, identity);
@@ -156,7 +154,8 @@ export async function readCandidateArtifact<T>(
 export function candidateErrorMessage(error: unknown): string {
   const code = error instanceof CandidateReadError ? error.code : error instanceof Error ? error.message : "unknown_error";
   const messages: Record<string, string> = {
-    unauthorized: "后台密钥无效或已过期；密钥只保存在当前页面内存，不会写入浏览器存储。",
+    unauthorized: "Cloudflare Access 登录已过期或当前身份未通过授权；请重新登录后重试。",
+    access_verification_unavailable: "Cloudflare Access 身份校验暂不可用，候选数据未读取；请稍后重试。",
     candidate_not_found_or_no_longer_staged: "候选不存在或已不再是 STAGED 状态；不会回退读取生产版本。",
     candidate_manifest_changed_refresh_required: "候选清单版本已变化，请重新读取并核对 releaseId。",
     candidate_response_identity_mismatch: "响应的版本、日期或清单哈希与选中候选不一致，已丢弃。",

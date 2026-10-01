@@ -83,7 +83,6 @@ function visibleRadarNodeCount(series: Array<{ date?: unknown }> | undefined): n
 }
 
 export function CandidateWorkbench() {
-  const [apiKey, setApiKey] = useState("");
   const [releaseIdInput, setReleaseIdInput] = useState("");
   const [candidate, setCandidate] = useState<CandidateEnvelope | null>(null);
   const [searchItems, setSearchItems] = useState<SearchItem[]>([]);
@@ -110,10 +109,9 @@ export function CandidateWorkbench() {
   useEffect(() => () => invalidateReads(), [invalidateReads]);
 
   const loadCandidate = useCallback(async (requestedReleaseId = releaseIdInput) => {
-    const cleanKey = apiKey.trim();
     const cleanReleaseId = requestedReleaseId.trim();
-    if (!cleanKey || !cleanReleaseId) {
-      setError("请填写后台密钥和精确 releaseId。候选列表不会被扫描或自动枚举。");
+    if (!cleanReleaseId) {
+      setError("请填写精确 releaseId。候选列表不会被扫描或自动枚举。");
       return;
     }
     invalidateReads();
@@ -127,7 +125,7 @@ export function CandidateWorkbench() {
     setLoading(true);
     const request = candidateGate.current.begin();
     try {
-      const loaded = await readCandidateManifest(fetch, cleanReleaseId, cleanKey, request.signal);
+      const loaded = await readCandidateManifest(fetch, cleanReleaseId, request.signal);
       if (!request.isCurrent()) return;
       candidateRef.current = loaded;
       setCandidate(loaded);
@@ -137,7 +135,7 @@ export function CandidateWorkbench() {
     } finally {
       if (request.isCurrent()) setLoading(false);
     }
-  }, [apiKey, invalidateReads, releaseIdInput]);
+  }, [invalidateReads, releaseIdInput]);
 
   useEffect(() => {
     if (!candidate || candidate.slot !== "etf_penetration" || capabilityFor(candidate, "stock_search")?.status !== "READY") return;
@@ -146,7 +144,7 @@ export function CandidateWorkbench() {
     const identity = identityOf(candidate);
     const descriptor = candidate.manifest.artifacts.stock_search;
     if (!descriptor) return;
-    void readCandidateArtifact<SearchPayload>(fetch, identity, "stock_search", descriptor, apiKey.trim(), request.signal)
+    void readCandidateArtifact<SearchPayload>(fetch, identity, "stock_search", descriptor, request.signal)
       .then((payload) => {
         if (!request.isCurrent() || candidateRef.current?.releaseId !== identity.releaseId || candidateRef.current.manifestSha256 !== identity.manifestSha256) return;
         setSearchItems(Array.isArray(payload.items) ? payload.items : []);
@@ -155,7 +153,7 @@ export function CandidateWorkbench() {
         if (!request.signal.aborted && request.isCurrent()) setError(candidateErrorMessage(cause));
       });
     return () => gate.cancel();
-  }, [apiKey, candidate]);
+  }, [candidate]);
 
   const filteredStocks = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -176,7 +174,7 @@ export function CandidateWorkbench() {
     }
     const request = detailGate.current.begin();
     const identity = identityOf(candidate);
-    void readCandidateArtifact<StockPayload>(fetch, identity, item.shard, descriptor, apiKey.trim(), request.signal)
+    void readCandidateArtifact<StockPayload>(fetch, identity, item.shard, descriptor, request.signal)
       .then((payload) => {
         if (!request.isCurrent() || candidateRef.current?.releaseId !== identity.releaseId || candidateRef.current.manifestSha256 !== identity.manifestSha256) return;
         const match = (payload.items ?? []).find((row) => row.identity === `${item.listingMarket}:${item.code}` ||
@@ -187,7 +185,7 @@ export function CandidateWorkbench() {
       .catch((cause: unknown) => {
         if (!request.signal.aborted && request.isCurrent()) setError(candidateErrorMessage(cause));
       });
-  }, [apiKey, candidate]);
+  }, [candidate]);
 
   const loadPeriodNodes = useCallback(() => {
     if (!candidate || !candidate.manifest.artifacts.radar || capabilityFor(candidate, "etf_radar")?.status !== "READY") return;
@@ -202,7 +200,7 @@ export function CandidateWorkbench() {
       setArtifactLoading(false);
       return;
     }
-    void readCandidateArtifact<RadarPayload>(fetch, identity, "radar", descriptor, apiKey.trim(), request.signal)
+    void readCandidateArtifact<RadarPayload>(fetch, identity, "radar", descriptor, request.signal)
       .then((payload) => {
         if (!request.isCurrent() || candidateRef.current?.releaseId !== identity.releaseId || candidateRef.current.manifestSha256 !== identity.manifestSha256) return;
         setRadar(payload);
@@ -213,18 +211,18 @@ export function CandidateWorkbench() {
       .finally(() => {
         if (request.isCurrent()) setArtifactLoading(false);
       });
-  }, [apiKey, candidate]);
+  }, [candidate]);
 
   const signOut = () => {
     invalidateReads();
     candidateRef.current = null;
-    setApiKey("");
     setCandidate(null);
     setSearchItems([]);
     setSelectedStock(null);
     setStockDetail(null);
     setRadar(null);
     setQuery("");
+    setReleaseIdInput("");
     setError(null);
     setLoading(false);
     setArtifactLoading(false);
@@ -244,14 +242,13 @@ export function CandidateWorkbench() {
     <main className="candidate-workbench">
       <header className="candidate-header">
         <div><span className="eyebrow">Flow · v0.7 candidate only</span><h1>候选发布预览</h1><p>只读取显式 releaseId 对应的 STAGED 清单与不可变工件；不读取 active pointer，不修改任何生产状态。</p></div>
-        {(candidate || apiKey) && <button aria-label="清除页面内存中的候选授权和数据" className="candidate-secondary" onClick={signOut} type="button"><SignOut size={17} />清除会话</button>}
+        {(candidate || releaseIdInput) && <button aria-label="清除候选页面中的数据" className="candidate-secondary" onClick={signOut} type="button"><SignOut size={17} />清除候选内容</button>}
       </header>
 
       <section className="candidate-panel candidate-access">
-        <div className="candidate-access-title"><LockKey size={19} /><div><strong>只读授权</strong><span>后台密钥只由本页内存使用，并通过 HTTPS 发给本域只读接口；应用不写 URL / localStorage / sessionStorage。请只在可信设备输入，并在离开前点击“清除会话”。</span></div></div>
-        <label><span>后台密钥</span><input autoComplete="off" onChange={(event) => setApiKey(event.target.value)} placeholder="Bearer token 原文" type="password" value={apiKey} /></label>
+        <div className="candidate-access-title"><LockKey size={19} /><div><strong>Cloudflare Access 只读身份</strong><span>请先通过 Cloudflare Access 登录。本页不收集或发送后台密钥；候选 API 在 Worker 端验证 Access JWT 的签名、签发方和应用受众后才读取数据。</span></div></div>
         <label><span>STAGED releaseId</span><input autoCapitalize="off" autoComplete="off" onChange={(event) => setReleaseIdInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadCandidate(); }} placeholder="release:YYYY-MM-DD:16位十六进制" spellCheck={false} value={releaseIdInput} /></label>
-        <button className="candidate-primary" disabled={loading || !apiKey.trim() || !releaseIdInput.trim()} onClick={() => void loadCandidate()} type="button">
+        <button className="candidate-primary" disabled={loading || !releaseIdInput.trim()} onClick={() => void loadCandidate()} type="button">
           {loading ? <ArrowClockwise className="spin" size={17} /> : <Database size={17} />}{loading ? "正在校验候选…" : candidate ? "重新读取此候选" : "读取指定候选"}
         </button>
         <p className="candidate-note">请求仅按 releaseId 做单行精确查询；不会列举候选、不自动刷新、不触发采集或发布。</p>

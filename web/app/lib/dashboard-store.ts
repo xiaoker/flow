@@ -14,6 +14,8 @@ type RuntimeEnv = {
   DB?: D1Database;
   RAW_BUCKET?: R2Bucket;
   INGEST_API_KEY?: string;
+  CANDIDATE_ACCESS_ISSUER?: string;
+  CANDIDATE_ACCESS_AUD?: string;
   HISTORY_IMPORT_ARCHIVE_ONLY?: string;
   SOURCE_OBSERVATION_SHADOW_ENABLED?: string;
   PCF_CAPTURE_V2_READ_ENABLED?: string;

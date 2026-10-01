@@ -1,4 +1,5 @@
 import { runtimeEnv } from "@/app/lib/dashboard-store";
+import { verifyCloudflareAccessRequest } from "@/app/lib/cloudflare-access";
 import {
   isCandidateArtifactName,
   isValidCandidateRequest,
@@ -8,22 +9,19 @@ import {
 
 export const dynamic = "force-dynamic";
 
-function secureEqual(left: string, right: string): boolean {
-  if (left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  return difference === 0;
-}
-
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "private, no-store, max-age=0" } });
 }
 
 export async function GET(request: Request): Promise<Response> {
   const runtime = await runtimeEnv();
-  const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-  if (!runtime.INGEST_API_KEY || !suppliedKey || !secureEqual(suppliedKey, runtime.INGEST_API_KEY)) {
-    return json({ error: "unauthorized" }, 401);
+  const access = await verifyCloudflareAccessRequest(request, {
+    issuer: runtime.CANDIDATE_ACCESS_ISSUER,
+    audience: runtime.CANDIDATE_ACCESS_AUD,
+  });
+  if (!access.authorized) {
+    const unavailable = access.reason === "misconfigured" || access.reason === "verifier_unavailable";
+    return json({ error: unavailable ? "access_verification_unavailable" : "unauthorized" }, unavailable ? 503 : 401);
   }
   if (!runtime.DB || !runtime.RAW_BUCKET) return json({ error: "storage_unavailable" }, 503);
 

@@ -31,6 +31,8 @@
     "binding": "IMAGES"
   },
   "vars": {
+    "CANDIDATE_ACCESS_ISSUER": "https://xiaoker.cloudflareaccess.com",
+    "CANDIDATE_ACCESS_AUD": "d3ffcc0ae6d15e7e43053d5499c90775b82ca47f5f684747fd77cc3447a3e67e",
     "PIPELINE_WINDOW_GATE_ENABLED": "1",
     "PIPELINE_WINDOW_CONTRACT_VERSION": "v1",
     "HISTORY_IMPORT_ARCHIVE_ONLY": "1",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import test from "node:test";
 import {
   CAPABILITY_CONTRACT_VERSION,
@@ -19,8 +19,58 @@ import { candidateManifestSha256, parseStagedCandidate } from "../app/lib/candid
 
 const AS_OF = "2026-09-30";
 const RELEASE_ID = `release:${AS_OF}:0123456789abcdef`;
+const ACCESS_ISSUER = `https://candidate-read-${process.pid}.cloudflareaccess.com`;
+const ACCESS_AUDIENCE = "d3ffcc0ae6d15e7e43053d5499c90775b82ca47f5f684747fd77cc3447a3e67e";
+const ACCESS_KEY_PAIR = await webcrypto.subtle.generateKey(
+  { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: Uint8Array.of(1, 0, 1), hash: "SHA-256" },
+  true,
+  ["sign", "verify"],
+);
+const ACCESS_PUBLIC_JWK = {
+  ...await webcrypto.subtle.exportKey("jwk", ACCESS_KEY_PAIR.publicKey),
+  kid: "candidate-read-test-key",
+  use: "sig",
+  alg: "RS256",
+};
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const hash = (letter) => letter.repeat(64);
+
+async function accessToken() {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: ACCESS_PUBLIC_JWK.kid, typ: "JWT" })).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({
+    iss: ACCESS_ISSUER,
+    aud: ACCESS_AUDIENCE,
+    iat: now,
+    exp: now + 3600,
+  })).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const signature = await webcrypto.subtle.sign(
+    { name: "RSASSA-PKCS1-v1_5" },
+    ACCESS_KEY_PAIR.privateKey,
+    new TextEncoder().encode(signingInput),
+  );
+  return `${signingInput}.${Buffer.from(signature).toString("base64url")}`;
+}
+
+async function withAccessJwks(callback) {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === `${ACCESS_ISSUER}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [ACCESS_PUBLIC_JWK] }, { headers: { "Cache-Control": "public, max-age=300" } });
+    }
+    return previousFetch(input, init);
+  };
+  try {
+    return await callback();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
+async function accessHeaders(extra = {}) {
+  return { ...extra, "Cf-Access-Jwt-Assertion": await accessToken() };
+}
 
 function stableJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -195,23 +245,24 @@ test("candidate artifact reader rejects mixed release identity and surfaces auth
   };
   const accepted = await readCandidateArtifact(async (url, init) => {
     assert.match(String(url), /manifestSha256=/);
-    assert.equal(init.headers.Authorization, "Bearer one-time-key");
+    assert.equal(init.headers.Authorization, undefined);
+    assert.equal(init.credentials, "same-origin");
     return new Response(body, { headers: correctHeaders });
-  }, identity, "radar", descriptor, "one-time-key", request.signal);
+  }, identity, "radar", descriptor, request.signal);
   assert.deepEqual(accepted, payload);
 
   await assert.rejects(readCandidateArtifact(async () => Response.json(payload, {
     headers: { ...correctHeaders, "x-flow-release-id": "release:2026-09-29:ffffffffffffffff" },
-  }), identity, "radar", descriptor, "one-time-key", request.signal), (error) => error.code === "candidate_response_identity_mismatch");
-  await assert.rejects(readCandidateArtifact(async () => new Response("", { status: 401 }), identity, "radar", descriptor, "bad", request.signal),
+  }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_response_identity_mismatch");
+  await assert.rejects(readCandidateArtifact(async () => new Response("", { status: 401 }), identity, "radar", descriptor, request.signal),
     (error) => error.code === "unauthorized");
   await assert.rejects(readCandidateArtifact(async () => new Response(body, {
     headers: { ...correctHeaders, "x-flow-artifact-sha256": hash("f") },
-  }), identity, "radar", descriptor, "one-time-key", request.signal), (error) => error.code === "candidate_artifact_descriptor_mismatch");
+  }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_artifact_descriptor_mismatch");
   await assert.rejects(readCandidateArtifact(async () => new Response(Buffer.from(JSON.stringify({ asOf: AS_OF, data: { ok: 2 } })), {
     headers: correctHeaders,
-  }), identity, "radar", descriptor, "one-time-key", request.signal), (error) => error.code === "candidate_artifact_sha256_mismatch");
-  assert.match(candidateErrorMessage(new CandidateReadError("unauthorized")), /只保存在当前页面内存/);
+  }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_artifact_sha256_mismatch");
+  assert.match(candidateErrorMessage(new CandidateReadError("unauthorized")), /Cloudflare Access/);
 });
 
 test("built candidate route is explicit, authenticated, staged-only, and exact by release id", async () => {
@@ -222,6 +273,8 @@ test("built candidate route is explicit, authenticated, staged-only, and exact b
   const row = rowFor(manifest);
   const db = exactCandidateDb(row);
   const env = {
+    CANDIDATE_ACCESS_ISSUER: ACCESS_ISSUER,
+    CANDIDATE_ACCESS_AUD: ACCESS_AUDIENCE,
     INGEST_API_KEY: "test-key",
     DB: db,
     RAW_BUCKET: { async get() { throw new Error("manifest lookup must not read R2"); } },
@@ -232,16 +285,23 @@ test("built candidate route is explicit, authenticated, staged-only, and exact b
   const unauthorized = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`), env, context);
   assert.equal(unauthorized.status, 401);
 
-  const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`, {
+  const legacyBearer = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`, {
     headers: { Authorization: "Bearer test-key" },
   }), env, context);
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
-  const value = await response.json();
-  assert.equal(value.status, "STAGED");
-  assert.equal(value.releaseId, RELEASE_ID);
-  assert.equal(value.asOf, AS_OF);
-  assert.equal(value.manifestSha256, manifest.manifestSha256);
+  assert.equal(legacyBearer.status, 401);
+
+  await withAccessJwks(async () => {
+    const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`, {
+      headers: await accessHeaders(),
+    }), env, context);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
+    const value = await response.json();
+    assert.equal(value.status, "STAGED");
+    assert.equal(value.releaseId, RELEASE_ID);
+    assert.equal(value.asOf, AS_OF);
+    assert.equal(value.manifestSha256, manifest.manifestSha256);
+  });
   assert.equal(db.queries.length, 1);
   assert.ok(db.queries.every((sql) => /WHERE release_id = \? AND status = 'STAGED'[\s\S]*LIMIT 1/.test(sql)));
   assert.ok(db.queries.every((sql) => !/active_release|SELECT \*/i.test(sql)));
@@ -258,6 +318,8 @@ test("candidate artifact route requires manifest identity and validates R2 metad
   const body = Buffer.from(JSON.stringify({ asOf: AS_OF, data: { etfTerminal: {} } }));
   let objectKey = null;
   const env = {
+    CANDIDATE_ACCESS_ISSUER: ACCESS_ISSUER,
+    CANDIDATE_ACCESS_AUD: ACCESS_AUDIENCE,
     INGEST_API_KEY: "test-key",
     DB: db,
     RAW_BUCKET: {
@@ -275,24 +337,26 @@ test("candidate artifact route requires manifest identity and validates R2 metad
     ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
   };
   const context = { waitUntil() {}, passThroughOnException() {} };
-  const missingHash = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}&artifact=radar`, {
-    headers: { Authorization: "Bearer test-key" },
-  }), env, context);
-  assert.equal(missingHash.status, 400);
-  assert.equal(objectKey, null);
+  await withAccessJwks(async () => {
+    const missingHash = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}&artifact=radar`, {
+      headers: await accessHeaders(),
+    }), env, context);
+    assert.equal(missingHash.status, 400);
+    assert.equal(objectKey, null);
 
-  const params = new URLSearchParams({ releaseId: RELEASE_ID, manifestSha256: manifest.manifestSha256, artifact: "radar" });
-  const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?${params}`, {
-    headers: { Authorization: "Bearer test-key" },
-  }), env, context);
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("x-flow-release-id"), RELEASE_ID);
-  assert.equal(response.headers.get("x-flow-artifact-sha256"), descriptor.sha256);
-  assert.equal(response.headers.get("x-flow-artifact-bytes"), String(descriptor.bytes));
-  assert.equal(response.headers.get("x-flow-as-of"), AS_OF);
-  assert.equal(response.headers.get("x-flow-manifest-sha256"), manifest.manifestSha256);
-  assert.equal(response.headers.get("x-flow-release-status"), "STAGED");
-  assert.equal(objectKey, descriptor.key);
+    const params = new URLSearchParams({ releaseId: RELEASE_ID, manifestSha256: manifest.manifestSha256, artifact: "radar" });
+    const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?${params}`, {
+      headers: await accessHeaders(),
+    }), env, context);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-flow-release-id"), RELEASE_ID);
+    assert.equal(response.headers.get("x-flow-artifact-sha256"), descriptor.sha256);
+    assert.equal(response.headers.get("x-flow-artifact-bytes"), String(descriptor.bytes));
+    assert.equal(response.headers.get("x-flow-as-of"), AS_OF);
+    assert.equal(response.headers.get("x-flow-manifest-sha256"), manifest.manifestSha256);
+    assert.equal(response.headers.get("x-flow-release-status"), "STAGED");
+    assert.equal(objectKey, descriptor.key);
+  });
 });
 
 test("candidate route does not expose storage exception details", async () => {
@@ -300,17 +364,21 @@ test("candidate route does not expose storage exception details", async () => {
   workerUrl.searchParams.set("candidate-error-sanitization-test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
   const env = {
+    CANDIDATE_ACCESS_ISSUER: ACCESS_ISSUER,
+    CANDIDATE_ACCESS_AUD: ACCESS_AUDIENCE,
     INGEST_API_KEY: "test-key",
     DB: { prepare() { throw new Error("D1_ERROR: internal table and binding details"); } },
     RAW_BUCKET: { async get() { throw new Error("manifest lookup must not read R2"); } },
     ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
   };
   const context = { waitUntil() {}, passThroughOnException() {} };
-  const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`, {
-    headers: { Authorization: "Bearer test-key" },
-  }), env, context);
-  assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), { error: "candidate_read_failed" });
+  await withAccessJwks(async () => {
+    const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/candidate-release?releaseId=${encodeURIComponent(RELEASE_ID)}`, {
+      headers: await accessHeaders(),
+    }), env, context);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: "candidate_read_failed" });
+  });
 });
 
 test("candidate workbench is a separate page and never routes through production active reads", async () => {
@@ -324,5 +392,7 @@ test("candidate workbench is a separate page and never routes through production
   const html = await response.text();
   assert.match(html, /候选发布预览/);
   assert.match(html, /STAGED releaseId/);
-  assert.match(html, /本页内存/);
+  assert.match(html, /Cloudflare Access 只读身份/);
+  assert.match(html, /本页不收集或发送后台密钥/);
+  assert.doesNotMatch(html, /Bearer token|setApiKey|INGEST_API_KEY/);
 });

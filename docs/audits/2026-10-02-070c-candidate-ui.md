@@ -19,8 +19,14 @@ This change implements the v0.7 / 070-C candidate-only read workbench on top of 
 ## Known limits and operator risks
 
 - The current v4 manifest carries per-period status/sample counts/reason codes, but not a per-period list of exact missing official dates. This UI explicitly does not infer missing dates from the recent Radar series. Exact date gaps remain available from the bounded 070-B planner; joining that evidence to the candidate manifest/UI is not claimed by this PR.
-- Authorization reuses the existing high-privilege `INGEST_API_KEY`. The key is entered into a password input, held by page JavaScript in memory, and sent in an HTTPS Authorization header; the application does not store it in URL or web storage. This is still a browser exposure of a privileged key. Use only a trusted, access-controlled device/entry point and clear the session when done. This PR does not implement a separate browser identity system and does not independently verify the Cloudflare Access policy protecting the page.
+- `/candidate` is behind the existing Cloudflare Access application for `flow.xiaoker.com`. The dashboard was read-only inspected on 2026-10-02: the `flow-only-me` Allow policy restricts the app to the operator's account, and a separate `flow-github-actions` Service Auth policy is present. The observed Access issuer is `https://xiaoker.cloudflareaccess.com`; the app's observed AUD is configured as a non-secret Worker variable. The candidate API independently validates the `Cf-Access-Jwt-Assertion` RS256 signature against that issuer's bounded JWKS, and checks `iss`, `aud`, `exp`, `nbf`, and `iat`; invalid, misconfigured, or unavailable verification fails closed. The browser sends same-origin requests with its Access session and no longer accepts, stores, or transmits `INGEST_API_KEY`.
+- The Access application's session-cookie `HttpOnly` and binding-cookie options were observed disabled. They were not changed in this code PR. Consider a separate Cloudflare control-plane hardening change after validating login behavior and the effect on the browser session.
 - No production candidate was read, no production D1/R2 budget was consumed, and no production deployment or UI acceptance was performed in this stage.
+
+## D1 deployment side-effect check
+
+- The merge-triggered Worker deployment workflow still runs `wrangler d1 migrations apply flow --remote` before deploying. A bounded read-only `wrangler d1 migrations list flow --remote` check returned `No migrations to apply!` at `2026-10-02 01:53:57 Asia/Shanghai`; no migration was applied.
+- This resolves the immediate uncertainty for the observed production state, not the structural coupling: if an unrelated migration becomes pending before a later deployment, the current workflow will apply it. Removing automatic migration application from ordinary Worker deploys remains a separate follow-up PR and must not be bundled into 070-C.
 
 ## Verification
 
@@ -33,7 +39,7 @@ cd web && npm test
 git diff --check
 ```
 
-Results: Python test suite passed; Web lint passed; Web test/build passed with 152 tests. Build emits the existing large-client-chunk advisory. A supplementary standalone `tsc --noEmit` was not treated as a passing gate because the repository has no configured typecheck script and reports unrelated baseline errors in unchanged files.
+Results: Full Python suite passed; Web lint passed; Web test/build passed with 157 tests, including signed Access JWT acceptance, forged/expired/wrong-audience rejection, unknown signing-key refresh, fail-closed verifier outage, and candidate API integration with no browser bearer key. `git diff --check` passed for tracked changes; build emits the existing large-client-chunk advisory. A supplementary standalone `tsc --noEmit` is not used as a gate because the repository has no configured typecheck script and reports unrelated baseline errors in unchanged files.
 
 ## Code review
 
@@ -42,7 +48,7 @@ The change was reviewed against [`docs/code-review-checklist.md`](../code-review
 - Date, release identity, manifest hash, artifact size/hash, and payload `asOf` are checked before display; stale requests are discarded.
 - D1 reads one exact `STAGED` primary-key row. R2 reads one declared key under the selected release prefix and enforces the 5 MB limit. The page does not enumerate candidates, poll, or write production state.
 - Missing period-specific official-date lists remain explicitly unknown; Radar's recent-node count is not presented as coverage for each period.
-- The existing `INGEST_API_KEY` remains a privileged browser credential while entered. The page keeps it in component memory and does not put it in URL or web storage, but this is still a material operator risk. Cloudflare Access protection was not independently verified and must not be assumed.
+- The candidate page no longer uses `INGEST_API_KEY`; the API validates Cloudflare Access JWTs independently of the perimeter challenge. The existing Access allow policy was inspected in the dashboard, but no Access policy or cookie settings were changed by this PR.
 - Previous inspection fixes are retained: misleading period-node aggregation, mixed search/detail readiness, and raw storage-error disclosure.
 
 The optional GStack review bundle file `.agents/skills/gstack/review/checklist.md` is absent; this does not block the project review because the repository checklist now defines the usable manual review. A screenshot-based browser audit was not performed and is not represented as complete. No production candidate was read and no production UI acceptance was performed.
