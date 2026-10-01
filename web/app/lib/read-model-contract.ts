@@ -158,6 +158,14 @@ export type MarketHistoryManifest = {
   connect: MarketHistoryCoverage;
 };
 
+export type ReadModelCoverage = {
+  etf?: { tradingDays?: number; instrumentCount?: number; availablePeriods?: string[] };
+  pressure?: { availableDateCount?: number; stockCount?: number; history20StockCount?: number };
+  stockSearch?: { count?: number };
+  national?: { count?: number };
+  [key: string]: unknown;
+};
+
 export type ReadModelManifest = {
   schemaVersion: number;
   slot?: ReadModelSlot;
@@ -166,6 +174,8 @@ export type ReadModelManifest = {
   observedAt?: string | null;
   producerBuildSha?: string;
   sourceDates?: Record<string, string | null>;
+  /** Optional aggregate coverage counters emitted by read-model producers. */
+  coverage?: ReadModelCoverage;
   marketHistory?: MarketHistoryManifest;
   pressureSchemaVersion?: number;
   stockShardCount?: number;
@@ -495,6 +505,7 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
     (value.producerBuildSha !== undefined &&
       (typeof value.producerBuildSha !== "string" || !/^[0-9a-f]{7,64}$/.test(value.producerBuildSha))) ||
     (value.sourceDates !== undefined && !isSourceDates(value.sourceDates)) ||
+    (value.coverage !== undefined && !isRecord(value.coverage)) ||
     (value.marketHistory !== undefined && !isMarketHistoryManifest(value.marketHistory)) ||
     (value.manifestSha256 !== undefined &&
       (typeof value.manifestSha256 !== "string" || !SHA256.test(value.manifestSha256))) ||

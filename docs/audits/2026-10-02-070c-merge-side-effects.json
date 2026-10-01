@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "stage": "070-C",
+  "branch": "codex/070c-candidate-ui-20261002",
+  "baseRef": "main",
+  "baseSha": "8769d93485af63d751acae9936f29b103c18d87e",
+  "changeScope": {
+    "businessCodeFiles": 8,
+    "newMigrations": [],
+    "workflowFilesChanged": [],
+    "productionReadPathChanged": false,
+    "activeReleasePointerChanged": false,
+    "featureFlagsChanged": false,
+    "productionDataOperationsPerformed": false
+  },
+  "mergeEffects": {
+    "deployWorkerWorkflow": {
+      "trigger": "A merged pull_request closed event to main whose diff includes web/**",
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "actions": [
+        "npm ci",
+        "npm run lint",
+        "npm test (includes production build)",
+        "npx wrangler d1 migrations apply flow --remote",
+        "npm run deploy",
+        "live Worker build-identity verification"
+      ],
+      "newMigrationInThisPullRequest": false,
+      "remotePendingMigrationInventory": "unknown_not_checked",
+      "risk": "The workflow applies any migration pending on the remote D1 database, even though this pull request adds no migration. Verify pending remote migration status before merge authorization."
+    },
+    "candidateRuntimeReads": {
+      "manifestLookup": "At most one release_manifest primary-key row per explicit request; exact release_id and STAGED status; no enumeration.",
+      "artifactLookup": "At most one exact declared R2 object per explicit request, capped at 5000000 bytes; no auto-refresh/polling.",
+      "writes": "None"
+    },
+    "security": {
+      "credential": "Existing INGEST_API_KEY is entered into the page, held in JavaScript memory, and sent over HTTPS in an Authorization header; it is not stored in URL/localStorage/sessionStorage.",
+      "accessPolicyVerified": false,
+      "operatorConstraint": "Use only a trusted access-controlled device/entry point; clear the page session after use."
+    },
+    "productionState": "No collection, recovery, history backfill, candidate upload/activation, active pointer change, flag change, or production read-path switch is part of this pull request."
+  },
+  "ciCost": {
+    "pullRequestActionsRunsExpected": true,
+    "mainDeploymentActionsRunAfterMerge": true,
+    "remainingActionsQuota": "unknown_not_checked"
+  },
+  "rollback": "Revert the merged code PR and let the same deploy workflow publish the prior source; this does not require data rollback because the PR writes no production data or schema. Confirm no unrelated pending D1 migration is applied by the deploy workflow before merge."
+}

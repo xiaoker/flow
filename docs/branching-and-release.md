@@ -34,6 +34,10 @@ git push
 
 ## 合并前检查
 
+按本次差异使用 [Flow 代码审查清单](code-review-checklist.md)，在现有 PR 或阶段
+报告中记录相关证据。清单用于辅助审查，不新增授权或门禁；辅助工具缺失时可
+完成人工审查。实际发布合同、质量校验及阶段停止点继续有效。
+
 ```bash
 git fetch origin main
 git merge-base --is-ancestor origin/main HEAD
