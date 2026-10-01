@@ -27,6 +27,19 @@ type CapturePlan = {
   calculationVersion: "pcf-capture-v2";
   hardLimit: number;
   status: "PLANNED" | "READY_NO_CHANGE" | "BLOCKED_QUALITY" | "BLOCKED_UNIVERSE_ANOMALY";
+  sourceWindow: {
+    version: "sse-pcf-exact-v1";
+    provider: "sse";
+    dataset: "etf_pcf";
+    probeCode: string;
+    targetDate: string;
+    previousDate: string;
+    exactDateRule: string;
+    windowClass: "official_exact";
+  };
+  sourceEvidence: Record<string, unknown>;
+  eligibility: { status: "ELIGIBLE" | "BLOCKED"; basis: string; setSha256: string; codes: string[] };
+  qualification: { version: "pcf-qualification-v1"; status: "PENDING" | "QUALIFIED" | "BLOCKED"; captureDate: string; qualificationDate: string | null; eligibleSetSha256: string; evidence: Record<string, unknown> };
   planSha256: string;
   items: PlanItem[];
   counts: {
@@ -73,6 +86,11 @@ function isPlanItem(value: unknown): value is PlanItem {
 function isPlan(value: unknown): value is CapturePlan {
   if (!isRecord(value) || !isRecord(value.counts)) return false;
   const counts = value.counts;
+  const sourceWindow = isRecord(value.sourceWindow) ? value.sourceWindow : null;
+  const sourceEvidence = isRecord(value.sourceEvidence) ? value.sourceEvidence : null;
+  const eligibility = isRecord(value.eligibility) ? value.eligibility : null;
+  const qualification = isRecord(value.qualification) ? value.qualification : null;
+  const eligibleCodes = eligibility && Array.isArray(eligibility.codes) ? eligibility.codes : null;
   return Boolean(
     value.calculationVersion === "pcf-capture-v2" &&
       typeof value.targetDate === "string" && ISO_DATE.test(value.targetDate) &&
@@ -81,6 +99,16 @@ function isPlan(value: unknown): value is CapturePlan {
       ["PLANNED", "READY_NO_CHANGE", "BLOCKED_QUALITY", "BLOCKED_UNIVERSE_ANOMALY"].includes(String(value.status)) &&
       typeof value.planSha256 === "string" && SHA256.test(value.planSha256) &&
       Array.isArray(value.items) && value.items.length <= MAX_ITEMS && value.items.every(isPlanItem) &&
+      sourceWindow !== null && sourceWindow.version === "sse-pcf-exact-v1" && sourceWindow.provider === "sse" && sourceWindow.dataset === "etf_pcf" &&
+      typeof sourceWindow.probeCode === "string" && sourceWindow.probeCode.length <= 32 &&
+      sourceWindow.targetDate === value.targetDate && sourceWindow.previousDate === value.previousDate &&
+      typeof sourceWindow.exactDateRule === "string" && sourceWindow.windowClass === "official_exact" &&
+      sourceEvidence !== null && eligibility !== null && ["ELIGIBLE", "BLOCKED"].includes(String(eligibility.status)) &&
+      typeof eligibility.basis === "string" && typeof eligibility.setSha256 === "string" && SHA256.test(eligibility.setSha256) &&
+      eligibleCodes !== null && eligibleCodes.every((code) => typeof code === "string" && ETF_CODE.test(code)) &&
+      qualification !== null && qualification.version === "pcf-qualification-v1" && qualification.status === "PENDING" &&
+      qualification.captureDate === value.targetDate && qualification.qualificationDate === null &&
+      qualification.eligibleSetSha256 === eligibility.setSha256 && isRecord(qualification.evidence) &&
       Object.values(counts).every((candidate) => Number.isSafeInteger(candidate) && Number(candidate) >= 0) &&
       Number(counts.expected) === value.items.length &&
       Number(counts.required) === value.items.filter((item) => item.required).length,
@@ -165,7 +193,15 @@ export async function POST(request: Request): Promise<Response> {
       plan.counts.unchanged,
       plan.counts.newBaselineMissing,
       plan.counts.missingCurrent,
-      JSON.stringify(plan.status === "BLOCKED_UNIVERSE_ANOMALY" ? { reason: plan.status } : {}),
+      JSON.stringify({
+        ...(plan.status === "BLOCKED_UNIVERSE_ANOMALY" ? { reason: plan.status } : {}),
+        planEvidence: {
+          sourceWindow: plan.sourceWindow,
+          sourceEvidence: plan.sourceEvidence,
+          eligibility: plan.eligibility,
+          qualification: plan.qualification,
+        },
+      }),
       startedAt,
       startedAt,
     ).run();

@@ -37,6 +37,9 @@ def test_canonical_and_pack_are_byte_deterministic() -> None:
     assert first["manifestSha256"] == second["manifestSha256"]
     assert first["artifacts"]["rawPack"]["bytes"] == second["artifacts"]["rawPack"]["bytes"]
     pack = first["artifacts"]["rawPack"]
+    assert first["manifest"]["qualification"]["status"] == "QUALIFIED"
+    assert first["manifest"]["qualification"]["evidence"]["rawPackSha256"] == pack["sha256"]
+    assert first["manifest"]["sourceWindow"]["targetDate"] == "2026-08-21"
     verify_deterministic_raw_pack(pack["bytes"], {"members": [{"etfCode": code, "file": f"{code}.xml", "bytes": len(content), "rawSha256": hashlib.sha256(content).hexdigest()} for code, content in (("510300", b"<xml code='510300'/>"), ("510500", b"<xml code='510500'/>"))]})
 
 

@@ -21,6 +21,8 @@ from typing import Any
 
 SCHEMA_VERSION = 2
 CALCULATION_VERSION = "pcf-capture-v2"
+SOURCE_WINDOW_VERSION = "sse-pcf-exact-v1"
+QUALIFICATION_VERSION = "pcf-qualification-v1"
 
 _COLUMNS: dict[str, tuple[str, ...]] = {
     "headers": (
@@ -165,6 +167,11 @@ def build_pcf_canonical_artifacts(
     missing_current: int = 0,
     quality: Mapping[str, int] | None = None,
     observed_at: str | None = None,
+    source_window: Mapping[str, Any] | None = None,
+    source_evidence: Mapping[str, Any] | None = None,
+    eligibility: Mapping[str, Any] | None = None,
+    qualification: Mapping[str, Any] | None = None,
+    normalized_sha256s: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return immutable artifact bytes, deterministic keys and a manifest.
 
@@ -197,6 +204,44 @@ def build_pcf_canonical_artifacts(
         "sha256": pack_sha,
         "members": len(pack_index["members"]),
     }
+    source_window_value = dict(source_window or {
+        "version": SOURCE_WINDOW_VERSION,
+        "provider": "sse",
+        "dataset": "etf_pcf",
+        "targetDate": trade_date,
+        "previousDate": previous_date,
+        "exactDateRule": "TradingDay == targetDate and PreTradingDay == previousDate",
+        "windowClass": "official_exact",
+    })
+    if source_window_value.get("targetDate") != trade_date or source_window_value.get("previousDate") != previous_date:
+        raise ValueError("source_window_date_mismatch")
+    eligibility_value = dict(eligibility or {
+        "status": "ELIGIBLE" if required_count >= 0 else "BLOCKED",
+        "basis": "COMPARABLE_CHANGED exact share delta",
+        "setSha256": hashlib.sha256(b"[]").hexdigest(),
+        "codes": [],
+    })
+    qualification_value = dict(qualification or {
+        "version": QUALIFICATION_VERSION,
+        "status": "PENDING",
+        "captureDate": trade_date,
+        "qualificationDate": None,
+        "eligibleSetSha256": eligibility_value.get("setSha256"),
+        "evidence": {},
+    })
+    qualification_value.setdefault("version", QUALIFICATION_VERSION)
+    qualification_value.setdefault("captureDate", trade_date)
+    qualification_value.setdefault("eligibleSetSha256", eligibility_value.get("setSha256"))
+    if valid_count == required_count and captured_count == required_count and failed_count == 0 and required_count >= 0 and eligibility_value.get("status") == "ELIGIBLE" and qualification_value.get("status") != "BLOCKED":
+        qualification_value["status"] = "QUALIFIED"
+        qualification_value["qualificationDate"] = trade_date
+        qualification_value["evidence"] = {
+            **dict(qualification_value.get("evidence") or {}),
+            "rawPackSha256": pack_sha,
+            "artifactSha256": {name: artifact_meta[name]["sha256"] for name in ("headers", "components", "data")},
+            "normalizedSha256s": dict(normalized_sha256s or {}),
+            "validatedCount": valid_count,
+        }
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "dataset": "sse_etf_pcf",
@@ -210,6 +255,10 @@ def build_pcf_canonical_artifacts(
             "urlTemplate": "https://query.sse.com.cn/etfDownload/downloadETF2Bulletin.do?fundCode={code}",
             "dateContract": "TradingDay == tradeDate; PreTradingDay == previousDate",
         },
+        "sourceWindow": source_window_value,
+        "sourceEvidence": dict(source_evidence or {}),
+        "eligibility": eligibility_value,
+        "qualification": qualification_value,
         "universe": {
             "required": required_count,
             "unchanged": unchanged_count,

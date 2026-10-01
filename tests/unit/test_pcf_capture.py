@@ -73,6 +73,51 @@ def test_outer_join_plan_keeps_all_baseline_states_and_is_deterministic() -> Non
     )
 
 
+def test_plan_separates_source_window_from_pending_qualification() -> None:
+    current = [_row("510300", 120)]
+    previous = [_row("510300", 100)]
+    source_window = {
+        "version": "sse-pcf-exact-v1",
+        "provider": "sse",
+        "dataset": "etf_pcf",
+        "probeCode": "510300",
+        "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
+        "exactDateRule": "TradingDay == targetDate and PreTradingDay == previousDate",
+        "windowClass": "official_exact",
+    }
+    plan = build_changed_etf_capture_plan(
+        current,
+        previous,
+        target_date="2026-08-21",
+        previous_date="2026-08-20",
+        source_window=source_window,
+        source_evidence={"pcfProbeSha256": "a" * 64},
+    )
+    assert plan["sourceWindow"] == source_window
+    assert plan["eligibility"]["status"] == "ELIGIBLE"
+    assert plan["eligibility"]["codes"] == ["510300"]
+    assert plan["qualification"]["status"] == "PENDING"
+    assert plan["qualification"]["qualificationDate"] is None
+    repeat = build_changed_etf_capture_plan(
+        current,
+        previous,
+        target_date="2026-08-21",
+        previous_date="2026-08-20",
+        source_window=source_window,
+        source_evidence={"pcfProbeSha256": "a" * 64},
+    )
+    assert repeat["planSha256"] == plan["planSha256"]
+    with pytest.raises(ValueError, match="source_window_date_mismatch"):
+        build_changed_etf_capture_plan(
+            current,
+            previous,
+            target_date="2026-08-21",
+            previous_date="2026-08-20",
+            source_window={**source_window, "targetDate": "2026-08-22"},
+        )
+
+
 def test_plan_does_not_silently_truncate_801_changed_etfs() -> None:
     current = [_row(f"{100000 + index:06d}", index + 1) for index in range(801)]
     previous = [_row(f"{100000 + index:06d}", index) for index in range(801)]
@@ -138,6 +183,35 @@ def test_job_and_item_contracts_reject_inconsistent_ready_state() -> None:
             state="PENDING",
             updatedAt="2026-08-21T00:00:00Z",
         )
+
+
+def test_ready_job_requires_qualified_evidence() -> None:
+    digest = hashlib.sha256(b"pcf").hexdigest()
+    kwargs = {
+        "jobId": "job-1",
+        "targetDate": "2026-08-21",
+        "previousDate": "2026-08-20",
+        "planSha256": digest,
+        "calculationVersion": "pcf-capture-v2",
+        "status": "READY",
+        "expectedCount": 1,
+        "requiredCount": 1,
+        "unchangedCount": 0,
+        "newBaselineCount": 0,
+        "missingCurrentCount": 0,
+        "capturedCount": 1,
+        "validCount": 1,
+        "failedCount": 0,
+        "startedAt": "2026-08-21T00:00:00Z",
+        "updatedAt": "2026-08-21T00:00:00Z",
+    }
+    with pytest.raises(ValueError, match="qualified PCF evidence"):
+        PcfCaptureJobContract(**kwargs)
+    qualified = PcfCaptureJobContract(
+        **kwargs,
+        qualification={"status": "QUALIFIED", "captureDate": "2026-08-21", "qualificationDate": "2026-08-21"},
+    )
+    assert qualified.qualification["status"] == "QUALIFIED"
 
 
 def test_manifest_contract_requires_exact_coverage_for_ready_artifacts() -> None:

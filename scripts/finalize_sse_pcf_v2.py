@@ -222,6 +222,10 @@ def finalize_plan(
     client = session or requests.Session()
     target_date = str(plan.get("targetDate") or "")
     previous_date = str(plan.get("previousDate") or "")
+    source_window = plan.get("sourceWindow") if isinstance(plan.get("sourceWindow"), Mapping) else None
+    source_evidence = plan.get("sourceEvidence") if isinstance(plan.get("sourceEvidence"), Mapping) else None
+    eligibility = plan.get("eligibility") if isinstance(plan.get("eligibility"), Mapping) else None
+    qualification = plan.get("qualification") if isinstance(plan.get("qualification"), Mapping) else None
     job_response = submit_plan(
         client,
         base_url=base_url,
@@ -241,6 +245,11 @@ def finalize_plan(
             "tradeDate": target_date,
             "jobId": job_id,
             "coverage": {"required": 0, "captured": 0, "valid": 0, "failed": 0},
+            "captureStatus": str(plan["status"]),
+            "qualificationStatus": "BLOCKED",
+            "sourceWindow": source_window,
+            "eligibility": eligibility,
+            "qualification": {**dict(qualification or {}), "status": "BLOCKED", "reason": str(plan["status"])},
         }
 
     required = _required_items(plan)
@@ -285,6 +294,11 @@ def finalize_plan(
             "unknownCodes": classification["unknownCodes"],
             "blockedItems": classification["blockedItems"],
             "unavailableCodes": unavailable,
+            "captureStatus": partial_status,
+            "qualificationStatus": "PENDING",
+            "sourceWindow": source_window,
+            "eligibility": eligibility,
+            "qualification": {**dict(qualification or {}), "status": "PENDING", "reason": "capture_incomplete"},
         }
 
     raw_xml: dict[str, bytes] = {}
@@ -294,6 +308,7 @@ def finalize_plan(
     data: list[dict[str, Any]] = []
     validated_items: list[dict[str, Any]] = []
     observed_values: list[str] = []
+    normalized_sha256s: dict[str, str] = {}
     for code in sorted(required_by_code):
         raw, lineage = download_raw_xml(
             client,
@@ -349,6 +364,7 @@ def finalize_plan(
             raise CaptureError(f"{code}_normalized_sha256_mismatch")
         raw_xml[code] = raw
         raw_metadata[code] = lineage
+        normalized_sha256s[code] = normalized_sha
         validated_items.append(
             {
                 "etfCode": code,
@@ -381,6 +397,11 @@ def finalize_plan(
         missing_current=int(counts.get("missingCurrent", 0)),
         quality={"pass": len(required), "warn": 0, "fail": 0},
         observed_at=observed_at,
+        source_window=source_window,
+        source_evidence=source_evidence,
+        eligibility=eligibility,
+        qualification=qualification,
+        normalized_sha256s=normalized_sha256s,
     )
     if not build["ready"]:
         raise CaptureError("canonical_not_ready")
@@ -439,6 +460,11 @@ def finalize_plan(
         },
         "artifacts": uploaded,
         "productionPublishCalls": 0,
+        "captureStatus": str(remote.get("status") or "READY"),
+        "qualificationStatus": str(build["manifest"].get("qualification", {}).get("status") or "QUALIFIED"),
+        "sourceWindow": build["manifest"].get("sourceWindow"),
+        "eligibility": build["manifest"].get("eligibility"),
+        "qualification": build["manifest"].get("qualification"),
     }
 
 

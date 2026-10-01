@@ -180,6 +180,9 @@ def lease(
     job_id: str,
     owner: str,
     action: str,
+    pause_status: str | None = None,
+    next_attempt_at: str | None = None,
+    reason: str | None = None,
     access_client_id: str | None = None,
     access_client_secret: str | None = None,
 ) -> dict[str, Any]:
@@ -193,12 +196,49 @@ def lease(
             ),
             "Content-Type": "application/json",
         },
-        json={"action": action, "jobId": job_id, "owner": owner},
+        json={
+            "action": action,
+            "jobId": job_id,
+            "owner": owner,
+            **({"status": pause_status, "nextAttemptAt": next_attempt_at, "reason": reason} if action == "pause" else {}),
+        },
         timeout=(10.0, 45.0),
     )
     if response.status_code in {401, 403, 409, 429}:
         raise RateLimited(f"control_plane_lease_http_{response.status_code}")
     return _json_response(response, label="control_plane_lease")
+
+
+def pause_lease(
+    session: requests.Session,
+    *,
+    base_url: str,
+    api_key: str,
+    job_id: str,
+    owner: str,
+    status: str,
+    reason: str,
+    access_client_id: str | None = None,
+    access_client_secret: str | None = None,
+) -> dict[str, Any]:
+    # Keep timestamp construction local to avoid a second clock source in the
+    # planner.  ISO UTC is the control-plane contract.
+    from datetime import datetime, timedelta, timezone
+
+    retry_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return lease(
+        session,
+        base_url=base_url,
+        api_key=api_key,
+        job_id=job_id,
+        owner=owner,
+        action="pause",
+        pause_status=status,
+        next_attempt_at=retry_at,
+        reason=reason,
+        access_client_id=access_client_id,
+        access_client_secret=access_client_secret,
+    )
 
 
 def fetch_xml(
@@ -528,6 +568,54 @@ def capture_plan(
                 "d1RowsWrittenUpperBound": completed + len(failures) + 8,
             },
         }
+    except RateLimited as exc:
+        try:
+            pause_lease(
+                client,
+                base_url=base_url,
+                api_key=api_key,
+                job_id=job_id,
+                owner=owner,
+                status="RATE_LIMITED",
+                reason=str(exc),
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            )
+        except (RateLimited, CaptureError, requests.RequestException):
+            pass
+        raise
+    except ExactWindowNotReady as exc:
+        try:
+            pause_lease(
+                client,
+                base_url=base_url,
+                api_key=api_key,
+                job_id=job_id,
+                owner=owner,
+                status="PARTIAL",
+                reason=str(exc),
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            )
+        except (RateLimited, CaptureError, requests.RequestException):
+            pass
+        raise
+    except ExpiredExactWindow as exc:
+        try:
+            pause_lease(
+                client,
+                base_url=base_url,
+                api_key=api_key,
+                job_id=job_id,
+                owner=owner,
+                status="EXPIRED_EXACT_WINDOW",
+                reason=str(exc),
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+            )
+        except (RateLimited, CaptureError, requests.RequestException):
+            pass
+        raise
     finally:
         try:
             lease(
