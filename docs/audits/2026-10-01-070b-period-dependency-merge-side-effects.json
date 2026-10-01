@@ -3,7 +3,13 @@
   "purpose": "Add an offline bounded ETF period dependency and minimum downstream rebuild planner.",
   "baseMainSha": "e7868f91099406b6173e5f61a118fcfbee01f594",
   "branch": "codex/070b-period-dependency-20261001",
-  "pullRequest": null,
+  "pullRequest": {
+    "number": 140,
+    "url": "https://github.com/xiaoker/flow/pull/140",
+    "base": "main",
+    "head": "codex/070b-period-dependency-20261001",
+    "state": "OPEN"
+  },
   "files": [
     "docs/audits/2026-10-01-070b-period-dependency-contract.md",
     "docs/audits/2026-10-01-070b-period-dependency-merge-side-effects.json",
@@ -50,5 +56,5 @@
     },
     "rollbackAndStop": "No runtime or stored data is changed by this PR. If CI fails, fix within this PR only; do not start 070-C or execute the generated plan."
   },
-  "reviewState": "Local full Python suite, Web lint, and 144 Web tests/build passed. PR creation and hosted CI are pending. No merge, deployment, migration, production data operation, candidate upload, flag change, or read-path switch has occurred."
+  "reviewState": "Local full Python suite, Web lint, and 144 Web tests/build passed. PR #140 is open; its initial hosted CI run started, and checks must pass on the final audit-synced PR head. No merge, deployment, migration, production data operation, candidate upload, flag change, or read-path switch has occurred."
 }
