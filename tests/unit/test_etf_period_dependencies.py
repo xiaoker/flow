@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import subprocess
@@ -383,6 +384,22 @@ def test_rejects_duplicate_invalid_and_unbounded_calendar_inputs() -> None:
     dates = ["2026-08-31", "2026-09-01"]
     with pytest.raises(ValueError, match="target_dates_duplicate"):
         _plan(dates, targets=["2026-09-01", "2026-09-01"], periods=("1d",))
+    with pytest.raises(ValueError, match="target_dates_limit_exceeded"):
+        build_etf_period_rebuild_plan(
+            calendar=_calendar(dates),
+            target_dates=itertools.repeat("2026-09-01"),
+            source_evidence=_sources(dates),
+            existing_models=[],
+            periods=("1d",),
+        )
+    with pytest.raises(ValueError, match="period_selection_limit_exceeded"):
+        build_etf_period_rebuild_plan(
+            calendar=_calendar(dates),
+            target_dates=["2026-09-01"],
+            source_evidence=_sources(dates),
+            existing_models=[],
+            periods=itertools.repeat("1d"),
+        )
     with pytest.raises(ValueError, match="target_date_not_in_official_calendar"):
         _plan(dates, targets=["2026-09-02"], periods=("1d",))
     with pytest.raises(ValueError, match="official_calendar_source_invalid"):
@@ -448,3 +465,33 @@ def test_offline_cli_writes_plan_only_and_reports_future_cost_unknown(tmp_path: 
     assert plan["resourceEstimate"]["plannerD1RowsRead"] == 0
     assert plan["resourceEstimate"]["plannerR2Gets"] == 0
     assert plan["resourceEstimate"]["futureBuildCostStatus"] == "UNKNOWN"
+
+
+def test_offline_cli_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    input_path = tmp_path / "duplicate-evidence.json"
+    output_path = tmp_path / "plan.json"
+    input_path.write_text(
+        '{"calendar":{},"targetDates":[],"targetDates":[],"sourceEvidence":[],"existingModels":[]}',
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts/plan_etf_period_rebuild.py"),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": "src:."},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode != 0
+    assert "input_json_duplicate_key" in completed.stderr
+    assert not output_path.exists()

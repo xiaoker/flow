@@ -74,6 +74,21 @@ def _count(value: Any, *, field: str) -> int:
     return value
 
 
+def _bounded_values(values: Iterable[Any], *, limit: int, field: str) -> list[Any]:
+    """Consume at most limit + 1 values so unbounded iterators fail closed."""
+    try:
+        iterator = iter(values)
+    except TypeError as exc:
+        raise ValueError(f"{field}_invalid") from exc
+    collected: list[Any] = []
+    for _ in range(limit + 1):
+        try:
+            collected.append(next(iterator))
+        except StopIteration:
+            return collected
+    raise ValueError(f"{field}_limit_exceeded")
+
+
 def _canonical_hash(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -409,7 +424,10 @@ def build_etf_period_rebuild_plan(
     """
 
     calendar_dates, calendar_hash = _calendar(calendar)
-    targets = [_date(value, field="target_date") for value in target_dates]
+    raw_targets = _bounded_values(
+        target_dates, limit=MAX_TARGET_DATES, field="target_dates"
+    )
+    targets = [_date(value, field="target_date") for value in raw_targets]
     if not targets:
         raise ValueError("target_dates_missing")
     if len(targets) > MAX_TARGET_DATES:
@@ -419,7 +437,9 @@ def build_etf_period_rebuild_plan(
     targets = sorted(targets)
     if any(value not in set(calendar_dates) for value in targets):
         raise ValueError("target_date_not_in_official_calendar")
-    selected_periods = tuple(periods)
+    selected_periods = tuple(
+        _bounded_values(periods, limit=len(MAX_PERIODS), field="period_selection")
+    )
     if (
         not selected_periods
         or len(set(selected_periods)) != len(selected_periods)

@@ -66,8 +66,11 @@ does not block share-change nodes.
 
 The planner accepts at most 280 target sessions, 533 official calendar
 sessions (280 targets plus up to 252 lookback sessions and a baseline), 1,066
-source rows, 11,200 model descriptors, and an 8 MiB JSON input file. It only
-reads the supplied local file and writes the requested local plan file. It
+source rows, 11,200 model descriptors, and an 8 MiB JSON input file. Iterable
+targets and period selections are capped while being consumed, and the CLI
+reads no more than 8 MiB + 1 byte even if the file changes after its size
+check. Duplicate JSON object keys are rejected to avoid ambiguous evidence.
+It only reads the supplied local file and writes the requested local plan file. It
 does not access an exchange, GitHub API, Cloudflare, D1, or R2; it does not
 normalize raw artifacts, rebuild model values, upload a candidate, change a
 flag, dispatch a workflow, or activate a release. Future build cost remains

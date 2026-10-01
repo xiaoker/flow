@@ -21,12 +21,25 @@ from trading_desk.etf_period_dependencies import (
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("input_json_duplicate_key")
+        result[key] = value
+    return result
+
+
 def _read_input(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError("input_file_missing")
     if path.stat().st_size > MAX_INPUT_BYTES:
         raise ValueError("input_file_limit_exceeded")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    with path.open("rb") as handle:
+        payload = handle.read(MAX_INPUT_BYTES + 1)
+    if len(payload) > MAX_INPUT_BYTES:
+        raise ValueError("input_file_limit_exceeded")
+    value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
     if not isinstance(value, dict):
         raise ValueError("input_json_object_required")
     required = {"calendar", "targetDates", "sourceEvidence", "existingModels"}

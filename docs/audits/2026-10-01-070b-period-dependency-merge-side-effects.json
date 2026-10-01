@@ -52,9 +52,9 @@
       "sourceEvidenceRows": 1066,
       "existingModelRows": 11200,
       "inputJsonBytes": 8388608,
-      "actionsBudget": "One PR CI run is required; merge adds main-branch CI. Remaining account quota was not queried."
+      "actionsBudget": "Each PR update and the post-merge main CI consume GitHub Actions minutes. This PR has implementation, audit-sync, and review-fix commits; actual billed minutes depend on runner usage. Remaining account quota was not queried."
     },
     "rollbackAndStop": "No runtime or stored data is changed by this PR. If CI fails, fix within this PR only; do not start 070-C or execute the generated plan."
   },
-  "reviewState": "Local full Python suite, Web lint, and 144 Web tests/build passed. PR #140 is open; its initial hosted CI run started, and checks must pass on the final audit-synced PR head. No merge, deployment, migration, production data operation, candidate upload, flag change, or read-path switch has occurred."
+  "reviewState": "Local full Python suite, Web lint, and 144 Web tests/build passed. PR #140 is open; a review fix tightened iterable/file input bounds and added negative-path tests, so hosted checks must pass on the latest head before merge. No merge, deployment, migration, production data operation, candidate upload, flag change, or read-path switch has occurred."
 }
