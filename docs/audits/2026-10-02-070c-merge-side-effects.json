@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "stage": "070-C",
+  "branch": "codex/070c-candidate-ui-20261002",
+  "baseRef": "main",
+  "baseSha": "8769d93485af63d751acae9936f29b103c18d87e",
+  "changeScope": {
+    "businessCodeFiles": 13,
+    "newMigrations": [],
+    "workflowFilesChanged": [],
+    "productionReadPathChanged": false,
+    "activeReleasePointerChanged": false,
+    "featureFlagsChanged": false,
+    "productionDataOperationsPerformed": false
+  },
+  "mergeEffects": {
+    "deployWorkerWorkflow": {
+      "trigger": "A merged pull_request closed event to main whose diff includes web/**",
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "actions": [
+        "npm ci",
+        "npm run lint",
+        "npm test (includes production build)",
+        "npx wrangler d1 migrations apply flow --remote",
+        "npm run deploy",
+        "live Worker build-identity verification"
+      ],
+      "newMigrationInThisPullRequest": false,
+      "remotePendingMigrationInventory": {
+        "checkedAt": "2026-10-02T01:53:57+08:00",
+        "command": "wrangler d1 migrations list flow --remote",
+        "result": "No migrations to apply!",
+        "migrationsApplied": false
+      },
+      "risk": "No migration was pending at the read-only check time, so this merge currently has no D1 migration to apply. The workflow remains structurally coupled to migrations and would apply any unrelated migration that becomes pending before a later deployment; split that behavior in a separate PR."
+    },
+    "candidateRuntimeReads": {
+      "manifestLookup": "At most one release_manifest primary-key row per explicit request; exact release_id and STAGED status; no enumeration.",
+      "artifactLookup": "At most one exact declared R2 object per explicit request, capped at 5000000 bytes; no auto-refresh/polling.",
+      "writes": "None"
+    },
+    "security": {
+      "credential": "The browser uses the Cloudflare Access session cookie for same-origin API calls; no INGEST_API_KEY is accepted by the page or sent by the candidate client.",
+      "accessPolicyVerified": true,
+      "accessPolicyEvidence": "Cloudflare dashboard showed flow.xiaoker.com app with a flow-only-me Allow policy restricted to the operator account and a separate flow-github-actions Service Auth policy. Candidate Worker verifies Cf-Access-Jwt-Assertion RS256 signature, issuer, audience, and temporal claims.",
+      "cookieHardeningFollowUp": "HttpOnly and binding-cookie options were observed disabled and were not changed by this PR; review separately before changing session behavior."
+    },
+    "productionState": "No collection, recovery, history backfill, candidate upload/activation, active pointer change, flag change, or production read-path switch is part of this pull request."
+  },
+  "ciCost": {
+    "pullRequestActionsRunsExpected": true,
+    "mainDeploymentActionsRunAfterMerge": true,
+    "remainingActionsQuota": "unknown_not_checked"
+  },
+  "rollback": "Revert the merged code PR and let the same deploy workflow publish the prior source; this does not require data rollback because the PR writes no production data or schema. Confirm no unrelated pending D1 migration is applied by the deploy workflow before merge."
+}
