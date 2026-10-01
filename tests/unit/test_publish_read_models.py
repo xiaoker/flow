@@ -6,7 +6,7 @@ import hashlib
 
 import pytest
 
-from scripts.publish_read_models import build_upload_body, check_capabilities
+from scripts.publish_read_models import build_upload_body, check_capabilities, post
 from scripts.verify_published_release import CANDIDATE_ARTIFACTS, slot_contract, verify, verify_candidate
 
 
@@ -75,6 +75,35 @@ def test_upload_rejects_unknown_activation_mode() -> None:
             finalize=False,
             activation_mode="activate_and_pray",
         )
+
+
+def test_read_model_post_uses_shared_bounded_retry_and_counts_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = __import__("scripts.publish_read_models", fromlist=["requests"])
+    responses = iter([
+        type("Response", (), {"ok": False, "status_code": 503, "text": "temporary"})(),
+        type("Response", (), {"ok": True, "json": lambda self: {"status": "staged"}})(),
+    ])
+    monkeypatch.setattr(module.requests, "post", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    metrics: dict[str, int] = {}
+    assert post("https://flow.example/import", {"artifact": "fixture"}, {}, metrics=metrics) == {"status": "staged"}
+    assert metrics["workerRequests"] == 2
+
+
+def test_read_model_post_does_not_retry_permanent_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = __import__("scripts.publish_read_models", fromlist=["requests"])
+    calls = 0
+
+    def permanent(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return type("Response", (), {"ok": False, "status_code": 400, "text": "invalid"})()
+
+    monkeypatch.setattr(module.requests, "post", permanent)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="read model import failed after retries"):
+        post("https://flow.example/import", {"artifact": "fixture"}, {})
+    assert calls == 1
 
 
 def test_dashboard_capability_does_not_require_pcf_readiness(monkeypatch: pytest.MonkeyPatch) -> None:

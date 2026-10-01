@@ -22,6 +22,8 @@ from datetime import date, datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .pipeline_application import checkpoint_is_reusable
+
 
 RECOVERY_SCHEMA_VERSION = 1
 RECOVERY_CONTRACT_VERSION = "recovery-execution-v1"
@@ -674,16 +676,24 @@ def artifact_reusable(
 
     if not existing:
         return False
-    try:
-        return (
-            _hash(existing.get("inputSha256", existing.get("input_sha256")), "input_sha256")
-            == _hash(input_sha256, "input_sha256")
-            and _string(existing.get("contractVersion", existing.get("contract_version")), "contract_version")
-            == contract_version
-            and existing.get("status") == "COMPLETED"
-        )
-    except RecoveryContractError:
-        return False
+    # Keep the recovery-facing legacy field names and contract semantics, but
+    # centralize the exact input/status/version decision with the v0.6
+    # application checkpoint seam.  A pre-v0.6 record without a self-hash is
+    # still accepted here for compatibility; newly emitted checkpoints are
+    # self-hashed by ``build_checkpoint``.
+    normalized = {
+        "status": existing.get("status"),
+        "contractVersion": existing.get("contractVersion", existing.get("contract_version")),
+        "inputSha256": existing.get("inputSha256", existing.get("input_sha256")),
+    }
+    for key in ("outputSha256", "checkpointSha256"):
+        if key in existing:
+            normalized[key] = existing[key]
+    return checkpoint_is_reusable(
+        normalized,
+        input_sha256=input_sha256,
+        contract_version=contract_version,
+    )
 
 
 def _receipt_key(value: Any) -> str:

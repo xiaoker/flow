@@ -3,7 +3,7 @@ from __future__ import annotations
 import traceback
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import requests
 
@@ -12,6 +12,13 @@ import pandas as pd
 from .adapters import OfficialMarketAdapters
 from .http import build_session
 from .models import FetchArtifact, QualityFinding
+from .pipeline_application import (
+    ApplicationContractError,
+    build_application_identity,
+    build_checkpoint,
+    canonical_sha256,
+    execute_application_plan,
+)
 from .quality import (
     profile,
     summarize_findings,
@@ -182,6 +189,7 @@ def collect_phase0(
     session: requests.Session | None = None,
     pcf_max_workers: int = 4,
     szse_etf_history_root: Path | None = None,
+    application_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -196,6 +204,20 @@ def collect_phase0(
             raise ValueError("szse_etf_history_root must be a Path")
         if not szse_etf_history_root.is_dir():
             raise ValueError("szse_etf_history_root must be an existing directory")
+    application_identity = None
+    if application_context is not None:
+        try:
+            # Validate the shared identity before any adapter or filesystem
+            # work begins.  A malformed resume/recovery context must fail
+            # closed without leaving a partial collection behind.
+            application_identity = build_application_identity(
+                run_key=application_context["runKey"],
+                window_date=application_context["windowDate"],
+                target_date=application_context.get("targetDate"),
+                producer_build_sha=application_context.get("producerBuildSha"),
+            )
+        except (KeyError, ApplicationContractError) as exc:
+            raise ValueError(f"invalid application context: {exc}") from exc
     dates = sorted(dates)
     deferred_datasets = _deferred_datasets_for_window(collection_window)
     run_id = new_run_id()
@@ -594,6 +616,53 @@ def collect_phase0(
                 artifact.normalized_path, workspace_root
             )
         manifest["artifacts"].append(payload)
+
+    # v0.6-A is an additive extraction seam.  Existing daily callers keep the
+    # legacy manifest unchanged; the recovery caller opts in with its already
+    # validated runKey/target identity so the same collector output carries a
+    # deterministic application checkpoint without giving the checkpoint any
+    # new publishing authority.
+    if application_identity is not None:
+        try:
+            identity = application_identity
+            input_sha = canonical_sha256(
+                {
+                    "requestedDates": dates,
+                    "collectionWindow": collection_window,
+                    "pcfMaxCodes": pcf_max_codes,
+                }
+            )
+            output_sha = canonical_sha256({"manifest": manifest, "quality": quality})
+            checkpoint_status = "COMPLETED" if gate_status in {"pass", "conditional_pass"} else (
+                "PENDING" if gate_status == "pending" else "BLOCKED_QUALITY"
+            )
+            execution = execute_application_plan(
+                identity=identity,
+                stages=["core_collection"],
+                stage_inputs={"core_collection": input_sha},
+                stage_runner=lambda stage, digest: build_checkpoint(
+                    identity=identity,
+                    stage=stage,
+                    status=checkpoint_status,
+                    input_sha256=digest,
+                    output_sha256=output_sha if checkpoint_status == "COMPLETED" else None,
+                    allowed_side_effects=("filesystem:data", "filesystem:reports"),
+                    evidence={
+                        "phase0GateStatus": gate_status,
+                        "requestedDates": dates,
+                        "artifactCount": len(artifacts),
+                    },
+                ),
+            )
+            manifest["application"] = {
+                "schemaVersion": execution["schemaVersion"],
+                "contractVersion": execution["contractVersion"],
+                "identity": identity.as_dict(),
+                "planHash": execution["planHash"],
+                "checkpoints": execution["checkpoints"],
+            }
+        except ApplicationContractError as exc:
+            raise ValueError(f"invalid application context: {exc}") from exc
 
     run_report_dir = report_root / run_id
     write_json(run_report_dir / "manifest.json", manifest)

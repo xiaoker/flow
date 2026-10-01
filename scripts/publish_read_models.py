@@ -12,6 +12,8 @@ from typing import Any
 
 import requests
 
+from trading_desk.pipeline_application import retry_bounded
+
 
 MAX_REQUEST_BYTES = 1_500_000
 ACTIVATION_MODES = {"active", "stage_only"}
@@ -32,11 +34,16 @@ def post(
     metrics: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    last_error: Exception | None = None
-    for attempt in range(4):
+    class _RetryableResponse(RuntimeError):
+        pass
+
+    class _PermanentResponse(RuntimeError):
+        pass
+
+    def attempt() -> dict[str, Any]:
+        if metrics is not None:
+            metrics["workerRequests"] = metrics.get("workerRequests", 0) + 1
         try:
-            if metrics is not None:
-                metrics["workerRequests"] = metrics.get("workerRequests", 0) + 1
             response = requests.post(url, data=encoded, headers=headers, timeout=(10, 90))
             if response.ok:
                 result = response.json()
@@ -44,14 +51,31 @@ def post(
                     raise ValueError("read model import did not return an object")
                 return result
             detail = response.text[:500].replace("\n", " ")
-            last_error = RuntimeError(f"{response.status_code} response: {detail}")
-            if response.status_code not in {408, 429} and response.status_code < 500:
-                break
-        except Exception as exc:  # pragma: no cover - exercised by live transport
-            last_error = exc
-        if attempt < 3:
-            time.sleep(2**attempt)
-    raise RuntimeError(f"read model import failed after retries: {last_error}")
+            error = RuntimeError(f"{response.status_code} response: {detail}")
+            if response.status_code in {408, 429} or response.status_code >= 500:
+                raise _RetryableResponse(str(error))
+            raise _PermanentResponse(str(error))
+        except (_RetryableResponse, _PermanentResponse):
+            raise
+        except Exception:
+            # Preserve the old transport contract: unexpected network/JSON
+            # errors are retryable within the same bounded attempt budget.
+            raise
+
+    def retry_exception(exc: BaseException) -> bool:
+        return not isinstance(exc, _PermanentResponse)
+
+    try:
+        return retry_bounded(
+            attempt,
+            max_attempts=4,
+            should_retry_exception=retry_exception,
+            sleep=time.sleep,
+        )
+    except (_RetryableResponse, _PermanentResponse) as exc:
+        raise RuntimeError(f"read model import failed after retries: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - exercised by live transport
+        raise RuntimeError(f"read model import failed after retries: {exc}") from exc
 
 
 def check_capabilities(

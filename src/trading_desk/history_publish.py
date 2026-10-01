@@ -6,6 +6,20 @@ from typing import Any
 
 import requests
 
+from .pipeline_application import retry_bounded
+
+
+class _RetryableHistoryResponse(RuntimeError):
+    def __init__(self, error: requests.HTTPError) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
+class _PermanentHistoryResponse(RuntimeError):
+    def __init__(self, error: requests.HTTPError) -> None:
+        self.error = error
+        super().__init__(str(error))
+
 
 def _post_chunk(
     *,
@@ -18,8 +32,8 @@ def _post_chunk(
 ) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     transport = session if session is not None else requests
-    last_error: Exception | None = None
-    for attempt in range(max_attempts):
+
+    def attempt() -> dict[str, Any]:
         try:
             response = transport.post(url, data=body, headers=headers, timeout=timeout)
             if response.ok:
@@ -32,9 +46,9 @@ def _post_chunk(
                 f"{response.status_code} response from history import: {detail}",
                 response=response,
             )
-            last_error = error
-            if response.status_code < 500 and response.status_code not in {408, 429}:
-                break
+            if response.status_code >= 500 or response.status_code in {408, 429}:
+                raise _RetryableHistoryResponse(error)
+            raise _PermanentHistoryResponse(error)
         except Exception as exc:
             # The live recovery transport raises a typed budget error before
             # sending a request.  Retrying it here would only burn time and
@@ -45,10 +59,31 @@ def _post_chunk(
                 "live_recovery_source_unavailable",
             }:
                 raise
-            last_error = exc
-        if attempt < max_attempts - 1:
-            time.sleep(2**attempt)
-    raise RuntimeError(f"history import chunk failed after retries: {last_error}")
+            raise
+
+    def retry_exception(exc: BaseException) -> bool:
+        if getattr(exc, "code", None) in {
+            "live_recovery_request_budget_exceeded",
+            "live_recovery_source_unavailable",
+        }:
+            return False
+        return isinstance(exc, _RetryableHistoryResponse) or not isinstance(
+            exc, _PermanentHistoryResponse
+        )
+
+    try:
+        return retry_bounded(
+            attempt,
+            max_attempts=max_attempts,
+            should_retry_exception=retry_exception,
+            sleep=time.sleep,
+        )
+    except _RetryableHistoryResponse as exc:
+        raise RuntimeError(f"history import chunk failed after retries: {exc.error}") from exc
+    except _PermanentHistoryResponse as exc:
+        raise RuntimeError(f"history import chunk failed after retries: {exc.error}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"history import chunk failed after retries: {exc}") from exc
 
 
 def publish_history_bundle(

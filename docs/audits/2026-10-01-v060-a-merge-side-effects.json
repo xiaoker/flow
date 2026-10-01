@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "stage": "060-A",
+  "baseCommit": "f1d1741947535b8589fa762dfb91939a6920f6d2",
+  "generatedAt": "2026-10-01T12:00:00Z",
+  "scope": {
+    "files": [
+      "src/trading_desk/pipeline_application.py",
+      "src/trading_desk/phase0.py",
+      "src/trading_desk/history_publish.py",
+      "src/trading_desk/recovery_execution.py",
+      "scripts/publish_read_models.py",
+      "scripts/run_live_recovery.py",
+      "tests/unit/test_pipeline_application.py",
+      "tests/unit/test_publish_read_models.py",
+      "tests/fixtures/pipeline/v060-a-redacted.json",
+      "docs/audits/flow-convergence-progress.md",
+      "docs/audits/2026-10-01-v060-a-merge-side-effects.json"
+    ],
+    "migrations": [],
+    "workflowChanges": false,
+    "productionFlagsChanged": false,
+    "activeReleaseChanged": false,
+    "collectionOrRecoveryDispatched": false
+  },
+  "mergeEffects": {
+    "ci": [
+      "pull_request: ci.yml unit-and-contract-tests",
+      "pull_request: ci.yml web-ci"
+    ],
+    "deploy": {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "automaticTrigger": false,
+      "reason": "The PR changes no web/** or deploy-worker.yml path; the deploy workflow path filter will not run on merge.",
+      "manualDispatch": "Not requested and not part of 060-A."
+    }
+  },
+  "runtimeBoundary": {
+    "applicationExecutor": "additive metadata/checkpoint seam only; existing production entry points remain authoritative",
+    "flags": "unchanged",
+    "capture": "not run",
+    "collectionOrRecovery": "not dispatched",
+    "activeRelease": "unchanged",
+    "remoteMigration": "not run"
+  },
+  "rollback": "Revert this standalone code PR before any 060-B work; no data cleanup, migration rollback or active-release mutation is required."
+}

@@ -1,0 +1,18 @@
+{
+  "identity": {
+    "runKey": "daily-market-data:2026-09-30:reconcile:v1",
+    "windowDate": "2026-09-30",
+    "targetDate": "2026-09-29",
+    "contractVersion": "pipeline-application-v1",
+    "producerBuildSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "stage": "build",
+  "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "outputSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "allowedSideEffects": ["filesystem:artifact", "r2:immutable-put"],
+  "evidence": {
+    "asOf": "2026-09-29",
+    "releaseSlot": "dashboard",
+    "redacted": true
+  }
+}
