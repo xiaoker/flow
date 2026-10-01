@@ -16,9 +16,10 @@ import {
   parseMarketDayStateRow,
   persistMarketDayProjection,
   projectMarketDay,
-  shouldDispatchHeavyCollection,
+  decideHeavyCollection,
   type SourceObservationSummary,
 } from "../app/lib/market-day-projection";
+import { resolveMarketDayProbeMode, type MarketDayProbeMode } from "../app/lib/market-day-mode";
 import { probeMarketDaySources } from "../app/lib/market-day-probe";
 
 interface Env {
@@ -28,8 +29,10 @@ interface Env {
   RAW_BUCKET: R2Bucket;
   INGEST_API_KEY: string;
   PIPELINE_WINDOW_GATE_ENABLED?: string;
-  /** v0.5 low-cost source probe; remains off until shadow validation is authorised. */
+  /** v0.5 compatibility input; 0=OFF, 1=ENFORCE. */
   MARKET_DAY_PROBE_ENABLED?: string;
+  /** v0.5 single probe contract: OFF, OBSERVE or ENFORCE. */
+  MARKET_DAY_PROBE_MODE?: string;
   /** Recovery control-plane gate; intentionally unset/disabled in production during R1. */
   PIPELINE_RECOVERY_ENABLED?: string;
   PIPELINE_WINDOW_CONTRACT_VERSION?: string;
@@ -71,10 +74,6 @@ function isRetryableDispatchStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-function isEnabledFlag(value: string | undefined): boolean {
-  return value === "1" || value === "true";
-}
-
 async function readMarketDayObservations(
   db: D1Database,
   targetDate: string,
@@ -103,42 +102,53 @@ async function readMarketDayObservations(
 
 async function coordinateMarketDay(
   env: Env,
-  targetDate: string,
+  windowDate: string,
   runKey: string,
-): Promise<{ shouldDispatch: boolean; probeFingerprint: string }> {
+  mode: MarketDayProbeMode,
+): Promise<{ shouldDispatch: boolean; probeFingerprint: string; decision: ReturnType<typeof decideHeavyCollection> }> {
   if (!env.DB) throw new Error("MARKET_DAY_PROBE_ENABLED requires DB");
   const observedAt = new Date().toISOString();
   // Probes are intentionally sequential and bounded.  They only retain
   // response metadata/prefix hashes; the heavy collector remains the owner of
   // raw bytes and full parsing.
-  const probes = await probeMarketDaySources(targetDate, observedAt);
-  const observations = await readMarketDayObservations(env.DB, targetDate);
-  const previousRow = await getMarketDayState(env.DB, targetDate);
+  const probes = await probeMarketDaySources(windowDate, observedAt);
+  const observations = await readMarketDayObservations(env.DB, windowDate);
+  const previousRow = await getMarketDayState(env.DB, windowDate);
   const previous = previousRow ? parseMarketDayStateRow(previousRow) : null;
   const projection = await projectMarketDay({
-    targetDate,
+    windowDate,
     observations,
     probes,
     projectedAt: observedAt,
   });
   const pipeline = await getPipelineWindow(env.DB, runKey);
-  const shouldDispatch = shouldDispatchHeavyCollection(
+  const oldDecision = pipeline?.status === "COMPLETED" || pipeline?.status === "DISPATCHED" || pipeline?.status === "RUNNING"
+    ? "skip"
+    : "dispatch";
+  const decision = decideHeavyCollection(
     previous,
     projection,
     pipeline?.status ?? null,
+    mode,
+    oldDecision,
   );
-  const persisted = await persistMarketDayProjection(env.DB, projection);
+  const persisted = await persistMarketDayProjection(env.DB, { ...projection, decision });
   console.info("Market-day probe projection recorded", {
-    targetDate,
+    windowDate,
     runKey,
     state: projection.state,
     nextAction: projection.nextAction,
-    shouldDispatch,
+    mode,
+    wouldDispatch: decision.wouldDispatch,
+    reason: decision.reason,
+    candidateBusinessDate: decision.candidateBusinessDate,
+    formalTargetDate: decision.formalTargetDate,
+    oldDecision: decision.oldDecision,
     probeFingerprint: projection.probeFingerprint,
     sourceFingerprint: projection.sourceFingerprint,
     d1RowsWritten: persisted.rowsWritten,
   });
-  return { shouldDispatch, probeFingerprint: projection.probeFingerprint };
+  return { shouldDispatch: decision.wouldDispatch, probeFingerprint: projection.probeFingerprint, decision };
 }
 
 async function dispatchDailyCollection(
@@ -155,19 +165,47 @@ async function dispatchDailyCollection(
   const runKey = buildPipelineRunKey(windowDate, window, contractVersion);
   const leaseOwner = `cloudflare:${window}:${controller.scheduledTime}`;
   const gateEnabled = env.PIPELINE_WINDOW_GATE_ENABLED === "1" || env.PIPELINE_WINDOW_GATE_ENABLED === "true";
+  const probeMode = resolveMarketDayProbeMode({
+    mode: env.MARKET_DAY_PROBE_MODE,
+    legacyEnabled: env.MARKET_DAY_PROBE_ENABLED,
+  }).mode;
   let probeFingerprint: string | null = null;
-  if (isEnabledFlag(env.MARKET_DAY_PROBE_ENABLED)) {
+  if (probeMode !== "OFF") {
     if (!gateEnabled) throw new Error("MARKET_DAY_PROBE_ENABLED requires PIPELINE_WINDOW_GATE_ENABLED");
-    const coordination = await coordinateMarketDay(env, windowDate, runKey);
-    probeFingerprint = coordination.probeFingerprint;
-    if (!coordination.shouldDispatch) {
+    let coordination: Awaited<ReturnType<typeof coordinateMarketDay>> | null = null;
+    try {
+      coordination = await coordinateMarketDay(env, windowDate, runKey, probeMode);
+    } catch (error: unknown) {
+      if (probeMode !== "OBSERVE") throw error;
+      // OBSERVE is an attached diagnostic sidecar.  Its own network/D1
+      // failure must not alter the already-proven legacy dispatch path.
+      console.warn("Market-day probe observation failed; preserving legacy dispatch", {
+        cron: controller.cron,
+        runKey,
+        windowDate,
+        detail: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
+      });
+    }
+    probeFingerprint = coordination?.probeFingerprint ?? null;
+    if (probeMode === "ENFORCE" && coordination && !coordination.shouldDispatch) {
       console.info("Market-day probe found no new source facts; skipping heavy collection", {
         cron: controller.cron,
         runKey,
         windowDate,
         probeFingerprint,
+        reason: coordination.decision.reason,
       });
       return;
+    }
+    if (probeMode === "OBSERVE") {
+      console.info("Market-day probe is observing; legacy dispatch remains unchanged", {
+        cron: controller.cron,
+        runKey,
+        windowDate,
+        probeFingerprint,
+        wouldDispatch: coordination?.decision.wouldDispatch ?? null,
+        reason: coordination?.decision.reason ?? "observation_unavailable",
+      });
     }
   }
   const scheduleLagMs = Math.max(0, Date.now() - controller.scheduledTime);

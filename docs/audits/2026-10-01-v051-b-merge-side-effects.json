@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "stage": "051-B",
+  "baseCommit": "1894f0588efb4665f847ba4aebd2f6401164de9e",
+  "generatedAt": "2026-10-01T09:17:18Z",
+  "scope": {
+    "files": [
+      "web/app/lib/market-day-mode.ts",
+      "web/app/lib/market-day-probe.ts",
+      "web/app/lib/market-day-projection.ts",
+      "web/worker/index.ts",
+      "web/tests/market-day-projection.test.mjs",
+      "docs/audits/flow-convergence-progress.md"
+    ],
+    "migrations": [],
+    "workflowChanges": false,
+    "productionFlagsChanged": false,
+    "activeReleaseChanged": false,
+    "collectionOrRecoveryDispatched": false
+  },
+  "mergeEffects": {
+    "ci": [
+      "pull_request: ci.yml unit-and-contract-tests",
+      "pull_request: ci.yml web-ci"
+    ],
+    "deploy": {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "trigger": "pull_request closed on main when merged and web/** changed",
+      "actions": [
+        "npm ci",
+        "npm run lint",
+        "npm test",
+        "wrangler d1 migrations apply flow --remote (no pending migration expected)",
+        "npm run deploy",
+        "production build identity verification"
+      ],
+      "concurrency": "flow-production-deploy; cancel-in-progress=true"
+    }
+  },
+  "runtimeBoundary": {
+    "probeModeDefault": "OFF",
+    "legacyMarketDayProbeEnabled": "0",
+    "enforceEnabled": false,
+    "observeEnabled": false,
+    "productionHeavyDispatchChanged": false
+  },
+  "rollback": "Revert the standalone PR before enabling OBSERVE or ENFORCE; no data cleanup or active-release mutation is required."
+}

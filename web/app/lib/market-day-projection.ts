@@ -3,6 +3,7 @@ import {
   sha256Hex,
   type SourceObservationStatus,
 } from "./source-observation.ts";
+import type { MarketDayProbeMode } from "./market-day-mode.ts";
 
 /**
  * v0.5 market-day projection.
@@ -12,7 +13,7 @@ import {
  * is publishable.  The normal release builder remains the only component
  * allowed to construct and publish decision data.
  */
-export const MARKET_DAY_PROJECTION_VERSION = "flow-market-day-v0.5" as const;
+export const MARKET_DAY_PROJECTION_VERSION = "flow-market-day-v0.5.1" as const;
 export const MARKET_DAY_STATE_SCHEMA_VERSION = 1 as const;
 export const MARKET_DAY_STATE_LIMIT = 64;
 
@@ -47,18 +48,27 @@ export type SourceObservationSummary = {
   observedAt: string;
 };
 
-export type MarketDayProbeStatus = "PUBLISHED" | "NOT_PUBLISHED" | "SOURCE_UNAVAILABLE";
+export type MarketDayProbeStatus =
+  | "PUBLISHED"
+  | "NOT_PUBLISHED"
+  | "SOURCE_UNAVAILABLE"
+  | "EMPTY_RESPONSE";
 
 export type MarketDayProbe = {
   sourceKey: MarketDaySourceKey;
   sourceId: string;
   dataset: string;
+  /** Scheduler business date used only to address the probe request. */
+  windowDate?: string;
+  /** Compatibility alias for older persisted probes; never a formal target date. */
   targetDate: string;
   status: MarketDayProbeStatus;
   httpStatus: number | null;
   observedAt: string;
   sourceBusinessDate: string | null;
   publishedDate: string | null;
+  /** A bounded official-date hint. It is not a target_date binding or proof. */
+  candidateBusinessDate?: string | null;
   fingerprint: string;
   reason: string;
   evidence: Record<string, unknown>;
@@ -82,7 +92,13 @@ export type MarketDayProjectionSource = {
 export type MarketDayProjection = {
   schemaVersion: typeof MARKET_DAY_STATE_SCHEMA_VERSION;
   projectionVersion: typeof MARKET_DAY_PROJECTION_VERSION;
+  /** Scheduler window; the persisted target_date key is this value. */
+  windowDate: string;
+  /** Compatibility alias retained for existing readers. */
   targetDate: string;
+  /** Candidate from a probe only; the formal collector target remains unset. */
+  candidateBusinessDate: string | null;
+  formalTargetDate: string | null;
   state: MarketDayState;
   sourceFingerprint: string;
   probeFingerprint: string;
@@ -96,7 +112,18 @@ export type MarketDayProjection = {
   nextAction: "collect_sources" | "wait_for_source_change" | "build_release" | "investigate_source";
   sources: MarketDayProjectionSource[];
   probes: MarketDayProbe[];
+  decision?: MarketDayDecision;
   projectedAt: string;
+};
+
+export type MarketDayDecision = {
+  mode: MarketDayProbeMode;
+  wouldDispatch: boolean;
+  reason: string;
+  candidateBusinessDate: string | null;
+  formalTargetDate: null;
+  oldDecision: "dispatch" | "skip" | "unknown";
+  pipelineStatus: string | null;
 };
 
 export type MarketDayStateRow = {
@@ -184,7 +211,9 @@ function actionForSource(
   probe: MarketDayProbe | null,
 ): MarketDayProjectionSource["nextAction"] {
   if (status === "VERIFIED") return "none";
-  if (status === "NOT_PUBLISHED" || probe?.status === "NOT_PUBLISHED") return "wait_for_publication";
+  if (status === "NOT_PUBLISHED" || probe?.status === "NOT_PUBLISHED" || probe?.status === "EMPTY_RESPONSE") {
+    return "wait_for_publication";
+  }
   if (status === "SOURCE_UNAVAILABLE" || probe?.status === "SOURCE_UNAVAILABLE") return "investigate_source";
   return "verify_observation";
 }
@@ -199,22 +228,28 @@ async function aggregateFingerprint(value: unknown): Promise<string> {
  * previous value.  The projection is deterministic apart from `projectedAt`.
  */
 export async function projectMarketDay(input: {
-  targetDate: string;
+  windowDate?: string;
+  /** Deprecated compatibility input; interpreted as the scheduler window only. */
+  targetDate?: string;
   observations?: SourceObservationSummary[];
   probes?: MarketDayProbe[];
   projectedAt?: string;
 }): Promise<MarketDayProjection> {
-  if (!isDate(input.targetDate)) throw new Error("market_day_invalid_target_date");
+  const windowDate = input.windowDate ?? input.targetDate ?? "";
+  if (!isDate(windowDate)) throw new Error("market_day_invalid_window_date");
+  if (input.windowDate && input.targetDate && input.windowDate !== input.targetDate) {
+    throw new Error("market_day_window_target_conflict");
+  }
   const probes = [...(input.probes ?? [])]
-    .filter((probe) => probe.targetDate === input.targetDate)
+    .filter((probe) => (probe.windowDate ?? probe.targetDate) === windowDate)
     .sort((left, right) => left.sourceKey.localeCompare(right.sourceKey));
   const probeByKey = new Map(probes.map((probe) => [probe.sourceKey, probe]));
-  const latest = latestObservations(input.observations ?? [], input.targetDate);
+  const latest = latestObservations(input.observations ?? [], windowDate);
   const sources: MarketDayProjectionSource[] = MARKET_DAY_SOURCE_DEFINITIONS.map((definition) => {
     const key = sourceKey(definition);
     const observation = latest.get(key);
     const probe = probeByKey.get(key) ?? null;
-    const status = statusForObservation(observation, input.targetDate);
+    const status = statusForObservation(observation, windowDate);
     return {
       key,
       sourceId: definition.sourceId,
@@ -236,6 +271,12 @@ export async function projectMarketDay(input: {
   const unavailable = required.filter((source) => ["SOURCE_UNAVAILABLE", "REJECTED_QUALITY", "DATE_MISMATCH"].includes(source.status)).length;
   const optionalVerified = sources.filter((source) => !source.required && source.status === "VERIFIED").length;
   const state: MarketDayState = verified === required.length ? "READY_TO_BUILD" : "WAITING_SOURCES";
+  const candidateDates = [...new Set(
+    probes
+      .map((probe) => probe.candidateBusinessDate ?? probe.sourceBusinessDate ?? null)
+      .filter((date): date is string => Boolean(date) && isDate(date)),
+  )];
+  const candidateBusinessDate = candidateDates.length === 1 ? candidateDates[0] : null;
   const sourceFingerprint = await aggregateFingerprint(
     sources.map((source) => ({
       key: source.key,
@@ -252,6 +293,7 @@ export async function projectMarketDay(input: {
       httpStatus: probe.httpStatus,
       sourceBusinessDate: probe.sourceBusinessDate,
       publishedDate: probe.publishedDate,
+      candidateBusinessDate: probe.candidateBusinessDate ?? null,
       fingerprint: probe.fingerprint,
     })),
   );
@@ -265,7 +307,10 @@ export async function projectMarketDay(input: {
   return {
     schemaVersion: MARKET_DAY_STATE_SCHEMA_VERSION,
     projectionVersion: MARKET_DAY_PROJECTION_VERSION,
-    targetDate: input.targetDate,
+    windowDate,
+    targetDate: windowDate,
+    candidateBusinessDate,
+    formalTargetDate: null,
     state,
     sourceFingerprint,
     probeFingerprint,
@@ -292,15 +337,66 @@ export async function projectMarketDay(input: {
  */
 export function shouldDispatchHeavyCollection(
   previous: Pick<MarketDayProjection, "probeFingerprint" | "state"> | null,
-  current: Pick<MarketDayProjection, "probeFingerprint" | "state" | "probes">,
+  current: Pick<MarketDayProjection, "probeFingerprint" | "state" | "probes"> & Partial<Pick<MarketDayProjection, "candidateBusinessDate">>,
   pipelineStatus: string | null,
 ): boolean {
+  return decideHeavyCollection(previous, {
+    ...current,
+    candidateBusinessDate: current.candidateBusinessDate ?? null,
+  }, pipelineStatus).wouldDispatch;
+}
+
+/**
+ * Produce the explicit decision recorded by OBSERVE and consumed by ENFORCE.
+ * A probe is a hint only: verified source observations and the publisher still
+ * own the formal target-date proof.  In particular, a stable 200 response or
+ * a publication watermark cannot by itself dispatch a heavy collection.
+ */
+export function decideHeavyCollection(
+  previous: Pick<MarketDayProjection, "probeFingerprint" | "state"> | null,
+  current: Pick<MarketDayProjection, "probeFingerprint" | "state" | "probes" | "candidateBusinessDate">,
+  pipelineStatus: string | null,
+  mode: MarketDayProbeMode = "ENFORCE",
+  oldDecision: MarketDayDecision["oldDecision"] = "dispatch",
+): MarketDayDecision {
   const sourceMayBeAvailable = current.probes.some((probe) => probe.status === "PUBLISHED");
-  if (!sourceMayBeAvailable) return pipelineStatus === "FAILED_RETRYABLE";
-  if (pipelineStatus === "FAILED_RETRYABLE") return true;
-  if (!previous) return true;
-  if (current.state === "READY_TO_BUILD") return false;
-  return previous.probeFingerprint !== current.probeFingerprint;
+  let wouldDispatch = false;
+  let reason = "stable_not_published_or_unavailable";
+
+  if (pipelineStatus === "FAILED_RETRYABLE") {
+    wouldDispatch = true;
+    reason = "retryable_pipeline_failure";
+  } else if (current.state === "READY_TO_BUILD") {
+    // READY_TO_BUILD is reusable input, not a terminal skip.  A release that
+    // has not completed still needs a chance to build/publish from the same
+    // immutable observations after a crash.
+    wouldDispatch = pipelineStatus !== "COMPLETED" && pipelineStatus !== "DISPATCHED" && pipelineStatus !== "RUNNING";
+    reason = wouldDispatch ? "ready_to_build_without_completed_release" : "ready_to_build_release_in_flight_or_complete";
+  } else if (!sourceMayBeAvailable) {
+    wouldDispatch = false;
+    reason = current.probes.some((probe) => probe.status === "EMPTY_RESPONSE")
+      ? "empty_response_not_evidence"
+      : "no_published_probe";
+  } else if (!previous) {
+    wouldDispatch = true;
+    reason = "first_probe_with_published_source";
+  } else if (previous.probeFingerprint !== current.probeFingerprint) {
+    wouldDispatch = true;
+    reason = "probe_fingerprint_changed";
+  } else {
+    wouldDispatch = false;
+    reason = "stable_probe_fingerprint";
+  }
+
+  return {
+    mode,
+    wouldDispatch,
+    reason,
+    candidateBusinessDate: current.candidateBusinessDate,
+    formalTargetDate: null,
+    oldDecision,
+    pipelineStatus,
+  };
 }
 
 function boundedJson(value: unknown, maxBytes: number): string {
@@ -348,7 +444,12 @@ export async function persistMarketDayProjection(
     projection.counts.pending,
     projection.counts.unavailable,
     projection.nextAction,
-    boundedJson(projection.probes, 48 * 1024),
+    boundedJson({
+      probes: projection.probes,
+      decision: projection.decision ?? null,
+      candidateBusinessDate: projection.candidateBusinessDate,
+      formalTargetDate: projection.formalTargetDate,
+    }, 48 * 1024),
     boundedJson(projection.sources, 48 * 1024),
     projection.projectedAt,
     nowIso,
@@ -384,13 +485,23 @@ export async function getMarketDayState(
 export function parseMarketDayStateRow(row: MarketDayStateRow): MarketDayProjection {
   if (!row || !isDate(row.target_date)) throw new Error("market_day_state_invalid_row");
   if (!MARKET_DAY_STATES.includes(row.state as MarketDayState)) throw new Error("market_day_state_invalid_state");
-  const probes = JSON.parse(row.probe_json || "[]") as MarketDayProbe[];
+  const probePayload = JSON.parse(row.probe_json || "[]") as MarketDayProbe[] | {
+    probes?: MarketDayProbe[];
+    decision?: MarketDayDecision | null;
+    candidateBusinessDate?: string | null;
+    formalTargetDate?: string | null;
+  };
+  const probes = Array.isArray(probePayload) ? probePayload : probePayload.probes ?? [];
+  const decision = Array.isArray(probePayload) ? undefined : probePayload.decision ?? undefined;
   const sources = JSON.parse(row.sources_json || "[]") as MarketDayProjectionSource[];
   if (!Array.isArray(probes) || !Array.isArray(sources)) throw new Error("market_day_state_invalid_json");
   return {
     schemaVersion: MARKET_DAY_STATE_SCHEMA_VERSION,
     projectionVersion: MARKET_DAY_PROJECTION_VERSION,
+    windowDate: row.target_date,
     targetDate: row.target_date,
+    candidateBusinessDate: Array.isArray(probePayload) ? null : probePayload.candidateBusinessDate ?? null,
+    formalTargetDate: Array.isArray(probePayload) ? null : probePayload.formalTargetDate ?? null,
     state: row.state as MarketDayState,
     sourceFingerprint: row.source_fingerprint,
     probeFingerprint: row.probe_fingerprint,
@@ -404,6 +515,7 @@ export function parseMarketDayStateRow(row: MarketDayStateRow): MarketDayProject
     nextAction: row.next_action as MarketDayProjection["nextAction"],
     sources,
     probes,
+    decision,
     projectedAt: row.projected_at,
   };
 }
