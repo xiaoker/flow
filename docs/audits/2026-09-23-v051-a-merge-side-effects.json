@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "generatedFor": {
+    "version": "v0.5.1",
+    "stage": "051-A",
+    "title": "isolate source observation sidecar failures",
+    "baseBranch": "main",
+    "baseSha": "11266dc11d258433a8e9c4d7ef8e2baf58e05303",
+    "headBranch": "codex/flow-v051-a-20260923",
+    "headSha": null,
+    "headShaResolvedIn": "stage-report-and-pull-request"
+  },
+  "changedPaths": [
+    "docs/audits/2026-09-23-v051-a-merge-side-effects.json",
+    "docs/audits/flow-convergence-progress.md",
+    "web/app/api/v1/admin/history-import/route.ts",
+    "web/app/lib/source-observation.ts",
+    "web/tests/source-observation.test.mjs"
+  ],
+  "pullRequestEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "pull_request",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/branch-sync-check.yml",
+        "trigger": "pull_request",
+        "jobs": ["verify-base"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      }
+    ],
+    "workflowDispatch": false,
+    "marketDataCollection": false,
+    "recoveryOrBackfill": false,
+    "sourceObservationShadowExecution": false,
+    "sourceObservationFlagChange": false
+  },
+  "mergeToMainEffects": {
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "trigger": "push on main",
+        "jobs": ["unit-and-contract-tests", "web-ci"],
+        "remoteDataWrites": false,
+        "productionDeploy": false
+      },
+      {
+        "path": ".github/workflows/deploy-worker.yml",
+        "trigger": "merged pull_request closed event; web/** path matches",
+        "jobs": ["deploy"],
+        "remoteDataWrites": true,
+        "productionDeploy": true,
+        "actions": [
+          "npm ci",
+          "web lint and production contract tests",
+          "npx wrangler d1 migrations apply flow --remote",
+          "npm run deploy",
+          "protected deployed-build identity verification"
+        ]
+      }
+    ],
+    "deployWorker": true,
+    "d1Migration": {
+      "newMigrationsInPr": [],
+      "remoteApplyCommandRunsOnMerge": true,
+      "pendingMigrationsAtMerge": "UNKNOWN_UNTIL_DEPLOY_RUN",
+      "destructive": false,
+      "dataRowsRead": "UNKNOWN_UNTIL_DEPLOY_RUN",
+      "dataRowsWritten": "UNKNOWN_UNTIL_DEPLOY_RUN",
+      "note": "This PR adds no migration. The existing deploy workflow still invokes the remote pending-migration command; do not claim zero remote work without its run evidence."
+    },
+    "activePointerChanged": false,
+    "productionReadPathChanged": false,
+    "featureFlagChanged": false,
+    "sourceObservationShadow": "The route only changes error isolation. No shadow run is dispatched and no flag is enabled by this PR. The effective production flag remains UNKNOWN until an authorized deployment verification."
+  },
+  "resourceEffects": {
+    "pullRequestD1RowsRead": 0,
+    "pullRequestD1RowsWritten": 0,
+    "pullRequestR2Writes": 0,
+    "mergeDeployD1RowsRead": "UNKNOWN_UNTIL_DEPLOY_RUN",
+    "mergeDeployD1RowsWritten": "UNKNOWN_UNTIL_DEPLOY_RUN",
+    "mergeDeployR2Operations": "UNKNOWN_UNTIL_DEPLOY_RUN",
+    "workerRequests": "UNKNOWN_UNTIL_AUTHORIZED_DEPLOY_VERIFICATION",
+    "githubActionsMinutes": {
+      "status": "UNKNOWN_UNTIL_RUN",
+      "note": "No collection, recovery, backfill, PCF, or workflow_dispatch is part of this PR. CI/deploy billing telemetry is not available locally."
+    },
+    "budgetDecision": "UNKNOWN_FOR_MERGE_DEPLOY; LOCAL_VALIDATION_WITHIN_SCOPE"
+  },
+  "sideEffectGuards": {
+    "d1OrR2WriteInPr": false,
+    "workflowDispatchInPr": false,
+    "activePointerMutationInPr": false,
+    "featureFlagEnablement": false,
+    "productionReadPathMutation": false,
+    "newMigration": false,
+    "collectionOrRecovery": false,
+    "pcfCapture": false,
+    "protectedPathsTouched": false,
+    "protectedPaths": ["reports/phase0/latest-*", "memory/"]
+  },
+  "rollback": {
+    "mode": "revert PR before merge or restore the previous route code",
+    "productionDataMutationInPr": false,
+    "pointerRecoveryRequired": false,
+    "note": "The change is an error-boundary change. It does not rewrite receipts, raw objects, D1 rows, releases, or active pointers. Any deployment rollback is a code rollback; no data rollback is required."
+  }
+}

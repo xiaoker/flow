@@ -10,7 +10,10 @@ import {
 } from "@/app/lib/etf-flow-state";
 import { extractMarketHistoryPoint } from "@/app/lib/market-history";
 import { isPublishableSnapshot } from "@/app/lib/snapshot-policy.mjs";
-import { recordSourceObservation } from "@/app/lib/source-observation";
+import {
+  isSourceObservationStorageError,
+  recordSourceObservation,
+} from "@/app/lib/source-observation";
 
 export const dynamic = "force-dynamic";
 
@@ -1206,6 +1209,7 @@ async function checkCollectionComplete(
 export async function POST(request: Request) {
   const runtime = await runtimeEnv();
   const archiveOnly = isEnabledFlag(runtime.HISTORY_IMPORT_ARCHIVE_ONLY);
+  const sourceObservationShadowEnabled = isEnabledFlag(runtime.SOURCE_OBSERVATION_SHADOW_ENABLED);
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   if (!runtime.INGEST_API_KEY || !suppliedKey || !secureEqual(suppliedKey, runtime.INGEST_API_KEY)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -1213,6 +1217,13 @@ export async function POST(request: Request) {
   if (!runtime.DB || !runtime.RAW_BUCKET) {
     return NextResponse.json({ error: "storage_unavailable" }, { status: 503 });
   }
+  const sourceObservationStatus = (d1Unavailable: number, r2Unavailable: number):
+    | "disabled"
+    | "recorded"
+    | "degraded" => {
+    if (!sourceObservationShadowEnabled) return "disabled";
+    return d1Unavailable > 0 || r2Unavailable > 0 ? "degraded" : "recorded";
+  };
   const declaredSize = Number(request.headers.get("content-length") ?? "0");
   if (declaredSize > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
@@ -1267,7 +1278,7 @@ export async function POST(request: Request) {
     let standardizedRows = 0;
     let sourceObservationCount = 0;
     let sourceObservationD1Unavailable = 0;
-    let sourceObservationR2Errors = 0;
+    let sourceObservationR2Unavailable = 0;
     for (const artifact of history.artifacts) {
       try {
         const raw = decodeBase64(artifact.rawContentBase64);
@@ -1301,7 +1312,7 @@ export async function POST(request: Request) {
         // participate in publication or readiness decisions yet: D1 is a
         // bounded projection and a later reconcile can replay the same R2
         // receipt if this insert is temporarily unavailable.
-        if (isEnabledFlag(runtime.SOURCE_OBSERVATION_SHADOW_ENABLED)) {
+        if (sourceObservationShadowEnabled) {
           try {
             const observation = await recordSourceObservation(runtime.RAW_BUCKET, runtime.DB, {
               sourceId: artifact.sourceId,
@@ -1322,19 +1333,26 @@ export async function POST(request: Request) {
               runKey: history.runKey ?? null,
             });
             sourceObservationCount += 1;
-            if (observation.d1Status === "unavailable") sourceObservationD1Unavailable += 1;
+            if (observation.d1Status === "unavailable") {
+              sourceObservationD1Unavailable += 1;
+              console.warn("source observation projection degraded", {
+                sourceId: artifact.sourceId,
+                dataset: artifact.dataset,
+                requestedDate: artifact.requestedDate,
+                code: observation.d1ErrorCode ?? "source_observation_d1_unavailable",
+              });
+            }
           } catch (error) {
-            // A raw archive without a receipt is not publishable while the
-            // shadow contract is enabled.  Continue this bounded artifact
-            // loop so other sources can leave independent evidence, then
-            // return a retryable response before any release work begins.
-            sourceObservationR2Errors += 1;
-            const code = error instanceof Error ? error.message : "unknown_receipt_error";
-            console.error("source observation receipt failed", {
+            if (!isSourceObservationStorageError(error)) throw error;
+            // The raw and metadata objects are already immutable evidence.
+            // An unavailable observation sidecar must be visible and
+            // retryable, but it must not create a new primary import failure.
+            sourceObservationR2Unavailable += 1;
+            console.warn("source observation receipt degraded", {
               sourceId: artifact.sourceId,
               dataset: artifact.dataset,
               requestedDate: artifact.requestedDate,
-              code,
+              code: error.code,
             });
           }
         }
@@ -1464,20 +1482,6 @@ export async function POST(request: Request) {
       }
     }
 
-    if (sourceObservationR2Errors > 0) {
-      return NextResponse.json(
-        {
-          error: "source_observation_receipt_failed",
-          asOf: history.asOf,
-          artifacts: history.artifacts.length,
-          sourceObservationCount,
-          sourceObservationD1Unavailable,
-          sourceObservationR2Errors,
-        },
-        { status: 503 },
-      );
-    }
-
     // Non-final chunks only checkpoint their artifact.  Avoid the expensive
     // expected-set R2 scan and snapshot serialization until the final chunk,
     // where completeness is checked exactly once before atomic publication.
@@ -1491,6 +1495,11 @@ export async function POST(request: Request) {
         archivedReadinessCount,
         sourceObservationCount,
         sourceObservationD1Unavailable,
+        sourceObservationR2Unavailable,
+        sourceObservationStatus: sourceObservationStatus(
+          sourceObservationD1Unavailable,
+          sourceObservationR2Unavailable,
+        ),
       });
     }
 
@@ -1549,6 +1558,11 @@ export async function POST(request: Request) {
         standardizedRows,
         sourceObservationCount,
         sourceObservationD1Unavailable,
+        sourceObservationR2Unavailable,
+        sourceObservationStatus: sourceObservationStatus(
+          sourceObservationD1Unavailable,
+          sourceObservationR2Unavailable,
+        ),
         snapshotSha256,
         snapshotKey: null,
         manifestKey,
@@ -1685,6 +1699,11 @@ export async function POST(request: Request) {
       archivedReadinessCount,
       sourceObservationCount,
       sourceObservationD1Unavailable,
+      sourceObservationR2Unavailable,
+      sourceObservationStatus: sourceObservationStatus(
+        sourceObservationD1Unavailable,
+        sourceObservationR2Unavailable,
+      ),
       snapshotSha256,
       snapshotKey,
       manifestKey,

@@ -107,6 +107,27 @@ type ObservationR2PutOptions = {
   customMetadata?: Record<string, string>;
 };
 
+/**
+ * R2 is the immutable observation sidecar, not the primary history import.
+ * Keep infrastructure failures distinguishable from receipt validation or
+ * identity conflicts so callers can degrade the sidecar without hiding a
+ * factual integrity failure.
+ */
+export class SourceObservationStorageError extends Error {
+  readonly storage = "r2" as const;
+  readonly code: "source_observation_r2_head_failed" | "source_observation_r2_put_failed";
+
+  constructor(code: "source_observation_r2_head_failed" | "source_observation_r2_put_failed") {
+    super(code);
+    this.name = "SourceObservationStorageError";
+    this.code = code;
+  }
+}
+
+export function isSourceObservationStorageError(error: unknown): error is SourceObservationStorageError {
+  return error instanceof SourceObservationStorageError;
+}
+
 export type SourceObservationPersistResult = {
   sourceFingerprint: string;
   observationId: string;
@@ -114,6 +135,7 @@ export type SourceObservationPersistResult = {
   receiptSha256: string;
   r2Status: "created" | "existing";
   d1Status: "recorded" | "already_recorded" | "unavailable";
+  d1ErrorCode: "source_observation_d1_unavailable" | null;
 };
 
 function isRecord(value: unknown): value is JsonObject {
@@ -347,7 +369,14 @@ export async function putImmutableObservationReceipt(
   const key = receiptKey(receipt);
   const body = new TextEncoder().encode(canonicalJson(receipt));
   const bodySha256 = await sha256Hex(body);
-  const head = typeof bucket.head === "function" ? await bucket.head(key) : null;
+  let head: Awaited<ReturnType<NonNullable<SourceObservationR2["head"]>>> = null;
+  if (typeof bucket.head === "function") {
+    try {
+      head = await bucket.head(key);
+    } catch {
+      throw new SourceObservationStorageError("source_observation_r2_head_failed");
+    }
+  }
   const matches = (existing: { size?: number; customMetadata?: Record<string, string> } | null): boolean => {
     if (!existing) return false;
     const metadata = existing.customMetadata ?? {};
@@ -377,9 +406,19 @@ export async function putImmutableObservationReceipt(
     });
     return { key, sha256: bodySha256, status: "created" };
   } catch (error) {
-    const raced = typeof bucket.head === "function" ? await bucket.head(key) : null;
+    let raced: Awaited<ReturnType<NonNullable<SourceObservationR2["head"]>>> = null;
+    if (typeof bucket.head === "function") {
+      try {
+        raced = await bucket.head(key);
+      } catch {
+        throw new SourceObservationStorageError("source_observation_r2_head_failed");
+      }
+    }
     if (matches(raced)) return { key, sha256: bodySha256, status: "existing" };
-    throw error;
+    // Keep the original exception out of the response/log contract.  R2
+    // providers may include request URLs or implementation details in it.
+    void error;
+    throw new SourceObservationStorageError("source_observation_r2_put_failed");
   }
 }
 
@@ -391,6 +430,7 @@ export async function recordSourceObservation(
   const receipt = await buildSourceObservationReceipt(input);
   const stored = await putImmutableObservationReceipt(bucket, receipt);
   let d1Status: SourceObservationPersistResult["d1Status"] = "unavailable";
+  let d1ErrorCode: SourceObservationPersistResult["d1ErrorCode"] = null;
   if (db) {
     try {
       const result = await db.prepare(
@@ -434,6 +474,7 @@ export async function recordSourceObservation(
       // The immutable R2 receipt is the recovery source.  D1 is only the
       // bounded query projection and can be reconciled later.
       d1Status = "unavailable";
+      d1ErrorCode = "source_observation_d1_unavailable";
     }
   }
   return {
@@ -443,5 +484,6 @@ export async function recordSourceObservation(
     receiptSha256: stored.sha256,
     r2Status: stored.status,
     d1Status,
+    d1ErrorCode,
   };
 }
