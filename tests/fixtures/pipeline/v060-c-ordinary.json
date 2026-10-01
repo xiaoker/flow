@@ -1,0 +1,45 @@
+{
+  "identity": {
+    "runKey": "daily-market-data:2026-09-30:reconcile:v1",
+    "windowDate": "2026-09-30",
+    "targetDate": "2026-09-29"
+  },
+  "mode": "ordinary",
+  "lease": {
+    "owner": "candidate:fixture",
+    "callbackOwner": "candidate:fixture",
+    "status": "ACTIVE",
+    "expiresAt": "2099-01-01T00:00:00Z"
+  },
+  "authorization": {
+    "kind": "existing-admin",
+    "verified": true,
+    "credentialRef": "environment:existing-admin"
+  },
+  "dependencyLockSha256": "841be0effa70f79bed6a8fa61e5c83013c69793cc882f1c95a0f9ad50a85a4d5",
+  "latestDataDate": "2026-09-30",
+  "stages": [
+    "core_collection",
+    "normalize",
+    "build",
+    "verify",
+    "publish",
+    "verify_visible"
+  ],
+  "stageInputs": {
+    "core_collection": "1111111111111111111111111111111111111111111111111111111111111111",
+    "normalize": "2222222222222222222222222222222222222222222222222222222222222222",
+    "build": "3333333333333333333333333333333333333333333333333333333333333333",
+    "verify": "4444444444444444444444444444444444444444444444444444444444444444",
+    "publish": "5555555555555555555555555555555555555555555555555555555555555555",
+    "verify_visible": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "stageResults": {
+    "core_collection": {"status": "COMPLETED", "outputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "allowedSideEffects": ["filesystem:checkpoint"]},
+    "normalize": {"status": "COMPLETED", "outputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "allowedSideEffects": ["filesystem:checkpoint"]},
+    "build": {"status": "COMPLETED", "outputSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "allowedSideEffects": ["filesystem:checkpoint"]},
+    "verify": {"status": "COMPLETED", "outputSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "allowedSideEffects": ["filesystem:checkpoint"], "evidence": {"r2Status": "SUCCEEDED", "d1Status": "SUCCEEDED"}},
+    "publish": {"status": "COMPLETED", "outputSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "allowedSideEffects": ["filesystem:checkpoint"]},
+    "verify_visible": {"status": "COMPLETED", "outputSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "allowedSideEffects": ["filesystem:checkpoint"]}
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "stage": "060-C",
+  "baseCommit": "8258d779b5ca7affce6895e4bdb729bf871c7f70",
+  "generatedAt": "2026-10-01T13:10:00Z",
+  "scope": {
+    "files": [
+      "src/trading_desk/pipeline_runner.py",
+      "src/trading_desk/cli.py",
+      "scripts/check_resource_budget.py",
+      ".github/workflows/pipeline-executor-candidate.yml",
+      "tests/unit/test_resource_budget.py",
+      "tests/unit/test_pipeline_runner.py",
+      "tests/unit/test_pipeline_executor_workflow.py",
+      "tests/fixtures/pipeline/v060-c-ordinary.json",
+      "docs/audits/2026-10-01-v060-c-executor-entry.md",
+      "docs/audits/2026-10-01-v060-c-merge-side-effects.json",
+      "docs/audits/flow-convergence-progress.md"
+    ],
+    "migrations": [],
+    "productionWorkflowsModified": false,
+    "productionFlagsChanged": false,
+    "activeReleaseChanged": false,
+    "collectionOrRecoveryDispatched": false
+  },
+  "mergeEffects": {
+    "ci": [
+      "pull_request: ci.yml unit-and-contract-tests",
+      "pull_request: ci.yml web-ci"
+    ],
+    "deploy": {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "automaticTrigger": false,
+      "reason": "The changed workflow is fixture-only and is not in deploy-worker.yml's web/** or deploy-worker.yml path filter.",
+      "manualDispatch": "Not requested and not part of 060-C."
+    },
+    "candidateWorkflow": {
+      "trigger": "workflow_dispatch only",
+      "productionSecrets": false,
+      "remoteWrites": false,
+      "artifactRetentionDays": 7
+    }
+  },
+  "runtimeBoundary": {
+    "entry": "candidate-only; no production caller is switched",
+    "recovery": "validated only when an already-approved recovery envelope is supplied",
+    "flags": "unchanged",
+    "remoteMigration": "not run",
+    "activeRelease": "unchanged"
+  },
+  "resourceEffects": {
+    "localD1RowsRead": 0,
+    "localD1RowsWritten": 0,
+    "localR2Operations": 0,
+    "localWorkerRequests": 0,
+    "githubActionsMinutes": "unknown_until_ci",
+    "candidateWorkflowMinutes": "manual_only",
+    "budgetDecision": "CANDIDATE_ONLY"
+  },
+  "rollback": "Revert this standalone code PR; no migration, release pointer, remote artifact or production flag cleanup is required."
+}

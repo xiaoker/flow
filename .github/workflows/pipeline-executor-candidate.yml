@@ -1,0 +1,59 @@
+name: Candidate pipeline executor
+
+on:
+  # Manual fixture-only smoke test.  It is intentionally not a schedule,
+  # push, pull_request, or production dispatch path.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-executor-candidate-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the exact requested producer SHA
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact checkout identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Run the shared candidate executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flow-pipeline-candidate"
+          PYTHONPATH=src:. python -m trading_desk.cli pipeline \
+            --request tests/fixtures/pipeline/v060-c-ordinary.json \
+            --state-dir "$RUNNER_TEMP/flow-pipeline-candidate/state" \
+            --output "$RUNNER_TEMP/flow-pipeline-candidate/result.json" \
+            --dependency-lock web/package-lock.json \
+            --producer-build-sha "$GITHUB_SHA"
+          jq -e '
+            (.status == "COMPLETED") and
+            (.sideEffects.remoteWrites == false) and
+            (.sideEffects.workflowDispatch == false) and
+            (.sideEffects.activeReleaseChanged == false) and
+            (.sideEffects.productionEntryEnabled == false)
+          ' "$RUNNER_TEMP/flow-pipeline-candidate/result.json"
+
+      - name: Upload candidate evidence only
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
+        with:
+          name: pipeline-executor-candidate-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/flow-pipeline-candidate/**
