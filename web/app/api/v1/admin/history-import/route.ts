@@ -1279,6 +1279,62 @@ export async function POST(request: Request) {
     let sourceObservationCount = 0;
     let sourceObservationD1Unavailable = 0;
     let sourceObservationR2Unavailable = 0;
+    const recordShadowObservation = async (
+      artifact: HistoryArtifact,
+      rawKey: string,
+      rawBytes: number,
+      normalizedFiles: NormalizedFile[] = [],
+    ): Promise<void> => {
+      if (!sourceObservationShadowEnabled) return;
+      try {
+        const observation = await recordSourceObservation(runtime.RAW_BUCKET, runtime.DB, {
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          targetDate: history.asOf,
+          requestedDate: artifact.requestedDate,
+          tradeDates: artifact.tradeDates,
+          observedAt: artifact.observedAt,
+          sourceUrl: artifact.sourceUrl,
+          dateBasis: artifact.dateBasis,
+          sha256: artifact.sha256,
+          contentType: artifact.contentType,
+          rawKey,
+          rawBytes,
+          metadata: artifact.metadata,
+          releaseId: artifact.releaseId,
+          normalizedFiles: normalizedFiles.map((file) => ({
+            name: file.name,
+            sha256: file.sha256,
+            rowCount: file.rowCount,
+            tradeDates: file.tradeDates,
+          })),
+          archiveRunId: history.runId,
+          runKey: history.runKey ?? null,
+        });
+        sourceObservationCount += 1;
+        if (observation.d1Status === "unavailable") {
+          sourceObservationD1Unavailable += 1;
+          console.warn("source observation projection degraded", {
+            sourceId: artifact.sourceId,
+            dataset: artifact.dataset,
+            requestedDate: artifact.requestedDate,
+            code: observation.d1ErrorCode ?? "source_observation_d1_unavailable",
+          });
+        }
+      } catch (error) {
+        if (!isSourceObservationStorageError(error)) throw error;
+        // The raw and normalized objects are already immutable evidence. An
+        // unavailable observation sidecar is visible and retryable, but must
+        // not create a new primary import failure.
+        sourceObservationR2Unavailable += 1;
+        console.warn("source observation receipt degraded", {
+          sourceId: artifact.sourceId,
+          dataset: artifact.dataset,
+          requestedDate: artifact.requestedDate,
+          code: error.code,
+        });
+      }
+    };
     for (const artifact of history.artifacts) {
       try {
         const raw = decodeBase64(artifact.rawContentBase64);
@@ -1307,55 +1363,6 @@ export async function POST(request: Request) {
             customMetadata: { sha256: artifact.sha256 },
           },
         );
-        // v0.5 shadow mode records the immutable observation immediately
-        // after the raw object is safely archived.  It deliberately does not
-        // participate in publication or readiness decisions yet: D1 is a
-        // bounded projection and a later reconcile can replay the same R2
-        // receipt if this insert is temporarily unavailable.
-        if (sourceObservationShadowEnabled) {
-          try {
-            const observation = await recordSourceObservation(runtime.RAW_BUCKET, runtime.DB, {
-              sourceId: artifact.sourceId,
-              dataset: artifact.dataset,
-              targetDate: history.asOf,
-              requestedDate: artifact.requestedDate,
-              tradeDates: artifact.tradeDates,
-              observedAt: artifact.observedAt,
-              sourceUrl: artifact.sourceUrl,
-              dateBasis: artifact.dateBasis,
-              sha256: artifact.sha256,
-              contentType: artifact.contentType,
-              rawKey,
-              rawBytes: raw.byteLength,
-              metadata: artifact.metadata,
-              releaseId: artifact.releaseId,
-              archiveRunId: history.runId,
-              runKey: history.runKey ?? null,
-            });
-            sourceObservationCount += 1;
-            if (observation.d1Status === "unavailable") {
-              sourceObservationD1Unavailable += 1;
-              console.warn("source observation projection degraded", {
-                sourceId: artifact.sourceId,
-                dataset: artifact.dataset,
-                requestedDate: artifact.requestedDate,
-                code: observation.d1ErrorCode ?? "source_observation_d1_unavailable",
-              });
-            }
-          } catch (error) {
-            if (!isSourceObservationStorageError(error)) throw error;
-            // The raw and metadata objects are already immutable evidence.
-            // An unavailable observation sidecar must be visible and
-            // retryable, but it must not create a new primary import failure.
-            sourceObservationR2Unavailable += 1;
-            console.warn("source observation receipt degraded", {
-              sourceId: artifact.sourceId,
-              dataset: artifact.dataset,
-              requestedDate: artifact.requestedDate,
-              code: error.code,
-            });
-          }
-        }
         const normalizedKeys: string[] = [];
         const normalizedFiles: Array<{ file: NormalizedFile; content: Uint8Array; wireContent: Uint8Array }> = [];
         for (const normalized of artifact.normalized) {
@@ -1404,6 +1411,9 @@ export async function POST(request: Request) {
             error: "source_not_available_yet",
           });
           collectionStateKeys.push(stateKey);
+          // Preserve explicit source-not-ready observations without attaching
+          // unvalidated normalized evidence or upgrading them to VERIFIED.
+          await recordShadowObservation(artifact, rawKey, raw.byteLength);
           manifestArtifacts.push({
             releaseId: artifact.releaseId,
             sourceId: artifact.sourceId,
@@ -1455,6 +1465,14 @@ export async function POST(request: Request) {
         );
         archivedPointerCount += evidenceCounts.pointerCount;
         archivedReadinessCount += evidenceCounts.readinessCount;
+        // A VERIFIED observation is emitted only after normalized file hashes,
+        // row counts and dataset rules have passed the primary import checks.
+        await recordShadowObservation(
+          artifact,
+          rawKey,
+          raw.byteLength,
+          normalizedFiles.map(({ file }) => file),
+        );
         manifestArtifacts.push({
           releaseId: artifact.releaseId,
           sourceId: artifact.sourceId,

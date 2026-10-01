@@ -103,6 +103,65 @@ test("same source bytes produce a stable fingerprint across observation times", 
   assert.equal(first.createdAt, first.observedAt);
 });
 
+test("normalized evidence is versioned into identity so raw-only and verified receipts do not collide", async () => {
+  const input = await artifact();
+  const normalizedSha256 = await sha256Hex(new TextEncoder().encode("normalized-source-row"));
+  const rawOnly = await buildSourceObservationReceipt(input);
+  const verified = await buildSourceObservationReceipt({
+    ...input,
+    normalizedFiles: [{
+      name: "data",
+      sha256: normalizedSha256,
+      rowCount: 1,
+      tradeDates: [TARGET_DATE],
+    }],
+  });
+  const verifiedReordered = await buildSourceObservationReceipt({
+    ...input,
+    normalizedFiles: [
+      { name: "z", sha256: "b".repeat(64), rowCount: 0, tradeDates: [] },
+      { name: "a", sha256: "a".repeat(64), rowCount: 0, tradeDates: [] },
+    ],
+  });
+  const verifiedReorderedAgain = await buildSourceObservationReceipt({
+    ...input,
+    normalizedFiles: [
+      { name: "a", sha256: "a".repeat(64), rowCount: 0, tradeDates: [] },
+      { name: "z", sha256: "b".repeat(64), rowCount: 0, tradeDates: [] },
+    ],
+  });
+
+  assert.equal(rawOnly.status, "OBSERVED");
+  assert.equal(verified.status, "VERIFIED");
+  assert.equal(verified.contractVersion, "flow-product-v0.5.1");
+  assert.notEqual(rawOnly.sourceFingerprint, verified.sourceFingerprint);
+  assert.equal(verifiedReordered.sourceFingerprint, verifiedReorderedAgain.sourceFingerprint);
+
+  const bucket = new FakeBucket();
+  const db = new FakeD1();
+  await recordSourceObservation(bucket, db, input);
+  const updated = await recordSourceObservation(bucket, db, {
+    ...input,
+    normalizedFiles: [{
+      name: "data",
+      sha256: normalizedSha256,
+      rowCount: 1,
+      tradeDates: [TARGET_DATE],
+    }],
+  });
+  assert.equal(updated.r2Status, "created");
+  assert.equal(bucket.objects.size, 2);
+  assert.equal(db.rows.size, 2);
+});
+
+test("receipt schema accepts the versioned patch-level observation contract", async () => {
+  const schema = JSON.parse(await readFile(new URL("../../schemas/source-observation-receipt.schema.json", import.meta.url), "utf8"));
+  const contractVersionPattern = new RegExp(schema.properties.contractVersion.pattern);
+  assert.equal(contractVersionPattern.test("flow-product-v0.5"), true);
+  assert.equal(contractVersionPattern.test("flow-product-v0.5.1"), true);
+  assert.equal(contractVersionPattern.test("flow-product-v0.5.1.2"), false);
+});
+
 test("replaying a receipt is idempotent in both R2 and D1", async () => {
   const bucket = new FakeBucket();
   const db = new FakeD1();

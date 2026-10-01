@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "change": "source-observation-normalized-evidence",
+  "baseMainSha": "f01678e5eb68a06cf57f73a3d3864bc371905be1",
+  "checkedAt": "2026-10-01",
+  "localValidation": {
+    "webBuildAndTests": "passed; 139 tests",
+    "webLint": "passed"
+  },
+  "pullRequestChecks": "pending",
+  "mergeEvents": [
+    {
+      "workflow": "Flow CI and data QA",
+      "trigger": "push to main",
+      "effect": "Runs repository CI after merge and consumes GitHub Actions minutes."
+    },
+    {
+      "workflow": "Deploy Flow Worker",
+      "trigger": "merged pull_request closed on main; this PR changes web/**",
+      "effect": "Runs npm install, web lint/build/tests, applies all pending remote D1 migrations, deploys Worker/static assets, and performs live build-identity verification.",
+      "remoteD1MigrationCommand": "npx wrangler d1 migrations apply flow --remote",
+      "migrationFilesAddedByThisPr": [],
+      "pendingRemoteMigrationsAtMerge": "unknown; no remote D1 query was run",
+      "workerDeployment": true,
+      "featureFlagChanges": false,
+      "productionCollectionOrPublishDispatch": false
+    }
+  ],
+  "externalCloudflareGitBuildConnection": "not independently verified; repository deployment workflow above is confirmed",
+  "productionActionsExecutedDuringImplementation": false,
+  "remoteD1WritesDuringImplementation": false,
+  "activeReleasePointerChanged": false
+}

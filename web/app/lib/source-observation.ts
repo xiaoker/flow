@@ -9,7 +9,7 @@
  */
 
 export const SOURCE_OBSERVATION_SCHEMA_VERSION = 1 as const;
-export const SOURCE_OBSERVATION_CONTRACT_VERSION = "flow-product-v0.5" as const;
+export const SOURCE_OBSERVATION_CONTRACT_VERSION = "flow-product-v0.5.1" as const;
 export const SOURCE_OBSERVATION_RECEIPT_PREFIX = "market-data/source-observations";
 export const MAX_SOURCE_OBSERVATION_EVIDENCE_BYTES = 32 * 1024;
 
@@ -276,7 +276,7 @@ export async function buildSourceObservationReceipt(
     sha256: file.sha256,
     rowCount: file.rowCount,
     tradeDates: [...new Set(file.tradeDates.map(canonicalDate).filter((date): date is string => Boolean(date)))].sort(),
-  }));
+  })).sort((left, right) => left.name.localeCompare(right.name));
   const normalizedSha256 = normalizedFiles.length === 1 ? normalizedFiles[0].sha256 : null;
   if (normalizedSha256 !== null && !SHA256.test(normalizedSha256)) {
     throw new Error("source_observation_invalid_normalized_sha256");
@@ -308,8 +308,10 @@ export async function buildSourceObservationReceipt(
     requestedDate: input.requestedDate,
     sourceBusinessDate: sourceDate,
     publishedDate: published,
+    httpStatus: statusCode,
     dateBasis: input.dateBasis,
     rawSha256: input.sha256,
+    normalizedFiles,
   };
   const sourceFingerprint = await sha256Hex(new TextEncoder().encode(canonicalJson(fingerprintInput)));
   const observationId = `obs:${input.sourceId}:${input.dataset}:${input.targetDate}:${sourceFingerprint.slice(0, 32)}`;
