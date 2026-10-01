@@ -1,0 +1,47 @@
+{
+  "stage": "070-A",
+  "purpose": "Add an opt-in schema-v4 capability contract to existing immutable read-model manifests; preserve v2/v3 and keep v4 candidate-only.",
+  "baseMainSha": "6d7c5a39bc1731ac32236200aefd53bcbee86e28",
+  "branch": "codex/070a-capability-contract-20261001",
+  "mergeSideEffects": {
+    "pullRequestChecks": [
+      "Flow CI and data QA runs on the pull request and consumes GitHub Actions minutes.",
+      "When the PR is merged, a main-branch CI run consumes GitHub Actions minutes."
+    ],
+    "automaticDeployment": {
+      "trigger": "Deploy Flow Worker listens to pull_request.closed for merged PRs that change web/**.",
+      "steps": [
+        "Run web lint and production contract tests.",
+        "Verify Cloudflare deployment credentials.",
+        "Run npx wrangler d1 migrations apply flow --remote.",
+        "Deploy Worker and static assets.",
+        "Verify the deployed build identity through the protected release endpoint."
+      ],
+      "workerCodeChanges": true,
+      "newD1MigrationInThisPR": false,
+      "remoteMigrationStateAtMerge": "PR #137 deployment completed the migration step successfully and its immediate preflight reported no migrations; recheck immediately before this merge. This PR adds no migration SQL.",
+      "featureFlagsChanged": false,
+      "productionReadPathChanged": false,
+      "activeReleasePointerChangedByCode": false
+    },
+    "dataAndExternalWrites": {
+      "collectionOrRecoveryDispatched": false,
+      "candidateManifestUploaded": false,
+      "r2OrD1DataMutationRequestedByThisPR": false,
+      "scheduledCronChanged": false,
+      "recoveryOrPCFRun": false
+    },
+    "runtimeCompatibility": {
+      "readModelV2V3": "Unchanged and retained.",
+      "schemaV4": "Advertised only as an opt-in candidate capability; importer requires stage_only and activation rejects it.",
+      "defaultProducer": "Remains schema v3; no production workflow opts into v4."
+    },
+    "resourceBounds": {
+      "d1RowsReadWrittenByNewCode": "None; schema-v4 validation uses the existing bounded manifest/artifact list and adds no database query.",
+      "r2ObjectsReadByNewCode": "None during deployment; no candidate is uploaded or verified in this PR.",
+      "actionsBudget": "One PR CI run is required; merge would additionally trigger main CI and the Worker deployment workflow."
+    },
+    "rollbackAndStop": "If Worker deploy or build-identity verification fails, do not run data workflows or switch any pointer. Revert the code PR through a new reviewed PR; v2/v3 production reads remain unchanged."
+  },
+  "reviewState": "Prepared for CI; remote D1 migration inventory must be checked again before merge authorization."
+}

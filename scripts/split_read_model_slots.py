@@ -14,6 +14,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from trading_desk.read_model_capabilities import (
+    CAPABILITY_MANIFEST_SCHEMA_VERSION,
+    bind_capability_artifact_refs,
+    capability_contract_identity,
+    states_from_capability_contract,
+    validate_capability_contract_for_split,
+)
+
 
 SLOT_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "dashboard": (
@@ -53,8 +61,9 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
     if slot not in SLOT_ARTIFACTS:
         raise ValueError(f"unsupported read-model slot: {slot}")
     source_manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
-    if not isinstance(source_manifest, dict) or source_manifest.get("schemaVersion") != 3:
-        raise ValueError("source manifest must be schemaVersion 3")
+    if not isinstance(source_manifest, dict) or source_manifest.get("schemaVersion") not in {3, CAPABILITY_MANIFEST_SCHEMA_VERSION}:
+        raise ValueError("source manifest must be schemaVersion 3 or 4")
+    schema_version = int(source_manifest["schemaVersion"])
     as_of = source_manifest.get("asOf")
     if not isinstance(as_of, str) or len(as_of) != 10:
         raise ValueError("source manifest has no valid asOf")
@@ -84,6 +93,12 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
         "requiredArtifacts": names,
         "artifactSha256": {name: sha256(payloads[name]) for name in names},
     }
+    capability_states = None
+    if schema_version == CAPABILITY_MANIFEST_SCHEMA_VERSION:
+        source_contract = source_manifest.get("capabilityContract")
+        validate_capability_contract_for_split(source_contract, source_manifest)
+        capability_states = states_from_capability_contract(source_contract, slot)
+        release_contract["capabilityContract"] = capability_contract_identity(capability_states, slot)
     release_id = f"release:{as_of}:{sha256(canonical_json(release_contract))[:16]}"
     prefix = f"market-data/releases/{as_of}/{release_id}"
     artifacts = {
@@ -96,7 +111,7 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
         for name in names
     }
     manifest: dict[str, Any] = {
-        "schemaVersion": 3,
+        "schemaVersion": schema_version,
         "slot": slot,
         "releaseId": release_id,
         "asOf": as_of,
@@ -105,6 +120,8 @@ def split(source_dir: Path, output_dir: Path, slot: str) -> dict[str, Any]:
         "requiredArtifacts": list(names),
         "artifacts": artifacts,
     }
+    if capability_states is not None:
+        manifest["capabilityContract"] = bind_capability_artifact_refs(capability_states, slot, artifacts)
     # Keep lineage and QA metadata from the full build.  They are descriptive
     # only; the slot identity above is part of the new immutable release hash.
     for key in ("marketHistory", "coverage", "pressureSchemaVersion", "stockShardCount", "classificationVersion", "calculationVersion", "quality", "publication", "producerBuildSha"):

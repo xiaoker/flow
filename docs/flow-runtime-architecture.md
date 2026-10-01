@@ -34,8 +34,10 @@ Cloudflare Worker
   `publication.status == confirmed` 的完成凭据后才能进入 `COMPLETED`；较早的
   fallback 可以归档，但不能关闭当前交易日窗口。恢复任务继续使用 receipt-backed
   recovery 状态接口。
-- manifest v2 与 v3 在迁移期并存；v3 使用 `observedAt` 对同一 `asOf` 的修订做单调排序，旧 v2 缺少该字段时按保守的较旧版本处理。
+- manifest v2 与 v3 在迁移期并存；v3 使用 `observedAt` 对同一 `asOf` 的修订做单调排序，旧 v2 缺少该字段时按保守的较旧版本处理。schema v4 是新增的 v0.7 能力合同，只能作为候选版本 `stage_only` 写入，生产激活接口明确拒绝；v2/v3 已发布历史与默认生产读取合同保持不变。
 - v3 manifest 额外声明 `sourceDates`、`pressureSchemaVersion=2`、8 个股票分片和固定 `requiredArtifacts`；发布日期 hash 同时覆盖这些控制字段。
+- v4 在同一 manifest 中增加 `capabilityContract`：列出核心 ETF、雷达、轮动、国家队、互联互通、两融、各周期、ETF 穿透、个股搜索和详情的状态、真实来源日期、覆盖、原因码及精确 artifact key/hash/bytes。一个 slot 未绑定另一个 slot 的精确发布时，跨 slot 能力必须为 `UNKNOWN`，不能借同日或旧版本引用冒充 READY。v4 的 READY 状态会在 Worker 入口校验日期、依赖状态、覆盖计数和逐项不可变引用；损坏引用拒绝候选。
+- schema v4 可由离线构建器显式启用 `--capability-contract-v07` 生成；候选发布必须使用 `scripts/publish_read_models.py --stage-only`。该开关默认关闭；当前生产工作流继续产生 schema v3，不在 070-A 中切换读取路径、激活 v4、补采或重建历史，也不新增 D1 migration。
 - v3 当前固定发布 18 个工件：`bootstrap` 只含首页摘要、板块周期矩阵和 ETF 搜索索引；`radar` 含完整 ETF 行；`radar_flow` 只在打开 ETF 详情后按同一 `releaseId` 延迟读取；`national` 只含国家队代码子集；`stock_search` 与 8 个股票分片按个股详情读取。
 - 默认首页不加载 Radar 全量行、ETF 穿透图、融资融券压力明细或股票分片；同一 `releaseId` 下的视图读取在浏览器内缓存，且每次读取校验 `X-Flow-Release-Id` 与 `asOf`，避免跨版本拼页。
 - `/api/v2/history/dates` 只返回包含完整 read-model 工件集合的发布日期，不把只有原始归档的日期暴露给主日期选择器。
@@ -52,7 +54,7 @@ Cloudflare Cron 仍是主调度器，按晚间、早间和 reconciliation 三个
 - `/api/v2/views/{view}`：按视图读取已发布对象，允许 `bootstrap / overview / radar / radar_flow / rotation / national / connect / margin / pressure`。
 - `/api/v2/releases/latest`：返回 D1 active release 清单。
 - `/api/v2/history/dates`、`/api/v2/market-history`：只读有限历史索引，不读取 R2 ETF 状态。
-- `/api/v1/admin/capabilities`：受保护的发布契约探测；只有 D1 `observed_at` 两列都存在时才声明 v3。
+- `/api/v1/admin/capabilities`：受保护的发布契约探测；只有 D1 `observed_at` 两列都存在时才声明 v3 兼容能力；同一部署可额外声明 v4 capability contract 候选支持，但该能力仅限 stage-only，不能激活。
 - `/api/v1/admin/releases/previous-candidates`：返回有上限的完整历史 read-model 候选元数据。
 - `/api/v1/admin/releases/artifact`：按 `releaseId + name` 精确流式读取历史工件，避免同日多版本按日期误选。
 

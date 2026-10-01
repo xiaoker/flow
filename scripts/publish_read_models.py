@@ -83,6 +83,7 @@ def check_capabilities(
     headers: dict[str, str],
     *,
     slot: str = "full",
+    required_manifest_schema: int = 3,
     metrics: dict[str, int] | None = None,
 ) -> None:
     if slot not in {"dashboard", "etf_penetration", "full"}:
@@ -100,8 +101,8 @@ def check_capabilities(
     if not isinstance(payload, dict):
         raise RuntimeError("capabilities response is not an object")
     required = {
-        "readModelManifestSchemas": 3,
-        "schemaVersions": 3,
+        "readModelManifestSchemas": required_manifest_schema,
+        "schemaVersions": required_manifest_schema,
         "pressureSchemaVersions": 2,
         "stockShardCounts": 8,
     }
@@ -118,8 +119,10 @@ def check_capabilities(
     }
     if slot in {"etf_penetration", "full"}:
         required_features.update({"previousCompatibleRelease", "radarFlowView", "sourceReadinessLedger"})
+    if required_manifest_schema == 4:
+        required_features.add("capabilityContractV07")
     if not required_features.issubset(features):
-        raise RuntimeError("deployed capability lacks v3 release features")
+        raise RuntimeError(f"deployed capability lacks v{required_manifest_schema} release features")
 
 
 def build_upload_body(
@@ -140,6 +143,8 @@ def build_upload_body(
 
     if activation_mode not in ACTIVATION_MODES:
         raise ValueError(f"unsupported activation mode: {activation_mode}")
+    if manifest.get("schemaVersion") == 4 and activation_mode != "stage_only":
+        raise ValueError("schema-v4 capability manifests are candidate-only and require --stage-only")
     digest = hashlib.sha256(content).hexdigest()
     wire_content = gzip.compress(content, compresslevel=6)
     return {
@@ -187,6 +192,10 @@ def main() -> None:
         raise ValueError("read-model manifest is invalid")
     manifest_slot = manifest.get("slot") if manifest.get("slot") in {"dashboard", "etf_penetration"} else "full"
     effective_slot = args.slot or manifest_slot
+    if manifest.get("schemaVersion") == 4 and not args.stage_only:
+        raise ValueError("schema-v4 capability manifests are candidate-only and require --stage-only")
+    if manifest.get("schemaVersion") not in {3, 4}:
+        raise ValueError("publisher requires schemaVersion 3 or 4")
     if args.slot and args.slot != manifest_slot:
         raise ValueError(f"manifest slot {manifest_slot} does not match requested slot {args.slot}")
     headers = {
@@ -195,7 +204,13 @@ def main() -> None:
         "CF-Access-Client-Secret": required_env("FLOW_CF_ACCESS_CLIENT_SECRET"),
         "Content-Type": "application/json",
     }
-    check_capabilities(args.capabilities_url, headers, slot=effective_slot, metrics=metrics)
+    check_capabilities(
+        args.capabilities_url,
+        headers,
+        slot=effective_slot,
+        required_manifest_schema=int(manifest["schemaVersion"]),
+        metrics=metrics,
+    )
     names = list(manifest["artifacts"])
     if not names:
         raise ValueError("read-model manifest has no artifacts")

@@ -116,7 +116,7 @@ test("keeps release history and rollback reads exact and migration-compatible", 
     readFile(new URL("../app/api/v1/admin/import/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/v1/admin/history-artifact/route.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(contract, /schemaVersion !== 2 && value\.schemaVersion !== 3/);
+  assert.match(contract, /schemaVersion !== 2 && value\.schemaVersion !== 3 && value\.schemaVersion !== CAPABILITY_MANIFEST_SCHEMA_VERSION/);
   assert.match(contract, /requiredArtifacts/);
   assert.match(capabilities, /readModelManifestSchemas/);
   assert.match(capabilities, /sameDateObservedAtOrder/);
@@ -132,6 +132,21 @@ test("keeps release history and rollback reads exact and migration-compatible", 
   assert.match(importer, /staged_stale_revision/);
   assert.match(historyArtifact, /latest-uploaded/);
   assert.match(historyArtifact, /X-Flow-Normalized-Candidate-Count/);
+});
+
+test("keeps schema-v4 capability manifests candidate-only", async () => {
+  const [contract, importer, activation, capabilities, publisher] = await Promise.all([
+    readFile(new URL("../app/lib/read-model-contract.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/read-model-import/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/read-model-activate/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/v1/admin/capabilities/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../scripts/publish_read_models.py", import.meta.url), "utf8"),
+  ]);
+  assert.match(contract, /isCandidateOnlyReadModelManifest/);
+  assert.match(importer, /candidate_manifest_requires_stage_only/);
+  assert.match(activation, /candidate_manifest_not_activatable/);
+  assert.match(capabilities, /capabilityContractV07/);
+  assert.match(publisher, /schema-v4 capability manifests are candidate-only and require --stage-only/);
 });
 
 test("replaces repetitive margin day cards with derived diagnostics", async () => {

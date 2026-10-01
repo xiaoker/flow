@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { runtimeEnv } from "@/app/lib/dashboard-store";
 import {
   hasCompleteReadModelManifest,
+  isCandidateOnlyReadModelManifest,
   isReadModelManifest,
   RELEASE_ID,
   type ReadModelManifest,
@@ -101,6 +102,9 @@ export async function POST(request: Request) {
     const parsed: unknown = JSON.parse(row.manifest_json);
     if (!isReadModelManifest(parsed) || !hasCompleteReadModelManifest(parsed)) {
       return NextResponse.json({ error: "invalid_staged_manifest" }, { status: 503 });
+    }
+    if (isCandidateOnlyReadModelManifest(parsed)) {
+      return NextResponse.json({ error: "candidate_manifest_not_activatable" }, { status: 409 });
     }
     if (parsed.releaseId !== row.release_id || parsed.asOf !== row.as_of) {
       return NextResponse.json({ error: "staged_manifest_identity_mismatch" }, { status: 503 });

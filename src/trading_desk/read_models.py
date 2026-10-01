@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from .stock_pressure import PRESSURE_SCHEMA_VERSION, build_stock_pressure, stock_shard_name
+from .read_model_capabilities import (
+    CAPABILITY_CONTRACT_VERSION,
+    CAPABILITY_MANIFEST_SCHEMA_VERSION,
+    bind_capability_artifact_refs,
+    build_capability_states,
+    capability_contract_identity,
+)
 
 
 SCHEMA_VERSION = 3
@@ -977,6 +984,7 @@ def build_read_models(
     market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
     previous_manifest: dict[str, Any] | None = None,
     producer_build_sha: str | None = None,
+    capability_contract_version: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Return view payloads and a release manifest without touching storage."""
 
@@ -1029,6 +1037,19 @@ def build_read_models(
             raise ReadModelError(f"read_model_too_large:{name}")
     observed_at = _observed_at_utc(effective_snapshot)
     source_dates = _source_dates(effective_snapshot)
+    capability_states = None
+    if capability_contract_version is not None:
+        if capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+            raise ReadModelError("capability_contract_version_unsupported")
+        capability_states = build_capability_states(
+            scope="full",
+            as_of=str(snapshot["asOf"]),
+            source_dates=source_dates,
+            snapshot=effective_snapshot,
+            payloads=payloads,
+            stock_catalog=stock_catalog,
+            artifact_names=set(encoded),
+        )
     release_contract = {
         "asOf": snapshot["asOf"],
         "observedAt": observed_at,
@@ -1039,6 +1060,8 @@ def build_read_models(
         "stockShardCount": STOCK_SHARD_COUNT,
         "requiredArtifacts": artifact_names,
     }
+    if capability_states is not None:
+        release_contract["capabilityContract"] = capability_contract_identity(capability_states, "full")
     if producer_build_sha:
         release_contract["producerBuildSha"] = producer_build_sha
     # Include release semantics in the identity, not only the payload bytes.
@@ -1049,7 +1072,10 @@ def build_read_models(
     )
     release_hash = sha256_bytes(digest_material)
     release_id = f"release:{snapshot['asOf']}:{release_hash[:16]}"
-    prefix = object_prefix or f"market-data/releases/{snapshot['asOf']}/{release_id}"
+    expected_prefix = f"market-data/releases/{snapshot['asOf']}/{release_id}"
+    if capability_states is not None and object_prefix is not None and object_prefix != expected_prefix:
+        raise ReadModelError("capability_manifest_requires_release_scoped_artifacts")
+    prefix = object_prefix or expected_prefix
     artifacts = {
         name: {
             "key": f"{prefix}/{name}.json",
@@ -1060,7 +1086,7 @@ def build_read_models(
         for name in artifact_names
     }
     manifest = {
-        "schemaVersion": SCHEMA_VERSION,
+        "schemaVersion": CAPABILITY_MANIFEST_SCHEMA_VERSION if capability_states is not None else SCHEMA_VERSION,
         "releaseId": release_id,
         "asOf": snapshot["asOf"],
         "observedAt": observed_at,
@@ -1079,6 +1105,8 @@ def build_read_models(
         "quality": snapshot.get("quality"),
         "publication": snapshot.get("publication"),
     }
+    if capability_states is not None:
+        manifest["capabilityContract"] = bind_capability_artifact_refs(capability_states, "full", artifacts)
     if producer_build_sha:
         manifest["producerBuildSha"] = producer_build_sha
     # Canonicalize the manifest itself to ensure callers cannot accidentally
@@ -1095,6 +1123,7 @@ def build_market_read_models(
     market_history: dict[str, Any] | list[dict[str, Any]] | None = None,
     previous_manifest: dict[str, Any] | None = None,
     producer_build_sha: str | None = None,
+    capability_contract_version: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Build the core market release without requiring ETF PCF.
 
@@ -1151,6 +1180,19 @@ def build_market_read_models(
     market_history_contract = _market_history_contract(compact_history)
     observed_at = _observed_at_utc(effective_snapshot)
     source_dates = _source_dates(effective_snapshot)
+    capability_states = None
+    if capability_contract_version is not None:
+        if capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+            raise ReadModelError("capability_contract_version_unsupported")
+        capability_states = build_capability_states(
+            scope="dashboard",
+            as_of=str(snapshot["asOf"]),
+            source_dates=source_dates,
+            snapshot=effective_snapshot,
+            payloads=payloads,
+            stock_catalog=None,
+            artifact_names=set(encoded),
+        )
     release_contract = {
         "slot": "dashboard",
         "asOf": snapshot["asOf"],
@@ -1161,11 +1203,16 @@ def build_market_read_models(
         "requiredArtifacts": list(MARKET_READ_MODEL_NAMES),
         "artifactSha256": {name: sha256_bytes(encoded[name]) for name in MARKET_READ_MODEL_NAMES},
     }
+    if capability_states is not None:
+        release_contract["capabilityContract"] = capability_contract_identity(capability_states, "dashboard")
     if producer_build_sha:
         release_contract["producerBuildSha"] = producer_build_sha
     release_hash = sha256_bytes(canonical_json_bytes(release_contract))
     release_id = f"release:{snapshot['asOf']}:{release_hash[:16]}"
-    prefix = object_prefix or f"market-data/releases/{snapshot['asOf']}/{release_id}"
+    expected_prefix = f"market-data/releases/{snapshot['asOf']}/{release_id}"
+    if capability_states is not None and object_prefix is not None and object_prefix != expected_prefix:
+        raise ReadModelError("capability_manifest_requires_release_scoped_artifacts")
+    prefix = object_prefix or expected_prefix
     artifacts = {
         name: {
             "key": f"{prefix}/{name}.json",
@@ -1176,7 +1223,7 @@ def build_market_read_models(
         for name in MARKET_READ_MODEL_NAMES
     }
     manifest: dict[str, Any] = {
-        "schemaVersion": SCHEMA_VERSION,
+        "schemaVersion": CAPABILITY_MANIFEST_SCHEMA_VERSION if capability_states is not None else SCHEMA_VERSION,
         "slot": "dashboard",
         "releaseId": release_id,
         "asOf": snapshot["asOf"],
@@ -1195,6 +1242,8 @@ def build_market_read_models(
         "quality": snapshot.get("quality"),
         "publication": snapshot.get("publication"),
     }
+    if capability_states is not None:
+        manifest["capabilityContract"] = bind_capability_artifact_refs(capability_states, "dashboard", artifacts)
     if producer_build_sha:
         manifest["producerBuildSha"] = producer_build_sha
     manifest["manifestSha256"] = sha256_bytes(canonical_json_bytes(manifest))
@@ -1211,6 +1260,7 @@ def write_read_models(
     market_history_path: Path | None = None,
     previous_manifest_path: Path | None = None,
     producer_build_sha: str | None = None,
+    capability_contract_version: str | None = None,
 ) -> dict[str, Any]:
     stock_catalog = None
     if stock_catalog_path is not None:
@@ -1229,6 +1279,7 @@ def write_read_models(
         market_history=market_history,
         previous_manifest=previous_manifest,
         producer_build_sha=producer_build_sha,
+        capability_contract_version=capability_contract_version,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
@@ -1247,6 +1298,7 @@ def write_market_read_models(
     market_history_path: Path | None = None,
     previous_manifest_path: Path | None = None,
     producer_build_sha: str | None = None,
+    capability_contract_version: str | None = None,
 ) -> dict[str, Any]:
     market_history = None
     if market_history_path is not None:
@@ -1261,6 +1313,7 @@ def write_market_read_models(
         market_history=market_history,
         previous_manifest=previous_manifest,
         producer_build_sha=producer_build_sha,
+        capability_contract_version=capability_contract_version,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():

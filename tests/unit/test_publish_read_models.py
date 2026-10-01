@@ -77,6 +77,26 @@ def test_upload_rejects_unknown_activation_mode() -> None:
         )
 
 
+def test_schema_v4_upload_requires_candidate_mode() -> None:
+    content = b"{}"
+    manifest = _manifest() | {"schemaVersion": 4}
+    declared = {
+        **manifest["artifacts"]["overview"],
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "bytes": len(content),
+    }
+    with pytest.raises(ValueError, match="schema-v4 capability manifests are candidate-only"):
+        build_upload_body(manifest, "overview", declared, content, finalize=False)
+    assert build_upload_body(
+        manifest,
+        "overview",
+        declared,
+        content,
+        finalize=False,
+        activation_mode="stage_only",
+    )["activationMode"] == "stage_only"
+
+
 def test_read_model_post_uses_shared_bounded_retry_and_counts_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     module = __import__("scripts.publish_read_models", fromlist=["requests"])
     responses = iter([
@@ -135,6 +155,46 @@ def test_dashboard_capability_does_not_require_pcf_readiness(monkeypatch: pytest
     check_capabilities("https://flow.example/capabilities", {"Content-Type": "application/json"}, slot="dashboard")
     with pytest.raises(RuntimeError, match="deployed capability lacks v3 release features"):
         check_capabilities("https://flow.example/capabilities", {"Content-Type": "application/json"}, slot="etf_penetration")
+
+
+def test_v4_candidate_requires_advertised_schema_and_feature(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "readModelManifestSchemas": [2, 3, 4],
+        "schemaVersions": [2, 3, 4],
+        "pressureSchemaVersions": [2],
+        "stockShardCounts": [8],
+        "features": [
+            "requiredArtifacts",
+            "sameDateObservedAtOrder",
+            "releaseSlots",
+            "bseMarginSeparateScope",
+            "capabilityContractV07",
+        ],
+    }
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return payload
+
+    module = __import__("scripts.publish_read_models", fromlist=["requests"])
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: FakeResponse())
+    check_capabilities(
+        "https://flow.example/capabilities",
+        {"Content-Type": "application/json"},
+        slot="dashboard",
+        required_manifest_schema=4,
+    )
+    payload["features"].remove("capabilityContractV07")
+    with pytest.raises(RuntimeError, match="deployed capability lacks v4 release features"):
+        check_capabilities(
+            "https://flow.example/capabilities",
+            {"Content-Type": "application/json"},
+            slot="dashboard",
+            required_manifest_schema=4,
+        )
 
 
 def test_dashboard_canary_contract_only_checks_market_artifacts() -> None:
