@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .phase0 import DEFAULT_PCF_MAX_CODES, collect_phase0
+from .pipeline_runner import PipelineRunnerError, run_pipeline_request
 from .release_qa import failed_findings, run_release_qa
 
 
@@ -40,6 +41,21 @@ def _parser() -> argparse.ArgumentParser:
     qa.add_argument("--snapshot", type=Path, default=Path("dashboard-snapshot.json"))
     qa.add_argument("--state", type=Path, help="Verified rolling ETF state used to reproduce materialized terminal")
     qa.add_argument("--output", type=Path, default=Path("reports/phase0/latest-release-qa.json"))
+    pipeline = subparsers.add_parser(
+        "pipeline",
+        help="Run the candidate cross-environment pipeline executor against a bounded request fixture",
+    )
+    pipeline.add_argument("--request", type=Path, required=True, help="JSON execution request fixture")
+    pipeline.add_argument("--state-dir", type=Path, required=True, help="Isolated checkpoint directory")
+    pipeline.add_argument("--output", type=Path, required=True, help="Execution result JSON")
+    pipeline.add_argument(
+        "--dependency-lock",
+        type=Path,
+        action="append",
+        required=True,
+        help="Dependency lock file; repeat for a multi-file lock contract",
+    )
+    pipeline.add_argument("--producer-build-sha", required=True, help="Exact checked-out producer SHA")
     return parser
 
 
@@ -88,6 +104,35 @@ def main() -> None:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         if report["counts"]["fail"]:
             raise SystemExit(1)
+    elif args.command == "pipeline":
+        payload = json.loads(args.request.read_text(encoding="utf-8"))
+        try:
+            report = run_pipeline_request(
+                payload,
+                state_dir=args.state_dir,
+                output_path=args.output,
+                producer_build_sha=args.producer_build_sha,
+                dependency_lock_paths=args.dependency_lock,
+                project_root=Path.cwd(),
+            )
+        except PipelineRunnerError as exc:
+            print(json.dumps({"status": "BLOCKED_QUALITY", "errorCode": exc.code}, ensure_ascii=False))
+            raise SystemExit(2) from exc
+        print(
+            json.dumps(
+                {
+                    "status": report["status"],
+                    "runKey": report["context"]["identity"]["runKey"],
+                    "planHash": report["plan"]["planHash"],
+                    "checkpointCount": len(report["plan"]["checkpoints"]),
+                    "activeReleaseChanged": report["sideEffects"]["activeReleaseChanged"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        if report["status"] != "COMPLETED":
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":

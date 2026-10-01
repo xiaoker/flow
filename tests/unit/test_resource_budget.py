@@ -300,6 +300,8 @@ def test_full_admission_script_is_a_real_offline_fail_closed_entrypoint(tmp_path
             str(paths["reserved"]),
             "--task",
             str(paths["task"]),
+            "--now",
+            "2026-10-01T12:00:00Z",
         ],
         cwd=Path(__file__).resolve().parents[2],
         env={**os.environ, "PYTHONPATH": "src:."},

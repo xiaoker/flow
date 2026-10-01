@@ -24,6 +24,15 @@ def _read(path: Path) -> dict[str, Any]:
     return value
 
 
+def _parse_now(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("--now must include a timezone")
+    return parsed
+
+
 def build_admission_report(
     *,
     config: dict[str, Any],
@@ -68,12 +77,17 @@ def main() -> None:
     parser.add_argument("--reserved", type=Path, required=True)
     parser.add_argument("--task", type=Path, required=True, help="Task upper-bound vector")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--now",
+        help="Evaluation timestamp (ISO-8601); intended for deterministic offline checks",
+    )
     args = parser.parse_args()
     report = build_admission_report(
         config=_read(args.config),
         measured=_read(args.measured),
         reserved=_read(args.reserved),
         task=_read(args.task),
+        now=_parse_now(args.now),
     )
     encoded = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     if args.output:
