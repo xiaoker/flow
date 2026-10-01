@@ -20,7 +20,8 @@
       "effect": "Runs npm install, web lint/build/tests, applies all pending remote D1 migrations, deploys Worker/static assets, and performs live build-identity verification.",
       "remoteD1MigrationCommand": "npx wrangler d1 migrations apply flow --remote",
       "migrationFilesAddedByThisPr": [],
-      "pendingRemoteMigrationsAtMerge": "unknown; no remote D1 query was run",
+      "pendingRemoteMigrationsAtLastCheck": [],
+      "pendingRemoteMigrationsAtMerge": "Recheck immediately before merge; state may change after the read-only query.",
       "workerDeployment": true,
       "featureFlagChanges": false,
       "productionCollectionOrPublishDispatch": false
@@ -28,6 +29,13 @@
   ],
   "externalCloudflareGitBuildConnection": "not independently verified; repository deployment workflow above is confirmed",
   "productionActionsExecutedDuringImplementation": false,
+  "remoteD1ReadsDuringImplementation": [
+    {
+      "command": "npx wrangler d1 migrations list flow --remote",
+      "checkedAt": "2026-10-01",
+      "result": "No migrations to apply"
+    }
+  ],
   "remoteD1WritesDuringImplementation": false,
   "activeReleasePointerChanged": false
 }
