@@ -40,6 +40,7 @@ from trading_desk.history_bundle import build_history_bundle_from_files
 from trading_desk.history_publish import publish_history_bundle
 from trading_desk.http import HttpSettings, build_session
 from trading_desk.phase0 import collect_phase0
+from trading_desk.pipeline_application import build_application_identity, build_application_plan
 from trading_desk.recovery_execution import (
     RecoveryContractError,
     RecoveryScope,
@@ -1034,6 +1035,12 @@ def run_live_recovery(
         session=source_session,
         pcf_max_workers=1,
         szse_etf_history_root=szse_history_root,
+        application_context={
+            "runKey": scope.run_key,
+            "windowDate": parsed_run_key["date"],
+            "targetDate": target,
+            "producerBuildSha": producer_build_sha,
+        },
     )
     manifest = collection["manifest"]
     quality = collection["quality"]
@@ -1313,6 +1320,25 @@ def run_live_recovery(
         "sourceFingerprint": source_fingerprint,
         "files": files,
         "measuredAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    # Keep the recovery evidence on the same identity/plan seam as ordinary
+    # collection.  The plan is descriptive only; the existing approved
+    # recovery plan, lease and publisher remain the authorities for side
+    # effects and activation.
+    application_identity = build_application_identity(
+        run_key=scope.run_key,
+        window_date=parsed_run_key["date"],
+        target_date=target,
+        producer_build_sha=producer_build_sha,
+    )
+    application_plan = build_application_plan(
+        application_identity,
+        ["core_collection", "normalize", "build", "verify", "publish", "verify_visible"],
+    )
+    evidence["application"] = {
+        "identity": application_identity.as_dict(),
+        "planHash": application_plan["planHash"],
+        "stages": application_plan["stages"],
     }
     _write_json(source_bundle / "recovery-evidence.json", evidence)
     _write_json(artifact_root / "recovery-evidence.json", evidence)
