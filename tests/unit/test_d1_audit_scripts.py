@@ -75,4 +75,5 @@ def test_stage_budget_receipt_records_d1_r2_and_actions_evidence() -> None:
     assert report["actionsMinutes"] == 2
     assert report["actionsRunAttempt"] == 0
     assert report["r2Bytes"] == 1234
-    assert report["decision"] in {"allow", "warn", "defer_optional", "block_d1_bulk"}
+    assert report["decision"] == "unknown_metrics"
+    assert "storageBytes" in report["unknownMetrics"]
