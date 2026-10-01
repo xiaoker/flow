@@ -31,6 +31,9 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
+      - name: Install the Python project runtime
+        run: python -m pip install --disable-pip-version-check -e .
+
       - name: Run the shared candidate executor
         shell: bash
         run: |

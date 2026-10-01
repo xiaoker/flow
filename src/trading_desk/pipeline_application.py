@@ -37,6 +37,7 @@ APPLICATION_STAGES = (
 APPLICATION_STATUSES = ("COMPLETED", "FAILED_RETRYABLE", "BLOCKED_QUALITY", "PENDING")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _RUN_KEY_RE = re.compile(
     r"^daily-market-data:(?P<date>\d{4}-\d{2}-\d{2}):(?P<window>[a-z_]+):(?P<version>v\d+)$"
 )
@@ -110,7 +111,11 @@ class ApplicationIdentity:
             _date(self.target_date, "target_date")
         if self.contract_version != APPLICATION_CONTRACT_VERSION:
             raise ApplicationContractError("unknown_application_contract_version")
-        _sha(self.producer_build_sha, "producer_build_sha", allow_none=True)
+        if self.producer_build_sha is not None and (
+            not isinstance(self.producer_build_sha, str)
+            or not _GIT_OBJECT_ID_RE.fullmatch(self.producer_build_sha)
+        ):
+            raise ApplicationContractError("invalid_producer_build_sha")
 
     def as_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -262,6 +267,7 @@ def execute_application_plan(
     stage_inputs: Mapping[str, str],
     stage_runner: Callable[[str, str], Mapping[str, Any]],
     existing_checkpoints: Iterable[Mapping[str, Any]] = (),
+    checkpoint_progress: Callable[[Sequence[Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute an injected stage function through one common checkpoint seam.
 
@@ -270,6 +276,8 @@ def execute_application_plan(
     existing operations, while the executor owns stage ordering, exact input
     identity and reuse decisions.  The returned records are suitable for a
     caller's existing manifest/receipt format and contain no credentials.
+    ``checkpoint_progress`` lets an I/O-owning adapter durably store verified
+    progress after each stage, including before a later stage raises.
     """
 
     plan = build_application_plan(identity, stages, stage_inputs=stage_inputs)
@@ -320,6 +328,12 @@ def execute_application_plan(
                 "checkpointSha256": checkpoint.get("checkpointSha256"),
             }
         )
+        if checkpoint_progress is not None:
+            checkpoint_progress(tuple(checkpoints))
+        if checkpoint.get("status") != "COMPLETED":
+            # A blocked, retryable, or pending stage is a barrier. Later stages
+            # may publish or expose data, so they must not run on partial input.
+            break
     statuses = [str(item.get("status")) for item in checkpoints]
     if all(status == "COMPLETED" for status in statuses):
         status = "COMPLETED"
