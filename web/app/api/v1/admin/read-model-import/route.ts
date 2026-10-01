@@ -211,6 +211,14 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
+  if (
+    isRecord(value) &&
+    isRecord(value.manifest) &&
+    value.manifest.schemaVersion === 4 &&
+    value.activationMode !== "stage_only"
+  ) {
+    return NextResponse.json({ error: "candidate_manifest_requires_stage_only" }, { status: 409 });
+  }
   if (!isUpload(value)) return NextResponse.json({ error: "invalid_read_model_upload" }, { status: 422 });
 
   try {

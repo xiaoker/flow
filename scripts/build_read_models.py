@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from trading_desk.read_models import write_market_read_models, write_read_models
+from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
 
 
 def main() -> None:
@@ -38,6 +39,11 @@ def main() -> None:
         "--producer-build-sha",
         help="Git commit SHA of the data producer; recorded in the release manifest",
     )
+    parser.add_argument(
+        "--capability-contract-v07",
+        action="store_true",
+        help="Emit the schema-v4 v0.7 capability contract for an explicitly staged candidate",
+    )
     args = parser.parse_args()
     if args.slot == "full" and args.stock_catalog is None:
         parser.error("--stock-catalog is required when --slot full is selected")
@@ -51,6 +57,7 @@ def main() -> None:
             market_history_path=args.market_history,
             previous_manifest_path=args.previous_manifest,
             producer_build_sha=args.producer_build_sha,
+            capability_contract_version=CAPABILITY_CONTRACT_VERSION if args.capability_contract_v07 else None,
         )
     else:
         result = write_read_models(
@@ -62,6 +69,7 @@ def main() -> None:
             market_history_path=args.market_history,
             previous_manifest_path=args.previous_manifest,
             producer_build_sha=args.producer_build_sha,
+            capability_contract_version=CAPABILITY_CONTRACT_VERSION if args.capability_contract_v07 else None,
         )
     print(json.dumps(result["manifest"], ensure_ascii=False, indent=2))
 

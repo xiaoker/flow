@@ -52,7 +52,8 @@ export async function GET(request: Request) {
         "sameDateObservedAtOrder",
       "previousCompatibleRelease",
       "radarFlowView",
-      "releaseSlots",
+        "releaseSlots",
+        "capabilityContractV07",
         ...(sourceReadinessReady ? ["sourceReadinessLedger"] : []),
         ...(bseMarginColumnReady ? ["bseMarginSeparateScope"] : []),
       ]
@@ -61,8 +62,8 @@ export async function GET(request: Request) {
   return Response.json(
     {
       contract: observedAtColumnsReady ? "read-model-v3" : "read-model-v2",
-      readModelManifestSchemas: observedAtColumnsReady ? [2, 3] : [2],
-      schemaVersions: observedAtColumnsReady ? [2, 3] : [2],
+      readModelManifestSchemas: observedAtColumnsReady ? [2, 3, 4] : [2],
+      schemaVersions: observedAtColumnsReady ? [2, 3, 4] : [2],
       pressureSchemaVersions: [2],
       stockShardCounts: [8],
       readModelSlots: ["dashboard", "etf_penetration"],
