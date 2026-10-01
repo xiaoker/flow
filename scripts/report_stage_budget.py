@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,9 @@ if __package__:
 else:
     # GitHub Actions invokes this file directly (``python scripts/...``), so
     # the script directory rather than the repository root is sys.path[0].
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from check_d1_budget import build_report
+from trading_desk.resource_budget import BudgetVector
 
 
 def _read_object(path: Path | None) -> dict[str, Any]:
@@ -44,17 +47,52 @@ def _stage_estimate(config: dict[str, Any], stage: str) -> dict[str, int]:
     return {"rowsRead": rows_read, "rowsWritten": rows_written}
 
 
+def _stage_cost_upper_bound(
+    config: dict[str, Any],
+    stage: str,
+    *,
+    actions_minutes: int | None,
+    r2_bytes: int | None,
+) -> BudgetVector:
+    """Build a complete upper-bound vector without inventing missing costs."""
+
+    d1 = _stage_estimate(config, stage)
+    values: dict[str, Any] = {
+        "d1RowsRead": {"value": d1["rowsRead"], "basis": "estimated", "scope": f"stage:{stage}"},
+        "d1RowsWritten": {"value": d1["rowsWritten"], "basis": "estimated", "scope": f"stage:{stage}"},
+        "workerRequests": {"value": None, "basis": "unknown", "reason": "stage_worker_requests_not_measured"},
+        "actionsMinutes": {
+            "value": actions_minutes if actions_minutes and actions_minutes > 0 else None,
+            "basis": "measured" if actions_minutes and actions_minutes > 0 else "unknown",
+            "reason": "actions_minutes_not_measured" if not actions_minutes else None,
+        },
+        "r2Bytes": {
+            "value": r2_bytes if r2_bytes and r2_bytes > 0 else None,
+            "basis": "measured" if r2_bytes and r2_bytes > 0 else "unknown",
+            "reason": "r2_bytes_not_measured" if not r2_bytes else None,
+        },
+        "r2ClassA": {"value": None, "basis": "unknown", "reason": "r2_class_a_not_measured"},
+        "r2ClassB": {"value": None, "basis": "unknown", "reason": "r2_class_b_not_measured"},
+    }
+    # Drop optional None metadata so BudgetMetric validation receives a clean
+    # object while keeping the value/basis distinction explicit.
+    for metric in values.values():
+        if isinstance(metric, dict) and metric.get("reason") is None:
+            metric.pop("reason", None)
+    return BudgetVector.from_mapping(values, scope=f"stage:{stage}")
+
+
 def build_stage_report(
     *,
     config: dict[str, Any],
     stage: str,
     run_key: str | None = None,
     measured: dict[str, Any] | None = None,
-    actions_minutes: int = 0,
+    actions_minutes: int | None = None,
     actions_run_attempt: int = 0,
-    r2_bytes: int = 0,
+    r2_bytes: int | None = None,
 ) -> dict[str, Any]:
-    if actions_minutes < 0 or actions_run_attempt < 0 or r2_bytes < 0:
+    if (actions_minutes is not None and actions_minutes < 0) or actions_run_attempt < 0 or (r2_bytes is not None and r2_bytes < 0):
         raise ValueError("actions_minutes, actions_run_attempt and r2_bytes must be non-negative")
     estimate = _stage_estimate(config, stage)
     decision = build_report(
@@ -69,9 +107,18 @@ def build_stage_report(
         {
             "stage": stage,
             "runKey": run_key,
-            "actionsMinutes": actions_minutes,
+            # A workflow-provided zero is a legacy placeholder, not a
+            # measured zero. Keep it unknown until a runner supplies a real
+            # elapsed-minute counter.
+            "actionsMinutes": actions_minutes if actions_minutes and actions_minutes > 0 else None,
             "actionsRunAttempt": actions_run_attempt,
-            "r2Bytes": r2_bytes,
+            "r2Bytes": r2_bytes if r2_bytes and r2_bytes > 0 else None,
+            "resourceMetrics": _stage_cost_upper_bound(
+                config,
+                stage,
+                actions_minutes=actions_minutes,
+                r2_bytes=r2_bytes,
+            ).as_dict(),
             "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
     )
@@ -84,9 +131,9 @@ def main() -> None:
     parser.add_argument("--stage", required=True)
     parser.add_argument("--run-key")
     parser.add_argument("--measured", type=Path)
-    parser.add_argument("--actions-minutes", type=int, default=0)
+    parser.add_argument("--actions-minutes", type=int, default=None)
     parser.add_argument("--actions-run-attempt", type=int, default=0)
-    parser.add_argument("--r2-bytes", type=int, default=0)
+    parser.add_argument("--r2-bytes", type=int, default=None)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 

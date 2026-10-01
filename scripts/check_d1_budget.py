@@ -4,7 +4,10 @@ The script consumes measured usage exported from Cloudflare Analytics (or a
 small fixture) and a predicted stage cost.  It never calls Cloudflare and
 never writes to D1.  It is intentionally suitable for PR 0; a later workflow
 can add the account-level Analytics fetch without changing the pure decision
-contract in ``trading_desk.resource_budget``.
+contract in ``trading_desk.resource_budget``. Missing counters are emitted as
+``unknown``. The optional ``--required`` mode is the admission gate and fails
+closed on unknown or over-budget evidence; a plain report remains useful for
+diagnostics and exits successfully.
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ def main() -> None:
     if args.output:
         args.output.write_text(encoded, encoding="utf-8")
     print(encoded, end="")
-    if report["decision"] == "block_d1_bulk":
+    if args.required and report["decision"] not in {"allow", "warn"}:
         raise SystemExit(2)
 
 

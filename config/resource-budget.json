@@ -24,6 +24,22 @@
     "workersRequestsPerDay": 50000,
     "githubActionsMinutesPerMonth": 1500
   },
+  "resourceAccounting": {
+    "schemaVersion": 1,
+    "measurementTtlSeconds": 3600,
+    "reservationTtlSeconds": 1800,
+    "conservativeLimitBasis": "min(official,hard)",
+    "unknownOutcomePolicy": "retain_reservation",
+    "dimensions": {
+      "d1RowsRead": "rows",
+      "d1RowsWritten": "rows",
+      "workerRequests": "requests",
+      "actionsMinutes": "minutes",
+      "r2Bytes": "bytes",
+      "r2ClassA": "operations",
+      "r2ClassB": "operations"
+    }
+  },
   "readOnlyInventoryBudget": {
     "d1RowsRead": 500000,
     "d1RowsWritten": 0,

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "stage": "060-B",
+  "baseCommit": "07c06ce8278ed27895f9334319e2bd71fb472042",
+  "generatedAt": "2026-10-01T12:00:00Z",
+  "scope": {
+    "files": [
+      "src/trading_desk/resource_budget.py",
+      "scripts/check_d1_budget.py",
+      "scripts/check_resource_budget.py",
+      "scripts/report_stage_budget.py",
+      "config/resource-budget.json",
+      "tests/unit/test_resource_budget.py",
+      "tests/unit/test_d1_audit_scripts.py",
+      "docs/audits/flow-convergence-progress.md",
+      "docs/audits/2026-10-01-v060-b-budget-accounting.md",
+      "docs/audits/2026-10-01-v060-b-merge-side-effects.json"
+    ],
+    "migrations": [],
+    "workflowChanges": false,
+    "productionFlagsChanged": false,
+    "activeReleaseChanged": false,
+    "collectionOrRecoveryDispatched": false
+  },
+  "mergeEffects": {
+    "ci": [
+      "pull_request: ci.yml unit-and-contract-tests",
+      "pull_request: ci.yml web-ci"
+    ],
+    "deploy": {
+      "workflow": ".github/workflows/deploy-worker.yml",
+      "automaticTrigger": false,
+      "reason": "The PR changes no web/** or deploy-worker.yml path; the deploy workflow path filter will not run on merge.",
+      "manualDispatch": "Not requested and not part of 060-B."
+    }
+  },
+  "runtimeBoundary": {
+    "budgetAdmission": "candidate-only; no production caller is switched",
+    "flags": "unchanged",
+    "remoteMigration": "not run",
+    "collectionOrRecovery": "not dispatched",
+    "activeRelease": "unchanged"
+  },
+  "resourceEffects": {
+    "d1RowsRead": 0,
+    "d1RowsWritten": 0,
+    "r2ClassAOperations": 0,
+    "r2ClassBOperations": 0,
+    "workerRequests": 0,
+    "githubActionsMinutes": "unknown_until_ci",
+    "budgetDecision": "CANDIDATE_ONLY"
+  },
+  "rollback": "Revert this standalone code PR before 060-C; no data cleanup, migration rollback or active-release mutation is required."
+}
