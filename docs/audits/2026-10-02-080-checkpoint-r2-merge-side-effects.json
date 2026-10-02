@@ -1,0 +1,16 @@
+{
+  "baseSha": "41d4a85187bf9df1671c42530c2f55d90273418a",
+  "stage": "080-RUNNER candidate checkpoint transport",
+  "prCi": true,
+  "mainCi": true,
+  "workerDeployOnMerge": true,
+  "pendingD1MigrationApplyOnMerge": true,
+  "newMigrationsInPr": false,
+  "remotePendingMigrationSet": "UNKNOWN",
+  "productionRunnerActivation": false,
+  "productionReadSwitch": false,
+  "collectionDispatch": false,
+  "featureFlagChange": false,
+  "currentAccountRemaining": "UNKNOWN",
+  "approvalRequired": "merge and automatic migration/deployment side effects"
+}

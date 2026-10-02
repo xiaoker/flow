@@ -372,6 +372,8 @@ def run_pipeline_request(
     lease_guard: Any | None = None,
     resume_bundles: Mapping[str, tuple[bytes, str]] | None = None,
     export_bundles: bool = False,
+    checkpoint_transport: Any | None = None,
+    resume_references: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -397,8 +399,13 @@ def run_pipeline_request(
     stages = _stage_names(payload)
     stage_inputs = _stage_inputs(payload, stages)
     adapter_mode = stage_adapters is not None
-    if (resume_bundles is not None or export_bundles) and (not adapter_mode or lease_guard is None):
+    if (resume_bundles is not None or export_bundles or checkpoint_transport is not None or resume_references is not None) and (not adapter_mode or lease_guard is None):
         raise PipelineRunnerError("bundle_operations_require_adapter_and_lease_guard")
+    if resume_references is not None and (checkpoint_transport is None or resume_bundles is not None
+        or not isinstance(resume_references, Mapping) or set(resume_references) - set(stages)):
+        raise PipelineRunnerError("invalid_durable_resume_references")
+    if checkpoint_transport is not None and not (export_bundles or resume_references is not None):
+        raise PipelineRunnerError("checkpoint_transport_operation_required")
     if resume_bundles is not None and (not isinstance(resume_bundles, Mapping) or set(resume_bundles) - set(stages)):
         raise PipelineRunnerError("invalid_resume_bundle_stage_set")
     stage_results: Mapping[str, Any] = {}
@@ -453,6 +460,15 @@ def run_pipeline_request(
     checkpoints_path = state_dir / "checkpoints.json"
     existing = _load_checkpoints(checkpoints_path)
     bundle_descriptors: dict[str, Any] = {}
+    if resume_references:
+        if existing:
+            raise PipelineRunnerError("resume_bundle_local_state_conflict")
+        resume_bundles = {}
+        for stage, digest in resume_references.items():
+            _sha(digest, "durable_bundle_sha256")
+            data = checkpoint_transport.download(context=context, stage=stage,
+                input_sha256=stage_inputs[stage], sha256=digest)
+            resume_bundles[stage] = (data, digest)
     if resume_bundles:
         if existing:
             raise PipelineRunnerError("resume_bundle_local_state_conflict")
@@ -476,7 +492,8 @@ def run_pipeline_request(
                     reference[0], sha256=reference[1], identity=context.identity,
                     stage=stage, input_sha256=stage_inputs[stage],
                     workspace=state_dir / "stages" / stage / stage_inputs[stage],
-                    confirm_lease=lease_guard.confirm, verify_output=adapter.verify_checkpoint,
+                    confirm_lease=lease_guard.confirm, check_lease=lease_guard.check,
+                    verify_output=adapter.verify_checkpoint,
                 )
             except ValueError as exc:
                 raise PipelineRunnerError("resume_bundle_verification_failed") from exc
@@ -612,6 +629,10 @@ def run_pipeline_request(
                         handle.flush()
                         os.fsync(handle.fileno())
                 bundle_descriptors[stage] = {"path": str(bundle_path), "sha256": digest, "bytes": len(data)}
+                if checkpoint_transport is not None:
+                    descriptor = checkpoint_transport.upload(context=context, stage=stage,
+                        input_sha256=stage_inputs[stage], data=data, sha256=digest)
+                    bundle_descriptors[stage]["remote"] = descriptor
             lease_guard.confirm()
         _write_json_atomic(
             checkpoints_path,
@@ -660,9 +681,12 @@ def run_pipeline_request(
     if lease_guard is not None:
         report["leaseEvidence"] = lease_guard.evidence()
         report["sideEffects"]["remoteWrites"] = lease_guard.renewal_count > 0
-    if resume_bundles is not None or export_bundles:
+    if resume_bundles is not None or export_bundles or checkpoint_transport is not None:
         report["checkpointBundles"] = {"exports": bundle_descriptors, "restoredStages": sorted(resume_bundles or {}),
-                                       "durableTransport": "not_connected"}
+                                       "durableTransport": "in_process_candidate" if checkpoint_transport is not None else "not_connected"}
+    if checkpoint_transport is not None:
+        report["checkpointTransportEvidence"] = checkpoint_transport.evidence()
+        report["sideEffects"]["remoteWrites"] |= checkpoint_transport.upload_attempts > 0
     _write_json_atomic(output_path, report)
     return report
 
