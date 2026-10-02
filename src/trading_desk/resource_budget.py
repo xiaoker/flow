@@ -576,6 +576,7 @@ class _Reservation:
     expires_at: datetime
     status: str = "RESERVED"
     consumed: BudgetVector | None = None
+    authorized: BudgetVector | None = None
     settled: dict[str, Any] | None = None
 
 
@@ -699,6 +700,36 @@ class BudgetLedger:
             self._version += 1
             return self._reservation_result(reservation, decision="debited")
 
+    def authorize_step(self, task_id: str, cost_upper_bound: BudgetVector) -> dict[str, Any]:
+        """Consume reserved allowance BEFORE a side effect, under the same lock.
+
+        This is an estimate/commitment, not physical measurement. An ambiguous
+        outcome never refunds this allowance. Remote/shared persistence remains
+        outside this reference implementation.
+        """
+        if not cost_upper_bound.all_known():
+            raise ValueError("step_cost_requires_complete_upper_bound")
+        with self._lock:
+            self.expire(now=self._now())
+            reservation = self._get(task_id)
+            if reservation.status not in {"RESERVED", "RUNNING"}:
+                return self._reservation_result(reservation, decision="not_authorized")
+            previous = reservation.authorized or BudgetVector.estimated(
+                {dimension: 0 for dimension in RESOURCE_DIMENSIONS}, scope="authorized_steps")
+            proposed = previous.add(cost_upper_bound, scope="authorized_steps")
+            over = {
+                dimension: {"proposed": proposed.metrics[dimension].value,
+                            "reserved": reservation.cost.metrics[dimension].value}
+                for dimension in RESOURCE_DIMENSIONS
+                if proposed.metrics[dimension].value > reservation.cost.metrics[dimension].value
+            }
+            if over:
+                return {**self._reservation_result(reservation, decision="step_over_budget"), "overBudget": over}
+            reservation.authorized = proposed
+            reservation.status = "RUNNING"
+            self._version += 1
+            return self._reservation_result(reservation, decision="authorized")
+
     def settle(
         self,
         task_id: str,
@@ -803,6 +834,7 @@ class BudgetLedger:
             "createdAt": reservation.created_at.isoformat().replace("+00:00", "Z"),
             "expiresAt": reservation.expires_at.isoformat().replace("+00:00", "Z"),
             "consumed": reservation.consumed.as_dict() if reservation.consumed else None,
+            "authorizedUpperBound": reservation.authorized.as_dict() if reservation.authorized else None,
         }
 
 

@@ -407,3 +407,40 @@ def test_aggregation_missing_timestamp_cannot_manufacture_freshness() -> None:
     summed = no_time.add(_measured())
     assert summed.metrics["d1RowsRead"].measured_at is None
     assert not summed.all_fresh(now=datetime(2026, 10, 1, 12, tzinfo=timezone.utc), max_age_seconds=60)
+
+
+def test_atomic_step_allowance_prevents_parallel_overspend() -> None:
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured())
+    ledger.reserve("job", _task(10))
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(lambda _: ledger.authorize_step("job", _task(6)), range(20)))
+    assert sum(result["decision"] == "authorized" for result in results) == 1
+    assert sum(result["decision"] == "step_over_budget" for result in results) == 19
+    record = ledger.snapshot()["reservations"]["job"]
+    assert record["authorizedUpperBound"]["d1RowsRead"]["value"] == 6
+    assert record["authorizedUpperBound"]["d1RowsRead"]["basis"] == "estimated"
+    assert record["consumed"] is None  # pre-spend allowance is not measurement
+
+
+@pytest.mark.parametrize("terminal", ["UNKNOWN", "SUCCEEDED"])
+def test_terminal_reservation_cannot_authorize_more_io(terminal) -> None:
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured())
+    ledger.reserve("job", _task(10))
+    if terminal == "UNKNOWN":
+        ledger.settle("job", outcome="UNKNOWN")
+    else:
+        ledger.settle("job", outcome="SUCCEEDED", actual=_measured())
+    assert ledger.authorize_step("job", _task(1))["decision"] == "not_authorized"
+
+
+def test_expired_or_unknown_step_cost_cannot_authorize_io() -> None:
+    from datetime import timedelta
+    now = [datetime(2026, 10, 1, 12, tzinfo=timezone.utc)]
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+                          reservation_ttl_seconds=60, clock=lambda: now[0])
+    ledger.reserve("job", _task(10))
+    with pytest.raises(ValueError, match="complete_upper_bound"):
+        ledger.authorize_step("job", BudgetVector.unknown())
+    now[0] += timedelta(seconds=60)
+    assert ledger.authorize_step("job", _task(1))["status"] == "UNKNOWN"
+    assert ledger.snapshot()["reserved"]["d1RowsRead"]["value"] == 10

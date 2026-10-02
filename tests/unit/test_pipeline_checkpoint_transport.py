@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 
 import pytest
+from datetime import datetime, timezone
+from trading_desk.resource_budget import BudgetLedger, BudgetVector
+from test_resource_budget import _full_limits, _task, _measured
 
 from trading_desk.pipeline_checkpoint_transport import CheckpointObjectTransport, MAX_OBJECT_BYTES
 from trading_desk.pipeline_runner import PipelineRunnerError
@@ -48,6 +51,17 @@ class Session:
 
 
 def transport(session, guard=None, **kwargs):
+    if "budget_ledger" not in kwargs:
+        ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+            clock=lambda: datetime(2026, 10, 1, 12, tzinfo=timezone.utc))
+        # Explicit local fixture limits, not production account telemetry.
+        from dataclasses import replace
+        ledger.limits = replace(ledger.limits, r2_bytes=MAX_OBJECT_BYTES * 20)
+        total = _task(100).numeric(); total["r2Bytes"] = MAX_OBJECT_BYTES * 12
+        assert ledger.reserve("fixture-task", BudgetVector.estimated(total))["decision"] in {"allow", "warn"}
+        cost = _task(4).numeric(); cost["r2Bytes"] = MAX_OBJECT_BYTES
+        kwargs.update(budget_ledger=ledger, budget_task_id="fixture-task",
+                      request_costs={method: BudgetVector.estimated(cost) for method in ("POST", "GET")})
     return CheckpointObjectTransport(base_url="https://flow.xiaoker.com", ingest_key="fixture-admin",
         access_client_id="fixture-id", access_client_secret="fixture-secret", lease_guard=guard or Guard(), session=session, **kwargs)
 
@@ -98,6 +112,60 @@ def test_lost_upload_response_reads_back_once_never_reuploads(tmp_path):
     assert receipt["key"] in session.objects
     assert [call[0] for call in session.calls] == ["POST", "GET"]
     assert client.evidence()["unconfirmedWriteOutcome"] is False
+
+
+@pytest.mark.parametrize("failure", ["missing", "unknown", "zero", "unreserved"])
+def test_budget_failure_prevents_even_lease_http_or_object_request(tmp_path, failure):
+    session, guard = Session(), Guard()
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured())
+    values = _task(4).numeric(); values["r2Bytes"] = MAX_OBJECT_BYTES
+    cost = _task(0) if failure == "zero" else BudgetVector.estimated(values)
+    if failure == "unknown":
+        cost = BudgetVector.unknown()
+    client = transport(session, guard, budget_ledger=None if failure == "missing" else ledger,
+                       budget_task_id="missing-task", request_costs={"POST": cost})
+    with pytest.raises(PipelineRunnerError, match="resource_"):
+        client.upload(**source(tmp_path))
+    assert guard.calls == 0
+    assert session.calls == []
+    assert client.upload_attempts == 0
+
+
+def test_ambiguous_upload_does_not_refund_or_bypass_readback_allowance(tmp_path):
+    session = Session(); session.lose_response = True
+    client = transport(session)
+    # Consume all the fixture's r2Bytes allowance in the first POST.
+    post = client._request_costs["POST"].numeric()
+    post["r2Bytes"] = MAX_OBJECT_BYTES * 12
+    client._request_costs["POST"] = BudgetVector.estimated(post)
+    with pytest.raises(PipelineRunnerError, match="resource_allowance_rejected"):
+        client.upload(**source(tmp_path))
+    assert [call[0] for call in session.calls] == ["POST"]
+    assert client.unconfirmed_write_outcome is True
+    record = client._budget_ledger.snapshot()["reservations"]["fixture-task"]
+    assert record["authorizedUpperBound"]["r2Bytes"]["value"] == MAX_OBJECT_BYTES * 12
+    assert record["consumed"] is None
+
+
+def test_two_clients_share_one_atomic_allowance_without_second_http(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    first = transport(Session())
+    ledger = first._budget_ledger
+    total = _task(100).numeric(); total["r2Bytes"] = MAX_OBJECT_BYTES * 12
+    sessions = [Session(), Session()]
+    clients = [transport(session, budget_ledger=ledger, budget_task_id="fixture-task",
+                         request_costs={"POST": BudgetVector.estimated(total)}) for session in sessions]
+    params = source(tmp_path)
+    def attempt(client):
+        try:
+            client.upload(**params)
+            return "uploaded"
+        except PipelineRunnerError as exc:
+            return str(exc)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, clients))
+    assert sorted(results) == ["checkpoint_resource_allowance_rejected", "uploaded"]
+    assert sum(len(session.calls) for session in sessions) == 1
 
 
 @pytest.mark.parametrize("status", [302, 401, 409, 429])
