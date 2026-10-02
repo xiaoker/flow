@@ -1,0 +1,15 @@
+{
+  "baseSha": "2c110962befca2b8788638e3688a2e04e1d9dc83",
+  "stage": "080-RUNNER budget ledger safety",
+  "prCi": true,
+  "mainCi": true,
+  "workerDeployOnMerge": false,
+  "pendingD1MigrationApplyOnMerge": false,
+  "newMigrationsInPr": false,
+  "productionRunnerActivation": false,
+  "productionReadSwitch": false,
+  "collectionDispatch": false,
+  "featureFlagChange": false,
+  "currentAccountRemaining": "UNKNOWN",
+  "approvalRequired": "merge"
+}

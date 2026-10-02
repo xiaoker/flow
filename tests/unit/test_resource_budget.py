@@ -316,3 +316,94 @@ def test_full_admission_script_is_a_real_offline_fail_closed_entrypoint(tmp_path
 def test_invalid_limit_is_rejected() -> None:
     with pytest.raises(ValueError, match="d1RowsReadPerDay"):
         ResourceLimits.from_mapping({"limits": {"d1RowsReadPerDay": 0}})
+
+
+@pytest.mark.parametrize("state", ["RESERVED", "RUNNING"])
+@pytest.mark.parametrize("boundary_seconds", [60, 61])
+def test_execution_methods_expire_without_explicit_sweep(state, boundary_seconds) -> None:
+    from datetime import timedelta
+    now = [datetime(2026, 10, 1, 12, tzinfo=timezone.utc)]
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+                          reservation_ttl_seconds=60, clock=lambda: now[0])
+    ledger.reserve("expired", _task(10))
+    if state == "RUNNING":
+        ledger.mark_running("expired")
+    now[0] += timedelta(seconds=boundary_seconds)
+    with pytest.raises(ValueError, match="reservation_not_running:UNKNOWN"):
+        ledger.mark_running("expired")
+    delta = BudgetVector.measured(_task(1).numeric(), measured_at=now[0].isoformat())
+    result = ledger.debit("expired", delta)
+    assert result["decision"] == "not_debitable"
+    assert result["status"] == "UNKNOWN"
+    assert result["consumed"] is None
+    assert ledger.snapshot()["reserved"]["d1RowsRead"]["value"] == 10
+
+
+def test_snapshot_reports_expiration_and_retains_budget_without_sweep() -> None:
+    from datetime import timedelta
+    now = [datetime(2026, 10, 1, 12, tzinfo=timezone.utc)]
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+                          reservation_ttl_seconds=60, clock=lambda: now[0])
+    ledger.reserve("job", _task(60))
+    now[0] += timedelta(seconds=60)
+    assert ledger.snapshot()["reservations"]["job"]["status"] == "UNKNOWN"
+    assert ledger.reserve("other", _task(41))["decision"] == "over_budget"
+
+
+def test_estimated_debit_is_not_physical_measurement() -> None:
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured())
+    ledger.reserve("job", _task(10))
+    with pytest.raises(ValueError, match="debit_requires_measured_metrics"):
+        ledger.debit("job", _task(1))
+    assert ledger.snapshot()["reservations"]["job"]["consumed"] is None
+
+
+@pytest.mark.parametrize("unknown_first", [False, True])
+def test_final_receipt_cannot_erase_observed_physical_usage(unknown_first) -> None:
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured())
+    ledger.reserve("job", _task(10))
+    measured = BudgetVector.measured(_task(5).numeric(), measured_at="2026-10-01T12:00:00Z")
+    ledger.debit("job", measured)
+    if unknown_first:
+        ledger.settle("job", outcome="UNKNOWN")
+    low = BudgetVector.measured(_task(4).numeric(), measured_at="2026-10-01T12:00:00Z")
+    with pytest.raises(ValueError, match="settlement_below_observed_consumption"):
+        ledger.settle("job", outcome="SUCCEEDED", actual=low)
+    assert ledger.snapshot()["reserved"]["d1RowsRead"]["value"] == 10
+    assert ledger.settle("job", outcome="SUCCEEDED", actual=measured)["decision"] == "settled"
+    assert ledger.snapshot()["measured"]["d1RowsRead"]["value"] == 5
+
+
+def test_late_complete_measurement_can_reconcile_expired_hold() -> None:
+    from datetime import timedelta
+    now = [datetime(2026, 10, 1, 12, tzinfo=timezone.utc)]
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+                          reservation_ttl_seconds=60, clock=lambda: now[0])
+    ledger.reserve("job", _task(10))
+    now[0] += timedelta(seconds=61)
+    assert ledger.snapshot()["reservations"]["job"]["status"] == "UNKNOWN"
+    actual = BudgetVector.measured(_task(5).numeric(), measured_at=now[0].isoformat())
+    assert ledger.settle("job", outcome="FAILED_KNOWN", actual=actual)["decision"] == "settled"
+    assert ledger.snapshot()["reserved"]["d1RowsRead"]["value"] == 0
+    assert ledger.snapshot()["measured"]["d1RowsRead"]["value"] == 5
+
+
+def test_finite_ttl_ledger_admits_fresh_measurement_without_losing_timestamp() -> None:
+    now = [datetime(2026, 10, 1, 12, tzinfo=timezone.utc)]
+    ledger = BudgetLedger(limits=_full_limits(), measured=_measured(),
+                          measurement_ttl_seconds=60, clock=lambda: now[0])
+    assert ledger.reserve("job", _task(10))["decision"] == "allow"
+    actual = BudgetVector.measured(_task(5).numeric(), measured_at="2026-10-01T12:00:30Z")
+    now[0] = datetime(2026, 10, 1, 12, 0, 30, tzinfo=timezone.utc)
+    ledger.settle("job", outcome="SUCCEEDED", actual=actual)
+    assert ledger.reserve("next", _task(10))["decision"] == "allow"
+    now[0] = datetime(2026, 10, 1, 12, 1, 1, tzinfo=timezone.utc)
+    # New local receipts do not renew stale shared-account evidence.
+    assert ledger.reserve("stale", _task(10))["decision"] == "unknown_metrics"
+
+
+def test_aggregation_missing_timestamp_cannot_manufacture_freshness() -> None:
+    no_time = BudgetVector.from_mapping(_task(1).numeric(), default_basis="measured")
+    summed = no_time.add(_measured())
+    assert summed.metrics["d1RowsRead"].measured_at is None
+    assert not summed.all_fresh(now=datetime(2026, 10, 1, 12, tzinfo=timezone.utc), max_age_seconds=60)
