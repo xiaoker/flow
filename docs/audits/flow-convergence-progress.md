@@ -26,6 +26,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-02 checkpoint increment (supersedes client in-flight status below)
+
+- PR #145 merged as `e72d2503fa12a61d72d828eb25b5653ddf5a496c`; ordinary lease client code is complete, not production-wired.
+- Fresh worktree `/private/tmp/flow-080-checkpoint-20261002`, branch `codex/080-checkpoint-20261002`, based on that merged main.
+- Current scope: bounded immutable stage bundle format and pure verification, using the existing application checkpoint contract. This is a prerequisite, **not completed durable resume**.
+- Local Python suite: 553 passed (including 12 new bundle tests). Web verification follows the existing lint/test/build chain.
+- Details and remaining ordered tasks: `docs/audits/2026-10-02-080-checkpoint-bundle.md`.
+- No remote operations, production entry, flags, D1 schema, workflows or active pointer changed. No Worker deployment side effect; PR/main CI consumes Actions minutes.
+- Next: after this isolated PR/CI and merge authorization, implement lease-safe import/export integration and bounded R2 transport. No live canary is authorized.
+
 - **Last checked:** 2026-10-02; the roadmap revision in the user-provided handoff is the controlling implementation order.
 - **Original repository:** `/Users/xiaoker/Documents/交易台` (dirty user worktree; read-only for this task).
 - **Current isolated worktree:** `/private/tmp/flow-080-runner-heartbeat-20261002`.
