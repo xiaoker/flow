@@ -1,12 +1,10 @@
 """Candidate cross-environment entry for the shared pipeline executor.
 
-This module is intentionally a thin adapter around
-``pipeline_application.execute_application_plan``.  It validates the
-execution envelope that a local operator and a GitHub workflow must use, then
-feeds the same redacted stage fixture into the same application executor.
-It does not contact D1, R2, Cloudflare, GitHub, an official source, or an
-active-release pointer.  The candidate entry is therefore safe to exercise
-before a production runner cutover is authorized.
+The CLI and manual GitHub workflow remain fixture-only.  An in-process caller
+may explicitly inject side-effect-classified stage adapters, but only after an
+independent control-plane verifier accepts the execution identity.  The
+current core-collection adapter is bounded and local-output-only; no current
+caller wires it to production scheduling or publishing.
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .pipeline_application import (
     APPLICATION_CONTRACT_VERSION,
@@ -40,6 +38,10 @@ _OWNER_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
 _MODES = {"ordinary", "recovery"}
 _AUTH_KINDS = {"existing-admin", "approved-recovery"}
 _PROTECTED_PATHS = {"memory"}
+_ALLOWED_ADAPTER_EFFECTS = {
+    "official_source_requests",
+    "filesystem:isolated_stage_workspace",
+}
 
 
 class PipelineRunnerError(ValueError):
@@ -137,11 +139,15 @@ def dependency_lock_digest(paths: Sequence[str | Path], *, root: Path) -> dict[s
 
 
 def _assert_safe_output(path: Path) -> None:
-    parts = path.resolve().parts
+    parts = path.resolve(strict=False).parts
     if any(part in _PROTECTED_PATHS for part in parts):
         raise PipelineRunnerError("protected_output_path")
-    for index, part in enumerate(parts[:-1]):
-        if part == "reports" and parts[index + 1] == "phase0" and path.name.startswith("latest-"):
+    for index, part in enumerate(parts[:-2]):
+        if (
+            part == "reports"
+            and parts[index + 1] == "phase0"
+            and parts[index + 2].startswith("latest-")
+        ):
             raise PipelineRunnerError("protected_output_path")
 
 
@@ -312,7 +318,7 @@ def _load_checkpoints(path: Path) -> list[Mapping[str, Any]]:
     return list(value)
 
 
-def _checkpoint_from_fixture(
+def _checkpoint_from_stage_result(
     *,
     context: PipelineExecutionContext,
     stage: str,
@@ -351,8 +357,15 @@ def run_pipeline_request(
     dependency_lock_paths: Sequence[str | Path],
     project_root: Path | None = None,
     now: datetime | None = None,
+    stage_adapters: Mapping[str, Any] | None = None,
+    authorization_verifier: Callable[[PipelineExecutionContext], bool] | None = None,
 ) -> dict[str, Any]:
-    """Run a candidate request through the same executor used by local/CI."""
+    """Run fixture stages or explicitly injected, verified stage adapters.
+
+    The CLI/workflow use fixture mode only.  An in-process adapter caller must
+    provide both a complete adapter map and an independent control-plane
+    authorization verifier before any stage can perform side effects.
+    """
 
     if not isinstance(payload, Mapping):
         raise PipelineRunnerError("pipeline_request_object_required")
@@ -370,15 +383,126 @@ def run_pipeline_request(
     )
     stages = _stage_names(payload)
     stage_inputs = _stage_inputs(payload, stages)
-    stage_results = _mapping(payload.get("stageResults"), "stage_results")
+    adapter_mode = stage_adapters is not None
+    stage_results: Mapping[str, Any] = {}
+    stage_configs: Mapping[str, Any] = {}
+    adapter_effects: set[str] = set()
+    source_request_count = 0
+    if adapter_mode:
+        if authorization_verifier is None:
+            raise PipelineRunnerError("live_authorization_verifier_required")
+        try:
+            authorization_verified = authorization_verifier(context)
+        except Exception as exc:
+            raise PipelineRunnerError("live_authorization_verification_failed") from exc
+        if authorization_verified is not True:
+            raise PipelineRunnerError("live_authorization_verification_failed")
+        if "stageResults" in payload:
+            raise PipelineRunnerError("fixture_results_forbidden_with_stage_adapters")
+        stage_configs = _mapping(payload.get("stageConfigs"), "stage_configs")
+        if set(stage_configs) != set(stages):
+            raise PipelineRunnerError("stage_config_set_mismatch")
+        if set(stage_adapters or {}) != set(stages):
+            raise PipelineRunnerError("stage_adapter_set_mismatch")
+        for stage in stages:
+            config = _mapping(stage_configs[stage], f"{stage}_config")
+            if canonical_sha256(config) != stage_inputs[stage]:
+                raise PipelineRunnerError("stage_config_input_digest_mismatch", stage)
+            adapter = (stage_adapters or {}).get(stage)
+            if not callable(getattr(adapter, "run", None)):
+                raise PipelineRunnerError("stage_adapter_run_required", stage)
+            if not callable(getattr(adapter, "verify_checkpoint", None)):
+                raise PipelineRunnerError("stage_adapter_checkpoint_verifier_required", stage)
+            effects = getattr(adapter, "allowed_side_effects", None)
+            if (
+                not isinstance(effects, (tuple, list, set, frozenset))
+                or any(not isinstance(effect, str) for effect in effects)
+            ):
+                raise PipelineRunnerError("stage_adapter_effect_contract_required", stage)
+            effect_set = set(effects)
+            if not effect_set or not effect_set.issubset(_ALLOWED_ADAPTER_EFFECTS):
+                raise PipelineRunnerError("unsupported_stage_adapter_effect", stage)
+            adapter_effects.update(effect_set)
+    else:
+        if authorization_verifier is not None or "stageConfigs" in payload:
+            raise PipelineRunnerError("stage_adapter_configuration_without_adapters")
+        stage_results = _mapping(payload.get("stageResults"), "stage_results")
     checkpoints_path = state_dir / "checkpoints.json"
     existing = _load_checkpoints(checkpoints_path)
+    if adapter_mode:
+        for checkpoint in existing:
+            stage = checkpoint.get("stage")
+            if stage not in stages or checkpoint.get("status") != "COMPLETED":
+                continue
+            adapter = (stage_adapters or {}).get(stage)
+            verifier = getattr(adapter, "verify_checkpoint")
+            input_sha256 = stage_inputs[stage]
+            workspace = (state_dir / "stages" / stage / input_sha256).resolve(strict=False)
+            try:
+                workspace.relative_to(state_dir)
+            except ValueError as exc:
+                raise PipelineRunnerError("stage_workspace_path_escape", stage) from exc
+            try:
+                verified = verifier(
+                    checkpoint=checkpoint,
+                    identity=context.identity,
+                    input_sha256=input_sha256,
+                    workspace=workspace,
+                )
+            except Exception as exc:
+                raise PipelineRunnerError("stage_checkpoint_evidence_verification_failed", stage) from exc
+            if verified is not True:
+                raise PipelineRunnerError("stage_checkpoint_evidence_mismatch", stage)
 
     def stage_runner(stage: str, input_sha256: str) -> Mapping[str, Any]:
-        value = stage_results.get(stage)
-        if not isinstance(value, Mapping):
-            raise PipelineRunnerError("stage_result_missing", stage)
-        return _checkpoint_from_fixture(
+        nonlocal source_request_count
+        if adapter_mode:
+            adapter = (stage_adapters or {}).get(stage)
+            run = getattr(adapter, "run", None)
+            config = stage_configs.get(stage)
+            if not isinstance(config, Mapping):
+                raise PipelineRunnerError("stage_config_missing", stage)
+            workspace = state_dir / "stages" / stage / input_sha256
+            try:
+                workspace = workspace.resolve(strict=False)
+                workspace.relative_to(state_dir)
+            except ValueError as exc:
+                raise PipelineRunnerError("stage_workspace_path_escape", stage) from exc
+            _assert_safe_output(workspace / "adapter-receipt.json")
+            try:
+                value = run(
+                    context=context,
+                    input_sha256=input_sha256,
+                    config=config,
+                    workspace=workspace,
+                )
+            except PipelineRunnerError:
+                raise
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,96}", code):
+                    raise PipelineRunnerError(code) from exc
+                raise PipelineRunnerError("stage_adapter_failed", type(exc).__name__) from exc
+            if "official_source_requests" in getattr(adapter, "allowed_side_effects", ()):
+                evidence = value.get("evidence") if isinstance(value, Mapping) else None
+                observed = evidence.get("sourceRequestCount") if isinstance(evidence, Mapping) else None
+                budget = evidence.get("sourceRequestBudget") if isinstance(evidence, Mapping) else None
+                if (
+                    isinstance(observed, bool)
+                    or not isinstance(observed, int)
+                    or not 0 <= observed <= 100
+                    or isinstance(budget, bool)
+                    or not isinstance(budget, int)
+                    or not 1 <= budget <= 100
+                    or observed > budget
+                ):
+                    raise PipelineRunnerError("stage_source_request_evidence_invalid", stage)
+                source_request_count += observed
+        else:
+            value = stage_results.get(stage)
+            if not isinstance(value, Mapping):
+                raise PipelineRunnerError("stage_result_missing", stage)
+        return _checkpoint_from_stage_result(
             context=context,
             stage=stage,
             input_sha256=input_sha256,
@@ -410,6 +534,7 @@ def run_pipeline_request(
     report = {
         "schemaVersion": EXECUTOR_SCHEMA_VERSION,
         "executorContractVersion": EXECUTOR_CONTRACT_VERSION,
+        "executionMode": "stage_adapter" if adapter_mode else "fixture",
         "status": result["status"],
         "context": context.as_dict(),
         "dependencyLock": lock_evidence,
@@ -421,6 +546,10 @@ def run_pipeline_request(
             "workflowDispatch": False,
             "activeReleaseChanged": False,
             "productionEntryEnabled": False,
+            "officialSourceRequests": source_request_count > 0,
+            "officialSourceRequestCount": source_request_count,
+            "officialSourceRequestsAllowed": "official_source_requests" in adapter_effects,
+            "isolatedFilesystemWrites": True,
         },
     }
     _write_json_atomic(output_path, report)

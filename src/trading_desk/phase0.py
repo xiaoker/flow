@@ -242,6 +242,8 @@ def collect_phase0(
             if getattr(exc, "code", None) in {
                 "live_recovery_request_budget_exceeded",
                 "live_recovery_source_unavailable",
+                "official_source_request_budget_exceeded",
+                "official_source_unavailable",
             }:
                 raise
             error = {

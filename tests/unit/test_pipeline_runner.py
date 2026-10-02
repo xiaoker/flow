@@ -50,7 +50,12 @@ def test_local_and_ci_entry_contract_produces_stable_candidate_without_side_effe
         "workflowDispatch": False,
         "activeReleaseChanged": False,
         "productionEntryEnabled": False,
+        "officialSourceRequests": False,
+        "officialSourceRequestCount": 0,
+        "officialSourceRequestsAllowed": False,
+        "isolatedFilesystemWrites": True,
     }
+    assert first["executionMode"] == "fixture"
     assert first["dependencyLock"]["sha256"] == dependency_lock_digest([LOCK], root=ROOT)["sha256"]
 
 
@@ -137,6 +142,16 @@ def test_lock_mismatch_and_protected_outputs_fail_closed(tmp_path: Path) -> None
             _payload(),
             state_dir=tmp_path / "memory" / "state",
             output_path=tmp_path / "result.json",
+            producer_build_sha=PRODUCER_SHA,
+            dependency_lock_paths=[LOCK],
+            project_root=ROOT,
+        )
+
+    with pytest.raises(PipelineRunnerError, match="protected_output_path"):
+        run_pipeline_request(
+            _payload(),
+            state_dir=ROOT / "reports" / "phase0" / "latest-manifest.json" / "nested",
+            output_path=tmp_path / "safe-result.json",
             producer_build_sha=PRODUCER_SHA,
             dependency_lock_paths=[LOCK],
             project_root=ROOT,
