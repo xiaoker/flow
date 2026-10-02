@@ -493,6 +493,38 @@ export async function getPipelineWindow(db: D1Like, runKey: string): Promise<Pip
   ).bind(runKey).first<PipelineWindowRow>();
 }
 
+/** Renew only the current ordinary attempt; never revive an expired lease. */
+export async function renewPipelineWindowLease(
+  db: D1Like,
+  input: { runKey: string; leaseOwner: string; expectedAttemptCount: number },
+  now = new Date(),
+): Promise<{ row: PipelineWindowRow; rowsWritten: number }> {
+  if (!parsePipelineRunKey(input.runKey)) throw new PipelineWindowError("invalid_run_key", 422);
+  if (!OWNER.test(input.leaseOwner)) throw new PipelineWindowError("invalid_lease_owner", 422);
+  if (!Number.isSafeInteger(input.expectedAttemptCount) || input.expectedAttemptCount < 1) {
+    throw new PipelineWindowError("invalid_attempt_count", 422);
+  }
+  const nowIso = now.toISOString();
+  const expiry = new Date(now.getTime() + PIPELINE_WINDOW_LEASE_MS).toISOString();
+  const result = await db.prepare(
+    `UPDATE pipeline_window
+        SET lease_expires_at = CASE WHEN lease_expires_at > ? THEN lease_expires_at ELSE ? END,
+            updated_at = ?
+      WHERE run_key = ? AND lease_owner = ? AND attempt_count = ?
+        AND recovery_id IS NULL AND status IN ('DISPATCHED', 'RUNNING')
+        AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+  ).bind(expiry, expiry, nowIso, input.runKey, input.leaseOwner, input.expectedAttemptCount, nowIso).run();
+  const changes = requireD1NonNegativeInteger(result.meta?.changes, "pipeline_window_renew_change_meta_invalid");
+  const rowsWritten = requireD1NonNegativeInteger(result.meta?.rows_written, "pipeline_window_renew_write_meta_invalid");
+  if (changes > 1) throw new PipelineWindowError("pipeline_window_renew_multirow_mutation", 503);
+  if (changes !== 1) throw new PipelineWindowError("pipeline_window_renew_conflict", 409);
+  const row = await getPipelineWindow(db, input.runKey);
+  if (!row || !activeTargetLease(row, input.leaseOwner, nowIso) || row.attempt_count !== input.expectedAttemptCount) {
+    throw new PipelineWindowError("pipeline_window_renew_conflict", 409);
+  }
+  return { row, rowsWritten };
+}
+
 export async function markPipelineWindow(
   db: D1Like,
   input: {

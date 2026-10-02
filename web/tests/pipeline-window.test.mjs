@@ -8,6 +8,7 @@ import {
   claimPipelineWindow,
   getPipelineWindow,
   markPipelineWindow,
+  renewPipelineWindowLease,
   parsePipelineRunKey,
   shanghaiDate,
 } from "../app/lib/pipeline-window.ts";
@@ -18,6 +19,68 @@ async function loadWorker() {
   const { default: worker } = await import(workerUrl.href);
   return worker;
 }
+
+test("ordinary renewal fences owner, attempt, expiry and status without changing target", async () => {
+  const db = await createDatabase();
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  const now = new Date("2026-08-29T10:00:00Z");
+  await claimPipelineWindow(db, input(runKey), now);
+  const request = { runKey, leaseOwner: "runner:00000001", expectedAttemptCount: 1 };
+  const renewed = await renewPipelineWindowLease(db, request, new Date("2026-08-29T10:05:00Z"));
+  assert.equal(renewed.row.lease_expires_at, "2026-08-29T10:20:00.000Z");
+  assert.equal(renewed.row.target_date, "2026-08-29");
+  assert.equal(renewed.row.status, "DISPATCHED");
+  assert.equal(renewed.rowsWritten, 1);
+  await assert.rejects(renewPipelineWindowLease(db, { ...request, leaseOwner: "runner:00000002" }, now), /renew_conflict/);
+  await assert.rejects(renewPipelineWindowLease(db, { ...request, expectedAttemptCount: 2 }, now), /renew_conflict/);
+  await assert.rejects(renewPipelineWindowLease(db, request, new Date("2026-08-29T10:20:00Z")), /renew_conflict/);
+  const shorter = await renewPipelineWindowLease(db, request, now);
+  assert.equal(shorter.row.lease_expires_at, renewed.row.lease_expires_at);
+  const metadataFailure = {
+    prepare(sql) {
+      if (!sql.startsWith("UPDATE")) return db.prepare(sql);
+      return { bind() { return this; }, async run() { return { meta: { changes: 1, rows_written: -1 } }; } };
+    },
+  };
+  await assert.rejects(renewPipelineWindowLease(metadataFailure, request, now), /write_meta_invalid/);
+  // Recovery rows remain exclusively owned by the recovery endpoint.
+  db.database.prepare("PRAGMA foreign_keys = OFF").run();
+  db.database.prepare("UPDATE pipeline_window SET recovery_id = 'recovery-test' WHERE run_key = ?").run(runKey);
+  await assert.rejects(renewPipelineWindowLease(db, request, now), /renew_conflict/);
+  db.database.prepare("UPDATE pipeline_window SET recovery_id = NULL WHERE run_key = ?").run(runKey);
+  for (const status of ["COMPLETED", "FAILED_RETRYABLE", "BLOCKED_QUALITY"]) {
+    db.database.prepare("UPDATE pipeline_window SET status = ? WHERE run_key = ?").run(status, runKey);
+    await assert.rejects(renewPipelineWindowLease(db, request, now), /renew_conflict/);
+  }
+  db.database.prepare("UPDATE pipeline_window SET status = 'RUNNING', lease_expires_at = NULL WHERE run_key = ?").run(runKey);
+  await assert.rejects(renewPipelineWindowLease(db, request, now), /renew_conflict/);
+  await assert.rejects(renewPipelineWindowLease(db, { ...request, expectedAttemptCount: 0 }, now), /invalid_attempt_count/);
+  db.close();
+});
+
+test("renewal route uses existing auth and rejects malformed renewal instead of falling through", async () => {
+  const worker = await loadWorker();
+  const db = await createDatabase();
+  const runKey = buildPipelineRunKey("2026-08-29", "evening");
+  await claimPipelineWindow(db, input(runKey));
+  const env = { DB: db, INGEST_API_KEY: "test-key", ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const body = { runKey, leaseOwner: "runner:00000001", status: "RUNNING", renewLease: true, expectedAttemptCount: 1 };
+  async function send(value, authorized = true) {
+    return worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/status", {
+      method: "POST", body: JSON.stringify(value),
+      headers: { "Content-Type": "application/json", ...(authorized ? { Authorization: "Bearer test-key" } : {}) },
+    }), env, context);
+  }
+  assert.equal((await send(body, false)).status, 401);
+  assert.equal((await send({ ...body, renewLease: "true" })).status, 422);
+  assert.equal((await send({ ...body, status: "COMPLETED" })).status, 422);
+  assert.equal((await send({ ...body, expectedAttemptCount: 2 })).status, 409);
+  const response = await send(body);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).decision, "renewed");
+  db.close();
+});
 
 class D1Statement {
   constructor(database, sql, claimMeta) {

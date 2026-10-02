@@ -2,6 +2,7 @@ import { runtimeEnv } from "@/app/lib/dashboard-store";
 import {
   getPipelineWindow,
   markPipelineWindow,
+  renewPipelineWindowLease,
   PipelineWindowError,
   type PipelineWindowStatus,
 } from "@/app/lib/pipeline-window";
@@ -111,6 +112,15 @@ export async function POST(request: Request): Promise<Response> {
   }
   const status = statusValue as PipelineWindowStatus;
   try {
+    if (value.renewLease !== undefined) {
+      if (value.renewLease !== true || status !== "RUNNING" || typeof value.expectedAttemptCount !== "number") {
+        return response({ error: "invalid_renew_request" }, 422);
+      }
+      const renewed = await renewPipelineWindowLease(runtime.DB, {
+        runKey, leaseOwner, expectedAttemptCount: value.expectedAttemptCount,
+      });
+      return response({ ...serialize(renewed.row), decision: "renewed", rowsWritten: renewed.rowsWritten });
+    }
     const row = await markPipelineWindow(runtime.DB, {
       runKey,
       leaseOwner,
