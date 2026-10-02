@@ -62,6 +62,7 @@ class BoundedOfficialSession:
         session: requests.Session | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        lease_check: Callable[[], None] | None = None,
     ) -> None:
         if (
             isinstance(maximum, bool)
@@ -91,6 +92,7 @@ class BoundedOfficialSession:
         self._last_by_host: dict[str, float] = {}
         self._monotonic = monotonic
         self._sleep = sleep
+        self._lease_check = lease_check
 
     @property
     def headers(self) -> Any:
@@ -217,6 +219,8 @@ class BoundedOfficialSession:
             delay = self.min_interval_seconds - (now - previous)
             if delay > 0:
                 self._sleep(delay)
+        if self._lease_check is not None:
+            self._lease_check()
         self.request_count += 1
         self._last_by_host[host] = self._monotonic()
 
@@ -371,6 +375,7 @@ class CoreCollectionStageAdapter:
             min_interval_seconds=normalized["minIntervalSeconds"],
             monotonic=self._monotonic,
             sleep=self._sleep,
+            lease_check=getattr(context, "lease_check", None),
         )
         try:
             result = collect_phase0(
@@ -387,6 +392,8 @@ class CoreCollectionStageAdapter:
             raise
         except Exception as exc:
             code = getattr(exc, "code", None)
+            if isinstance(code, str) and code.startswith("pipeline_lease_"):
+                raise
             if code in {"official_source_request_budget_exceeded", "official_source_unavailable"}:
                 raise PipelineAdapterError(str(code)) from exc
             raise PipelineAdapterError("core_collection_adapter_failed", type(exc).__name__) from exc

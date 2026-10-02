@@ -239,7 +239,7 @@ def collect_phase0(
             # hard request-budget stop.  Do not turn that control decision
             # into a generic quality finding and continue issuing requests
             # for every remaining dataset.
-            if getattr(exc, "code", None) in {
+            if str(getattr(exc, "code", "")).startswith("pipeline_lease_") or getattr(exc, "code", None) in {
                 "live_recovery_request_budget_exceeded",
                 "live_recovery_source_unavailable",
                 "official_source_request_budget_exceeded",
