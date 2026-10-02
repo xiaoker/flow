@@ -60,6 +60,20 @@ function requireIdentityHeaders(response: Response, expected: CandidateIdentity)
 
 async function requireOk(response: Response): Promise<void> {
   if (response.ok) return;
+  // The endpoint deliberately returns machine-readable error codes. Preserve
+  // only the documented safe-code shape; never render arbitrary server text.
+  try {
+    const body: unknown = await response.clone().json();
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const code = (body as { error?: unknown }).error;
+      if (typeof code === "string" && /^(?:unauthorized|access_verification_unavailable|storage_unavailable|invalid_candidate_reference|manifest_sha256_required|staged_candidate_not_found|candidate_[a-z0-9_]{1,80})$/.test(code)) {
+        throw new CandidateReadError(code);
+      }
+    }
+  } catch (error) {
+    if (error instanceof CandidateReadError) throw error;
+    // Non-JSON and malformed error responses use the status-based fallback.
+  }
   if (response.status === 401 || response.status === 403) throw new CandidateReadError("unauthorized");
   if (response.status === 404) throw new CandidateReadError("candidate_not_found_or_no_longer_staged");
   if (response.status === 409) throw new CandidateReadError("candidate_manifest_changed_refresh_required");
@@ -156,6 +170,15 @@ export function candidateErrorMessage(error: unknown): string {
   const messages: Record<string, string> = {
     unauthorized: "Cloudflare Access 登录已过期或当前身份未通过授权；请重新登录后重试。",
     access_verification_unavailable: "Cloudflare Access 身份校验暂不可用，候选数据未读取；请稍后重试。",
+    storage_unavailable: "候选读取所需的 D1 或 R2 存储绑定不可用；请检查 Worker 绑定配置。",
+    invalid_candidate_reference: "候选 releaseId、清单哈希或工件名称格式无效。",
+    manifest_sha256_required: "读取候选工件必须提供清单哈希；请重新读取候选清单。",
+    staged_candidate_not_found: "未找到该 STAGED 候选；它可能不存在或已不再处于候选状态。",
+    candidate_read_failed: "候选读取在服务端失败；请用此错误码核对 Worker 日志。",
+    candidate_artifact_key_mismatch: "候选清单中的工件路径不符合该 release 的隔离范围，服务端已拒绝读取。",
+    candidate_artifact_unavailable: "候选工件在 R2 中缺失或元数据与清单不一致，服务端已拒绝读取。",
+    candidate_manifest_changed: "候选清单版本已变化，请重新读取候选并核对 releaseId。",
+    candidate_artifact_not_found: "候选清单中没有请求的工件。",
     candidate_not_found_or_no_longer_staged: "候选不存在或已不再是 STAGED 状态；不会回退读取生产版本。",
     candidate_manifest_changed_refresh_required: "候选清单版本已变化，请重新读取并核对 releaseId。",
     candidate_response_identity_mismatch: "响应的版本、日期或清单哈希与选中候选不一致，已丢弃。",
