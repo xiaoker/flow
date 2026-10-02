@@ -127,7 +127,8 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
 def restore_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdentity,
                          stage: str, input_sha256: str, workspace: Path,
                          confirm_lease: Callable[[], Any],
-                         verify_output: Callable[..., bool]) -> Mapping[str, Any]:
+                         verify_output: Callable[..., bool],
+                         check_lease: Callable[[], Any] | None = None) -> Mapping[str, Any]:
     """Restore only into a new isolated directory; partial restores fail closed.
 
     Completion is committed by the runner only AFTER this function succeeds.
@@ -151,7 +152,7 @@ def restore_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdent
     except FileExistsError as exc:
         raise CheckpointBundleError("restore_workspace_exists") from exc
     for name, content in files.items():
-        confirm_lease()
+        (check_lease or confirm_lease)()
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb") as handle:

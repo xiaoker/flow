@@ -26,6 +26,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-02 bounded R2 transport increment (current)
+
+- PR #147 merged as `41d4a85187bf9df1671c42530c2f55d90273418a`.
+- Worktree `/private/tmp/flow-080-r2-20261002`, branch `codex/080-r2-20261002`, based on that merge.
+- Candidate runner now supports explicit trusted digest references through bounded admin R2 transport; ordinary owner/attempt authority reuses pipeline_window. No production caller is enabled.
+- Details and actual deployment side effects: `docs/audits/2026-10-02-080-checkpoint-r2.md` and its merge-side-effects JSON.
+- No new migration, but web changes trigger automatic pending migration apply + Worker deployment on merge. Current production pending set/account quota/Access acceptance remain UNKNOWN.
+- Before live canary: lifecycle/resource admission, larger-artifact strategy, remaining adapters/recovery and rollback package. This stage is not production-complete.
+- Next after full tests/CI: stop for explicit merge/deployment-side-effect authorization, then verify deployment before further candidate runtime work.
+
 ### 2026-10-02 lease-safe resume increment (current)
 
 - PR #146 merged as `df47766f2539c376f468964b40f699089d953e6e`; bounded bundle contract is on main.
