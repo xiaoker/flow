@@ -26,6 +26,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-02 offline checkpoint preflight increment (current)
+
+- PR #148 merged as `979115dfb20c52fdf3ad5941068a03c07d0d6fa0`; deployment `37024110459` succeeded, exact merge build identity verified, no migrations to apply. Worker version `bf4b5ccf-3262-4ffb-9456-764c2e44b06f`.
+- Fresh worktree `/private/tmp/flow-080-admission-20261002`, branch `codex/080-admission-20261002`, based on that merge.
+- Offline preflight reuses bundle verification and resource accounting, reports actual encoded/decoded bytes, transport fit and complete-budget diagnostics. It grants no execution authority, creates no reservation, and does not pretend lifecycle policy is installed.
+- Existing config has no R2 Class A/B caps; those remain UNKNOWN. No provider quota, real core artifact size or lifecycle acceptance has been measured in this increment.
+- Details: `docs/audits/2026-10-02-080-checkpoint-preflight.md`. Python tests: 586 passed. Web verification and hosted CI recorded in the PR.
+- Only Python/tests/docs changed: no Worker deployment or migration on merge, no production reads, flags, active pointer, collection or original protected files changed.
+- Next: full CI then stop for merge authorization. Runtime lifecycle, shared reservation integration, full-task cost evidence, larger-artifact strategy and remaining adapters still precede a separately authorized canary. `080-RUNNER` is not complete.
+
 ### 2026-10-02 bounded R2 transport increment (current)
 
 - PR #147 merged as `41d4a85187bf9df1671c42530c2f55d90273418a`.
