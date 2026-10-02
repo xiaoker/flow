@@ -256,6 +256,12 @@ test("candidate artifact reader rejects mixed release identity and surfaces auth
   }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_response_identity_mismatch");
   await assert.rejects(readCandidateArtifact(async () => new Response("", { status: 401 }), identity, "radar", descriptor, request.signal),
     (error) => error.code === "unauthorized");
+  await assert.rejects(readCandidateArtifact(async () => Response.json({ error: "storage_unavailable" }, { status: 503 }),
+    identity, "radar", descriptor, request.signal), (error) => error.code === "storage_unavailable");
+  await assert.rejects(readCandidateArtifact(async () => Response.json({ error: "candidate_artifact_unavailable" }, { status: 503 }),
+    identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_artifact_unavailable");
+  await assert.rejects(readCandidateArtifact(async () => Response.json({ error: "<script>alert(1)</script>" }, { status: 503 }),
+    identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_read_http_503");
   await assert.rejects(readCandidateArtifact(async () => new Response(body, {
     headers: { ...correctHeaders, "x-flow-artifact-sha256": hash("f") },
   }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_artifact_descriptor_mismatch");
@@ -263,6 +269,8 @@ test("candidate artifact reader rejects mixed release identity and surfaces auth
     headers: correctHeaders,
   }), identity, "radar", descriptor, request.signal), (error) => error.code === "candidate_artifact_sha256_mismatch");
   assert.match(candidateErrorMessage(new CandidateReadError("unauthorized")), /Cloudflare Access/);
+  assert.match(candidateErrorMessage(new CandidateReadError("storage_unavailable")), /D1 或 R2/);
+  assert.match(candidateErrorMessage(new CandidateReadError("candidate_artifact_unavailable")), /R2 中缺失/);
 });
 
 test("built candidate route is explicit, authenticated, staged-only, and exact by release id", async () => {
