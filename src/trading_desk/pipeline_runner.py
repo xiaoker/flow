@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -173,6 +173,8 @@ class PipelineExecutionContext:
     recovery_id: str | None
     recovery_plan_sha256: str | None
     dependency_lock_sha256: str
+    lease_attempt_count: int | None = None
+    lease_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -192,6 +194,8 @@ class PipelineExecutionContext:
                 "recoveryId": self.recovery_id,
                 "planSha256": self.recovery_plan_sha256,
             }
+        if self.lease_attempt_count is not None:
+            result["lease"]["attemptCount"] = self.lease_attempt_count
         return result
 
 
@@ -275,6 +279,9 @@ def build_execution_context(
     declared_lock = payload.get("dependencyLockSha256")
     if declared_lock != dependency_lock_sha256:
         raise PipelineRunnerError("dependency_lock_sha_mismatch")
+    attempt = lease.get("attemptCount")
+    if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1):
+        raise PipelineRunnerError("invalid_lease_attempt_count")
     return PipelineExecutionContext(
         identity=identity,
         mode=mode,
@@ -284,6 +291,7 @@ def build_execution_context(
         recovery_id=recovery_id,
         recovery_plan_sha256=recovery_plan_sha256,
         dependency_lock_sha256=dependency_lock_sha256,
+        lease_attempt_count=attempt,
     )
 
 
@@ -359,6 +367,7 @@ def run_pipeline_request(
     now: datetime | None = None,
     stage_adapters: Mapping[str, Any] | None = None,
     authorization_verifier: Callable[[PipelineExecutionContext], bool] | None = None,
+    lease_guard: Any | None = None,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -389,14 +398,20 @@ def run_pipeline_request(
     adapter_effects: set[str] = set()
     source_request_count = 0
     if adapter_mode:
-        if authorization_verifier is None:
+        if lease_guard is not None and authorization_verifier is not None:
+            raise PipelineRunnerError("ambiguous_live_authorization_verifier")
+        if authorization_verifier is None and lease_guard is None:
             raise PipelineRunnerError("live_authorization_verifier_required")
         try:
-            authorization_verified = authorization_verifier(context)
+            authorization_verified = lease_guard.verify(context) if lease_guard is not None else authorization_verifier(context)
+        except PipelineRunnerError:
+            raise
         except Exception as exc:
             raise PipelineRunnerError("live_authorization_verification_failed") from exc
         if authorization_verified is not True:
             raise PipelineRunnerError("live_authorization_verification_failed")
+        if lease_guard is not None:
+            context = replace(context, lease_check=lease_guard.check)
         if "stageResults" in payload:
             raise PipelineRunnerError("fixture_results_forbidden_with_stage_adapters")
         stage_configs = _mapping(payload.get("stageConfigs"), "stage_configs")
@@ -424,7 +439,7 @@ def run_pipeline_request(
                 raise PipelineRunnerError("unsupported_stage_adapter_effect", stage)
             adapter_effects.update(effect_set)
     else:
-        if authorization_verifier is not None or "stageConfigs" in payload:
+        if authorization_verifier is not None or lease_guard is not None or "stageConfigs" in payload:
             raise PipelineRunnerError("stage_adapter_configuration_without_adapters")
         stage_results = _mapping(payload.get("stageResults"), "stage_results")
     checkpoints_path = state_dir / "checkpoints.json"
@@ -457,6 +472,8 @@ def run_pipeline_request(
     def stage_runner(stage: str, input_sha256: str) -> Mapping[str, Any]:
         nonlocal source_request_count
         if adapter_mode:
+            if context.lease_check is not None:
+                context.lease_check()
             adapter = (stage_adapters or {}).get(stage)
             run = getattr(adapter, "run", None)
             config = stage_configs.get(stage)
@@ -483,6 +500,8 @@ def run_pipeline_request(
                 if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,96}", code):
                     raise PipelineRunnerError(code) from exc
                 raise PipelineRunnerError("stage_adapter_failed", type(exc).__name__) from exc
+            if context.lease_check is not None:
+                context.lease_check()
             if "official_source_requests" in getattr(adapter, "allowed_side_effects", ()):
                 evidence = value.get("evidence") if isinstance(value, Mapping) else None
                 observed = evidence.get("sourceRequestCount") if isinstance(evidence, Mapping) else None
@@ -510,6 +529,8 @@ def run_pipeline_request(
         )
 
     def persist_progress(checkpoints: Sequence[Mapping[str, Any]]) -> None:
+        if lease_guard is not None:
+            lease_guard.confirm()
         _write_json_atomic(
             checkpoints_path,
             {
@@ -529,6 +550,8 @@ def run_pipeline_request(
         checkpoint_progress=persist_progress,
     )
     latest_data_date = payload.get("latestDataDate")
+    if lease_guard is not None:
+        lease_guard.confirm()
     if latest_data_date is not None:
         latest_data_date = _date(latest_data_date, "latest_data_date")
     report = {
@@ -552,6 +575,9 @@ def run_pipeline_request(
             "isolatedFilesystemWrites": True,
         },
     }
+    if lease_guard is not None:
+        report["leaseEvidence"] = lease_guard.evidence()
+        report["sideEffects"]["remoteWrites"] = lease_guard.renewal_count > 0
     _write_json_atomic(output_path, report)
     return report
 
