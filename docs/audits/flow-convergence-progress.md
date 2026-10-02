@@ -26,6 +26,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-02 budget ledger safety increment (current)
+
+- PR #149 merged as `2c110962befca2b8788638e3688a2e04e1d9dc83`; main CI `37028156674` succeeded. No Worker deployment was required.
+- Fresh worktree `/private/tmp/flow-080-budget-20261002`, branch `codex/080-budget-20261002`, based on that merge.
+- Before wiring candidate resource accounting, fix confirmed reference-ledger defects: expiry checked at execution/report methods, physical debit requires measured basis, final settlement cannot erase observed cost, measured aggregation preserves conservative freshness.
+- Details: `docs/audits/2026-10-02-080-budget-ledger-safety.md`. Full local/hosted results in PR; no production verification claimed.
+- Shared durable reservation integration and checkpoint lifecycle remain incomplete. This is not a production budget ledger or completed `080-RUNNER`.
+- Only Python/tests/docs changed; PR/main CI, no automatic Worker deploy/migration, no live task or protected original-file edits. Stop after CI for merge approval, then continue those prerequisites from latest main.
+
 ### 2026-10-02 offline checkpoint preflight increment (current)
 
 - PR #148 merged as `979115dfb20c52fdf3ad5941068a03c07d0d6fa0`; deployment `37024110459` succeeded, exact merge build identity verified, no migrations to apply. Worker version `bf4b5ccf-3262-4ffb-9456-764c2e44b06f`.

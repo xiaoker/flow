@@ -271,8 +271,14 @@ class BudgetVector:
                 )
                 continue
             basis = "measured" if left.basis == right.basis == "measured" else "estimated"
+            measured_at = None
+            if basis == "measured" and left.measured_at is not None and right.measured_at is not None:
+                # Aggregating counters must not drop their freshness proof or
+                # refresh old account evidence with a newer local settlement.
+                measured_at = min((left.measured_at, right.measured_at),
+                                  key=lambda value: _iso_datetime(value, "measuredAt"))
             result[dimension] = BudgetMetric.known(
-                dimension, left.value + right.value, basis=basis, scope=scope
+                dimension, left.value + right.value, basis=basis, measured_at=measured_at, scope=scope
             )
         return BudgetVector(result)
 
@@ -650,6 +656,7 @@ class BudgetLedger:
 
     def mark_running(self, task_id: str) -> dict[str, Any]:
         with self._lock:
+            self.expire(now=self._now())
             reservation = self._get(task_id)
             if reservation.status == "RESERVED":
                 reservation.status = "RUNNING"
@@ -663,7 +670,10 @@ class BudgetLedger:
 
         if not delta.all_known():
             raise ValueError("debit_requires_known_metrics")
+        if any(metric.basis != "measured" for metric in delta.metrics.values()):
+            raise ValueError("debit_requires_measured_metrics")
         with self._lock:
+            self.expire(now=self._now())
             reservation = self._get(task_id)
             if reservation.status not in {"RESERVED", "RUNNING"}:
                 return self._reservation_result(reservation, decision="not_debitable")
@@ -722,6 +732,13 @@ class BudgetLedger:
                 raise ValueError("known_settlement_requires_complete_metrics")
             if any(metric.basis != "measured" for metric in actual.metrics.values()):
                 raise ValueError("known_settlement_requires_measured_metrics")
+            # A final receipt cannot erase physical counters already observed.
+            # UNKNOWN retains the hold until a complete, consistent receipt.
+            if reservation.consumed is not None and any(
+                actual.metrics[dimension].value < reservation.consumed.metrics[dimension].value
+                for dimension in RESOURCE_DIMENSIONS
+            ):
+                raise ValueError("settlement_below_observed_consumption")
             over = {
                 dimension: {"actual": actual.metrics[dimension].value, "reserved": reservation.cost.metrics[dimension].value}
                 for dimension in RESOURCE_DIMENSIONS
@@ -758,6 +775,7 @@ class BudgetLedger:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            self.expire(now=self._now())
             active = self._active_reserved()
             return {
                 "version": self._version,
