@@ -26,6 +26,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-02 lease-safe resume increment (current)
+
+- PR #146 merged as `df47766f2539c376f468964b40f699089d953e6e`; bounded bundle contract is on main.
+- Worktree `/private/tmp/flow-080-resume-20261002`, branch `codex/080-resume-20261002`, based on that merge.
+- In-process candidate runner implements explicit bundle export and isolated restore under verified lease authority, with adapter re-verification and dependency/recovery binding. CLI/workflows remain unchanged.
+- Details: `docs/audits/2026-10-02-080-bundle-resume.md`. Local separate-directory fixture is not production evidence.
+- Durable R2 transport remains unconnected, explicitly reported as such; no production or recovery run is authorized.
+- PR/main CI only; no Worker deployment, migration, flags, active pointer or original protected files changed.
+- Next after CI and merge approval: bounded authenticated immutable R2 transport. Remaining adapters, recovery/budget integration and live canary stay pending.
+
 ### 2026-10-02 checkpoint increment (supersedes client in-flight status below)
 
 - PR #145 merged as `e72d2503fa12a61d72d828eb25b5653ddf5a496c`; ordinary lease client code is complete, not production-wired.
