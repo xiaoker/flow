@@ -1,0 +1,15 @@
+{
+  "baseSha": "979115dfb20c52fdf3ad5941068a03c07d0d6fa0",
+  "stage": "080-RUNNER offline checkpoint preflight",
+  "prCi": true,
+  "mainCi": true,
+  "workerDeployOnMerge": false,
+  "pendingD1MigrationApplyOnMerge": false,
+  "newMigrationsInPr": false,
+  "productionRunnerActivation": false,
+  "productionReadSwitch": false,
+  "collectionDispatch": false,
+  "featureFlagChange": false,
+  "currentAccountRemaining": "UNKNOWN",
+  "approvalRequired": "merge"
+}
