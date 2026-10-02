@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -28,6 +29,7 @@ from .pipeline_application import (
     canonical_sha256,
     execute_application_plan,
 )
+from .pipeline_checkpoint_bundle import build_stage_bundle, restore_stage_bundle, verify_stage_bundle
 
 
 EXECUTOR_SCHEMA_VERSION = 1
@@ -368,6 +370,8 @@ def run_pipeline_request(
     stage_adapters: Mapping[str, Any] | None = None,
     authorization_verifier: Callable[[PipelineExecutionContext], bool] | None = None,
     lease_guard: Any | None = None,
+    resume_bundles: Mapping[str, tuple[bytes, str]] | None = None,
+    export_bundles: bool = False,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -393,6 +397,10 @@ def run_pipeline_request(
     stages = _stage_names(payload)
     stage_inputs = _stage_inputs(payload, stages)
     adapter_mode = stage_adapters is not None
+    if (resume_bundles is not None or export_bundles) and (not adapter_mode or lease_guard is None):
+        raise PipelineRunnerError("bundle_operations_require_adapter_and_lease_guard")
+    if resume_bundles is not None and (not isinstance(resume_bundles, Mapping) or set(resume_bundles) - set(stages)):
+        raise PipelineRunnerError("invalid_resume_bundle_stage_set")
     stage_results: Mapping[str, Any] = {}
     stage_configs: Mapping[str, Any] = {}
     adapter_effects: set[str] = set()
@@ -444,6 +452,35 @@ def run_pipeline_request(
         stage_results = _mapping(payload.get("stageResults"), "stage_results")
     checkpoints_path = state_dir / "checkpoints.json"
     existing = _load_checkpoints(checkpoints_path)
+    bundle_descriptors: dict[str, Any] = {}
+    if resume_bundles:
+        if existing:
+            raise PipelineRunnerError("resume_bundle_local_state_conflict")
+        for stage in stages:
+            if stage not in resume_bundles:
+                continue
+            reference = resume_bundles[stage]
+            if not isinstance(reference, tuple) or len(reference) != 2:
+                raise PipelineRunnerError("invalid_resume_bundle_reference")
+            adapter = (stage_adapters or {})[stage]
+            try:
+                prior, _ = verify_stage_bundle(reference[0], sha256=reference[1], identity=context.identity,
+                                               stage=stage, input_sha256=stage_inputs[stage])
+                binding = prior.get("evidence", {}).get("runnerBinding", {})
+                expected_binding = {"dependencyLockSha256": context.dependency_lock_sha256,
+                                    "mode": context.mode, "recoveryId": context.recovery_id,
+                                    "recoveryPlanSha256": context.recovery_plan_sha256}
+                if any(binding.get(key) != value for key, value in expected_binding.items()):
+                    raise PipelineRunnerError("resume_bundle_execution_binding_mismatch")
+                checkpoint = restore_stage_bundle(
+                    reference[0], sha256=reference[1], identity=context.identity,
+                    stage=stage, input_sha256=stage_inputs[stage],
+                    workspace=state_dir / "stages" / stage / stage_inputs[stage],
+                    confirm_lease=lease_guard.confirm, verify_output=adapter.verify_checkpoint,
+                )
+            except ValueError as exc:
+                raise PipelineRunnerError("resume_bundle_verification_failed") from exc
+            existing.append(checkpoint)
     if adapter_mode:
         for checkpoint in existing:
             stage = checkpoint.get("stage")
@@ -502,6 +539,15 @@ def run_pipeline_request(
                 raise PipelineRunnerError("stage_adapter_failed", type(exc).__name__) from exc
             if context.lease_check is not None:
                 context.lease_check()
+            if isinstance(value, Mapping):
+                value = dict(value)
+                value["evidence"] = dict(value.get("evidence") or {})
+                value["evidence"]["runnerBinding"] = {
+                    "dependencyLockSha256": context.dependency_lock_sha256,
+                    "mode": context.mode, "recoveryId": context.recovery_id,
+                    "recoveryPlanSha256": context.recovery_plan_sha256,
+                    "leaseOwner": context.lease_owner, "attemptCount": context.lease_attempt_count,
+                }
             if "official_source_requests" in getattr(adapter, "allowed_side_effects", ()):
                 evidence = value.get("evidence") if isinstance(value, Mapping) else None
                 observed = evidence.get("sourceRequestCount") if isinstance(evidence, Mapping) else None
@@ -530,6 +576,42 @@ def run_pipeline_request(
 
     def persist_progress(checkpoints: Sequence[Mapping[str, Any]]) -> None:
         if lease_guard is not None:
+            lease_guard.confirm()
+        if export_bundles:
+            for checkpoint in checkpoints:
+                stage = checkpoint["stage"]
+                if checkpoint.get("status") != "COMPLETED" or stage in bundle_descriptors:
+                    continue
+                binding = checkpoint.get("evidence", {}).get("runnerBinding", {})
+                expected_binding = {"dependencyLockSha256": context.dependency_lock_sha256,
+                                    "mode": context.mode, "recoveryId": context.recovery_id,
+                                    "recoveryPlanSha256": context.recovery_plan_sha256}
+                if any(binding.get(key) != value for key, value in expected_binding.items()):
+                    raise PipelineRunnerError("bundle_export_execution_binding_missing")
+                workspace = state_dir / "stages" / stage / stage_inputs[stage]
+                adapter = (stage_adapters or {})[stage]
+                if adapter.verify_checkpoint(checkpoint=checkpoint, identity=context.identity,
+                                             input_sha256=stage_inputs[stage], workspace=workspace) is not True:
+                    raise PipelineRunnerError("bundle_export_adapter_evidence_mismatch")
+                data, digest = build_stage_bundle(workspace=workspace, checkpoint=checkpoint,
+                                                 identity=context.identity, stage=stage,
+                                                 input_sha256=stage_inputs[stage])
+                lease_guard.confirm()
+                bundle_dir = state_dir / "bundles"
+                _assert_safe_output(bundle_dir / f"{digest}.json")
+                if any(path.is_symlink() for path in (bundle_dir, *bundle_dir.parents)):
+                    raise PipelineRunnerError("bundle_export_symlink_forbidden")
+                bundle_dir.mkdir(parents=True, exist_ok=True)
+                bundle_path = bundle_dir / f"{digest}.json"
+                if bundle_path.exists():
+                    if bundle_path.is_symlink() or bundle_path.stat().st_size != len(data) or bundle_path.read_bytes() != data:
+                        raise PipelineRunnerError("bundle_export_collision")
+                else:
+                    with bundle_path.open("xb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                bundle_descriptors[stage] = {"path": str(bundle_path), "sha256": digest, "bytes": len(data)}
             lease_guard.confirm()
         _write_json_atomic(
             checkpoints_path,
@@ -578,6 +660,9 @@ def run_pipeline_request(
     if lease_guard is not None:
         report["leaseEvidence"] = lease_guard.evidence()
         report["sideEffects"]["remoteWrites"] = lease_guard.renewal_count > 0
+    if resume_bundles is not None or export_bundles:
+        report["checkpointBundles"] = {"exports": bundle_descriptors, "restoredStages": sorted(resume_bundles or {}),
+                                       "durableTransport": "not_connected"}
     _write_json_atomic(output_path, report)
     return report
 

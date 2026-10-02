@@ -8,8 +8,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .pipeline_application import ApplicationIdentity, canonical_sha256, checkpoint_is_reusable
 
@@ -121,3 +122,44 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
         raise
     except (ValueError, TypeError, KeyError) as exc:
         raise CheckpointBundleError("invalid_bundle_encoding") from exc
+
+
+def restore_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdentity,
+                         stage: str, input_sha256: str, workspace: Path,
+                         confirm_lease: Callable[[], Any],
+                         verify_output: Callable[..., bool]) -> Mapping[str, Any]:
+    """Restore only into a new isolated directory; partial restores fail closed.
+
+    Completion is committed by the runner only AFTER this function succeeds.
+    Interrupted directories remain for diagnosis; they are never overwritten or
+    silently treated as completed. This is not a distributed lock or R2 client.
+    """
+    checkpoint, files = verify_stage_bundle(data, sha256=sha256, identity=identity,
+                                           stage=stage, input_sha256=input_sha256)
+    workspace = workspace.absolute()
+    if any(path.is_symlink() for path in (workspace, *workspace.parents)):
+        raise CheckpointBundleError("restore_symlink_forbidden")
+    if "memory" in workspace.parts or any(
+        workspace.parts[index:index + 2] == ("reports", "phase0")
+        for index in range(len(workspace.parts) - 1)
+    ):
+        raise CheckpointBundleError("protected_restore_path")
+    confirm_lease()
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace.mkdir()  # Exclusive; never merge into an existing workspace.
+    except FileExistsError as exc:
+        raise CheckpointBundleError("restore_workspace_exists") from exc
+    for name, content in files.items():
+        confirm_lease()
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    if verify_output(checkpoint=checkpoint, identity=identity, input_sha256=input_sha256,
+                     workspace=workspace) is not True:
+        raise CheckpointBundleError("restored_adapter_evidence_mismatch")
+    confirm_lease()
+    return checkpoint
