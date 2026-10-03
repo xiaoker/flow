@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-03 bounded control I/O increment
+
+- PR #153 merged as `7532a2538e50f5c0938deac2f84651923abf1e83`; main CI `37102275281` and deployment `37102276562` passed. Worker identity verified; migration 0015 applied, no pending migrations afterward. No budget provisioning or production task executed.
+- Candidate HTTP exchange is shared by budget and checkpoint clients; foreground deadlines do not claim cancellation. Unconfirmed uploads require exact verified readback before another upload.
+- Evidence: `2026-10-03-080-bounded-control-io.md` and its merge-side-effects JSON. Python 652/Web 177 tests, lint/build passed; no production verification claimed.
+- Stop after PR CI for merge authorization. No automatic Worker deployment or migration for this increment. Lifecycle, shared-account evidence rollover, full-task bounds and remaining adapters precede live acceptance; `080-RUNNER` remains incomplete.
+
 | Stage ID | Scope | Code status | PR / HEAD / merge SHA | Deployment | Runtime / data evidence | Blocker | Next action | Authorization needed |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `051-A` | Non-interfering source observation error boundary | `MERGED_DEPLOYED` | PR #130; merge `1894f0588efb4665f847ba4aebd2f6401164de9e`; normalized-evidence ordering follow-up PR #137, merge `6d7c5a39bc1731ac32236200aefd53bcbee86e28` | PR #137 deploy run `36874232795` succeeded; Worker build identity verified | Receipt creation follows normalized evidence verification; source fingerprint v0.5.1 includes normalized identity; flags unchanged | None for this item | Keep sidecar failures non-fatal only for classified observation storage errors | — |
