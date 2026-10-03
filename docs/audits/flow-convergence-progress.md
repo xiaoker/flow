@@ -26,6 +26,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-03 shared budget next increment
+
+- PR #152 merged as `7ff01e17eda95e57a4da8eff363b5e10a121f1f2`; main CI `37086304887` passed. Python-only local persistence required no Worker deployment.
+- Fresh isolated worktree `/private/tmp/flow-080-shared-budget-20261003`, branch `codex/080-shared-budget-20261003`, based on that main.
+- Candidate shared transition protocol, additive account schema and bounded Python adapter implemented; parity, fencing, ambiguity and 20-client local concurrency tests added. No production admission or account availability is claimed.
+- Details: `2026-10-03-080-shared-budget-contract.md`; merge deployment/migration side effects recorded separately. CI awaits the standalone PR. No production execution, flags, remote migration or protected-file changes performed.
+- Next: full local/hosted CI, then stop for merge/deployment authorization. Evidence provisioning/rollover, lifecycle, full-task bounds, recovery and live acceptance remain incomplete; `080-RUNNER` remains CODE_IN_PROGRESS.
+
 ### 2026-10-03 checkpoint pre-spend allowance (current)
 
 - PR #150 merged `ef999521db5fed3271b87679f2f6e6b81b2e7878`; main CI `37030459135` passed. No Worker deployment required.

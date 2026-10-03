@@ -1,0 +1,21 @@
+{
+  "contract": "merge-side-effects-v1",
+  "baseSha": "7ff01e17eda95e57a4da8eff363b5e10a121f1f2",
+  "scope": "080-RUNNER candidate shared budget prerequisite",
+  "pullRequest": {"ci": true, "actionsMinutes": "unknown", "productionMutation": false},
+  "merge": {
+    "mainCi": true,
+    "automaticWorkerDeployment": true,
+    "automaticPendingD1MigrationApply": true,
+    "productionPendingMigrationSet": "unknown",
+    "newMigration": "web/drizzle/0015_shared_budget_account.sql",
+    "newMigrationSql": "CREATE TABLE pipeline_budget_account (scope text PRIMARY KEY NOT NULL, revision integer DEFAULT 0 NOT NULL, state_json text NOT NULL, updated_at text NOT NULL);",
+    "dataSeedOrBackfill": false,
+    "featureFlagChange": false,
+    "activePointerChange": false,
+    "collectionOrRecoveryDispatch": false,
+    "productionCallerEnabled": false
+  },
+  "executed": {"remoteMigration": false, "deployment": false, "productionBudgetProvisioning": false, "liveCanary": false},
+  "limits": "Local fixtures are not production usage or availability evidence. Merge authorization must account for all pending migrations."
+}

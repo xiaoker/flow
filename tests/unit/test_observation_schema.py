@@ -104,8 +104,11 @@ def test_drizzle_schema_and_metadata_are_in_sync() -> None:
         assert field in schema
 
     journal = json.loads((ROOT / "web/drizzle/meta/_journal.json").read_text(encoding="utf-8"))
-    assert journal["entries"][-1]["idx"] == 14
-    assert journal["entries"][-1]["tag"] == "0014_warm_morlocks"
+    # Later additive migrations must not make this historical schema assertion
+    # stale. Preserve the exact entry and require a contiguous ordered journal.
+    assert [entry["idx"] for entry in journal["entries"]] == list(range(len(journal["entries"])))
+    assert journal["entries"][14]["idx"] == 14
+    assert journal["entries"][14]["tag"] == "0014_warm_morlocks"
     snapshot = json.loads((ROOT / "web/drizzle/meta/0013_snapshot.json").read_text(encoding="utf-8"))
     table = snapshot["tables"]["source_observation"]
     assert set(table["columns"]) == {

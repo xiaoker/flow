@@ -1,0 +1,16 @@
+{
+  "now": "2026-10-03T02:00:00.000Z",
+  "cap": 100,
+  "target": 90,
+  "trace": [
+    { "operation": "reserve", "value": 30, "decision": "allow", "status": "RESERVED" },
+    { "operation": "mark_running", "decision": "running", "status": "RUNNING" },
+    { "operation": "authorize_step", "value": 10, "decision": "authorized", "status": "RUNNING" },
+    { "operation": "debit", "value": 8, "measured": true, "decision": "debited", "status": "RUNNING" },
+    { "operation": "authorize_step", "value": 25, "decision": "step_over_budget", "status": "RUNNING" },
+    { "operation": "settle", "outcome": "UNKNOWN", "decision": "unknown_outcome", "status": "UNKNOWN" },
+    { "operation": "authorize_step", "value": 1, "decision": "not_authorized", "status": "UNKNOWN" },
+    { "operation": "settle", "outcome": "FAILED_KNOWN", "value": 8, "measured": true, "decision": "settled", "status": "FAILED_KNOWN" },
+    { "operation": "settle", "outcome": "FAILED_KNOWN", "value": 8, "measured": true, "decision": "settled", "status": "FAILED_KNOWN" }
+  ]
+}
