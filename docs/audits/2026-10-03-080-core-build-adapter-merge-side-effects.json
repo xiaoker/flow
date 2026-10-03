@@ -1,0 +1,15 @@
+{
+  "stage": "080-RUNNER",
+  "baseSha": "42c7b3459d2416243911631f4aa47725b8a41b9f",
+  "scope": "candidate injected offline core read-model build adapter",
+  "githubActions": {"prCi": true, "mainCi": true, "minutes": "unknown"},
+  "automaticWorkerDeploy": false,
+  "migration": false,
+  "productionReadsOrWrites": false,
+  "featureFlagChanges": false,
+  "activePointerChanges": false,
+  "collectionOrCanary": false,
+  "retentionInstallationOrDeletion": false,
+  "cliOrWorkflowRegistration": false,
+  "protectedOriginalFilesChanged": false
+}

@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-03 offline core build adapter increment
+
+- PR #156 merged `42c7b3459d2416243911631f4aa47725b8a41b9f`; main CI `37105591284` passed. No Worker deployment or migration.
+- Fresh branch `codex/080-build-adapter-20261003` implements a real offline build adapter through the existing runner injection interface; exact snapshot/date/hash validation and deterministic existing-builder outputs, with checkpoint verification and separate-job bundle resume.
+- Full Python 706 / Web 177 tests, build/lint passed; hosted CI awaits the standalone PR. Audit and effects: `2026-10-03-080-core-build-adapter*`.
+- No CLI/workflow registration, production path, PCF requirement, formula, flag or live execution change. Optional historical sidecar inputs and remaining adapters are not yet wired; no production/period acceptance is claimed.
+- Stop after PR CI for merge authorization; after merge/main CI continue remaining adapters and immutable sidecars. Full-task budget/lifecycle/recovery/canary evidence remains required. 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-03 checkpoint/shared-budget composition increment
 
 - PR #155 merged `4c322fe29a68e02e1ec119156fde91d73df6db69`; main CI `37104059663` passed. No Worker deployment or migration.
