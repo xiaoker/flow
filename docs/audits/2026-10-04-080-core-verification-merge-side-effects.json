@@ -1,0 +1,14 @@
+{
+  "stage": "080-RUNNER-core-verification",
+  "baseSha": "aa275167ed2b2ed5ee7461c374be6cc1523eab41",
+  "automaticActions": ["PR CI", "branch freshness check", "main CI after merge"],
+  "actionsBudgetAvailability": "UNKNOWN",
+  "workerDeployment": false,
+  "databaseMigration": false,
+  "productionExecution": false,
+  "remoteWrites": false,
+  "flagChanges": false,
+  "activePointerChanges": false,
+  "retentionChanges": false,
+  "protectedPathsModified": false
+}

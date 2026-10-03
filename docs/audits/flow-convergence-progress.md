@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 offline core verification increment
+
+- PR #158 merged `aa275167ed2b2ed5ee7461c374be6cc1523eab41`; main CI `37123306214` passed. No Worker deployment/migration.
+- Fresh branch `codex/080-verify-20261003` implements the existing runner verify seam through the same core builder checkpoint verifier, with saved bytes, confirmed-publication requirement and cross-job resume. Core verification does not require PCF shards.
+- Python 740 / Web 177 tests, production build and lint passed. Hosted CI awaits standalone PR. Audit/effects: `2026-10-04-080-core-verification*`.
+- No remote writes, CLI/workflow registration, flags, pointer or protected-file changes. Stop at PR CI for merge approval; afterward continue remaining adapters/resource evidence. 080 remains CODE_IN_PROGRESS, not production-ready.
+
 ### 2026-10-03 immutable historical build inputs increment
 
 - PR #157 merged `30c167f1038e4bdaee1c79b45e59cc35893c478a`; main CI `37119570876` passed. No Worker deployment or migration.
