@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import gzip
 import hashlib
 import json
@@ -13,10 +12,12 @@ from typing import Any
 import requests
 
 from trading_desk.pipeline_application import retry_bounded
+from trading_desk.pipeline_publication import (
+    ACTIVATION_MODES, build_upload_body, validate_publication_capabilities,
+)
 
 
 MAX_REQUEST_BYTES = 1_500_000
-ACTIVATION_MODES = {"active", "stage_only"}
 
 
 def required_env(name: str) -> str:
@@ -98,69 +99,8 @@ def check_capabilities(
     )
     response.raise_for_status()
     payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("capabilities response is not an object")
-    required = {
-        "readModelManifestSchemas": required_manifest_schema,
-        "schemaVersions": required_manifest_schema,
-        "pressureSchemaVersions": 2,
-        "stockShardCounts": 8,
-    }
-    for field, version in required.items():
-        values = payload.get(field)
-        if not isinstance(values, list) or version not in values:
-            raise RuntimeError(f"deployed capability missing {field}={version}")
-    features = set(payload.get("features") or [])
-    required_features = {
-        "requiredArtifacts",
-        "sameDateObservedAtOrder",
-        "releaseSlots",
-        "bseMarginSeparateScope",
-    }
-    if slot in {"etf_penetration", "full"}:
-        required_features.update({"previousCompatibleRelease", "radarFlowView", "sourceReadinessLedger"})
-    if required_manifest_schema == 4:
-        required_features.add("capabilityContractV07")
-    if not required_features.issubset(features):
-        raise RuntimeError(f"deployed capability lacks v{required_manifest_schema} release features")
-
-
-def build_upload_body(
-    manifest: dict[str, Any],
-    name: str,
-    declared: dict[str, Any],
-    content: bytes,
-    *,
-    finalize: bool,
-    activation_mode: str = "active",
-) -> dict[str, Any]:
-    """Build one bounded upload request.
-
-    ``stage_only`` is deliberately explicit on every artifact.  The Worker
-    treats the mode as a candidate import and writes only immutable objects
-    plus a STAGED manifest; it must never move the active pointer.
-    """
-
-    if activation_mode not in ACTIVATION_MODES:
-        raise ValueError(f"unsupported activation mode: {activation_mode}")
-    if manifest.get("schemaVersion") == 4 and activation_mode != "stage_only":
-        raise ValueError("schema-v4 capability manifests are candidate-only and require --stage-only")
-    digest = hashlib.sha256(content).hexdigest()
-    wire_content = gzip.compress(content, compresslevel=6)
-    return {
-        "version": 1,
-        "activationMode": activation_mode,
-        "manifest": manifest,
-        "artifact": {
-            "name": name,
-            "key": declared["key"],
-            "sha256": digest,
-            "bytes": len(content),
-            "contentBase64": base64.b64encode(wire_content).decode("ascii"),
-            "contentEncoding": "gzip",
-        },
-        "finalize": finalize,
-    }
+    validate_publication_capabilities(payload, slot=slot,
+                                      required_manifest_schema=required_manifest_schema)
 
 
 def main() -> None:
