@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 offline whole-task resource preflight
+
+- PR #159 merged `bd2749a76a3ead70f4242c74f6b4a30f3e65eef7`; main CI `37137817176` passed. No Worker deploy/migration.
+- Fresh branch `codex/080-task-preflight-20261004` aggregates bounded plan stage costs and explicit lease/control, checkpoint and platform overhead; existing bundle, budget and lifecycle contracts remain authoritative.
+- Missing cost/usage/evidence is UNKNOWN and blocked; local consistency never grants execution authority or reserves resources. Audit/effects: `2026-10-04-080-task-preflight*`. Local and hosted test results recorded in the PR.
+- No production entry/reads, workflow, migration, flag, retention, pointer, live collection or protected user-file changes. Stop after CI for merge approval. Remaining adapters/runtime evidence and separately authorized live acceptance remain pending; 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-04 offline core verification increment
 
 - PR #158 merged `aa275167ed2b2ed5ee7461c374be6cc1523eab41`; main CI `37123306214` passed. No Worker deployment/migration.
