@@ -1,0 +1,15 @@
+{
+  "stage": "080-RUNNER",
+  "baseSha": "30c167f1038e4bdaee1c79b45e59cc35893c478a",
+  "scope": "candidate immutable historical build input contract",
+  "githubActions": {"prCi": true, "mainCi": true, "minutes": "unknown"},
+  "automaticWorkerDeploy": false,
+  "migration": false,
+  "productionReadsOrWrites": false,
+  "featureFlagChanges": false,
+  "activePointerChanges": false,
+  "collectionOrCanary": false,
+  "retentionInstallationOrDeletion": false,
+  "cliOrWorkflowRegistration": false,
+  "protectedOriginalFilesChanged": false
+}

@@ -15,6 +15,10 @@ from .read_models import build_market_read_models, canonical_json_bytes
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_FILES = 32
+SIDECAR_INPUTS = {
+    "marketHistorySha256": ("market_history_path", "input-market-history.json"),
+    "previousManifestSha256": ("previous_manifest_path", "input-previous-manifest.json"),
+}
 
 
 def _result(encoded, manifest):
@@ -40,11 +44,28 @@ def _read(path: Path, maximum: int) -> bytes:
 @dataclass(frozen=True)
 class CoreReadModelBuildAdapter:
     snapshot_path: Path
+    market_history_path: Path | None = None
+    previous_manifest_path: Path | None = None
     allowed_side_effects: tuple[str, ...] = ("filesystem:isolated_stage_workspace",)
 
-    def _expected(self, identity, config, input_sha256, data):
-        if set(config) != {"snapshotSha256"} or canonical_sha256(config) != input_sha256:
+    def _expected(self, identity, config, input_sha256, data, sidecars=None):
+        sidecars = sidecars or {}
+        keys = set(config)
+        if "snapshotSha256" not in keys or keys - {"snapshotSha256", *SIDECAR_INPUTS} or canonical_sha256(config) != input_sha256:
             raise PipelineAdapterError("build_input_contract_mismatch")
+        if set(sidecars) != keys - {"snapshotSha256"}:
+            raise PipelineAdapterError("build_sidecar_contract_mismatch")
+        parsed = {}
+        for key, content in sidecars.items():
+            if hashlib.sha256(content).hexdigest() != config[key]:
+                raise PipelineAdapterError("build_sidecar_hash_mismatch")
+            try:
+                parsed[key] = json.loads(content)
+            except ValueError:
+                raise PipelineAdapterError("build_sidecar_invalid") from None
+            allowed = (dict, list) if key == "marketHistorySha256" else (dict,)
+            if not isinstance(parsed[key], allowed):
+                raise PipelineAdapterError("build_sidecar_invalid")
         if hashlib.sha256(data).hexdigest() != config["snapshotSha256"]:
             raise PipelineAdapterError("build_snapshot_hash_mismatch")
         try:
@@ -54,11 +75,13 @@ class CoreReadModelBuildAdapter:
         if not isinstance(snapshot, dict) or snapshot.get("asOf") != identity.target_date:
             raise PipelineAdapterError("build_snapshot_date_mismatch")
         payloads, manifest = build_market_read_models(snapshot, require_materialized=True,
+            market_history=parsed.get("marketHistorySha256"),
+            previous_manifest=parsed.get("previousManifestSha256"),
             producer_build_sha=identity.producer_build_sha,
             capability_contract_version=CAPABILITY_CONTRACT_VERSION)
         encoded = {f"{name}.json": canonical_json_bytes(value) for name, value in payloads.items()}
         encoded["manifest.json"] = canonical_json_bytes(manifest)
-        if len(encoded) + 2 > MAX_FILES or sum(map(len, encoded.values())) > MAX_OUTPUT_BYTES:
+        if len(encoded) + 2 + len(sidecars) > MAX_FILES or sum(map(len, encoded.values())) > MAX_OUTPUT_BYTES:
             raise PipelineAdapterError("build_output_budget_exceeded")
         return encoded, manifest
 
@@ -83,11 +106,22 @@ class CoreReadModelBuildAdapter:
         if context.lease_check is not None:
             context.lease_check()
         data = _read(self.snapshot_path, MAX_INPUT_BYTES)
-        encoded, manifest = self._expected(context.identity, config, input_sha256, data)
+        sidecars = {}
+        for key, (attribute, _filename) in SIDECAR_INPUTS.items():
+            path = getattr(self, attribute)
+            if (key in config) != (path is not None):
+                raise PipelineAdapterError("build_sidecar_contract_mismatch")
+            if path is not None:
+                sidecars[key] = _read(Path(path), MAX_INPUT_BYTES)
+        if len(data) + sum(map(len, sidecars.values())) > MAX_INPUT_BYTES:
+            raise PipelineAdapterError("build_input_bundle_size_exceeded")
+        encoded, manifest = self._expected(context.identity, config, input_sha256, data, sidecars)
         if context.lease_check is not None:
             context.lease_check()
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "input-snapshot.json").write_bytes(data)
+        for key, content in sidecars.items():
+            (workspace / SIDECAR_INPUTS[key][1]).write_bytes(content)
         for name, content in encoded.items():
             (workspace / name).write_bytes(content)
         result = _result(encoded, manifest)
@@ -112,11 +146,18 @@ class CoreReadModelBuildAdapter:
             if receipt.get("inputSha256") != input_sha:
                 return False
             data = _read(workspace / "input-snapshot.json", MAX_INPUT_BYTES)
-            encoded, manifest = self._expected(identity, receipt["config"], input_sha, data)
+            sidecars = {key: _read(workspace / filename, MAX_INPUT_BYTES)
+                        for key, (_attribute, filename) in SIDECAR_INPUTS.items()
+                        if key in receipt["config"]}
+            if len(data) + sum(map(len, sidecars.values())) > MAX_INPUT_BYTES:
+                return False
+            encoded, manifest = self._expected(identity, receipt["config"], input_sha, data, sidecars)
             if receipt.get("stageResult") != _result(encoded, manifest):
                 return False
             names = {p.name for p in islice(workspace.iterdir(), MAX_FILES + 1)}
-            if names != set(encoded) | {"input-snapshot.json", "adapter-receipt.json"}:
+            expected_names = set(encoded) | {"input-snapshot.json", "adapter-receipt.json"}
+            expected_names.update(SIDECAR_INPUTS[key][1] for key in sidecars)
+            if names != expected_names:
                 return False
             for name, expected in encoded.items():
                 if _read(workspace / name, MAX_OUTPUT_BYTES) != expected:
