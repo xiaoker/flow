@@ -1,0 +1,14 @@
+{
+  "stage": "080-RUNNER",
+  "baseSha": "e73633c8f74e22afb68d319e74c30c43d3b18830",
+  "scope": "offline checkpoint lifecycle evidence consistency",
+  "githubActions": {"prCi": true, "mainCi": true, "minutes": "unknown"},
+  "automaticWorkerDeploy": false,
+  "migration": false,
+  "productionReadsOrWrites": false,
+  "retentionInstallationOrDeletion": false,
+  "featureFlagChanges": false,
+  "activePointerChanges": false,
+  "collectionOrCanary": false,
+  "protectedOriginalFilesChanged": false
+}

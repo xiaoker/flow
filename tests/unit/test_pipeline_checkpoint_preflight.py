@@ -9,6 +9,7 @@ from trading_desk.pipeline_checkpoint_bundle import CheckpointBundleError, build
 from trading_desk.pipeline_checkpoint_preflight import checkpoint_preflight
 from trading_desk.resource_budget import BudgetVector, RESOURCE_DIMENSIONS, ResourceLimits
 from test_pipeline_checkpoint_bundle import fixture, IDENTITY, INPUT
+from test_pipeline_checkpoint_lifecycle import lifecycle_fixture
 
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +26,10 @@ def arguments(tmp_path):
     return dict(data=data, sha256=digest, identity=IDENTITY, stage="core_collection", input_sha256=INPUT,
                 limits=limits, measured=BudgetVector.measured(zero, measured_at=NOW.isoformat()),
                 reserved=BudgetVector.estimated(zero), task_cost=BudgetVector.estimated(cost),
-                now=NOW, measurement_ttl_seconds=3600)
+                now=NOW, measurement_ttl_seconds=3600,
+                lifecycle_evidence=dict(lifecycle_fixture(), observedAt=NOW.isoformat(),
+                    referenceAudit=dict(lifecycle_fixture()["referenceAudit"], observedAt=NOW.isoformat()),
+                    restoreEvidence=dict(lifecycle_fixture()["restoreEvidence"], observedAt=NOW.isoformat())))
 
 
 def test_verified_exact_sizes_deterministic_no_execution_authority(tmp_path):
@@ -63,6 +67,15 @@ def test_underestimated_transport_cannot_pass_as_zero_cost(tmp_path):
     report = checkpoint_preflight(**args)
     assert report["understatedDimensions"] == ["r2Bytes", "r2ClassA", "r2ClassB", "workerRequests"]
     assert "task_cost_below_transport_floor" in report["blockers"]
+
+
+def test_missing_lifecycle_cannot_pass_offline_preflight(tmp_path):
+    args = arguments(tmp_path)
+    args.pop("lifecycle_evidence")
+    report = checkpoint_preflight(**args)
+    assert report["status"] == "BLOCKED"
+    assert "checkpoint_lifecycle_inputs_incomplete" in report["blockers"]
+    assert report["lifecycle"]["productionVerified"] is False
 
 
 def test_size_limit_diagnostic_does_not_raise_transport_cap(tmp_path, monkeypatch):

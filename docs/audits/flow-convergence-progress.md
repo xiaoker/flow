@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-03 lifecycle evidence consistency increment
+
+- PR #154 merged `e73633c8f74e22afb68d319e74c30c43d3b18830`; main CI `37103089242` passed. No Worker deploy or migration.
+- Fresh isolated branch `codex/080-checkpoint-policy-20261003` adds pure local consistency checks for exact-prefix expiration, locks, fresh complete reference audit and restore evidence; sizing preflight blocks missing lifecycle input.
+- Passing caller assertions are not provider verification or runtime authorization. No retention policy is installed. Details and merge effects: `2026-10-03-080-checkpoint-lifecycle-inputs*`.
+- Stop after PR CI for merge authorization. Actual lifecycle evidence, shared-account rollover, full-task budgets and remaining adapters remain; 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-03 bounded control I/O increment
 
 - PR #153 merged as `7532a2538e50f5c0938deac2f84651923abf1e83`; main CI `37102275281` and deployment `37102276562` passed. Worker identity verified; migration 0015 applied, no pending migrations afterward. No budget provisioning or production task executed.

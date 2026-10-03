@@ -11,6 +11,7 @@ from typing import Any
 from .pipeline_application import ApplicationIdentity
 from .pipeline_checkpoint_bundle import verify_stage_bundle
 from .pipeline_checkpoint_transport import MAX_OBJECT_BYTES
+from .pipeline_checkpoint_lifecycle import checkpoint_lifecycle_preflight
 from .resource_budget import BudgetVector, ResourceLimits, evaluate_budget
 
 
@@ -19,6 +20,7 @@ def checkpoint_preflight(
     input_sha256: str, limits: ResourceLimits, measured: BudgetVector,
     reserved: BudgetVector, task_cost: BudgetVector, now: datetime,
     measurement_ttl_seconds: int,
+    lifecycle_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Inspect exact bytes and complete caller-supplied task upper bounds.
 
@@ -40,6 +42,9 @@ def checkpoint_preflight(
                          if task_cost.metrics[name].value is not None
                          and task_cost.metrics[name].value < floor)
     blockers = []
+    lifecycle = checkpoint_lifecycle_preflight(lifecycle_evidence, now=now)
+    if lifecycle["status"] == "BLOCKED":
+        blockers.append("checkpoint_lifecycle_inputs_incomplete")
     if len(data) > MAX_OBJECT_BYTES:
         blockers.append("transport_object_size_exceeded")
     if budget["decision"] not in {"allow", "warn"}:
@@ -55,6 +60,7 @@ def checkpoint_preflight(
                      "fileCount": len(files), "transportMaxBytes": MAX_OBJECT_BYTES,
                      "fitsTransport": len(data) <= MAX_OBJECT_BYTES},
         "budget": budget, "transportCostFloors": floors,
+        "lifecycle": lifecycle,
         "understatedDimensions": understated, "blockers": blockers,
         "liveExecutionAllowed": False,
         "remainingRequirements": ["verified_checkpoint_lifecycle", "atomic_shared_resource_reservation",
