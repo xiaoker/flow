@@ -1,0 +1,14 @@
+{
+  "stage": "080-RUNNER-task-preflight",
+  "baseSha": "bd2749a76a3ead70f4242c74f6b4a30f3e65eef7",
+  "automaticActions": ["PR CI", "branch freshness check", "main CI after merge"],
+  "actionsBudgetAvailability": "UNKNOWN",
+  "workerDeployment": false,
+  "databaseMigration": false,
+  "productionExecution": false,
+  "remoteWrites": false,
+  "flagChanges": false,
+  "activePointerChanges": false,
+  "retentionChanges": false,
+  "protectedPathsModified": false
+}
