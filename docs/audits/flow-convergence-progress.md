@@ -26,6 +26,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current handoff block
 
+### 2026-10-03 checkpoint pre-spend allowance (current)
+
+- PR #150 merged `ef999521db5fed3271b87679f2f6e6b81b2e7878`; main CI `37030459135` passed. No Worker deployment required.
+- Fresh worktree `/private/tmp/flow-080-budget-io-20261003`, branch `codex/080-budget-io-20261003`, based on that merge.
+- Candidate checkpoint transport consumes allowance before I/O through the existing atomic reference ledger. Ambiguous readbacks cost allowance too; commitments and physical measurements are separate.
+- Details: `docs/audits/2026-10-03-080-checkpoint-budget-io.md`. This does not prove shared durable account reservation, lifecycle or production costs; evidence labels the in-process scope.
+- No production wiring, schema, flags, active pointer, retention or collection changes; original protected paths untouched. PR/main CI only, no Worker auto-deploy/migration.
+- Next: stop at CI-passed merge authorization, then persistent shared resource and lifecycle prerequisites. `080-RUNNER` is still incomplete.
+
 ### 2026-10-02 budget ledger safety increment (current)
 
 - PR #149 merged as `2c110962befca2b8788638e3688a2e04e1d9dc83`; main CI `37028156674` succeeded. No Worker deployment was required.

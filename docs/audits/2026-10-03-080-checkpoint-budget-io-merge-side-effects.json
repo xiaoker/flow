@@ -1,0 +1,15 @@
+{
+  "baseSha": "ef999521db5fed3271b87679f2f6e6b81b2e7878",
+  "stage": "080-RUNNER checkpoint pre-spend allowance",
+  "prCi": true,
+  "mainCi": true,
+  "workerDeployOnMerge": false,
+  "pendingD1MigrationApplyOnMerge": false,
+  "newMigrationsInPr": false,
+  "productionRunnerActivation": false,
+  "productionReadSwitch": false,
+  "collectionDispatch": false,
+  "featureFlagChange": false,
+  "currentAccountRemaining": "UNKNOWN",
+  "approvalRequired": "merge"
+}

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .http import HttpSettings, build_session
 from .pipeline_checkpoint_bundle import verify_stage_bundle
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
+from .resource_budget import BudgetLedger, BudgetVector
 
 MAX_OBJECT_BYTES = 1024 * 1024
 
@@ -22,7 +23,9 @@ MAX_OBJECT_BYTES = 1024 * 1024
 class CheckpointObjectTransport:
     def __init__(self, *, base_url: str, ingest_key: str, access_client_id: str,
                  access_client_secret: str, lease_guard: Any, maximum_requests: int = 12,
-                 session: Any = None, monotonic=time.monotonic, allow_loopback_fixture: bool = False):
+                 session: Any = None, monotonic=time.monotonic, allow_loopback_fixture: bool = False,
+                 budget_ledger: BudgetLedger | None = None, budget_task_id: str | None = None,
+                 request_costs: dict[str, BudgetVector] | None = None):
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
         if not ((parsed.scheme == "https" and parsed.hostname == "flow.xiaoker.com" and parsed.port in {None, 443}) or fixture) or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
@@ -47,6 +50,27 @@ class CheckpointObjectTransport:
         self.bytes_received = 0
         self.unconfirmed_write_outcome = False
         self._lock = threading.RLock()
+        self._budget_ledger, self._budget_task_id = budget_ledger, budget_task_id
+        self._request_costs = dict(request_costs or {})
+
+    def _authorize_request(self, method: str, data: bytes | None) -> None:
+        cost = self._request_costs.get(method)
+        if not isinstance(self._budget_ledger, BudgetLedger) or not self._budget_task_id or not isinstance(cost, BudgetVector) or not cost.all_known():
+            raise PipelineRunnerError("checkpoint_resource_allowance_required")
+        # Includes the server's readback and caller's lease checks/renewals.
+        # These floors do not manufacture a complete estimate; caller supplies
+        # all seven dimensions, including total lease and execution upper bounds.
+        floors = {"workerRequests": 1, "r2ClassB": 1, "d1RowsRead": 1}
+        if method == "POST":
+            floors.update(r2ClassA=1, r2Bytes=len(data or b""))
+        if any(cost.metrics[name].value < minimum for name, minimum in floors.items()):
+            raise PipelineRunnerError("checkpoint_resource_cost_understated")
+        try:
+            result = self._budget_ledger.authorize_step(self._budget_task_id, cost)
+        except ValueError:
+            raise PipelineRunnerError("checkpoint_resource_allowance_rejected") from None
+        if result["decision"] != "authorized":
+            raise PipelineRunnerError("checkpoint_resource_allowance_rejected")
 
     @staticmethod
     def _params(context: PipelineExecutionContext, stage: str, input_sha256: str, sha256: str) -> dict:
@@ -63,9 +87,10 @@ class CheckpointObjectTransport:
         return f"market-data/pipeline/checkpoints/v1/{run_hash}/{context.identity.producer_build_sha}/{stage}/{input_sha256}/{sha256}.json"
 
     def _request(self, method: str, params: dict, data: bytes | None = None) -> tuple[int, bytes, Any]:
-        self._guard.confirm()
         if self.request_count >= self._maximum:
             raise PipelineRunnerError("checkpoint_transport_budget_exceeded")
+        self._authorize_request(method, data)
+        self._guard.confirm()
         self.request_count += 1
         if method == "POST":
             self.upload_attempts += 1
@@ -147,4 +172,5 @@ class CheckpointObjectTransport:
         return {"requests": self.request_count, "maximumRequests": self._maximum, "uploadAttempts": self.upload_attempts,
                 "verifiedDownloads": self.downloads, "bytesSent": self.bytes_sent, "bytesReceived": self.bytes_received,
                 "unconfirmedWriteOutcome": self.unconfirmed_write_outcome, "d1RowsRead": None, "d1RowsWritten": 0,
-                "accountRemaining": None}
+                "accountRemaining": None, "resourceAllowance": "in_process_reference" if self._budget_ledger else "missing",
+                "sharedDurableReservation": False}
