@@ -1,6 +1,14 @@
 import { sql } from "drizzle-orm";
 import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
+// Candidate shared reservations. No default account/evidence row is seeded.
+export const pipelineBudgetAccounts = sqliteTable("pipeline_budget_account", {
+  scope: text("scope").primaryKey(),
+  revision: integer("revision").notNull().default(0),
+  stateJson: text("state_json").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const dataSources = sqliteTable("data_source", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
