@@ -73,6 +73,24 @@ class SharedBudgetLedger(BudgetLedger):
     def _inflight(self):
         return self._exchange.inflight
 
+    def validate_execution_identity(self, *, run_key: str, lease_owner: str,
+                                    attempt_count: int, target_date: str,
+                                    task_id: str) -> None:
+        """Local equality fence, not lease verification or budget permission."""
+        if (task_id != self.task_id or type(attempt_count) is not int
+                or self._identity != {"runKey": run_key, "leaseOwner": lease_owner,
+                                      "attemptCount": attempt_count, "targetDate": target_date}):
+            raise ValueError("shared_budget_execution_identity_mismatch")
+
+    def accounting_evidence(self) -> dict:
+        """Already observed control-plane usage only; never performs a GET."""
+        with self._lock:
+            return {"scope": "server_authoritative_shared", "requests": self.request_count,
+                    "maximumRequests": self._maximum, "d1RowsRead": self.rows_read,
+                    "d1RowsWritten": self.rows_written,
+                    "pendingOperation": self._pending is not None,
+                    "accountRemaining": None}
+
     def _request(self, method: str, payload: dict) -> dict:
         if self.request_count >= self._maximum:
             raise ValueError("shared_budget_request_limit")

@@ -1,0 +1,15 @@
+{
+  "stage": "080-RUNNER",
+  "baseSha": "4c322fe29a68e02e1ec119156fde91d73df6db69",
+  "scope": "candidate checkpoint and shared budget identity composition",
+  "githubActions": {"prCi": true, "mainCi": true, "minutes": "unknown"},
+  "automaticWorkerDeploy": false,
+  "migration": false,
+  "productionReadsOrWrites": false,
+  "budgetProvisioningOrRollover": false,
+  "retentionInstallationOrDeletion": false,
+  "featureFlagChanges": false,
+  "activePointerChanges": false,
+  "collectionOrCanary": false,
+  "protectedOriginalFilesChanged": false
+}
