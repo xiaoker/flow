@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-03 immutable historical build inputs increment
+
+- PR #157 merged `30c167f1038e4bdaee1c79b45e59cc35893c478a`; main CI `37119570876` passed. No Worker deployment or migration.
+- Fresh branch `codex/080-build-inputs-20261003` extends the same candidate build adapter with hash-bound market history/previous manifest bytes. Existing builder date/coverage regression checks remain authoritative; saved sidecars participate in checkpoint verification and cross-job resume.
+- 28 focused tests passed; full local Python 720 / Web 177 tests, build/lint passed. Hosted CI awaits the standalone PR; no production acceptance is claimed. Audit/effects: `2026-10-03-080-core-build-inputs*`.
+- CLI/workflows/production flags unchanged; no historical collection or pointer change. Stop at PR CI for merge authorization, then continue remaining normalization/verification/publication/recovery adapters from latest main. Full-task resource and live canary prerequisites remain; 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-03 offline core build adapter increment
 
 - PR #156 merged `42c7b3459d2416243911631f4aa47725b8a41b9f`; main CI `37105591284` passed. No Worker deployment or migration.

@@ -11,7 +11,7 @@ from trading_desk.pipeline_runner import build_execution_context
 from trading_desk.read_models import build_market_read_models, canonical_json_bytes
 from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
 from test_pipeline_bundle_resume import payload
-from test_read_models import _snapshot
+from test_read_models import _snapshot, _market_history
 from datetime import datetime, timezone
 
 
@@ -113,11 +113,14 @@ def test_real_runner_build_stage_resume_without_original_input(tmp_path):
     assert second["plan"]["records"][0]["reused"] is True
 
 
-def test_cross_job_bundle_resume_uses_saved_input(tmp_path):
+@pytest.mark.parametrize("with_sidecars", [False, True])
+def test_cross_job_bundle_resume_uses_saved_input(tmp_path, with_sidecars):
     from pathlib import Path
     from trading_desk.pipeline_runner import run_pipeline_request
     from test_pipeline_bundle_resume import ROOT, LOCK, Guard
     adapter, args, _ = inputs(tmp_path)
+    if with_sidecars:
+        adapter, args, _ = sidecar_inputs(tmp_path)
     request = payload()
     request["identity"]["targetDate"] = "2026-08-06"
     request["stages"] = ["build"]
@@ -131,6 +134,9 @@ def test_cross_job_bundle_resume_uses_saved_input(tmp_path):
     ref = first["checkpointBundles"]["exports"]["build"]
     data = Path(ref["path"]).read_bytes()
     adapter.snapshot_path.unlink()
+    if with_sidecars:
+        adapter.market_history_path.unlink()
+        adapter.previous_manifest_path.unlink()
     request["lease"].update(owner="second-owner", callbackOwner="second-owner", attemptCount=2)
     second = run_pipeline_request(request, state_dir=tmp_path / "second/state",
                                   output_path=tmp_path / "second/report.json",
@@ -159,3 +165,98 @@ def test_lease_loss_before_write_and_output_bound(tmp_path, monkeypatch, fail_at
     with pytest.raises(PipelineAdapterError, match="output_budget"):
         adapter.run(**args)
     assert not args["workspace"].exists()
+
+
+def sidecar_inputs(tmp_path):
+    adapter, args, snapshot = inputs(tmp_path)
+    history = _market_history(start="2026-08-05", count=2)
+    _, previous = build_market_read_models(snapshot, require_materialized=True,
+        market_history=history, producer_build_sha="a" * 40,
+        capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    history_path = tmp_path / "history.json"
+    previous_path = tmp_path / "previous.json"
+    history_path.write_bytes(canonical_json_bytes(history))
+    previous_path.write_bytes(canonical_json_bytes(previous))
+    adapter = replace(adapter, market_history_path=history_path, previous_manifest_path=previous_path)
+    args["config"].update(marketHistorySha256=hashlib.sha256(history_path.read_bytes()).hexdigest(),
+                          previousManifestSha256=hashlib.sha256(previous_path.read_bytes()).hexdigest())
+    args["input_sha256"] = canonical_sha256(args["config"])
+    return adapter, args, snapshot
+
+
+def test_sidecars_match_existing_builder_and_resume(tmp_path):
+    adapter, args, snapshot = sidecar_inputs(tmp_path)
+    payloads, manifest = build_market_read_models(snapshot, require_materialized=True,
+        market_history=json.loads(adapter.market_history_path.read_bytes()),
+        previous_manifest=json.loads(adapter.previous_manifest_path.read_bytes()),
+        producer_build_sha="a" * 40, capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    result = adapter.run(**args)
+    assert (args["workspace"] / "manifest.json").read_bytes() == canonical_json_bytes(manifest)
+    for name, value in payloads.items():
+        assert (args["workspace"] / f"{name}.json").read_bytes() == canonical_json_bytes(value)
+    for path in (adapter.snapshot_path, adapter.market_history_path, adapter.previous_manifest_path):
+        path.unlink()
+    assert adapter.run(**args) == result
+
+
+@pytest.mark.parametrize("change", ["hash", "missing_path", "extra_path", "invalid_json", "date", "regression", "total_size"])
+def test_sidecars_fail_closed_before_write(tmp_path, monkeypatch, change):
+    from trading_desk.read_models import ReadModelError
+    adapter, args, _ = sidecar_inputs(tmp_path)
+    if change == "hash":
+        adapter.market_history_path.write_bytes(b"{}")
+    elif change == "missing_path":
+        adapter = replace(adapter, market_history_path=None)
+    elif change == "extra_path":
+        del args["config"]["marketHistorySha256"]
+    elif change == "total_size":
+        monkeypatch.setattr("trading_desk.pipeline_build_adapter.MAX_INPUT_BYTES",
+                            max(path.stat().st_size for path in (adapter.snapshot_path, adapter.market_history_path, adapter.previous_manifest_path)))
+    else:
+        if change == "invalid_json":
+            content = b"not-json"
+        elif change == "date":
+            history = _market_history(start="2026-08-05", count=1)
+            content = canonical_json_bytes(history)
+        else:
+            content = canonical_json_bytes(_market_history(start="2026-08-06", count=1))
+        adapter.market_history_path.write_bytes(content)
+        args["config"]["marketHistorySha256"] = hashlib.sha256(content).hexdigest()
+    args["input_sha256"] = canonical_sha256(args["config"])
+    with pytest.raises((PipelineAdapterError, ReadModelError)):
+        adapter.run(**args)
+    assert not args["workspace"].exists()
+
+
+@pytest.mark.parametrize("filename", ["input-market-history.json", "input-previous-manifest.json"])
+def test_saved_sidecar_corruption_rejects_resume(tmp_path, filename):
+    adapter, args, _ = sidecar_inputs(tmp_path)
+    adapter.run(**args)
+    (args["workspace"] / filename).write_bytes(b"{}")
+    with pytest.raises(PipelineAdapterError, match="checkpoint_invalid"):
+        adapter.run(**args)
+
+
+@pytest.mark.parametrize("kind", ["history_only", "previous_only", "previous_only_regression"])
+def test_independent_optional_sidecars(tmp_path, kind):
+    from trading_desk.read_models import ReadModelError
+    adapter, args, snapshot = sidecar_inputs(tmp_path)
+    if kind == "history_only":
+        adapter = replace(adapter, previous_manifest_path=None)
+        del args["config"]["previousManifestSha256"]
+    else:
+        adapter = replace(adapter, market_history_path=None)
+        del args["config"]["marketHistorySha256"]
+        if kind == "previous_only":
+            _, previous = build_market_read_models(snapshot, require_materialized=True,
+                producer_build_sha="a" * 40, capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+            adapter.previous_manifest_path.write_bytes(canonical_json_bytes(previous))
+            args["config"]["previousManifestSha256"] = hashlib.sha256(adapter.previous_manifest_path.read_bytes()).hexdigest()
+    args["input_sha256"] = canonical_sha256(args["config"])
+    if kind == "previous_only_regression":
+        with pytest.raises(ReadModelError, match="regressed"):
+            adapter.run(**args)
+        assert not args["workspace"].exists()
+    else:
+        first = adapter.run(**args)
+        assert adapter.run(**args) == first
