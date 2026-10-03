@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-03 checkpoint/shared-budget composition increment
+
+- PR #155 merged `4c322fe29a68e02e1ec119156fde91d73df6db69`; main CI `37104059663` passed. No Worker deployment or migration.
+- Fresh branch `codex/080-shared-checkpoint-20261003` binds shared budget identity to checkpoint I/O and reports observed control-plane evidence separately; no new production entry.
+- Python 692 / Web 177 tests, build/lint passed. Details and effects: `2026-10-03-080-checkpoint-shared-budget*`. Composition fixtures are not production acceptance or official usage.
+- Stop after PR CI for merge authorization. Provider lifecycle evidence, evidence reconciliation, full-task bounds, remaining adapters/recovery and separately authorized canary remain. 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-03 lifecycle evidence consistency increment
 
 - PR #154 merged `e73633c8f74e22afb68d319e74c30c43d3b18830`; main CI `37103089242` passed. No Worker deploy or migration.

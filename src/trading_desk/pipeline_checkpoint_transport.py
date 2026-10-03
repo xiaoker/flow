@@ -17,6 +17,7 @@ from .bounded_http import BoundedHTTPExchange, BoundedHTTPError
 from .pipeline_checkpoint_bundle import verify_stage_bundle
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
+from .resource_budget_remote import SharedBudgetLedger
 
 MAX_OBJECT_BYTES = 1024 * 1024
 MAX_REQUEST_SECONDS = 20
@@ -57,11 +58,20 @@ class CheckpointObjectTransport:
         self._lock = threading.RLock()
         self._budget_ledger, self._budget_task_id = budget_ledger, budget_task_id
         self._request_costs = dict(request_costs or {})
+        self._shared_authorizations = 0
 
-    def _authorize_request(self, method: str, data: bytes | None) -> None:
+    def _authorize_request(self, method: str, data: bytes | None, params: dict) -> None:
         cost = self._request_costs.get(method)
         if not isinstance(self._budget_ledger, BudgetLedger) or not self._budget_task_id or not isinstance(cost, BudgetVector) or not cost.all_known():
             raise PipelineRunnerError("checkpoint_resource_allowance_required")
+        if isinstance(self._budget_ledger, SharedBudgetLedger):
+            try:
+                self._budget_ledger.validate_execution_identity(
+                    run_key=params["runKey"], lease_owner=params["leaseOwner"],
+                    attempt_count=params["attemptCount"], target_date=params["targetDate"],
+                    task_id=self._budget_task_id)
+            except (ValueError, KeyError):
+                raise PipelineRunnerError("checkpoint_shared_budget_identity_mismatch") from None
         # Includes the server's readback and caller's lease checks/renewals.
         # These floors do not manufacture a complete estimate; caller supplies
         # all seven dimensions, including total lease and execution upper bounds.
@@ -76,6 +86,8 @@ class CheckpointObjectTransport:
             raise PipelineRunnerError("checkpoint_resource_allowance_rejected") from None
         if result["decision"] != "authorized":
             raise PipelineRunnerError("checkpoint_resource_allowance_rejected")
+        if isinstance(self._budget_ledger, SharedBudgetLedger):
+            self._shared_authorizations += 1
 
     @staticmethod
     def _params(context: PipelineExecutionContext, stage: str, input_sha256: str, sha256: str) -> dict:
@@ -98,7 +110,7 @@ class CheckpointObjectTransport:
             raise PipelineRunnerError("checkpoint_transport_request_still_unconfirmed") from None
         if self.request_count >= self._maximum:
             raise PipelineRunnerError("checkpoint_transport_budget_exceeded")
-        self._authorize_request(method, data)
+        self._authorize_request(method, data, params)
         self._guard.confirm()
         self.request_count += 1
         if method == "POST":
@@ -178,11 +190,15 @@ class CheckpointObjectTransport:
         return {"key": expected_key, "sha256": sha256, "bytes": len(data)}
 
     def evidence(self) -> dict:
+        shared = isinstance(self._budget_ledger, SharedBudgetLedger)
         return {"requests": self.request_count, "maximumRequests": self._maximum, "uploadAttempts": self.upload_attempts,
                 "verifiedDownloads": self.downloads, "bytesSent": self.bytes_sent, "bytesReceived": self.bytes_received,
                 "unconfirmedWriteOutcome": self.unconfirmed_write_outcome,
                 "responseMeasurementComplete": self.response_measurement_complete,
                 "bytesReceivedBasis": "measured" if self.response_measurement_complete else "measured_lower_bound",
                 "d1RowsRead": None, "d1RowsWritten": None,
-                "accountRemaining": None, "resourceAllowance": "in_process_reference" if self._budget_ledger else "missing",
-                "sharedDurableReservation": False}
+                "accountRemaining": None,
+                "resourceAllowance": "server_authoritative_shared" if shared else "in_process_reference" if self._budget_ledger else "missing",
+                "sharedDurableReservation": shared and self._shared_authorizations > 0,
+                "sharedAuthorizations": self._shared_authorizations,
+                "budgetControlPlane": self._budget_ledger.accounting_evidence() if shared else None}
