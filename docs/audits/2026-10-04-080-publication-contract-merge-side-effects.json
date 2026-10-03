@@ -1,0 +1,14 @@
+{
+  "stage": "080-RUNNER-publication-contract",
+  "baseSha": "5f793b7bf04014bb4637fa867140658074346bb3",
+  "automaticActions": ["PR CI", "branch freshness check", "main CI after merge"],
+  "actionsBudgetAvailability": "UNKNOWN",
+  "workerDeployment": false,
+  "databaseMigration": false,
+  "productionExecution": false,
+  "remoteWrites": false,
+  "flagChanges": false,
+  "activePointerChanges": false,
+  "retentionChanges": false,
+  "protectedPathsModified": false
+}

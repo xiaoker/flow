@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 shared publication contract extraction
+
+- PR #160 merged `5f793b7bf04014bb4637fa867140658074346bb3`; main CI `37138580284` passed. No Worker deploy/migration.
+- Fresh branch `codex/080-publication-contract-20261004` moves existing upload request construction/capability validation into a reusable package module; the current publisher delegates without transport or activation changes. Not a new publication platform or runner registration.
+- Python 782 / Web 177 tests, build/lint passed. Audit/effects: `2026-10-04-080-publication-contract*`; hosted results reported with the PR. Local fixtures do not establish production acceptance.
+- No candidate upload, collection, flags, pointer, retention, migration, production read change or protected user-file edits. Stop after CI for merge approval; next is the remaining candidate publication seam with bounded budget/lease-aware transport. 080 remains CODE_IN_PROGRESS.
+
 ### 2026-10-04 offline whole-task resource preflight
 
 - PR #159 merged `bd2749a76a3ead70f4242c74f6b4a30f3e65eef7`; main CI `37137817176` passed. No Worker deploy/migration.
