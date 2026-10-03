@@ -1,0 +1,16 @@
+{
+  "baseSha": "48d1e6b86931b41d50d54ff63e2d589a4b1fa177",
+  "stage": "080-RUNNER local-only durable budget adapter",
+  "prCi": true,
+  "mainCi": true,
+  "workerDeployOnMerge": false,
+  "pendingD1MigrationApplyOnMerge": false,
+  "newMigrationsInPr": false,
+  "productionRunnerActivation": false,
+  "productionReadSwitch": false,
+  "collectionDispatch": false,
+  "featureFlagChange": false,
+  "remoteSharedReservationImplemented": false,
+  "currentAccountRemaining": "UNKNOWN",
+  "approvalRequired": "merge"
+}

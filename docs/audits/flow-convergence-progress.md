@@ -98,3 +98,10 @@ R2, D1, release, or receipt evidence.
 - **Next allowed action:** push the standalone client PR, wait for CI and stop for merge approval. After merge, continue durable checkpoint transport and remaining stage adapters using existing application/receipt APIs. Recovery approval integration, resource reservation and single-window canary/rollback still need completion; no production activation is authorized.
 - **Forbidden in this work:** wiring new code to production scheduling/publishing, candidate upload/activation, production read-path switch, feature-flag changes, collection, recovery, history repair, active-release mutation, or destructive cleanup.
 - **Protected paths:** `reports/phase0/latest-*`, `memory/`, and all other pre-existing user changes in the original worktree are untouched.
+# 2026-10-03 local budget persistence increment
+
+- PR #151 merged as `48d1e6b86931b41d50d54ff63e2d589a4b1fa177`; main CI `37084824734` succeeded.
+- Fresh branch `codex/080-durable-budget-20261003` from that merge. Local-only SQLite adapter reuses existing budget transitions under bounded atomic journal replay; restart and separate processes sharing one file cannot forget allowance.
+- See `2026-10-03-080-local-budget-persistence.md` for trust boundary, limits and tests. No remote shared quota store, production caller, migrations or workflow changes.
+- `080-RUNNER` remains CODE_IN_PROGRESS. Cross-host/account-wide reservations, full cost evidence, checkpoint lifecycle, remaining adapters, recovery and real canary remain required.
+- Stop after hosted CI for merge authorization. Original reports/latest, memory and user edits untouched.
