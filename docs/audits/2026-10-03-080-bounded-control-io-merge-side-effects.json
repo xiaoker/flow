@@ -1,0 +1,13 @@
+{
+  "stage": "080-RUNNER",
+  "baseSha": "7532a2538e50f5c0938deac2f84651923abf1e83",
+  "scope": "candidate bounded control-plane HTTP exchanges",
+  "githubActions": {"prCi": true, "mainCi": true, "minutes": "unknown"},
+  "automaticWorkerDeploy": false,
+  "migration": false,
+  "productionReadsOrWrites": false,
+  "featureFlagChanges": false,
+  "activePointerChanges": false,
+  "collectionOrCanary": false,
+  "protectedOriginalFilesChanged": false
+}

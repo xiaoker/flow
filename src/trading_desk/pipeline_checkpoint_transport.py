@@ -13,11 +13,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .http import HttpSettings, build_session
+from .bounded_http import BoundedHTTPExchange, BoundedHTTPError
 from .pipeline_checkpoint_bundle import verify_stage_bundle
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
 
 MAX_OBJECT_BYTES = 1024 * 1024
+MAX_REQUEST_SECONDS = 20
 
 
 class CheckpointObjectTransport:
@@ -43,12 +45,15 @@ class CheckpointObjectTransport:
         self._headers = {"Authorization": f"Bearer {ingest_key}", "CF-Access-Client-Id": access_client_id,
                          "CF-Access-Client-Secret": access_client_secret, "Content-Type": "application/json"}
         self._guard, self._maximum, self._clock = lease_guard, maximum_requests, monotonic
+        self._exchange = BoundedHTTPExchange(self._session, monotonic=monotonic)
         self.request_count = 0
         self.upload_attempts = 0
         self.downloads = 0
         self.bytes_sent = 0
         self.bytes_received = 0
         self.unconfirmed_write_outcome = False
+        self._pending_upload: dict | None = None
+        self.response_measurement_complete = True
         self._lock = threading.RLock()
         self._budget_ledger, self._budget_task_id = budget_ledger, budget_task_id
         self._request_costs = dict(request_costs or {})
@@ -87,6 +92,10 @@ class CheckpointObjectTransport:
         return f"market-data/pipeline/checkpoints/v1/{run_hash}/{context.identity.producer_build_sha}/{stage}/{input_sha256}/{sha256}.json"
 
     def _request(self, method: str, params: dict, data: bytes | None = None) -> tuple[int, bytes, Any]:
+        try:
+            self._exchange.ensure_idle()
+        except BoundedHTTPError:
+            raise PipelineRunnerError("checkpoint_transport_request_still_unconfirmed") from None
         if self.request_count >= self._maximum:
             raise PipelineRunnerError("checkpoint_transport_budget_exceeded")
         self._authorize_request(method, data)
@@ -96,27 +105,21 @@ class CheckpointObjectTransport:
             self.upload_attempts += 1
             self.bytes_sent += len(data or b"")
             self.unconfirmed_write_outcome = True
-        response = None
-        started = self._clock()
+            self._pending_upload = dict(params)
         try:
-            response = self._session.request(method, self._url, params=params, data=data, headers=self._headers,
-                                             allow_redirects=False, timeout=(5, 10), stream=True)
-            content = bytearray()
-            for chunk in response.iter_content(chunk_size=65536):
-                self.bytes_received += len(chunk)
-                content.extend(chunk)
-                if len(content) > MAX_OBJECT_BYTES or self._clock() - started >= 20:
-                    raise PipelineRunnerError("checkpoint_transport_response_limit")
-            if self._clock() - started >= 20:
-                raise PipelineRunnerError("checkpoint_transport_response_limit")
-            return response.status_code, bytes(content), response.headers
-        except PipelineRunnerError:
-            raise
-        except Exception:
+            reply = self._exchange.request(method, self._url, params=params, data=data,
+                headers=self._headers, max_bytes=MAX_OBJECT_BYTES, chunk_size=65536,
+                max_chunks=64, deadline_seconds=MAX_REQUEST_SECONDS)
+            self.bytes_received += len(reply.content)
+            return reply.status, reply.content, reply.headers
+        except BoundedHTTPError as exc:
+            self.response_measurement_complete = False
+            if str(exc) in {"response_deadline", "response_limit"}:
+                raise PipelineRunnerError("checkpoint_transport_response_limit") from None
             raise PipelineRunnerError("checkpoint_transport_unavailable") from None
-        finally:
-            if response is not None:
-                response.close()
+        except Exception:
+            self.response_measurement_complete = False
+            raise PipelineRunnerError("checkpoint_transport_unavailable") from None
 
     def download(self, *, context: PipelineExecutionContext, stage: str, input_sha256: str, sha256: str) -> bytes:
         with self._lock:
@@ -133,6 +136,9 @@ class CheckpointObjectTransport:
             raise PipelineRunnerError("checkpoint_transport_bundle_invalid") from None
         self._guard.confirm()
         self.downloads += 1
+        if self._pending_upload == params:
+            self._pending_upload = None
+            self.unconfirmed_write_outcome = False
         return content
 
     def upload(self, *, context: PipelineExecutionContext, stage: str, input_sha256: str, data: bytes, sha256: str) -> dict:
@@ -140,6 +146,8 @@ class CheckpointObjectTransport:
             return self._upload(context=context, stage=stage, input_sha256=input_sha256, data=data, sha256=sha256)
 
     def _upload(self, *, context: PipelineExecutionContext, stage: str, input_sha256: str, data: bytes, sha256: str) -> dict:
+        if self._pending_upload is not None:
+            raise PipelineRunnerError("checkpoint_transport_unconfirmed_write_requires_readback")
         params = self._params(context, stage, input_sha256, sha256)
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_OBJECT_BYTES:
             raise PipelineRunnerError("checkpoint_transport_object_limit")
@@ -166,11 +174,15 @@ class CheckpointObjectTransport:
         else:
             raise PipelineRunnerError("checkpoint_transport_write_rejected")
         self.unconfirmed_write_outcome = False
+        self._pending_upload = None
         return {"key": expected_key, "sha256": sha256, "bytes": len(data)}
 
     def evidence(self) -> dict:
         return {"requests": self.request_count, "maximumRequests": self._maximum, "uploadAttempts": self.upload_attempts,
                 "verifiedDownloads": self.downloads, "bytesSent": self.bytes_sent, "bytesReceived": self.bytes_received,
-                "unconfirmedWriteOutcome": self.unconfirmed_write_outcome, "d1RowsRead": None, "d1RowsWritten": 0,
+                "unconfirmedWriteOutcome": self.unconfirmed_write_outcome,
+                "responseMeasurementComplete": self.response_measurement_complete,
+                "bytesReceivedBasis": "measured" if self.response_measurement_complete else "measured_lower_bound",
+                "d1RowsRead": None, "d1RowsWritten": None,
                 "accountRemaining": None, "resourceAllowance": "in_process_reference" if self._budget_ledger else "missing",
                 "sharedDurableReservation": False}

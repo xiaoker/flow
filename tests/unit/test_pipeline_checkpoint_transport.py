@@ -225,3 +225,56 @@ def test_concurrent_client_calls_share_one_request_budget(tmp_path):
         outcomes = list(pool.map(attempt, range(20)))
     assert sum(outcomes) == 3
     assert len(session.calls) == client.request_count == 3
+
+
+@pytest.mark.parametrize("where", ["headers", "body"])
+def test_late_upload_is_ambiguous_until_exact_readback(tmp_path, monkeypatch, where):
+    import threading
+    import time
+    import trading_desk.pipeline_checkpoint_transport as module
+    finish = threading.Event()
+    params = source(tmp_path)
+    class SlowSession(Session):
+        def request(self, method, url, **kwargs):
+            response = super().request(method, url, **kwargs)
+            if method == "POST":
+                if where == "headers":
+                    finish.wait(2)
+                else:
+                    original = response.iter_content
+                    def slow(**options):
+                        finish.wait(2)
+                        yield from original(**options)
+                    response.iter_content = slow
+            return response
+    monkeypatch.setattr(module, "MAX_REQUEST_SECONDS", 0.01)
+    session = SlowSession(); client = transport(session)
+    started = time.monotonic()
+    try:
+        with pytest.raises(PipelineRunnerError, match="response_limit"):
+            client.upload(**params)
+        assert time.monotonic() - started < 0.5
+        assert client.unconfirmed_write_outcome
+        assert client.evidence()["bytesReceivedBasis"] == "measured_lower_bound"
+        with pytest.raises(PipelineRunnerError, match="requires_readback"):
+            client.upload(**params)
+        with pytest.raises(PipelineRunnerError, match="still_unconfirmed"):
+            client.download(**{k: v for k, v in params.items() if k != "data"})
+        assert len(session.calls) == 1
+    finally:
+        finish.set(); client._exchange.inflight.join(1)
+    assert client.unconfirmed_write_outcome  # Late daemon cannot mark success.
+    assert client.download(**{k: v for k, v in params.items() if k != "data"}) == params["data"]
+    assert not client.unconfirmed_write_outcome
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
+    assert client.evidence()["responseMeasurementComplete"] is False  # Sticky.
+
+
+def test_failed_readback_cannot_enable_second_upload(tmp_path):
+    session = Session(); session.lose_response = True; session.corrupt = True
+    client = transport(session); params = source(tmp_path)
+    with pytest.raises(PipelineRunnerError, match="bundle_invalid"):
+        client.upload(**params)
+    with pytest.raises(PipelineRunnerError, match="requires_readback"):
+        client.upload(**params)
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
