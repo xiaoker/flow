@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 local durable publication intent
+
+- PR #164 merged as `5a78ab0f7c4a736b496c10a2fae27eb4e9975515`; main CI `37174851707` passed, no Worker deploy/migration triggered.
+- Fresh branch `codex/080-publication-intent-20261004` from that main adds explicitly injected SQLite pre-HTTP intent and persisted exact receipt. Reuses existing transport/lease/budget/readback; no production registration.
+- Restart and separate processes sharing the retained file cannot forget unknown writes. Twenty concurrent instances yield one intent winner; intermediate unknown writes remain blocked pending later reconciliation.
+- Audit/effects: `2026-10-04-080-publication-intent*`. Local evidence does not prove remote visibility or account quota. No protected original changes or production actions.
+- Stop after CI for merge authorization. Runner integration, cross-host persistence, intermediate uncertainty, recovery and live acceptance remain; 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-04 bounded injected candidate HTTP transport
 
 - PR #163 merged `5506c1da139f623d16265d7a563894a7a7b26525`; main CI `37174011540`, deploy `37174011632` passed. Exact merge build verified on attempt 3; no migrations to apply. Worker `d86bdab3-42e9-4366-bab6-dcc50b518b6f`.

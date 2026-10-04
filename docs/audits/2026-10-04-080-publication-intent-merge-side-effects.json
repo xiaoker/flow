@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-publication-intent-20261004",
+  "baseSha": "5a78ab0f7c4a736b496c10a2fae27eb4e9975515",
+  "scope": "080-RUNNER injected local pre-effect publication intent",
+  "onMerge": {"mainCI": true, "workerDeploy": false, "pendingD1MigrationsApply": false, "newMigrationFiles": []},
+  "duringImplementation": {"productionWrites": false, "workflowDispatch": false, "candidateUpload": false, "flagChanges": false, "activePointerChanges": false, "retentionChanges": false, "protectedUserFilesTouched": false},
+  "stop": "CI passed; await explicit merge authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}
