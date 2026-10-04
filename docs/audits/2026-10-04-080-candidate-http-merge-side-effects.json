@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-candidate-http-20261004",
+  "baseSha": "5506c1da139f623d16265d7a563894a7a7b26525",
+  "scope": "080-RUNNER bounded injected ordinary candidate transport",
+  "onMerge": {
+    "mainCI": true,
+    "workerDeploy": false,
+    "pendingD1MigrationsApply": false,
+    "newMigrationFiles": []
+  },
+  "duringImplementation": {
+    "productionWrites": false,
+    "workflowDispatch": false,
+    "candidateUpload": false,
+    "flagChanges": false,
+    "activePointerChanges": false,
+    "retentionChanges": false,
+    "protectedUserFilesTouched": false
+  },
+  "stop": "CI passed; await explicit merge authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}
