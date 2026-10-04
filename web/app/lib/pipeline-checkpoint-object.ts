@@ -4,7 +4,7 @@ import { getPipelineWindow, parsePipelineRunKey, PipelineWindowError } from "./p
 export const CHECKPOINT_OBJECT_MAX_BYTES = 1024 * 1024;
 const HASH = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const STAGES = new Set(["core_collection", "normalize", "build", "verify", "publish", "verify_visible"]);
+const STAGES = new Set(["core_collection", "normalize", "build", "verify", "publish", "verify_visible", "handoff"]);
 type DB = Parameters<typeof getPipelineWindow>[0];
 type Bucket = {
   get(key: string): Promise<{ size: number; customMetadata?: Record<string, string>; body: ReadableStream<Uint8Array> } | null>;
@@ -26,7 +26,7 @@ async function hash(bytes: Uint8Array) {
   const digest = await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-async function boundedBytes(stream: ReadableStream<Uint8Array> | null) {
+async function boundedBytes(stream: ReadableStream<Uint8Array> | null, maximum = CHECKPOINT_OBJECT_MAX_BYTES) {
   if (!stream) throw new PipelineWindowError("checkpoint_body_missing", 422);
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -38,7 +38,7 @@ async function boundedBytes(stream: ReadableStream<Uint8Array> | null) {
       if (done) break;
       if (++count > 512) throw new PipelineWindowError("checkpoint_chunk_limit", 413);
       size += value.byteLength;
-      if (size > CHECKPOINT_OBJECT_MAX_BYTES) throw new PipelineWindowError("checkpoint_object_too_large", 413);
+      if (size > maximum) throw new PipelineWindowError("checkpoint_object_too_large", 413);
       chunks.push(value);
     }
   } finally {
@@ -66,6 +66,7 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
   const target = query.get("targetDate") ?? "";
   const attemptText = query.get("attemptCount") ?? "";
   const attempt = Number(attemptText);
+  const maximum = stage === "handoff" ? 16384 : CHECKPOINT_OBJECT_MAX_BYTES;
   if (!parsePipelineRunKey(runKey) || !STAGES.has(stage) || !HASH.test(input) || !HASH.test(sha256) || !SHA.test(producer)
       || !/^[A-Za-z0-9_.:/-]{1,128}$/.test(owner) || !/^[1-9][0-9]{0,8}$/.test(attemptText)
       || !/^\d{4}-\d{2}-\d{2}$/.test(target) || !Number.isSafeInteger(attempt)) {
@@ -89,8 +90,8 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
     let classA = 0;
     if (request.method === "POST") {
       const length = Number(request.headers.get("content-length"));
-      if (length > CHECKPOINT_OBJECT_MAX_BYTES) return response({ error: "checkpoint_object_too_large" }, 413);
-      const bytes = await boundedBytes(request.body);
+      if (length > maximum) return response({ error: "checkpoint_object_too_large" }, 413);
+      const bytes = await boundedBytes(request.body, maximum);
       if (await hash(bytes) !== sha256) return response({ error: "checkpoint_digest_mismatch" }, 422);
       await confirm();
       classA = 1;
@@ -101,13 +102,13 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
     }
     const object = await bucket.get(key);
     if (!object) return response({ error: "checkpoint_not_found" }, 404);
-    if (object.size <= 0 || object.size > CHECKPOINT_OBJECT_MAX_BYTES || object.customMetadata?.sha256 !== sha256
+    if (object.size <= 0 || object.size > maximum || object.customMetadata?.sha256 !== sha256
         || object.customMetadata?.runKey !== runKey || object.customMetadata?.targetDate !== target
         || object.customMetadata?.producerBuildSha !== producer || object.customMetadata?.stage !== stage
         || object.customMetadata?.inputSha256 !== input) {
       return response({ error: "checkpoint_object_conflict" }, 409);
     }
-    const bytes = await boundedBytes(object.body);
+    const bytes = await boundedBytes(object.body, maximum);
     if (bytes.byteLength !== object.size || await hash(bytes) !== sha256) return response({ error: "checkpoint_object_conflict" }, 409);
     await confirm(); // Immutable orphan writes never imply completion after lease loss.
     const usage = { d1RowsRead: null, d1RowsWritten: 0, r2ClassA: classA, r2ClassB: 1, r2Bytes: bytes.byteLength };

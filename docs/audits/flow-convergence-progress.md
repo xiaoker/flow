@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-05 exact checkpoint handoff
+
+- PR #168 merged `814b0be96240b7497f6aa6e05be10e0dab8da917`; main CI `37216493324` and deploy `37216493673` succeeded, exact production build confirmed on attempt 2, no migrations to apply.
+- Current independent branch `codex/080-checkpoint-handoff-20261005` adds bounded immutable confirmed-prefix locators through existing checkpoint transport; fresh hosts discover exact bundle references from one trusted handoff hash and verify every bundle before reuse. No bucket listing or mutable latest pointer.
+- Candidate-only parameters; no CLI/workflow/scheduler production registration. Recovery and publish-journal restoration are not fabricated. Audit/effects: `2026-10-05-080-checkpoint-handoff*`.
+- Stop after CI for explicit merge, automatic Worker deployment and pending migration check/apply authorization; no new migration, actual pending status UNKNOWN. Protected original files unchanged.
+- Remaining: publish journal transfer/reconciliation, recovery wiring, trusted production artifact-channel integration and real resource/lifecycle/canary/rollback acceptance. 080 remains CODE_IN_PROGRESS.
+
 ### 2026-10-04 cross-host candidate upload intent
 
 - PR #167 merged `c373e3bd440662bee76310ba168716a39003229b`; main CI `37201932146` and deploy `37201932265` passed; exact merge build verified, no migrations to apply.

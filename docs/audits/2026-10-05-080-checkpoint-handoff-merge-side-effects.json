@@ -1,0 +1,18 @@
+{
+  "baseSha": "814b0be96240b7497f6aa6e05be10e0dab8da917",
+  "scope": "080-RUNNER exact checkpoint handoff discovery and transfer",
+  "mergeTriggers": ["main CI", "automatic Worker deployment", "pending D1 migration check/apply"],
+  "newMigrations": [],
+  "productionPendingMigrations": "UNKNOWN",
+  "accountUsage": "UNKNOWN",
+  "endpointChange": "existing checkpoint endpoint permits handoff namespace with 16 KiB limit",
+  "candidateCostChange": "one budgeted POST per advancing confirmed prefix; one budgeted GET per receiving handoff",
+  "productionCallerChanged": false,
+  "productionReadPathChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "retentionChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "authorizationRequired": "merge plus automatic Worker deployment and pending migration check/apply"
+}
