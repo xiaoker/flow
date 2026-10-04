@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 explicit runner candidate upload authority
+
+- PR #161 merged `d631222cfa3162a8d32b6e3601d18028fd7f26dd`; main CI `37139268189` passed. No Worker deployment/migration for that Python-only increment.
+- Fresh isolated branch `codex/080-candidate-authority-20261004` protects explicit ordinary runner uploads with current lease/owner/attempt/date checks, conditional immutable R2 writes and atomic lease-conditioned STAGED insertion. Legacy uploads remain unchanged; no runner caller enabled.
+- Audit/effects: `2026-10-04-080-candidate-upload-authority*`. Full Python 791 passed; Web final results in PR. Supplemental typecheck has the same 136 baseline errors, zero added. Fixtures do not establish production acceptance or resource allowance.
+- This PR changes web runtime: merge automatically deploys Worker and applies pending migrations (remote pending state UNKNOWN); no new migration. Stop after CI for merge/deployment authorization. No live upload, collection, flags, pointers, retention or protected-file changes.
+- Remaining bounded/budget-aware publication transport, recovery integration and live acceptance are still required. 080 remains CODE_IN_PROGRESS.
+
 ### 2026-10-04 shared publication contract extraction
 
 - PR #160 merged `5f793b7bf04014bb4637fa867140658074346bb3`; main CI `37138580284` passed. No Worker deploy/migration.

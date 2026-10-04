@@ -7,6 +7,8 @@ import {
   type ReadModelManifest,
 } from "@/app/lib/read-model-contract";
 import { activateReadModels } from "../import/route";
+import { candidateUploadAuthority, parseCandidateExecution } from "@/app/lib/candidate-upload-authority";
+import { PipelineWindowError } from "@/app/lib/pipeline-window";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +35,7 @@ type ReadModelUpload = {
   manifest: ReadModelManifest;
   artifact: ReadModelArtifactUpload;
   finalize?: boolean;
+  pipelineExecution?: unknown;
 };
 
 function secureEqual(left: string, right: string): boolean {
@@ -78,10 +81,31 @@ function decodeBase64(value: string): Uint8Array {
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
-async function decodeContent(artifact: ReadModelArtifactUpload): Promise<Uint8Array> {
+async function decodeContent(artifact: ReadModelArtifactUpload, bounded = false): Promise<Uint8Array> {
   const encoded = decodeBase64(artifact.contentBase64);
   if (artifact.contentEncoding !== "gzip") return encoded;
   const stream = new Blob([encoded]).stream().pipeThrough(new DecompressionStream("gzip"));
+  if (bounded) {
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_BODY_BYTES || chunks.length >= 512) throw new PipelineWindowError("candidate_content_too_large", 413);
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  }
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
@@ -96,7 +120,19 @@ async function putImmutable(
   content: Uint8Array | string,
   sha256: string,
   options: R2PutOptions,
+  fenced = false,
 ): Promise<void> {
+  if (fenced) {
+    await bucket.put(key, content, { ...options, onlyIf: new Headers({ "If-None-Match": "*" }) });
+    const saved = await bucket.get(key);
+    const expectedBytes = typeof content === "string" ? new TextEncoder().encode(content).byteLength : content.byteLength;
+    if (!saved || saved.size !== expectedBytes) throw new PipelineWindowError("candidate_immutable_conflict", 409);
+    const bytes = saved ? new Uint8Array(await saved.arrayBuffer()) : null;
+    if (!saved || saved.customMetadata?.sha256 !== sha256 || !bytes || await sha256Hex(bytes) !== sha256) {
+      throw new PipelineWindowError("candidate_immutable_conflict", 409);
+    }
+    return;
+  }
   const existing = typeof bucket.head === "function" ? await bucket.head(key) : null;
   if (existing) {
     if (existing.customMetadata?.sha256 !== sha256) throw new Error(`read_model_immutable_conflict:${key}`);
@@ -222,17 +258,24 @@ export async function POST(request: Request) {
   if (!isUpload(value)) return NextResponse.json({ error: "invalid_read_model_upload" }, { status: 422 });
 
   try {
-    const content = await decodeContent(value.artifact);
+    const authority = Object.hasOwn(value, "pipelineExecution")
+      ? candidateUploadAuthority(runtime.DB, parseCandidateExecution(value.pipelineExecution, value.manifest, value.activationMode))
+      : null;
+    if (authority) await authority.confirm();
+    if (authority && value.artifact.bytes > MAX_BODY_BYTES) throw new PipelineWindowError("candidate_content_too_large", 413);
+    const content = await decodeContent(value.artifact, Boolean(authority));
     if (content.byteLength !== value.artifact.bytes) throw new Error("read_model_size_mismatch");
     if ((await sha256Hex(content)) !== value.artifact.sha256) throw new Error("read_model_sha256_mismatch");
-    await putImmutable(runtime.RAW_BUCKET, value.artifact.key, content, value.artifact.sha256, {
+    const putArtifact = () => putImmutable(runtime.RAW_BUCKET!, value.artifact.key, content, value.artifact.sha256, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: {
         releaseId: value.manifest.releaseId,
         asOf: value.manifest.asOf,
         sha256: value.artifact.sha256,
       },
-    });
+    }, Boolean(authority));
+    if (authority) await authority.effect(putArtifact);
+    else await putArtifact();
 
     if (value.finalize !== true) {
       return NextResponse.json({ status: "staged", asOf: value.manifest.asOf, name: value.artifact.name });
@@ -243,14 +286,16 @@ export async function POST(request: Request) {
     const manifestBody = JSON.stringify(value.manifest);
     const manifestBodySha256 = await sha256Hex(new TextEncoder().encode(manifestBody));
     const manifestKey = `market-data/releases/${value.manifest.asOf}/${value.manifest.releaseId}/manifest.json`;
-    await putImmutable(runtime.RAW_BUCKET, manifestKey, manifestBody, manifestBodySha256, {
+    const putManifest = () => putImmutable(runtime.RAW_BUCKET!, manifestKey, manifestBody, manifestBodySha256, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: {
         releaseId: value.manifest.releaseId,
         asOf: value.manifest.asOf,
         sha256: manifestBodySha256,
       },
-    });
+    }, Boolean(authority));
+    if (authority) await authority.effect(putManifest);
+    else await putManifest();
     const activatedAt = new Date().toISOString();
     const release = {
       releaseId: value.manifest.releaseId,
@@ -258,7 +303,9 @@ export async function POST(request: Request) {
       manifestKey,
       manifestSha256: value.manifest.manifestSha256 ?? manifestBodySha256,
     };
-    const activation = value.activationMode === "stage_only"
+    const activation = authority
+      ? await authority.stage(release, value.manifest, manifestBody)
+      : value.activationMode === "stage_only"
       ? await stageReadModels(runtime.DB, release, value.manifest, activatedAt)
       : await activateReadModels(runtime.DB, release, value.manifest, activatedAt);
     return NextResponse.json({
@@ -268,6 +315,12 @@ export async function POST(request: Request) {
       manifestKey,
     });
   } catch (error) {
+    if (error instanceof PipelineWindowError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    if (Object.hasOwn(value, "pipelineExecution")) {
+      return NextResponse.json({ error: "candidate_upload_unavailable" }, { status: 503 });
+    }
     console.error("read model import failed", error);
     return NextResponse.json(
       { error: "read_model_import_failed", detail: error instanceof Error ? error.message : "unknown_error" },
