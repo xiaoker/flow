@@ -1,0 +1,17 @@
+{
+  "baseSha": "c373e3bd440662bee76310ba168716a39003229b",
+  "scope": "080-RUNNER candidate cross-host upload deduplication",
+  "mergeTriggers": ["main CI", "automatic Worker deploy", "pending D1 migration check/apply"],
+  "newMigrations": [],
+  "productionPendingMigrations": "UNKNOWN",
+  "productionReadPathChanged": false,
+  "candidateProtocolChanged": "Python candidate transport requests upload_once; existing authenticated endpoint adds bounded conditional R2 intent put",
+  "candidateIncrementalCost": {"r2ClassAPerUpload": 1, "maximumIntentBytes": 4096, "additionalIndexedLeaseReads": 2},
+  "accountUsage": "UNKNOWN",
+  "collectionOrCanary": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "retentionChanged": false,
+  "protectedOriginalPathsChanged": false,
+  "authorizationRequired": "merge plus automatic Worker deployment and pending migration check/apply"
+}

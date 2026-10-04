@@ -87,6 +87,11 @@ class CandidatePublicationTransport:
                 r2Bytes=body["artifact"]["bytes"] + (len(body["candidateManifestJson"].encode()) if final else 0))
             if body.get("operation") == "inspect_artifact":
                 floors.update(d1RowsRead=4, d1RowsWritten=0, r2ClassA=0, r2ClassB=1, r2Bytes=0)
+            elif body.get("operation") == "upload_once":
+                # One bounded remote intent object precedes the artifact effect.
+                floors["r2ClassA"] += 1
+                floors["d1RowsRead"] += 2
+                floors["r2Bytes"] += 4096
         if any(cost.metrics[key].value < minimum for key, minimum in floors.items()):
             raise PipelineRunnerError("candidate_resource_cost_understated")
         try:
@@ -156,6 +161,7 @@ class CandidatePublicationTransport:
                 raise PipelineRunnerError("candidate_unconfirmed_write_requires_reconciliation")
             execution = self.execution(context)
             body = build_candidate_upload_body(manifest_bytes, name, content, execution=execution, finalize=finalize)
+            body["operation"] = "upload_once"
             manifest = body["manifest"]
             if not isinstance(manifest.get("releaseId"), str) or not 1 <= len(manifest["artifacts"]) <= 20:
                 raise PipelineRunnerError("candidate_transport_manifest_invalid")
