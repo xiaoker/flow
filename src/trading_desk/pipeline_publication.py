@@ -8,9 +8,49 @@ from __future__ import annotations
 import base64
 import gzip
 import hashlib
+import json
 from typing import Any
 
+from .read_models import canonical_json_bytes
+
 ACTIVATION_MODES = {"active", "stage_only"}
+
+
+def build_candidate_upload_body(manifest_bytes: bytes, name: str, content: bytes,
+                                *, execution: dict[str, Any], finalize: bool) -> dict[str, Any]:
+    """Keep the producer's exact signed canonical bytes across JS serialization.
+
+    Pure preparation only: no permission, budget, HTTP or success assertion.
+    The server still verifies current authority and immutable byte identity.
+    """
+    if not isinstance(manifest_bytes, bytes) or not 0 < len(manifest_bytes) <= 65536:
+        raise ValueError("candidate_manifest_bytes_limit")
+    if not isinstance(content, bytes) or not 0 < len(content) <= 1_500_000 or type(finalize) is not bool:
+        raise ValueError("candidate_artifact_bytes_limit")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (ValueError, UnicodeError):
+        raise ValueError("candidate_manifest_invalid") from None
+    if not isinstance(manifest, dict) or canonical_json_bytes(manifest) != manifest_bytes:
+        raise ValueError("candidate_manifest_not_canonical")
+    unsigned = dict(manifest)
+    declared_hash = unsigned.pop("manifestSha256", None)
+    if declared_hash != hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest():
+        raise ValueError("candidate_manifest_digest_mismatch")
+    if manifest.get("schemaVersion") != 4 or not isinstance(execution, dict):
+        raise ValueError("candidate_upload_contract_invalid")
+    if execution.get("targetDate") != manifest.get("asOf") or execution.get("producerBuildSha") != manifest.get("producerBuildSha"):
+        raise ValueError("candidate_upload_identity_mismatch")
+    artifacts = manifest.get("artifacts")
+    declared = artifacts.get(name) if isinstance(artifacts, dict) else None
+    if not isinstance(declared, dict) or declared.get("sha256") != hashlib.sha256(content).hexdigest() or declared.get("bytes") != len(content):
+        raise ValueError("candidate_artifact_identity_mismatch")
+    body = build_upload_body(manifest, name, declared, content, finalize=finalize, activation_mode="stage_only")
+    body["pipelineExecution"] = dict(execution)
+    body["candidateManifestJson"] = manifest_bytes.decode("utf-8")
+    if len(json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()) > 1_500_000:
+        raise ValueError("candidate_upload_request_limit")
+    return body
 
 
 def validate_publication_capabilities(payload: Any, *, slot: str = "full",

@@ -9,6 +9,7 @@ import {
 import { activateReadModels } from "../import/route";
 import { candidateUploadAuthority, parseCandidateExecution } from "@/app/lib/candidate-upload-authority";
 import { PipelineWindowError } from "@/app/lib/pipeline-window";
+import { candidateManifestSha256 } from "@/app/lib/candidate-read";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,7 @@ type ReadModelUpload = {
   artifact: ReadModelArtifactUpload;
   finalize?: boolean;
   pipelineExecution?: unknown;
+  candidateManifestJson?: unknown;
 };
 
 function secureEqual(left: string, right: string): boolean {
@@ -261,6 +263,21 @@ export async function POST(request: Request) {
     const authority = Object.hasOwn(value, "pipelineExecution")
       ? candidateUploadAuthority(runtime.DB, parseCandidateExecution(value.pipelineExecution, value.manifest, value.activationMode))
       : null;
+    let exactManifestJson: string | undefined;
+    if (Object.hasOwn(value, "candidateManifestJson")) {
+      if (!authority || typeof value.candidateManifestJson !== "string"
+          || new TextEncoder().encode(value.candidateManifestJson).byteLength > 65536) {
+        throw new PipelineWindowError("invalid_candidate_manifest_bytes", 422);
+      }
+      let parsed: unknown;
+      try { parsed = JSON.parse(value.candidateManifestJson); }
+      catch { throw new PipelineWindowError("invalid_candidate_manifest_bytes", 422); }
+      if (JSON.stringify(parsed) !== JSON.stringify(value.manifest)
+          || await candidateManifestSha256(value.candidateManifestJson) !== value.manifest.manifestSha256) {
+        throw new PipelineWindowError("candidate_manifest_bytes_mismatch", 409);
+      }
+      exactManifestJson = value.candidateManifestJson;
+    }
     if (authority) await authority.confirm();
     if (authority && value.artifact.bytes > MAX_BODY_BYTES) throw new PipelineWindowError("candidate_content_too_large", 413);
     const content = await decodeContent(value.artifact, Boolean(authority));
@@ -283,7 +300,7 @@ export async function POST(request: Request) {
     if (!(await allArtifactsPresent(runtime.RAW_BUCKET, value.manifest))) {
       return NextResponse.json({ status: "waiting_artifacts", asOf: value.manifest.asOf }, { status: 409 });
     }
-    const manifestBody = JSON.stringify(value.manifest);
+    const manifestBody = exactManifestJson ?? JSON.stringify(value.manifest);
     const manifestBodySha256 = await sha256Hex(new TextEncoder().encode(manifestBody));
     const manifestKey = `market-data/releases/${value.manifest.asOf}/${value.manifest.releaseId}/manifest.json`;
     const putManifest = () => putImmutable(runtime.RAW_BUCKET!, manifestKey, manifestBody, manifestBodySha256, {
