@@ -43,6 +43,7 @@ _PROTECTED_PATHS = {"memory"}
 _ALLOWED_ADAPTER_EFFECTS = {
     "official_source_requests",
     "filesystem:isolated_stage_workspace",
+    "candidate_publication_requests",
 }
 
 
@@ -450,6 +451,8 @@ def run_pipeline_request(
             ):
                 raise PipelineRunnerError("stage_adapter_effect_contract_required", stage)
             effect_set = set(effects)
+            if "candidate_publication_requests" in effect_set and (stage != "publish" or context.mode != "ordinary"):
+                raise PipelineRunnerError("candidate_publication_effect_scope_invalid", stage)
             if not effect_set or not effect_set.issubset(_ALLOWED_ADAPTER_EFFECTS):
                 raise PipelineRunnerError("unsupported_stage_adapter_effect", stage)
             adapter_effects.update(effect_set)

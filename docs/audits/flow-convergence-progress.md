@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 injected candidate publish adapter
+
+- PR #165 merged `6eee4309b790d8807fc6fe8defbe9034a338e798`; main CI `37198596074` passed, no Worker deployment or migration.
+- Fresh branch `codex/080-publish-adapter-20261004` connects verified immutable core output to ordinary runner publish through explicit injection. Shared allowance, retained intent and current lease required; all declared artifacts exact-readback verified.
+- Fourteen new behavioral fixtures include actual runner invocation, no duplicate uploads on resume, upfront request ceilings and unknown-final reconciliation ordering. No CLI/workflow production registration or live acceptance.
+- Audit/effects: `2026-10-04-080-publish-adapter*`. Protected user files and production state untouched; stop after CI for merge authorization.
+- Remaining: intermediate unknown-write reconciliation, cross-host intent/checkpoint integration, recovery and live canary/rollback. 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-04 local durable publication intent
 
 - PR #164 merged as `5a78ab0f7c4a736b496c10a2fae27eb4e9975515`; main CI `37174851707` passed, no Worker deploy/migration triggered.

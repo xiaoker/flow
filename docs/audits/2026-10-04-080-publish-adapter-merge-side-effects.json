@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-publish-adapter-20261004",
+  "baseSha": "6eee4309b790d8807fc6fe8defbe9034a338e798",
+  "scope": "080 ordinary injected candidate publish stage",
+  "onMerge": {"mainCI": true, "workerDeploy": false, "pendingD1MigrationsApply": false, "newMigrationFiles": []},
+  "duringImplementation": {"productionWrites": false, "workflowDispatch": false, "candidateUpload": false, "flagChanges": false, "activePointerChanges": false, "retentionChanges": false, "protectedUserFilesTouched": false},
+  "stop": "CI passed; await explicit merge authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}
