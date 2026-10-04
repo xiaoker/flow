@@ -181,7 +181,7 @@ class CandidatePublicationTransport:
             return expected
 
     def reconcile_final_upload(self, *, context: PipelineExecutionContext, manifest_bytes: bytes,
-                               name: str, content: bytes) -> dict:
+                               name: str, content: bytes, _verify_only: bool = False) -> dict:
         """One explicit exact readback; no automatic retry or orphan bypass.
 
         Only the same final upload identity can clear a pending write. A 404 or
@@ -192,13 +192,13 @@ class CandidatePublicationTransport:
             body = build_candidate_upload_body(manifest_bytes, name, content, execution=execution, finalize=True)
             manifest = body["manifest"]
             expected_pending = {"execution": execution, "manifest": manifest, "name": name, "finalize": True}
-            if self._intent_store is not None:
+            if not _verify_only and self._intent_store is not None:
                 recorded = self._intent_store.lookup(self._reference(body))
                 if recorded is None or recorded["status"] != "PENDING":
                     raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
                 if self._pending is None:
                     self._pending = expected_pending
-            if self._pending != expected_pending:
+            if not _verify_only and self._pending != expected_pending:
                 raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
             reply = self._request("GET", "/api/v1/admin/candidate-release", execution=execution,
                 params={"releaseId": manifest["releaseId"], "manifestSha256": manifest["manifestSha256"], "artifact": name})
@@ -211,11 +211,21 @@ class CandidatePublicationTransport:
                 raise PipelineRunnerError("candidate_transport_readback_mismatch")
             self._guard.confirm()
             self.readbacks += 1
-            if self._intent_store is not None:
+            if not _verify_only and self._intent_store is not None:
                 self._intent_store.acknowledge(self._reference(body), self._receipt(body))
-            self._pending = None
+            if not _verify_only:
+                self._pending = None
             return {"status": "staged_candidate", "releaseId": manifest["releaseId"],
                     "asOf": manifest["asOf"], "manifestSha256": manifest["manifestSha256"]}
+
+    def verify_staged_artifact(self, **source) -> dict:
+        """Fresh bounded exact read, never clears or acknowledges unknown writes."""
+        return self.reconcile_final_upload(**source, _verify_only=True)
+
+    def require_durable_intent(self, body: dict) -> dict | None:
+        if self._intent_store is None:
+            raise PipelineRunnerError("candidate_durable_intent_required")
+        return self._intent_store.lookup(self._reference(body))
 
     def evidence(self) -> dict:
         shared = isinstance(self._ledger, SharedBudgetLedger)
