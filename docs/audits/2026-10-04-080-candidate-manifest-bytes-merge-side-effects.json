@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-publication-transport-20261004",
+  "baseSha": "860d7673f8e8dd85649ff078bc85864e24f4c75b",
+  "scope": "080-RUNNER byte-preserving candidate publication contract",
+  "onMerge": {
+    "mainCI": true,
+    "workerDeploy": true,
+    "pendingD1MigrationsApply": true,
+    "workflow": ".github/workflows/deploy-worker.yml",
+    "newMigrationFiles": [],
+    "remotePendingMigrations": "UNKNOWN"
+  },
+  "duringImplementation": {
+    "productionWrites": false,
+    "workflowDispatch": false,
+    "candidateUpload": false,
+    "flagChanges": false,
+    "activePointerChanges": false,
+    "retentionChanges": false,
+    "protectedUserFilesTouched": false
+  },
+  "stop": "CI passed; await explicit merge/deployment authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}

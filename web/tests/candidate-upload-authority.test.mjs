@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { CAPABILITY_IDS, CAPABILITY_CONTRACT_VERSION, ETF_PERIOD_IDS, isReadModelManifest } from "../app/lib/read-model-contract.ts";
+import { parseStagedCandidate } from "../app/lib/candidate-read.ts";
 import { candidateUploadAuthority, parseCandidateExecution } from "../app/lib/candidate-upload-authority.ts";
 
 const ref = { runKey: "daily-market-data:2026-09-30:reconcile:v1", leaseOwner: "runner-1",
@@ -35,6 +36,7 @@ function fixture(overrides = {}) {
     }; } };
   } };
   return { row, calls, db, authority: candidateUploadAuthority(db, ref, now),
+    getSaved() { return saved; },
     saved(value) { saved = value; }, onInsert(value) { onInsert = value; } };
 }
 
@@ -47,6 +49,39 @@ test("execution binds real target date independently of window date", () => {
   assert.throws(() => parseCandidateExecution(ref, manifest, "active"), /requires_stage_only/);
   assert.throws(() => parseCandidateExecution(ref, { ...manifest, asOf: "2026-09-30" }, "stage_only"), /manifest_mismatch/);
   assert.throws(() => parseCandidateExecution(ref, { ...manifest, producerBuildSha: "b".repeat(40) }, "stage_only"), /manifest_mismatch/);
+});
+
+test("built candidate upload preserves signed producer decimal bytes and rejects mismatch before writes", async () => {
+  const url = new URL("../dist/server/index.js", import.meta.url); url.searchParams.set("candidate-bytes-test", String(Date.now()));
+  const { default: worker } = await import(url.href);
+  const f = fixture(); f.row.lease_expires_at = new Date(Date.now() + 600000).toISOString();
+  const body = uploadManifest(); body.manifest.coverage = { fixtureRatio: 1 };
+  const unsigned = JSON.stringify(body.manifest).replace('"fixtureRatio":1', '"fixtureRatio":1.0');
+  const digest = createHash("sha256").update(unsigned).digest("hex");
+  const raw = `{"manifestSha256":"${digest}",${unsigned.slice(1)}`;
+  body.manifest = JSON.parse(raw); body.candidateManifestJson = raw; body.finalize = true;
+  let writes = 0; const objects = new Map();
+  const env = { DB: f.db, INGEST_API_KEY: "local-test-key", RAW_BUCKET: {
+    async put(key, content, options) {
+      writes++; const bytes = typeof content === "string" ? Buffer.from(content) : content;
+      objects.set(key, { size: bytes.byteLength, customMetadata: options.customMetadata, async arrayBuffer() { return bytes; } });
+    }, async get(key) { return objects.get(key); }, async head() { return { size: 2 }; },
+  }, ASSETS: { fetch: async () => new Response("not found", { status: 404 }) } };
+  const invoke = (payload) => worker.fetch(new Request("http://localhost/api/v1/admin/read-model-import", {
+    method: "POST", headers: { Authorization: "Bearer local-test-key" }, body: JSON.stringify(payload),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal((await invoke({ ...body, candidateManifestJson: raw.replace("1.0", "2.0") })).status, 409);
+  assert.equal((await invoke({ ...body, candidateManifestJson: "invalid" })).status, 422);
+  const missingLease = { ...body }; delete missingLease.pipelineExecution;
+  assert.equal((await invoke(missingLease)).status, 422); assert.equal(writes, 0);
+  const response = await invoke(body);
+  assert.equal(response.status, 200); assert.equal((await response.json()).status, "staged_candidate");
+  assert.equal(f.getSaved().manifest_json, raw); assert.equal(f.getSaved().manifest_sha256, digest);
+  assert.match(f.getSaved().manifest_json, /"fixtureRatio":1\.0/);
+  const row = { ...f.getSaved(), release_id: body.manifest.releaseId, schema_version: 4 };
+  assert.deepEqual(await parseStagedCandidate(row), body.manifest);
+  await assert.rejects(parseStagedCandidate({ ...row, manifest_json: JSON.stringify(body.manifest) }), /sha256_mismatch/);
+  assert.equal(writes, 2);
 });
 
 for (const override of [{ lease_owner: "other" }, { attempt_count: 3 }, { target_date: "2026-09-30" },

@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 exact producer manifest bytes across candidate upload
+
+- PR #162 merged `860d7673f8e8dd85649ff078bc85864e24f4c75b`; main CI `37172358522` and deploy `37172358765` passed. Exact production SHA verified; no migration pending then.
+- Fresh branch `codex/080-publication-transport-20261004` fixes the reproduced Python decimal/JS reserialization hash seam through an optional bounded signed producer JSON field and pure shared candidate upload helper. No new serializer or caller registration, and no actual production data defect claimed.
+- Web build/191 tests/lint passed; full Python results in PR. Audit/effects: `2026-10-04-080-candidate-manifest-bytes*`. Local byte fixtures are not production acceptance.
+- Merge matches Worker deploy/pending-migration workflow; no new migration, current remote pending state UNKNOWN. No live upload, collection, flag, pointer, retention, remote migration or protected-file changes.
+- Stop after hosted CI for merge/deployment authorization. Bounded budget-aware HTTP transport, runner publication/recovery integration and live acceptance remain; 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-04 explicit runner candidate upload authority
 
 - PR #161 merged `d631222cfa3162a8d32b6e3601d18028fd7f26dd`; main CI `37139268189` passed. No Worker deployment/migration for that Python-only increment.
