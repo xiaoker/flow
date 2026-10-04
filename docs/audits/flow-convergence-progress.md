@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 bounded injected candidate HTTP transport
+
+- PR #163 merged `5506c1da139f623d16265d7a563894a7a7b26525`; main CI `37174011540`, deploy `37174011632` passed. Exact merge build verified on attempt 3; no migrations to apply. Worker `d86bdab3-42e9-4366-bab6-dcc50b518b6f`.
+- Fresh worktree `/private/tmp/flow-080-candidate-http-20261004`, branch `codex/080-candidate-http-20261004`, based on that merge.
+- Injected ordinary-only stage publication transport uses the existing wire, lease, budget and bounded HTTP contracts. Exact final readback; unknown intermediate writes block blind retries. No runner/CLI/workflow registration.
+- Python 825 / Web 191 tests, build/lint passed. Audit/effects: `2026-10-04-080-candidate-http*`. No provider quota or live Access acceptance claimed.
+- Python/tests/docs only: PR/main CI, no automatic Worker deployment or migration. No collection, upload, flags, pointer, retention or protected original-file edits. Stop after hosted CI for merge authorization.
+- Next: persistent pre-effect publication intent/checkpoint and intermediate uncertainty reconciliation in existing runner, then recovery/resource/live acceptance. Instance-local transport hold alone is not durable resume. 080 remains CODE_IN_PROGRESS.
+
 ### 2026-10-04 exact producer manifest bytes across candidate upload
 
 - PR #162 merged `860d7673f8e8dd85649ff078bc85864e24f4c75b`; main CI `37172358522` and deploy `37172358765` passed. Exact production SHA verified; no migration pending then.
