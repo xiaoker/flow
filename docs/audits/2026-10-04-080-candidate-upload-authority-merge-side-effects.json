@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-candidate-authority-20261004",
+  "baseSha": "d631222cfa3162a8d32b6e3601d18028fd7f26dd",
+  "scope": "080-RUNNER optional ordinary candidate upload authority",
+  "onMerge": {
+    "mainCI": true,
+    "workerDeploy": true,
+    "pendingD1MigrationsApply": true,
+    "workflow": ".github/workflows/deploy-worker.yml",
+    "newMigrationFiles": [],
+    "remotePendingMigrations": "UNKNOWN"
+  },
+  "duringImplementation": {
+    "productionWrites": false,
+    "workflowDispatch": false,
+    "candidateUpload": false,
+    "flagChanges": false,
+    "activePointerChanges": false,
+    "retentionChanges": false,
+    "protectedUserFilesTouched": false
+  },
+  "stop": "PR CI passed; wait for explicit merge/deployment authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}
