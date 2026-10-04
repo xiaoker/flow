@@ -38,7 +38,7 @@ type ReadModelUpload = {
   finalize?: boolean;
   pipelineExecution?: unknown;
   candidateManifestJson?: unknown;
-  operation?: "inspect_artifact";
+  operation?: "inspect_artifact" | "upload_once";
 };
 
 function secureEqual(left: string, right: string): boolean {
@@ -73,7 +73,7 @@ function isUpload(value: unknown): value is ReadModelUpload {
       (artifact.contentEncoding === undefined || artifact.contentEncoding === "gzip") &&
       (value.activationMode === undefined || value.activationMode === "active" || value.activationMode === "stage_only") &&
       (value.finalize === undefined || typeof value.finalize === "boolean") &&
-      (value.operation === undefined || value.operation === "inspect_artifact"),
+      (value.operation === undefined || value.operation === "inspect_artifact" || value.operation === "upload_once"),
   );
 }
 
@@ -320,6 +320,29 @@ export async function POST(request: Request) {
         asOf: value.manifest.asOf, manifestSha256: value.manifest.manifestSha256,
         name: value.artifact.name, sha256: value.artifact.sha256, bytes: size },
         { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+    }
+    if (value.operation === "upload_once") {
+      if (!authority || !exactManifestJson || typeof value.finalize !== "boolean") {
+        throw new PipelineWindowError("invalid_candidate_upload_once", 422);
+      }
+      // The key deliberately excludes lease owner/attempt: takeover must not
+      // grant another effect for an immutable artifact. A claimed but unfinished
+      // upload stays blocked; absence is not permission to reset this marker.
+      const reference = JSON.stringify({ schemaVersion: 1, execution: value.pipelineExecution,
+        releaseId: value.manifest.releaseId, manifestSha256: value.manifest.manifestSha256,
+        artifact: { name: value.artifact.name, key: value.artifact.key,
+          sha256: value.artifact.sha256, bytes: value.artifact.bytes }, finalize: value.finalize });
+      if (new TextEncoder().encode(reference).byteLength > 4096) {
+        throw new PipelineWindowError("candidate_upload_intent_too_large", 413);
+      }
+      const markerKey = `market-data/releases/${value.manifest.asOf}/${value.manifest.releaseId}/upload-intents/${value.artifact.name}.json`;
+      const claimed = await authority.effect(() => runtime.RAW_BUCKET!.put(markerKey, reference, {
+        onlyIf: new Headers({ "If-None-Match": "*" }),
+        httpMetadata: { contentType: "application/json" },
+      }));
+      // Only a definite successful conditional put authorizes this invocation.
+      // A timeout or pre-existing marker never authorizes an artifact write.
+      if (!claimed) throw new PipelineWindowError("candidate_upload_intent_exists", 409);
     }
     const putArtifact = () => putImmutable(runtime.RAW_BUCKET!, value.artifact.key, content, value.artifact.sha256, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },

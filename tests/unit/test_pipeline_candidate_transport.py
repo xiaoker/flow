@@ -77,9 +77,18 @@ def client(session, guard=None, **options):
     return CandidatePublicationTransport(**(defaults | options))
 
 
+def test_remote_intent_cost_is_charged_before_any_http():
+    source = args(); session = Session()
+    costs = _task(20).numeric() | {"r2ClassA": 2, "r2Bytes": 2_000_000}
+    with pytest.raises(PipelineRunnerError, match="cost_understated"):
+        client(session, request_costs={"POST": BudgetVector.estimated(costs)}).upload(**source, finalize=True)
+    assert not session.calls
+
+
 def test_stage_only_wire_exact_bytes_receipt_and_unknown_telemetry():
     session = Session(); transport = client(session); source = args()
     assert transport.upload(**source, finalize=False)["status"] == "staged"
+    assert json.loads(session.calls[0][2]["data"])["operation"] == "upload_once"
     assert transport.upload(**source, finalize=True)["status"] == "staged_candidate"
     for _, url, request in session.calls:
         assert url.endswith("/api/v1/admin/read-model-import")

@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 cross-host candidate upload intent
+
+- PR #167 merged `c373e3bd440662bee76310ba168716a39003229b`; main CI `37201932146` and deploy `37201932265` passed; exact merge build verified, no migrations to apply.
+- Current branch `codex/080-intent-handoff-20261004` uses conditional bounded R2 upload intents before candidate effects. A new host cannot infer upload permission from an older empty SQLite journal; duplicate attempts block and only exact readback resolves the local unknown hold.
+- Legacy callers unchanged; no production runner registration, collection, activation, flag or retention change. Unfinished marker without an artifact remains blocked rather than retried.
+- Audit/effects: `2026-10-04-080-cross-host-intent*`. Web changes trigger automatic deploy and pending migration check/apply; no new migration, production pending state UNKNOWN. Stop after CI for explicit merge/deploy authorization.
+- Remaining: complete checkpoint discovery/transfer, recovery wiring, authorized unfinished-intent reconciliation, budget/live canary and rollback acceptance. 080 remains CODE_IN_PROGRESS.
+
 ### 2026-10-04 exact intermediate artifact reconciliation
 
 - PR #166 merged `e0f7428b0a28ac4f1f020495e9615baf0225584f`; main CI `37199798087` passed; no deployment required for that Python-only PR.

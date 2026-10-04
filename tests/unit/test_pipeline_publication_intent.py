@@ -12,6 +12,7 @@ from trading_desk.pipeline_publication import build_candidate_upload_body
 from trading_desk.pipeline_publication_intent import PublicationIntentStore
 from trading_desk.pipeline_runner import PipelineRunnerError
 from test_pipeline_candidate_transport import args, client, Session
+from test_pipeline_checkpoint_transport import Response
 
 
 def store(path, initialize=False):
@@ -26,6 +27,36 @@ def reference(finalize=True):
     return CandidatePublicationTransport._reference(build_candidate_upload_body(
         source["manifest_bytes"], source["name"], source["content"],
         execution=CandidatePublicationTransport.execution(source["context"]), finalize=finalize))
+
+
+def test_new_host_without_old_sqlite_cannot_repeat_remote_upload(tmp_path):
+    class OnceSession(Session):
+        claimed = False
+        writes = 0
+
+        def request(self, method, url, **kwargs):
+            if method == "POST":
+                assert json.loads(kwargs["data"])["operation"] == "upload_once"
+                if self.claimed:
+                    self.calls.append((method, url, kwargs))
+                    return Response(b'{"error":"candidate_upload_intent_exists"}', 409)
+                self.claimed = True
+                self.writes += 1
+            return super().request(method, url, **kwargs)
+
+    remote = OnceSession()
+    client(remote, intent_store=store(tmp_path / "host-a.sqlite", True)).upload(**args(), finalize=True)
+    # This host has a distinct initially empty local journal. The remote marker,
+    # not a copied local file, prevents a second effect. Explicit readback only.
+    other = client(remote, intent_store=store(tmp_path / "host-b.sqlite", True))
+    with pytest.raises(PipelineRunnerError, match="write_rejected"):
+        other.upload(**args(), finalize=True)
+    assert remote.writes == 1
+    assert other.evidence()["unconfirmedWriteOutcome"] is True
+    other.reconcile_final_upload(**args())
+    assert store(tmp_path / "host-b.sqlite").lookup(reference())["status"] == "ACKNOWLEDGED"
+    other.upload(**args(), finalize=True)
+    assert remote.writes == 1
 
 
 def test_commit_precedes_http_and_acknowledged_restart_has_no_http(tmp_path):

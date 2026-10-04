@@ -10,6 +10,63 @@ const ref = { runKey: "daily-market-data:2026-09-30:reconcile:v1", leaseOwner: "
 const manifest = { schemaVersion: 4, asOf: ref.targetDate, producerBuildSha: ref.producerBuildSha };
 const now = () => new Date("2026-10-04T00:00:00Z");
 
+test("cross-host upload_once has one effect winner and never resets unknown intents", async () => {
+  const url = new URL("../dist/server/index.js", import.meta.url); url.searchParams.set("once", String(Date.now()));
+  const { default: worker } = await import(url.href);
+  const f = fixture(); f.row.lease_expires_at = new Date(Date.now() + 600000).toISOString();
+  const body = uploadManifest();
+  const unsigned = JSON.stringify(body.manifest);
+  const digest = createHash("sha256").update(unsigned).digest("hex");
+  body.candidateManifestJson = `{"manifestSha256":"${digest}",${unsigned.slice(1)}`;
+  body.manifest = JSON.parse(body.candidateManifestJson);
+  body.operation = "upload_once"; body.finalize = false;
+  const objects = new Map(); let artifacts = 0; let crash = false; let takeover = false;
+  const env = { INGEST_API_KEY: "local-test-key", DB: f.db, RAW_BUCKET: {
+    async put(key, content, options) {
+      assert.equal(options.onlyIf.get("If-None-Match"), "*");
+      if (objects.has(key)) return null;
+      const bytes = typeof content === "string" ? Buffer.from(content) : Buffer.from(content);
+      if (key.includes("/upload-intents/")) {
+        assert.ok(bytes.byteLength <= 4096);
+        objects.set(key, { bytes });
+        if (takeover) f.row.lease_owner = "other";
+      } else {
+        artifacts++;
+        if (crash) throw new Error("fixture crash after claim");
+        objects.set(key, { bytes, customMetadata: options.customMetadata });
+      }
+      return { key };
+    },
+    async get(key) {
+      const object = objects.get(key);
+      if (!object) return null;
+      return { size: object.bytes.byteLength, customMetadata: object.customMetadata,
+        body: new Response(object.bytes).body, async arrayBuffer() { return object.bytes; } };
+    }, async head() { throw new Error("unexpected head"); },
+  }, ASSETS: { fetch: async () => new Response("missing", { status: 404 }) } };
+  const invoke = (payload = body) => worker.fetch(new Request("http://localhost/api/v1/admin/read-model-import", {
+    method: "POST", headers: { Authorization: "Bearer local-test-key" }, body: JSON.stringify(payload),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  const replies = await Promise.all(Array.from({ length: 20 }, () => invoke()));
+  assert.equal(replies.filter((r) => r.status === 200).length, 1);
+  assert.equal(replies.filter((r) => r.status === 409).length, 19);
+  assert.equal(artifacts, 1); assert.equal(f.getSaved(), null);
+  // A host with no local journal still cannot replay the effect.
+  assert.equal((await invoke()).status, 409); assert.equal(artifacts, 1);
+  assert.equal((await invoke({ ...body, finalize: true })).status, 409); assert.equal(artifacts, 1);
+  assert.equal((await invoke({ ...body, operation: "inspect_artifact" })).status, 200);
+  objects.clear(); crash = true;
+  assert.equal((await invoke()).status, 503); assert.equal(artifacts, 2);
+  crash = false;
+  assert.equal((await invoke()).status, 409); assert.equal(artifacts, 2);
+  assert.equal((await invoke({ ...body, operation: "inspect_artifact" })).status, 404);
+  objects.clear(); takeover = true;
+  assert.equal((await invoke()).status, 409); assert.equal(artifacts, 2);
+  f.row.lease_owner = ref.leaseOwner;
+  assert.equal((await invoke({ ...body, pipelineExecution: null })).status, 422);
+  assert.ok(f.calls.every((call) => call === "read"));
+});
+
 test("fenced intermediate inspection reads exact orphan without any writes", async () => {
   const url = new URL("../dist/server/index.js", import.meta.url); url.searchParams.set("inspect", String(Date.now()));
   const { default: worker } = await import(url.href);
