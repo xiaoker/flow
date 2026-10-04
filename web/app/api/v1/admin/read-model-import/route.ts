@@ -38,6 +38,7 @@ type ReadModelUpload = {
   finalize?: boolean;
   pipelineExecution?: unknown;
   candidateManifestJson?: unknown;
+  operation?: "inspect_artifact";
 };
 
 function secureEqual(left: string, right: string): boolean {
@@ -71,7 +72,8 @@ function isUpload(value: unknown): value is ReadModelUpload {
       artifact.contentBase64.length > 0 &&
       (artifact.contentEncoding === undefined || artifact.contentEncoding === "gzip") &&
       (value.activationMode === undefined || value.activationMode === "active" || value.activationMode === "stage_only") &&
-      (value.finalize === undefined || typeof value.finalize === "boolean"),
+      (value.finalize === undefined || typeof value.finalize === "boolean") &&
+      (value.operation === undefined || value.operation === "inspect_artifact"),
   );
 }
 
@@ -283,6 +285,42 @@ export async function POST(request: Request) {
     const content = await decodeContent(value.artifact, Boolean(authority));
     if (content.byteLength !== value.artifact.bytes) throw new Error("read_model_size_mismatch");
     if ((await sha256Hex(content)) !== value.artifact.sha256) throw new Error("read_model_sha256_mismatch");
+    if (value.operation === "inspect_artifact") {
+      if (!authority || !exactManifestJson || value.finalize !== false) {
+        throw new PipelineWindowError("invalid_candidate_inspection", 422);
+      }
+      const saved = await authority.effect(() => runtime.RAW_BUCKET!.get(value.artifact.key));
+      if (!saved) return NextResponse.json({ error: "candidate_artifact_not_found" }, { status: 404 });
+      if (saved.size !== value.artifact.bytes || saved.size > MAX_BODY_BYTES ||
+          saved.customMetadata?.releaseId !== value.manifest.releaseId ||
+          saved.customMetadata?.asOf !== value.manifest.asOf ||
+          saved.customMetadata?.sha256 !== value.artifact.sha256) {
+        throw new PipelineWindowError("candidate_artifact_inspection_mismatch", 409);
+      }
+      const reader = saved.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const { done, value: chunk } = await reader.read();
+          if (done) break;
+          size += chunk.byteLength;
+          if (size > MAX_BODY_BYTES || chunks.length >= 512) throw new PipelineWindowError("candidate_content_too_large", 413);
+          chunks.push(chunk);
+        }
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      if (size !== content.byteLength || await sha256Hex(bytes) !== value.artifact.sha256) {
+        throw new PipelineWindowError("candidate_artifact_inspection_mismatch", 409);
+      }
+      await authority.confirm();
+      return NextResponse.json({ status: "verified_artifact", releaseId: value.manifest.releaseId,
+        asOf: value.manifest.asOf, manifestSha256: value.manifest.manifestSha256,
+        name: value.artifact.name, sha256: value.artifact.sha256, bytes: size },
+        { headers: { "Cache-Control": "private, no-store, max-age=0" } });
+    }
     const putArtifact = () => putImmutable(runtime.RAW_BUCKET!, value.artifact.key, content, value.artifact.sha256, {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: {

@@ -9,6 +9,42 @@ const ref = { runKey: "daily-market-data:2026-09-30:reconcile:v1", leaseOwner: "
   attemptCount: 2, targetDate: "2026-09-29", producerBuildSha: "a".repeat(40) };
 const manifest = { schemaVersion: 4, asOf: ref.targetDate, producerBuildSha: ref.producerBuildSha };
 const now = () => new Date("2026-10-04T00:00:00Z");
+
+test("fenced intermediate inspection reads exact orphan without any writes", async () => {
+  const url = new URL("../dist/server/index.js", import.meta.url); url.searchParams.set("inspect", String(Date.now()));
+  const { default: worker } = await import(url.href);
+  const f = fixture(); f.row.lease_expires_at = new Date(Date.now() + 600000).toISOString();
+  const body = uploadManifest();
+  const unsigned = JSON.stringify(body.manifest);
+  const digest = createHash("sha256").update(unsigned).digest("hex");
+  const raw = `{"manifestSha256":"${digest}",${unsigned.slice(1)}`;
+  body.manifest = JSON.parse(raw); body.candidateManifestJson = raw;
+  body.operation = "inspect_artifact"; body.finalize = false;
+  let missing = false; let corrupt = false; let takeover = false; let gets = 0;
+  const env = { INGEST_API_KEY: "local-test-key", DB: f.db, RAW_BUCKET: {
+    async get(key) {
+      gets++; assert.equal(key, body.artifact.key);
+      if (takeover) f.row.lease_owner = "other";
+      if (missing) return null;
+      const content = corrupt ? Buffer.from("xx") : Buffer.from(body.artifact.contentBase64, "base64");
+      return { size: content.byteLength, customMetadata: { releaseId: body.manifest.releaseId,
+        asOf: body.manifest.asOf, sha256: body.artifact.sha256 }, body: new Response(content).body };
+    }, async put() { throw new Error("forbidden write"); }, async head() { throw new Error("forbidden enumeration"); },
+  }, ASSETS: { fetch: async () => new Response("missing", { status: 404 }) } };
+  const invoke = (payload = body, auth = true) => worker.fetch(new Request("http://localhost/api/v1/admin/read-model-import", {
+    method: "POST", headers: auth ? { Authorization: "Bearer local-test-key" } : {}, body: JSON.stringify(payload),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal((await invoke(body, false)).status, 401); assert.equal(gets, 0);
+  assert.equal((await invoke({ ...body, pipelineExecution: null })).status, 422); assert.equal(gets, 0);
+  assert.equal((await invoke({ ...body, finalize: true })).status, 422); assert.equal(gets, 0);
+  const success = await invoke(); assert.equal(success.status, 200);
+  assert.equal((await success.json()).status, "verified_artifact");
+  assert.equal(f.getSaved(), null); assert.ok(f.calls.every((call) => call === "read"));
+  missing = true; assert.equal((await invoke()).status, 404); missing = false;
+  corrupt = true; assert.equal((await invoke()).status, 409); corrupt = false;
+  takeover = true; assert.equal((await invoke()).status, 409);
+  assert.equal(f.getSaved(), null);
+});
 function fixture(overrides = {}) {
   const row = { run_key: ref.runKey, lease_owner: ref.leaseOwner, attempt_count: 2,
     target_date: ref.targetDate, recovery_id: null, status: "RUNNING", lease_expires_at: "2026-10-04T00:15:00Z", ...overrides };
