@@ -21,8 +21,10 @@ inventory. All artifacts, exact producer bytes and durable local bindings are
 validated before any network effect. Immutable sources are held as bounded bytes
 for uploads; no rescan can substitute changed bytes after validation.
 
-Artifacts are uploaded in sorted order, finalizing only the last one. Existing
-stage-only HTTP/lease/shared-budget contracts govern each request. Every declared
+Artifacts are uploaded in sorted order, finalizing only the last one. The
+client and shared control-plane request ceilings must cover remaining uploads
+and all reads before any effect. This check is not account-budget permission.
+Existing stage-only HTTP/lease/shared-budget contracts govern each request. Every declared
 artifact is then read through the existing STAGED API and compared to its exact
 hash, size, date, manifest hash and content before a local COMPLETED checkpoint.
 Missing, corrupt or rejected reads cannot complete the stage.
@@ -42,16 +44,16 @@ that file. Callers must preserve the same bound file and execution identity.
 
 ## Tests
 
-Twelve new fixtures cover all-artifact publication/readback, read-only resumed
+Fourteen new fixtures cover all-artifact publication/readback, read-only resumed
 completion, source/config/owner/local-budget/missing-intent rejection before
 remote effects, budget denial, unknown final reconciliation without duplicate
 POST, intermediate unknown block, corrupt readback, actual runner invocation and
-effect rejection on a nonpublish stage.
+effect rejection on a nonpublish stage and insufficient request capacity.
 
 Validation commands: full Python `PYTHONPATH=src:. /Users/xiaoker/Documents/交易台/.venv/bin/python -m pytest -q -o addopts=`;
 Web `npm test` (build included), `npm run lint`; `git diff --check`.
 Fixture authorization is not evidence of production Access or account quota.
-Results: full Python 845 passed; new adapter tests 12 passed; Web 191 passed;
+Results: full Python 847 passed; new adapter tests 14 passed; Web 191 passed;
 build, lint and diff whitespace check passed.
 
 ## Effects and next step

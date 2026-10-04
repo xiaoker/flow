@@ -227,6 +227,16 @@ class CandidatePublicationTransport:
             raise PipelineRunnerError("candidate_durable_intent_required")
         return self._intent_store.lookup(self._reference(body))
 
+    def require_request_capacity(self, requests: int) -> None:
+        """Local hard ceilings only, never account or resource permission."""
+        if type(requests) is not int or requests < 0 or requests > self._maximum - self.request_count:
+            raise PipelineRunnerError("candidate_transport_budget_exceeded")
+        if isinstance(self._ledger, SharedBudgetLedger):
+            control = self._ledger.accounting_evidence()
+            # Each authorization uses metadata GET then atomic operation POST.
+            if 2 * requests > control["maximumRequests"] - control["requests"]:
+                raise PipelineRunnerError("candidate_shared_control_request_capacity")
+
     def evidence(self) -> dict:
         shared = isinstance(self._ledger, SharedBudgetLedger)
         return {"requests": self.request_count, "maximumRequests": self._maximum,

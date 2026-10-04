@@ -141,6 +141,13 @@ def test_unknown_intermediate_and_bad_readback_never_complete(tmp_path):
 
 def test_corrupt_remote_readback_rejects_local_receipt(tmp_path):
     adapter, params, remote = fixture(tmp_path); result = adapter.run(**params)
+    context = params["context"]
+    ledger = SharedBudgetLedger(base_url="https://flow.xiaoker.com", ingest_key="fixture-key", access_client_id="fixture-id",
+        access_client_secret="fixture-secret", lease_guard=Guard(), session=remote,
+        run_key=context.identity.run_key, lease_owner=context.lease_owner,
+        attempt_count=context.lease_attempt_count, target_date=context.identity.target_date)
+    adapter = replace(adapter, transport=client(remote, intent_store=adapter.transport._intent_store,
+        budget_ledger=ledger, budget_task_id=ledger.task_id))
     remote.corrupt = True
     checkpoint = {"identity": params["context"].identity.as_dict(), "stage": "publish", "status": "COMPLETED",
         "inputSha256": params["input_sha256"], "outputSha256": result["outputSha256"]}
@@ -171,4 +178,16 @@ def test_candidate_effect_rejected_on_nonpublish_stage(tmp_path):
         run_pipeline_request(request, state_dir=tmp_path / "state", output_path=tmp_path / "result.json",
             producer_build_sha="a" * 40, dependency_lock_paths=[LOCK], project_root=ROOT,
             now=datetime(2026, 10, 3, tzinfo=timezone.utc), stage_adapters={"core_collection": adapter}, lease_guard=Guard())
+    assert not remote.calls
+
+
+@pytest.mark.parametrize("ceiling", ["transport", "control"])
+def test_insufficient_request_capacity_rejected_before_any_effect(tmp_path, ceiling):
+    adapter, params, remote = fixture(tmp_path)
+    if ceiling == "transport":
+        adapter.transport._maximum = 1
+    else:
+        adapter.transport._ledger._maximum = 1
+    with pytest.raises(PipelineRunnerError, match="budget_exceeded|control_request_capacity"):
+        adapter.run(**params)
     assert not remote.calls

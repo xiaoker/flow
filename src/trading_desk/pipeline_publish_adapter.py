@@ -81,6 +81,12 @@ class CoreCandidatePublishAdapter:
         # stage directory; this adapter never initializes or resets it.
         if workspace.exists() and next(workspace.iterdir(), None) is not None:
             raise PipelineAdapterError("partial_publish_workspace_requires_reconciliation")
+        required = len(sources)
+        for _source, body in sources:
+            recorded = self.transport.require_durable_intent(body)
+            if recorded is None or recorded["status"] == "PENDING":
+                required += 1
+        self.transport.require_request_capacity(required)
         # Resolve the one unknown final write before replaying earlier local
         # acknowledgements: the transport intentionally blocks all uploads
         # while its instance-local unknown hold remains set.
@@ -119,6 +125,7 @@ class CoreCandidatePublishAdapter:
         result = self._result(manifest, checkpoint["inputSha256"])
         if receipt.get("stageResult") != result or checkpoint.get("outputSha256") != result["outputSha256"]:
             return False
+        self.transport.require_request_capacity(len(sources))
         for source, body in sources:
             recorded = self.transport.require_durable_intent(body)
             if recorded is None or recorded["status"] != "ACKNOWLEDGED" or recorded["receipt"] != self.transport._receipt(body):
