@@ -87,13 +87,16 @@ class CoreCandidatePublishAdapter:
             if recorded is None or recorded["status"] == "PENDING":
                 required += 1
         self.transport.require_request_capacity(required)
-        # Resolve the one unknown final write before replaying earlier local
+        # Resolve the one unknown write before replaying earlier local
         # acknowledgements: the transport intentionally blocks all uploads
         # while its instance-local unknown hold remains set.
         for source, body in sources:
             recorded = self.transport.require_durable_intent(body)
-            if recorded is not None and recorded["status"] == "PENDING" and body["finalize"]:
-                self.transport.reconcile_final_upload(**source)
+            if recorded is not None and recorded["status"] == "PENDING":
+                if body["finalize"]:
+                    self.transport.reconcile_final_upload(**source)
+                else:
+                    self.transport.reconcile_intermediate_upload(**source)
         for source, body in sources:
             self.transport.upload(**source, finalize=body["finalize"])
         for source, _body in sources:

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "branch": "codex/080-intermediate-readback-20261004",
+  "baseSha": "e0f7428b0a28ac4f1f020495e9615baf0225584f",
+  "scope": "080 exact intermediate artifact inspection and resume",
+  "onMerge": {"mainCI": true, "workerDeploy": true, "pendingD1MigrationsApply": true, "newMigrationFiles": [], "productionPendingMigrationState": "UNKNOWN"},
+  "duringImplementation": {"productionWrites": false, "workflowDispatch": false, "candidateUpload": false, "flagChanges": false, "activePointerChanges": false, "retentionChanges": false, "protectedUserFilesTouched": false},
+  "stop": "CI passed; await explicit merge/deployment-side-effect authorization",
+  "remainingStageStatus": "CODE_IN_PROGRESS"
+}

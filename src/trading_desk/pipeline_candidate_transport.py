@@ -1,8 +1,8 @@
 """Bounded ordinary candidate publication, never activation or scheduling.
 
 Uses the existing upload wire contract, lease guard, shared allowance and HTTP
-exchange. A lost intermediate upload response cannot be read through the
-existing STAGED-only API: keep it ambiguous and never blindly retry it.
+exchange. Intermediate ambiguity requires explicit fenced exact inspection,
+not a blind retry or a claim that an orphan is a fully staged release.
 This is an injected transport, not a production runner/CLI registration.
 """
 from __future__ import annotations
@@ -85,6 +85,8 @@ class CandidatePublicationTransport:
                 r2ClassA=2 if final else 1,
                 r2ClassB=(2 + len(body["manifest"]["artifacts"])) if final else 1,
                 r2Bytes=body["artifact"]["bytes"] + (len(body["candidateManifestJson"].encode()) if final else 0))
+            if body.get("operation") == "inspect_artifact":
+                floors.update(d1RowsRead=4, d1RowsWritten=0, r2ClassA=0, r2ClassB=1, r2Bytes=0)
         if any(cost.metrics[key].value < minimum for key, minimum in floors.items()):
             raise PipelineRunnerError("candidate_resource_cost_understated")
         try:
@@ -107,12 +109,14 @@ class CandidatePublicationTransport:
         self._authorize(method, execution, body)
         self._guard.confirm()
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() if body else None
-        if body is not None and self._intent_store is not None:
+        write = body is not None and body.get("operation") != "inspect_artifact"
+        if write and self._intent_store is not None:
             self._intent_store.begin(self._reference(body))
         self.request_count += 1
         if body is not None:
-            self.upload_attempts += 1
             self.bytes_sent += len(data)
+        if write:
+            self.upload_attempts += 1
             self._pending = {"execution": execution, "manifest": body["manifest"],
                              "name": body["artifact"]["name"], "finalize": body["finalize"]}
         try:
@@ -221,6 +225,35 @@ class CandidatePublicationTransport:
     def verify_staged_artifact(self, **source) -> dict:
         """Fresh bounded exact read, never clears or acknowledges unknown writes."""
         return self.reconcile_final_upload(**source, _verify_only=True)
+
+    def reconcile_intermediate_upload(self, *, context, manifest_bytes, name, content) -> dict:
+        """Exact fenced orphan read; absence never grants another upload."""
+        with self._lock:
+            execution = self.execution(context)
+            body = build_candidate_upload_body(manifest_bytes, name, content, execution=execution, finalize=False)
+            recorded = self.require_durable_intent(body)
+            if recorded is None or recorded["status"] != "PENDING":
+                raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
+            pending = {"execution": execution, "manifest": body["manifest"], "name": name, "finalize": False}
+            if self._pending is not None and self._pending != pending:
+                raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
+            self._pending = pending
+            reply = self._request("POST", "/api/v1/admin/read-model-import", execution=execution,
+                body={**body, "operation": "inspect_artifact"})
+            expected = {"status": "verified_artifact", "releaseId": body["manifest"]["releaseId"],
+                "asOf": body["manifest"]["asOf"], "manifestSha256": body["manifest"]["manifestSha256"],
+                "name": name, "sha256": body["artifact"]["sha256"], "bytes": len(content)}
+            try:
+                result = json.loads(reply.content)
+            except ValueError:
+                result = None
+            if reply.status != 200 or result != expected:
+                raise PipelineRunnerError("candidate_intermediate_readback_mismatch")
+            self._guard.confirm()
+            self._intent_store.acknowledge(self._reference(body), self._receipt(body))
+            self.readbacks += 1
+            self._pending = None
+            return expected
 
     def require_durable_intent(self, body: dict) -> dict | None:
         if self._intent_store is None:

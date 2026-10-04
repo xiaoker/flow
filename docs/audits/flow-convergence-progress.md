@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-04 exact intermediate artifact reconciliation
+
+- PR #166 merged `e0f7428b0a28ac4f1f020495e9615baf0225584f`; main CI `37199798087` passed; no deployment required for that Python-only PR.
+- Fresh branch `codex/080-intermediate-readback-20261004` closes lost intermediate upload response using the existing authenticated/fenced upload endpoint in explicit read-only inspection mode. No write or release registration on inspection.
+- Retained SQLite restart resumes with seven unique artifacts uploaded once each. Missing/corrupt reads or lease takeover retain unknown status. All-artifact STAGED verification still required.
+- Local Python 848, Web 192/build/lint passed. Audit/effects: `2026-10-04-080-intermediate-readback*`. No production actions or protected original-file changes.
+- Web paths trigger automatic Worker deployment and pending migration check/apply; no new migration, pending production state UNKNOWN. Stop after CI for merge/deploy-side-effect authorization.
+- Remaining: cross-environment retained intent/checkpoint integration, recovery wiring and actual live canary/rollback. 080 is CODE_IN_PROGRESS.
+
 ### 2026-10-04 injected candidate publish adapter
 
 - PR #165 merged `6eee4309b790d8807fc6fe8defbe9034a338e798`; main CI `37198596074` passed, no Worker deployment or migration.

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 class Remote:
     def __init__(self):
-        self.calls = []; self.artifacts = {}; self.manifest = None
+        self.calls = []; self.artifacts = {}; self.manifest = None; self.upload_names = []
         self.lost_name = None; self.corrupt = False; self.deny = False
 
     def request(self, method, url, **kwargs):
@@ -38,6 +38,15 @@ class Remote:
                 "revision": 1, "rowsRead": 21, "rowsWritten": 1}).encode())
         if method == "POST":
             body = json.loads(kwargs["data"]); artifact = body["artifact"]
+            if body.get("operation") == "inspect_artifact":
+                if artifact["name"] not in self.artifacts:
+                    return Response(b"{}", 404)
+                if self.corrupt:
+                    return Response(b"{}", 409)
+                return Response(json.dumps({"status": "verified_artifact", "releaseId": body["manifest"]["releaseId"],
+                    "asOf": body["manifest"]["asOf"], "manifestSha256": body["manifest"]["manifestSha256"],
+                    "name": artifact["name"], "sha256": artifact["sha256"], "bytes": artifact["bytes"]}).encode())
+            self.upload_names.append(artifact["name"])
             self.artifacts[artifact["name"]] = gzip.decompress(base64.b64decode(artifact["contentBase64"]))
             if body["finalize"]:
                 self.manifest = body["manifest"]
@@ -128,15 +137,35 @@ def test_unknown_final_can_be_exactly_reconciled(tmp_path):
     assert sum(method == "POST" and url.endswith("read-model-import") for method, url in remote.calls) == len(names)
 
 
-def test_unknown_intermediate_and_bad_readback_never_complete(tmp_path):
+def test_missing_intermediate_readback_never_complete(tmp_path):
     adapter, params, remote = fixture(tmp_path)
     remote.lost_name = sorted(json.loads((adapter.source_dir / "build/manifest.json").read_bytes())["artifacts"])[0]
     with pytest.raises(PipelineRunnerError):
         adapter.run(**params)
     remote.lost_name = None
-    with pytest.raises(PipelineRunnerError, match="requires_reconciliation"):
+    remote.artifacts.clear()
+    with pytest.raises(PipelineRunnerError, match="intermediate_readback_mismatch"):
         adapter.run(**params)
     assert not (params["workspace"] / "adapter-receipt.json").exists()
+    assert adapter.transport.evidence()["unconfirmedWriteOutcome"] is True
+
+
+def test_unknown_intermediate_resumes_after_exact_inspection(tmp_path):
+    adapter, params, remote = fixture(tmp_path)
+    name = sorted(json.loads((adapter.source_dir / "build/manifest.json").read_bytes())["artifacts"])[0]
+    remote.lost_name = name
+    with pytest.raises(PipelineRunnerError, match="unavailable"):
+        adapter.run(**params)
+    remote.lost_name = None
+    manifest = json.loads((adapter.source_dir / "build/manifest.json").read_bytes())
+    reopened = PublicationIntentStore(tmp_path / "intent.sqlite", execution=CandidatePublicationTransport.execution(params["context"]),
+        release_id=manifest["releaseId"], manifest_sha256=manifest["manifestSha256"])
+    ledger = adapter.transport._ledger
+    adapter = replace(adapter, transport=client(remote, intent_store=reopened, budget_ledger=ledger, budget_task_id=ledger.task_id))
+    assert adapter.run(**params)["status"] == "COMPLETED"
+    assert adapter.transport.upload_attempts == 6
+    assert len(remote.upload_names) == len(set(remote.upload_names)) == 7
+    assert adapter.transport.evidence()["unconfirmedWriteOutcome"] is False
 
 
 def test_corrupt_remote_readback_rejects_local_receipt(tmp_path):
