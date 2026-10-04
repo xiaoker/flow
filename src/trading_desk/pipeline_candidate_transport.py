@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from .bounded_http import BoundedHTTPExchange, BoundedHTTPError
 from .http import HttpSettings, build_session
 from .pipeline_publication import build_candidate_upload_body
+from .pipeline_publication_intent import PublicationIntentStore
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
 from .resource_budget_remote import SharedBudgetLedger
@@ -30,7 +31,7 @@ class CandidatePublicationTransport:
                  access_client_secret: str, lease_guard: Any, budget_ledger: BudgetLedger,
                  budget_task_id: str, request_costs: dict[str, BudgetVector],
                  maximum_requests: int = 40, session: Any = None, monotonic=time.monotonic,
-                 allow_loopback_fixture: bool = False):
+                 allow_loopback_fixture: bool = False, intent_store: PublicationIntentStore | None = None):
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
         if not ((parsed.scheme == "https" and parsed.hostname == "flow.xiaoker.com" and parsed.port in {None, 443}) or fixture) or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
@@ -52,6 +53,7 @@ class CandidatePublicationTransport:
         self._exchange = BoundedHTTPExchange(self._session, monotonic=monotonic)
         self._lock = threading.RLock()
         self._pending: dict | None = None
+        self._intent_store = intent_store
         self.request_count = self.upload_attempts = self.readbacks = 0
         self.bytes_sent = self.bytes_received = self._shared_authorizations = 0
         self.response_measurement_complete = True
@@ -105,6 +107,8 @@ class CandidatePublicationTransport:
         self._authorize(method, execution, body)
         self._guard.confirm()
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() if body else None
+        if body is not None and self._intent_store is not None:
+            self._intent_store.begin(self._reference(body))
         self.request_count += 1
         if body is not None:
             self.upload_attempts += 1
@@ -121,6 +125,26 @@ class CandidatePublicationTransport:
         self.bytes_received += len(reply.content)
         return reply
 
+    @staticmethod
+    def _reference(body: dict) -> dict:
+        artifact = body["artifact"]
+        return {"execution": body["pipelineExecution"], "releaseId": body["manifest"]["releaseId"],
+                "manifestSha256": body["manifest"]["manifestSha256"],
+                "name": artifact["name"], "finalize": body["finalize"],
+                "artifactSha256": artifact["sha256"], "artifactBytes": artifact["bytes"],
+                "artifactKey": artifact["key"]}
+
+    @staticmethod
+    def _receipt(body: dict) -> dict:
+        manifest = body["manifest"]
+        result = {"status": "staged_candidate" if body["finalize"] else "staged", "asOf": manifest["asOf"]}
+        if body["finalize"]:
+            result.update(releaseId=manifest["releaseId"],
+                manifestKey=f'market-data/releases/{manifest["asOf"]}/{manifest["releaseId"]}/manifest.json')
+        else:
+            result["name"] = body["artifact"]["name"]
+        return result
+
     def upload(self, *, context: PipelineExecutionContext, manifest_bytes: bytes,
                name: str, content: bytes, finalize: bool) -> dict:
         with self._lock:
@@ -131,6 +155,16 @@ class CandidatePublicationTransport:
             manifest = body["manifest"]
             if not isinstance(manifest.get("releaseId"), str) or not 1 <= len(manifest["artifacts"]) <= 20:
                 raise PipelineRunnerError("candidate_transport_manifest_invalid")
+            expected = self._receipt(body)
+            if self._intent_store is not None:
+                recorded = self._intent_store.lookup(self._reference(body))
+                if recorded is not None:
+                    if recorded["status"] != "ACKNOWLEDGED":
+                        raise PipelineRunnerError("candidate_unconfirmed_write_requires_reconciliation")
+                    if recorded["receipt"] != expected:
+                        raise PipelineRunnerError("candidate_transport_receipt_invalid")
+                    self._guard.confirm()
+                    return expected
             reply = self._request("POST", "/api/v1/admin/read-model-import", execution=execution, body=body)
             if reply.status != 200:
                 raise PipelineRunnerError("candidate_transport_write_rejected")
@@ -138,15 +172,11 @@ class CandidatePublicationTransport:
                 result = json.loads(reply.content)
             except ValueError:
                 raise PipelineRunnerError("candidate_transport_receipt_invalid") from None
-            expected = {"status": "staged_candidate" if finalize else "staged", "asOf": manifest["asOf"]}
-            if finalize:
-                expected.update(releaseId=manifest["releaseId"],
-                    manifestKey=f'market-data/releases/{manifest["asOf"]}/{manifest["releaseId"]}/manifest.json')
-            else:
-                expected["name"] = name
             if not isinstance(result, dict) or any(result.get(k) != v for k, v in expected.items()):
                 raise PipelineRunnerError("candidate_transport_receipt_invalid")
             self._guard.confirm()
+            if self._intent_store is not None:
+                self._intent_store.acknowledge(self._reference(body), expected)
             self._pending = None
             return expected
 
@@ -162,6 +192,12 @@ class CandidatePublicationTransport:
             body = build_candidate_upload_body(manifest_bytes, name, content, execution=execution, finalize=True)
             manifest = body["manifest"]
             expected_pending = {"execution": execution, "manifest": manifest, "name": name, "finalize": True}
+            if self._intent_store is not None:
+                recorded = self._intent_store.lookup(self._reference(body))
+                if recorded is None or recorded["status"] != "PENDING":
+                    raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
+                if self._pending is None:
+                    self._pending = expected_pending
             if self._pending != expected_pending:
                 raise PipelineRunnerError("candidate_reconciliation_identity_mismatch")
             reply = self._request("GET", "/api/v1/admin/candidate-release", execution=execution,
@@ -175,6 +211,8 @@ class CandidatePublicationTransport:
                 raise PipelineRunnerError("candidate_transport_readback_mismatch")
             self._guard.confirm()
             self.readbacks += 1
+            if self._intent_store is not None:
+                self._intent_store.acknowledge(self._reference(body), self._receipt(body))
             self._pending = None
             return {"status": "staged_candidate", "releaseId": manifest["releaseId"],
                     "asOf": manifest["asOf"], "manifestSha256": manifest["manifestSha256"]}
@@ -182,9 +220,10 @@ class CandidatePublicationTransport:
     def evidence(self) -> dict:
         shared = isinstance(self._ledger, SharedBudgetLedger)
         return {"requests": self.request_count, "maximumRequests": self._maximum,
+                "durableLocalIntent": self._intent_store is not None,
                 "uploadAttempts": self.upload_attempts, "verifiedReadbacks": self.readbacks,
                 "bytesSent": self.bytes_sent, "bytesReceived": self.bytes_received,
-                "unconfirmedWriteOutcome": self._pending is not None,
+                "unconfirmedWriteOutcome": self._pending is not None or (self._intent_store is not None and self._intent_store.has_pending()),
                 "responseMeasurementComplete": self.response_measurement_complete,
                 "bytesReceivedBasis": "measured" if self.response_measurement_complete else "measured_lower_bound",
                 "d1RowsRead": None, "d1RowsWritten": None, "accountRemaining": None,
