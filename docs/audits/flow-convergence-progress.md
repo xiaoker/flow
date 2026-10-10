@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11 exact recovery stage scope
+
+- PR #170 merged `4e1f93348fae16b138aaa08917c3fa56baa8dae2`; main CI `38065767394` passed. No Worker deployment required.
+- Same independent recovery worktree now closes a confirmed local scope gap: injected recovery adapters must receive and validate the approved plan before callbacks or state writes. Only identical stage semantics are accepted; product-domain mappings are not invented.
+- Audit/effects: `2026-10-11-080-recovery-scope*`. Python/tests/docs only; no migration/deploy or production activation. Stop after CI for merge authorization.
+- Full recovery lease/budget/transport integration remains incomplete; ordinary restrictions stay intact. 080-RUNNER remains CODE_IN_PROGRESS. Protected original files unchanged.
+
 ### 2026-10-10 completed publication checkpoint restoration
 
 - PR #169 merged `a9878d47c9a78d55ab9c037ee766598eefc75dbd`; main CI `38064627849` and deploy `38064628262` passed. Exact served build verified; no migrations to apply.
