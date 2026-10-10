@@ -1,0 +1,13 @@
+{
+  "baseSha": "7494d9ce26cba61b4d6426f632cf99bac90f48a2",
+  "scope": "080-RUNNER existing recovery approval and cooperative lease client",
+  "mergeTriggers": ["main CI"],
+  "newMigrations": [],
+  "workerDeployment": false,
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN"
+}
