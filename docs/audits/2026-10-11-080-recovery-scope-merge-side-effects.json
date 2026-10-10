@@ -1,0 +1,13 @@
+{
+  "baseSha": "4e1f93348fae16b138aaa08917c3fa56baa8dae2",
+  "scope": "080-RUNNER fail-closed exact recovery stage scope",
+  "mergeTriggers": ["main CI"],
+  "newMigrations": [],
+  "workerDeployment": false,
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN"
+}

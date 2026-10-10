@@ -378,6 +378,7 @@ def run_pipeline_request(
     resume_references: Mapping[str, str] | None = None,
     export_handoff: bool = False,
     resume_handoff_sha256: str | None = None,
+    approved_recovery_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -403,6 +404,16 @@ def run_pipeline_request(
     stages = _stage_names(payload)
     stage_inputs = _stage_inputs(payload, stages)
     adapter_mode = stage_adapters is not None
+    if adapter_mode and context.mode == "recovery":
+        if approved_recovery_plan is None:
+            raise PipelineRunnerError("recovery_scope_plan_required")
+        from .pipeline_recovery_scope import bind_recovery_runner_scope
+        try:
+            bind_recovery_runner_scope(approved_recovery_plan, context, stages, now=now)
+        except ValueError as exc:
+            raise PipelineRunnerError("recovery_scope_rejected") from exc
+    elif approved_recovery_plan is not None:
+        raise PipelineRunnerError("recovery_scope_plan_without_recovery_adapters")
     if export_handoff and (not export_bundles or checkpoint_transport is None):
         raise PipelineRunnerError("handoff_requires_durable_bundle_export")
     if resume_handoff_sha256 is not None:
