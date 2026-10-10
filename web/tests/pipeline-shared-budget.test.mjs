@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, webcrypto } from "node:crypto";
 import { DIMENSIONS, BUDGET_SCOPE, MAX_RECEIPTS, MAX_RESERVATIONS, MAX_STATE_BYTES, createSharedBudgetState, transitionSharedBudget, sharedBudgetRequest } from "../app/lib/pipeline-shared-budget.ts";
+import { canonicalJson } from "../app/lib/pipeline-recovery-plan.ts";
 globalThis.crypto ??= webcrypto;
 const now = new Date("2026-10-03T02:00:00.000Z");
 const units = ["rows", "rows", "requests", "minutes", "bytes", "operations", "operations"];
@@ -38,6 +39,115 @@ function adapter(sqlite, options = {}) {
 const request = (payload, token = "fixture-key") => new Request("https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 const call = (db, p, opts) => sharedBudgetRequest(request(p), { DB: adapter(db, opts), INGEST_API_KEY: "fixture-key" }, () => now, nums(100));
 function readState(db) { return JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=?").get(BUDGET_SCOPE).state_json); }
+function recoveryFixture(manifest = { runnerBudgetContract: "flow-shared-budget-v1", taskCostUpperBound: vec(80) }) {
+  const db = seed();
+  const plan = { schemaVersion: 1, contractVersion: "recovery-execution-v1", campaignId: "fixture", recoveryId: "fixture-recovery",
+    runKey: key(0), dataDates: ["2026-10-02"], requiredStages: ["core_collection"], artifactRoot: ".recovery/fixture",
+    stateDir: ".recovery/fixture/state", maxDates: 1, maxRequests: 20, deadline: "2026-10-03T03:00:00Z", budgetManifest: manifest };
+  plan.planHash = createHash("sha256").update(canonicalJson(plan)).digest("hex");
+  const bytes = new TextEncoder().encode(canonicalJson(plan) + "\n");
+  const scopeSha256 = createHash("sha256").update(bytes).digest("hex");
+  const objectKey = `market-data/recovery/plans/${plan.recoveryId}-${scopeSha256}.json`;
+  db.exec("CREATE TABLE pipeline_window_recovery (recovery_id TEXT PRIMARY KEY,run_key TEXT,plan_key TEXT,plan_sha256 TEXT,scope_sha256 TEXT,status TEXT,expires_at TEXT)");
+  db.prepare("INSERT INTO pipeline_window_recovery VALUES (?,?,?,?,?,'ACTIVE','2026-10-03T03:00:00Z')").run(plan.recoveryId, plan.runKey, objectKey, plan.planHash, scopeSha256);
+  db.prepare("UPDATE pipeline_window SET recovery_id=? WHERE run_key=? AND lease_owner=?").run(plan.recoveryId, key(0), "owner0");
+  const counts = { head: 0, get: 0 };
+  const bucket = { async head(k) { counts.head++; assert.equal(k, objectKey); return { size: bytes.length, customMetadata: { sha256: scopeSha256 } }; },
+    async get(k) { counts.get++; assert.equal(k, objectKey); return { arrayBuffer: async () => bytes.buffer }; }, async put() { assert.fail("no plan writes"); } };
+  const runtime = { DB: adapter(db), INGEST_API_KEY: "fixture-key", PIPELINE_RECOVERY_ENABLED: "1", RAW_BUCKET: bucket };
+  const p = { ...input(), recoveryId: plan.recoveryId, planSha256: plan.planHash, scopeSha256 };
+  const run = (payload = p, overrides = {}) => sharedBudgetRequest(request(payload), { ...runtime, ...overrides }, () => now, nums(100));
+  return { db, plan, p, runtime, run, counts };
+}
+
+test("recovery uses exact approved plan and the same account CAS, not another quota", async () => {
+  const f = recoveryFixture();
+  assert.equal((await (await f.run()).json()).decision, "allow");
+  assert.equal(f.counts.head, 1); assert.equal(f.counts.get, 1);
+  const id = `recovery/${f.p.recoveryId}/${f.p.planSha256}/${key(0)}/owner0/1`;
+  assert.equal(readState(f.db).reservations[id].cost.d1RowsRead, 70);
+  const replay = await (await f.run()).json(); assert.equal(replay.replayed, true);
+  assert.equal(f.db.prepare("SELECT revision FROM pipeline_budget_account").get().revision, 1);
+  const ordinary = await call(f.db, { ...input(1), vector: vec(40), expectedRevision: 1 });
+  assert.equal((await ordinary.json()).decision, "over_budget");
+  f.db.close();
+});
+
+test("recovery flag, ID/hash/date/expiry and missing approved bound fail closed", async () => {
+  for (const mutate of [{ recoveryId: undefined }, { planSha256: "0".repeat(64) }, { scopeSha256: "0".repeat(64) },
+    { recoveryId: "other" }, { targetDate: "2026-10-03" }, { attemptCount: 2 }, { leaseOwner: "other" }]) {
+    const f = recoveryFixture(); assert.notEqual((await f.run({ ...f.p, ...mutate })).status, 200);
+    assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+  }
+  for (const flag of ["0", undefined]) {
+    const f = recoveryFixture(); assert.equal((await f.run(f.p, { PIPELINE_RECOVERY_ENABLED: flag })).status, 404);
+    assert.equal(f.counts.head, 0); f.db.close();
+  }
+  for (const change of ["status='REVOKED'", "status='PAUSED'", "expires_at='2026-10-03T01:59:00Z'"]) {
+    const f = recoveryFixture(); f.db.prepare(`UPDATE pipeline_window_recovery SET ${change}`).run();
+    assert.equal((await f.run()).status, 409); assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+  }
+  for (const manifest of [{ fixture: true }, "ops-budget/fixture", { runnerBudgetContract: "flow-shared-budget-v1", taskCostUpperBound: { ...vec(80), r2Bytes: { unit: "bytes", value: null, basis: "unknown" } } }]) {
+    const f = recoveryFixture(manifest); assert.notEqual((await f.run()).status, 200);
+    assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+  }
+});
+
+test("revocation between preflight and commit is atomically fenced", async () => {
+  const f = recoveryFixture();
+  const db = adapter(f.db, { before(sql) { if (sql.startsWith("UPDATE pipeline_budget_account")) f.db.prepare("UPDATE pipeline_window_recovery SET status='REVOKED'").run(); } });
+  assert.equal((await f.run(f.p, { DB: db })).status, 409);
+  assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+});
+
+test("takeover cannot multiply the plan budget; settlements retain conservative scope charge", async () => {
+  const f = recoveryFixture();
+  assert.equal((await (await f.run()).json()).decision, "allow");
+  const settle = { ...f.p, operation: "settle", operationId: "b".repeat(64), expectedRevision: 1, outcome: "SUCCEEDED", vector: vec(10, true) };
+  assert.equal((await (await f.run(settle)).json()).decision, "settled");
+  f.db.prepare("UPDATE pipeline_window SET lease_owner='next',attempt_count=2 WHERE run_key=? AND lease_owner='owner0'").run(key(0));
+  const next = { ...f.p, leaseOwner: "next", attemptCount: 2, operationId: "c".repeat(64), expectedRevision: 2, vector: vec(20) };
+  assert.equal((await f.run(next)).status, 409);
+  assert.equal(Object.keys(readState(f.db).reservations).length, 1); f.db.close();
+});
+
+test("invalid immutable plan and UNKNOWN account never grant recovery allowance", async () => {
+  const f = recoveryFixture();
+  const corrupted = { ...f.runtime.RAW_BUCKET, async get() { return { arrayBuffer: async () => new TextEncoder().encode("{}").buffer }; } };
+  assert.equal((await f.run(f.p, { RAW_BUCKET: corrupted })).status, 409);
+  const s = readState(f.db); s.evidence.r2Bytes = { value: null, unit: "bytes", basis: "unknown" };
+  f.db.prepare("UPDATE pipeline_budget_account SET state_json=?").run(JSON.stringify(s));
+  assert.equal((await (await f.run()).json()).decision, "unknown_metrics");
+  assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+});
+
+test("recovery and ordinary contenders cannot oversell the shared account", async () => {
+  const f = recoveryFixture();
+  const responses = await Promise.all([f.run(), ...Array.from({ length: 19 }, (_, i) => call(f.db, input(i + 1)))]);
+  const results = await Promise.all(responses.map(r => r.json()));
+  assert.equal(results.filter(r => r.decision === "allow").length, 1);
+  assert.equal(Object.keys(readState(f.db).reservations).length, 1);
+  assert.equal(f.db.prepare("SELECT revision FROM pipeline_budget_account").get().revision, 1);
+  f.db.close();
+});
+
+test("recovery approval query uses its primary key and plan expiry cannot be extended by lease", async () => {
+  const f = recoveryFixture();
+  const explanation = f.db.prepare("EXPLAIN QUERY PLAN SELECT plan_key FROM pipeline_window_recovery WHERE recovery_id=? AND run_key=? AND plan_sha256=? AND scope_sha256=? LIMIT 1")
+    .all(f.p.recoveryId, f.p.runKey, f.p.planSha256, f.p.scopeSha256);
+  assert.match(explanation[0].detail, /INDEX/);
+  // The immutable plan is expired although both database expiries are valid.
+  const expired = structuredClone(f.plan); delete expired.planHash; expired.deadline = "2026-10-03T01:59:00Z";
+  expired.planHash = createHash("sha256").update(canonicalJson(expired)).digest("hex");
+  const bytes = new TextEncoder().encode(canonicalJson(expired) + "\n");
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  const objectKey = `market-data/recovery/plans/${expired.recoveryId}-${sha}.json`;
+  f.db.prepare("UPDATE pipeline_window_recovery SET plan_key=?,plan_sha256=?,scope_sha256=?").run(objectKey, expired.planHash, sha);
+  const bucket = { async head() { return { size: bytes.length, customMetadata: { sha256: sha } }; },
+    async get() { return { arrayBuffer: async () => bytes.buffer }; }, async put() { assert.fail(); } };
+  assert.equal((await f.run({ ...f.p, planSha256: expired.planHash, scopeSha256: sha }, { RAW_BUCKET: bucket })).status, 409);
+  assert.deepEqual(readState(f.db).reservations, {}); f.db.close();
+});
 test("additive migration, metadata and indexed bounded queries", () => {
   const db = seed();
   const sql = readFileSync(new URL("../drizzle/0015_shared_budget_account.sql", import.meta.url), "utf8");

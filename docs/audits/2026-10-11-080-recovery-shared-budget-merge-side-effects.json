@@ -1,0 +1,15 @@
+{
+  "baseSha": "dac896b2fc69f6065ba0be707c5c92a7aee15f6b",
+  "scope": "080-RUNNER recovery scope in existing shared account budget",
+  "mergeTriggers": ["main CI", "Deploy Flow Worker"],
+  "newMigrations": [],
+  "remotePendingMigrations": "UNKNOWN",
+  "automaticMigrationCommand": "npx wrangler d1 migrations apply flow --remote",
+  "workerDeployment": true,
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN"
+}

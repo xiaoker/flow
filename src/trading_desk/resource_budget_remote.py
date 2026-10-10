@@ -197,3 +197,51 @@ class SharedBudgetLedger(BudgetLedger):
 
     def expire(self, **kwargs: Any):
         raise ValueError("shared_budget_expiry_is_server_authoritative")
+
+
+class RecoverySharedBudgetLedger(SharedBudgetLedger):
+    """Same account ledger; exact approved recovery scope, never a new quota."""
+
+    def __init__(self, *, approved_plan, context, stages, now=None, **kwargs):
+        from .pipeline_recovery_scope import bind_recovery_runner_scope
+        from .recovery_execution import plan_bytes, validate_recovery_plan
+        bind_recovery_runner_scope(approved_plan, context, stages, now=now)
+        scope = validate_recovery_plan(approved_plan)
+        manifest = scope.budget_manifest
+        if not isinstance(manifest, dict) or manifest.get("runnerBudgetContract") != "flow-shared-budget-v1":
+            raise ValueError("budget_recovery_upper_bound_required")
+        upper = manifest.get("taskCostUpperBound")
+        if not isinstance(upper, dict) or len(upper) != 7:
+            raise ValueError("budget_recovery_upper_bound_required")
+        self._approved_upper = BudgetVector.from_mapping(upper)
+        if not self._approved_upper.all_known():
+            raise ValueError("budget_recovery_upper_bound_unknown")
+        super().__init__(**kwargs)
+        self.validate_execution_identity(run_key=context.identity.run_key, lease_owner=context.lease_owner,
+            attempt_count=context.lease_attempt_count, target_date=context.identity.target_date, task_id=self.task_id)
+        self._recovery_binding = {"recoveryId": scope.recovery_id, "planSha256": scope.plan_hash,
+                                  "scopeSha256": plan_bytes(approved_plan)[1]}
+        self._identity.update(self._recovery_binding)
+        self.task_id = f"recovery/{scope.recovery_id}/{scope.plan_hash}/{self.task_id}"
+        self._maximum = min(self._maximum, scope.max_requests)
+
+    def validate_execution_identity(self, *, run_key, lease_owner, attempt_count,
+                                    target_date, task_id, recovery_id=None, recovery_plan_sha256=None):
+        if not hasattr(self, "_recovery_binding"):
+            return super().validate_execution_identity(run_key=run_key, lease_owner=lease_owner,
+                attempt_count=attempt_count, target_date=target_date, task_id=task_id)
+        if (recovery_id != self._recovery_binding["recoveryId"]
+                or recovery_plan_sha256 != self._recovery_binding["planSha256"]
+                or task_id != self.task_id or type(attempt_count) is not int
+                or self._identity != {"runKey": run_key, "leaseOwner": lease_owner,
+                    "attemptCount": attempt_count, "targetDate": target_date, **self._recovery_binding}):
+            raise ValueError("shared_budget_execution_identity_mismatch")
+
+    def reserve(self, task_id, task_cost):
+        if (not task_cost.all_known() or any(task_cost.metrics[d].value > self._approved_upper.metrics[d].value
+                                           for d in self._approved_upper.metrics)):
+            raise ValueError("budget_recovery_scope_over_budget")
+        return super().reserve(task_id, task_cost)
+
+    def accounting_evidence(self):
+        return {**super().accounting_evidence(), **self._recovery_binding}

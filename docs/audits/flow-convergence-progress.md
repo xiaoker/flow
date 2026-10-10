@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11 recovery shared-account budget
+
+- PR #172 merged `dac896b2fc69f6065ba0be707c5c92a7aee15f6b`; main CI `38067224021` passed; no deployment required for that Python-only PR.
+- Fresh `codex/080-recovery-budget-20261011` implements one end-to-end client/server budget scope: existing ACTIVE recovery approval, immutable inline upper bound, atomic lease/approval CAS and cumulative attempt envelopes in the same account ledger.
+- Audit/effects: `2026-10-11-080-recovery-shared-budget*`. No new migration, but web merge automatically deploys Worker and applies pending migrations (remote pending UNKNOWN). Stop after CI for combined merge/deploy/migration authorization.
+- No production caller, flag, collection or active pointer changed. Actual account usage UNKNOWN. Recovery artifact authority, domain mapping, trusted caller, resource lifecycle and real canary remain; 080-RUNNER CODE_IN_PROGRESS. Protected original files untouched.
+
 ### 2026-10-11 recovery approval and lease client
 
 - PR #171 merged `7494d9ce26cba61b4d6426f632cf99bac90f48a2`; main CI `38066630282` passed. No deployment required.
