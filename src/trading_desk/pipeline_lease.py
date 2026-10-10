@@ -96,14 +96,17 @@ class OrdinaryPipelineLease:
     def _verify(self, context: PipelineExecutionContext) -> bool:
         if self._context is not None:
             self._fail("pipeline_lease_guard_already_used")
-        if context.mode != "ordinary" or context.recovery_id is not None:
-            self._fail("pipeline_lease_recovery_requires_existing_recovery_guard")
+        self._validate_context(context)
         if context.lease_attempt_count != self._attempt:
             self._fail("pipeline_lease_attempt_mismatch")
         self._context = context
         self._started = self._monotonic()
         self._request(renew=False)
         return True
+
+    def _validate_context(self, context: PipelineExecutionContext) -> None:
+        if context.mode != "ordinary" or context.recovery_id is not None:
+            self._fail("pipeline_lease_recovery_requires_existing_recovery_guard")
 
     def check(self) -> None:
         with self._lock:

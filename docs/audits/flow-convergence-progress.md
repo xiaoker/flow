@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11 recovery approval and lease client
+
+- PR #171 merged `7494d9ce26cba61b4d6426f632cf99bac90f48a2`; main CI `38066630282` passed. No deployment required.
+- Fresh independent `codex/080-recovery-lease-20261011` validates exact canonical approved scope, ACTIVE live approval and current recovery owner/attempt/date; renewals require fresh full approval reads. Shared lifecycle; no new lock or API.
+- Audit/effects: `2026-10-11-080-recovery-lease*`. Python/tests/docs only; no migration/deploy, collection or production activation. Stop after hosted CI for merge authorization.
+- Recovery-aware budget and artifact authority, domain mappings, trusted caller and real canary remain incomplete. 080-RUNNER remains CODE_IN_PROGRESS. Original protected paths untouched.
+
 ### 2026-10-11 exact recovery stage scope
 
 - PR #170 merged `4e1f93348fae16b138aaa08917c3fa56baa8dae2`; main CI `38065767394` passed. No Worker deployment required.
