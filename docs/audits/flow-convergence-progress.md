@@ -7,6 +7,13 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-10 completed publication checkpoint restoration
+
+- PR #169 merged `a9878d47c9a78d55ab9c037ee766598eefc75dbd`; main CI `38064627849` and deploy `38064628262` passed. Exact served build verified; no migrations to apply.
+- Independent branch `codex/080-publication-resume-20261010` adds explicit candidate-only reconstruction of current-owner local ACK records after all exact STAGED reads succeed. No upload permission is copied and pending writes are not erased.
+- Audit/effects: `2026-10-10-080-publication-resume*`. Python/tests/docs only; no Worker deployment, migration or production registration. Stop after CI for merge authorization.
+- Remaining recovery integration, trusted production channel, actual budget/lifecycle and canary/rollback. 080-RUNNER remains CODE_IN_PROGRESS. Original protected paths unchanged.
+
 ### 2026-10-05 exact checkpoint handoff
 
 - PR #168 merged `814b0be96240b7497f6aa6e05be10e0dab8da917`; main CI `37216493324` and deploy `37216493673` succeeded, exact production build confirmed on attempt 2, no migrations to apply.

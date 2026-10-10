@@ -100,6 +100,68 @@ def test_exact_stage_publication_and_resume_only_reads(tmp_path):
     assert sum(method == "POST" and url.endswith("read-model-import") for method, url in remote.calls) == writes
 
 
+def completed_new_host(tmp_path):
+    adapter, params, remote = fixture(tmp_path)
+    result = adapter.run(**params)
+    context = replace(params["context"], lease_owner="next-owner", lease_attempt_count=2)
+    manifest = json.loads((adapter.source_dir / "build/manifest.json").read_bytes())
+    store = PublicationIntentStore.initialize(tmp_path / "next-host.sqlite",
+        execution=CandidatePublicationTransport.execution(context), release_id=manifest["releaseId"],
+        manifest_sha256=manifest["manifestSha256"])
+    ledger = SharedBudgetLedger(base_url="https://flow.xiaoker.com", ingest_key="fixture-key",
+        access_client_id="fixture-id", access_client_secret="fixture-secret", lease_guard=Guard(), session=remote,
+        run_key=context.identity.run_key, lease_owner=context.lease_owner,
+        attempt_count=context.lease_attempt_count, target_date=context.identity.target_date)
+    adapter = replace(adapter, execution_context=context, restore_completed_intents=True,
+        transport=client(remote, intent_store=store, budget_ledger=ledger, budget_task_id=ledger.task_id))
+    checkpoint = {"identity": context.identity.as_dict(), "stage": "publish", "status": "COMPLETED",
+        "inputSha256": params["input_sha256"], "outputSha256": result["outputSha256"]}
+    remote.calls.clear()
+    return adapter, params, remote, context, checkpoint
+
+
+def test_completed_checkpoint_new_owner_restores_only_from_staged_reads(tmp_path):
+    adapter, params, remote, context, checkpoint = completed_new_host(tmp_path)
+    assert adapter.verify_checkpoint(context=context, checkpoint=checkpoint, workspace=params["workspace"])
+    assert len(remote.upload_names) == 7
+    assert not any(method == "POST" and url.endswith("read-model-import") for method, url in remote.calls)
+    manifest, sources = adapter._sources(context, params["config"], params["input_sha256"])
+    assert all(adapter.transport.require_durable_intent(body)["status"] == "ACKNOWLEDGED" for _, body in sources)
+    assert not adapter.transport._intent_store.has_pending()
+
+
+@pytest.mark.parametrize("fault", ["corrupt", "missing", "budget", "disabled", "checkpoint"])
+def test_completed_handoff_does_not_invent_acknowledgements(tmp_path, fault):
+    adapter, params, remote, context, checkpoint = completed_new_host(tmp_path)
+    if fault == "corrupt":
+        remote.corrupt = True
+    elif fault == "missing":
+        remote.manifest = None
+    elif fault == "budget":
+        remote.deny = True
+    elif fault == "disabled":
+        adapter = replace(adapter, restore_completed_intents=False)
+    else:
+        checkpoint["outputSha256"] = "0" * 64
+    try:
+        assert not adapter.verify_checkpoint(context=context, checkpoint=checkpoint, workspace=params["workspace"])
+    except PipelineRunnerError:
+        pass
+    _, sources = adapter._sources(context, params["config"], params["input_sha256"])
+    assert all(adapter.transport.require_durable_intent(body) is None for _, body in sources)
+    assert len(remote.upload_names) == 7
+
+
+def test_pending_current_host_intent_cannot_be_blessed_by_checkpoint(tmp_path):
+    adapter, params, remote, context, checkpoint = completed_new_host(tmp_path)
+    _, sources = adapter._sources(context, params["config"], params["input_sha256"])
+    body = sources[0][1]
+    adapter.transport._intent_store.begin(adapter.transport._reference(body))
+    assert not adapter.verify_checkpoint(context=context, checkpoint=checkpoint, workspace=params["workspace"])
+    assert not remote.calls
+    assert adapter.transport._intent_store.has_pending()
+
+
 @pytest.mark.parametrize("fault", ["artifact", "config", "owner", "local_budget", "no_intent"])
 def test_invalid_input_has_no_remote_effect(tmp_path, fault):
     adapter, params, remote = fixture(tmp_path)

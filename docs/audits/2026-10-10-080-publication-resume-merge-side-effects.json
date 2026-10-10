@@ -1,0 +1,15 @@
+{
+  "baseSha": "a9878d47c9a78d55ab9c037ee766598eefc75dbd",
+  "scope": "080-RUNNER completed publication checkpoint current-owner intent restoration",
+  "mergeTriggers": ["main CI"],
+  "newMigrations": [],
+  "workerDeployment": false,
+  "productionCallerChanged": false,
+  "productionReadPathChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN",
+  "authorizationRequired": "merge; PR and main CI consume Actions minutes"
+}
