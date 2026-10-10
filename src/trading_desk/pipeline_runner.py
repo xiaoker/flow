@@ -30,6 +30,7 @@ from .pipeline_application import (
     execute_application_plan,
 )
 from .pipeline_checkpoint_bundle import build_stage_bundle, restore_stage_bundle, verify_stage_bundle
+from .pipeline_checkpoint_handoff import build_checkpoint_handoff, handoff_input_sha256, verify_checkpoint_handoff
 
 
 EXECUTOR_SCHEMA_VERSION = 1
@@ -375,6 +376,8 @@ def run_pipeline_request(
     export_bundles: bool = False,
     checkpoint_transport: Any | None = None,
     resume_references: Mapping[str, str] | None = None,
+    export_handoff: bool = False,
+    resume_handoff_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -400,12 +403,18 @@ def run_pipeline_request(
     stages = _stage_names(payload)
     stage_inputs = _stage_inputs(payload, stages)
     adapter_mode = stage_adapters is not None
+    if export_handoff and (not export_bundles or checkpoint_transport is None):
+        raise PipelineRunnerError("handoff_requires_durable_bundle_export")
+    if resume_handoff_sha256 is not None:
+        _sha(resume_handoff_sha256, "handoff_sha256")
+        if checkpoint_transport is None or resume_references is not None or resume_bundles is not None:
+            raise PipelineRunnerError("ambiguous_or_missing_handoff_transport")
     if (resume_bundles is not None or export_bundles or checkpoint_transport is not None or resume_references is not None) and (not adapter_mode or lease_guard is None):
         raise PipelineRunnerError("bundle_operations_require_adapter_and_lease_guard")
     if resume_references is not None and (checkpoint_transport is None or resume_bundles is not None
         or not isinstance(resume_references, Mapping) or set(resume_references) - set(stages)):
         raise PipelineRunnerError("invalid_durable_resume_references")
-    if checkpoint_transport is not None and not (export_bundles or resume_references is not None):
+    if checkpoint_transport is not None and not (export_bundles or resume_references is not None or resume_handoff_sha256 is not None):
         raise PipelineRunnerError("checkpoint_transport_operation_required")
     if resume_bundles is not None and (not isinstance(resume_bundles, Mapping) or set(resume_bundles) - set(stages)):
         raise PipelineRunnerError("invalid_resume_bundle_stage_set")
@@ -463,6 +472,21 @@ def run_pipeline_request(
     checkpoints_path = state_dir / "checkpoints.json"
     existing = _load_checkpoints(checkpoints_path)
     bundle_descriptors: dict[str, Any] = {}
+    handoff_descriptor = None
+    handoff_sizes = {}
+    if resume_handoff_sha256 is not None:
+        if existing:
+            raise PipelineRunnerError("resume_bundle_local_state_conflict")
+        plan_digest = handoff_input_sha256(context, stages, stage_inputs)
+        data = checkpoint_transport.download(context=context, stage="handoff",
+            input_sha256=plan_digest, sha256=resume_handoff_sha256)
+        try:
+            references = verify_checkpoint_handoff(data, sha256=resume_handoff_sha256,
+                context=context, input_sha256=plan_digest)
+            resume_references = {stage: ref["sha256"] for stage, ref in references.items()}
+            handoff_sizes = {stage: ref["bytes"] for stage, ref in references.items()}
+        except ValueError as exc:
+            raise PipelineRunnerError("resume_handoff_invalid") from exc
     if resume_references:
         if existing:
             raise PipelineRunnerError("resume_bundle_local_state_conflict")
@@ -471,6 +495,8 @@ def run_pipeline_request(
             _sha(digest, "durable_bundle_sha256")
             data = checkpoint_transport.download(context=context, stage=stage,
                 input_sha256=stage_inputs[stage], sha256=digest)
+            if stage in handoff_sizes and len(data) != handoff_sizes[stage]:
+                raise PipelineRunnerError("resume_handoff_bundle_size_mismatch")
             resume_bundles[stage] = (data, digest)
     if resume_bundles:
         if existing:
@@ -595,6 +621,7 @@ def run_pipeline_request(
         )
 
     def persist_progress(checkpoints: Sequence[Mapping[str, Any]]) -> None:
+        nonlocal handoff_descriptor
         if lease_guard is not None:
             lease_guard.confirm()
         if export_bundles:
@@ -637,6 +664,12 @@ def run_pipeline_request(
                         input_sha256=stage_inputs[stage], data=data, sha256=digest)
                     bundle_descriptors[stage]["remote"] = descriptor
             lease_guard.confirm()
+            if export_handoff and bundle_descriptors:
+                data, digest = build_checkpoint_handoff(context, stages, stage_inputs, bundle_descriptors)
+                if handoff_descriptor is None or handoff_descriptor["sha256"] != digest:
+                    handoff_descriptor = checkpoint_transport.upload(context=context, stage="handoff",
+                        input_sha256=handoff_input_sha256(context, stages, stage_inputs), data=data, sha256=digest)
+                    _write_json_atomic(state_dir / "handoff.json", handoff_descriptor)
         _write_json_atomic(
             checkpoints_path,
             {
@@ -688,6 +721,8 @@ def run_pipeline_request(
         report["checkpointBundles"] = {"exports": bundle_descriptors, "restoredStages": sorted(resume_bundles or {}),
                                        "durableTransport": "in_process_candidate" if checkpoint_transport is not None else "not_connected"}
     if checkpoint_transport is not None:
+        if handoff_descriptor is not None:
+            report["checkpointHandoff"] = handoff_descriptor
         report["checkpointTransportEvidence"] = checkpoint_transport.evidence()
         report["sideEffects"]["remoteWrites"] |= checkpoint_transport.upload_attempts > 0
     _write_json_atomic(output_path, report)

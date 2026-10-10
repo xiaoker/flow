@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .http import HttpSettings, build_session
 from .bounded_http import BoundedHTTPExchange, BoundedHTTPError
 from .pipeline_checkpoint_bundle import verify_stage_bundle
+from .pipeline_checkpoint_handoff import verify_checkpoint_handoff
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
 from .resource_budget_remote import SharedBudgetLedger
@@ -143,7 +144,7 @@ class CheckpointObjectTransport:
         if status != 200 or headers.get("X-Flow-Checkpoint-Sha256") != sha256 or headers.get("X-Flow-Checkpoint-Key") != self.key(context, stage, input_sha256, sha256):
             raise PipelineRunnerError("checkpoint_transport_read_rejected")
         try:
-            verify_stage_bundle(content, sha256=sha256, identity=context.identity, stage=stage, input_sha256=input_sha256)
+            self._verify_object(content, sha256, context, stage, input_sha256)
         except ValueError:
             raise PipelineRunnerError("checkpoint_transport_bundle_invalid") from None
         self._guard.confirm()
@@ -163,7 +164,7 @@ class CheckpointObjectTransport:
         params = self._params(context, stage, input_sha256, sha256)
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_OBJECT_BYTES:
             raise PipelineRunnerError("checkpoint_transport_object_limit")
-        verify_stage_bundle(data, sha256=sha256, identity=context.identity, stage=stage, input_sha256=input_sha256)
+        self._verify_object(data, sha256, context, stage, input_sha256)
         try:
             status, content, _ = self._request("POST", params, data)
         except PipelineRunnerError as exc:
@@ -188,6 +189,13 @@ class CheckpointObjectTransport:
         self.unconfirmed_write_outcome = False
         self._pending_upload = None
         return {"key": expected_key, "sha256": sha256, "bytes": len(data)}
+
+    @staticmethod
+    def _verify_object(data, digest, context, stage, input_sha256):
+        if stage == "handoff":
+            return verify_checkpoint_handoff(data, sha256=digest, context=context, input_sha256=input_sha256)
+        return verify_stage_bundle(data, sha256=digest, identity=context.identity,
+                                  stage=stage, input_sha256=input_sha256)
 
     def evidence(self) -> dict:
         shared = isinstance(self._budget_ledger, SharedBudgetLedger)

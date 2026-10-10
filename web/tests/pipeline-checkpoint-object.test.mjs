@@ -57,6 +57,17 @@ test("immutable put and exact get reuse existing authority with no D1 writes or 
   assert.deepEqual(new Uint8Array(await get.arrayBuffer()), bytes);
 });
 
+test("handoff uses exact immutable namespace and a smaller bounded body", async () => {
+  const f = fixture(); f.query.set("stage", "handoff");
+  const put = await checkpointObjectRequest(f.request(), f.runtime, now);
+  assert.equal(put.status, 200);
+  assert.match((await put.json()).key, /\/handoff\//);
+  assert.equal((await checkpointObjectRequest(f.request("GET"), f.runtime, now)).status, 200);
+  const before = f.calls.filter((call) => call === "r2-put").length;
+  assert.equal((await checkpointObjectRequest(f.request("POST", new Uint8Array(16385)), f.runtime, now)).status, 413);
+  assert.equal(f.calls.filter((call) => call === "r2-put").length, before);
+});
+
 test("auth and malformed references reject before any storage operation", async () => {
   const f = fixture();
   assert.equal((await checkpointObjectRequest(f.request("POST", bytes, false), f.runtime, now)).status, 401);
