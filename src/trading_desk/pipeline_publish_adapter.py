@@ -20,6 +20,7 @@ class CoreCandidatePublishAdapter:
     source_dir: Path
     transport: CandidatePublicationTransport
     execution_context: object
+    restore_completed_intents: bool = False
     allowed_side_effects: tuple[str, ...] = (
         "filesystem:isolated_stage_workspace", "candidate_publication_requests")
 
@@ -129,6 +130,26 @@ class CoreCandidatePublishAdapter:
         if receipt.get("stageResult") != result or checkpoint.get("outputSha256") != result["outputSha256"]:
             return False
         self.transport.require_request_capacity(len(sources))
+        if self.restore_completed_intents:
+            # A completed checkpoint is a locator, never an upload permission.
+            # Rebuild only current-owner local acknowledgements from fresh,
+            # exact STAGED reads. Validate every local record before any I/O,
+            # then every remote artifact before persisting the first record.
+            missing = []
+            for source, body in sources:
+                recorded = self.transport.require_durable_intent(body)
+                if recorded is None:
+                    missing.append(body)
+                elif recorded["status"] != "ACKNOWLEDGED" or recorded["receipt"] != self.transport._receipt(body):
+                    return False
+            for source, _body in sources:
+                self.transport.verify_staged_artifact(**source)
+            for body in missing:
+                self.transport._guard.confirm()
+                reference = self.transport._reference(body)
+                self.transport._intent_store.begin(reference)
+                self.transport._intent_store.acknowledge(reference, self.transport._receipt(body))
+            return True
         for source, body in sources:
             recorded = self.transport.require_durable_intent(body)
             if recorded is None or recorded["status"] != "ACKNOWLEDGED" or recorded["receipt"] != self.transport._receipt(body):
