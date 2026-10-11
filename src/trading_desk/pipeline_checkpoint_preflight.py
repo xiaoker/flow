@@ -15,12 +15,59 @@ from .pipeline_checkpoint_lifecycle import checkpoint_lifecycle_preflight
 from .resource_budget import BudgetVector, ResourceLimits, evaluate_budget
 
 
+def recovery_control_preflight(*, checkpoint_requests: int | None,
+    ledger_operations: int | None, runner_confirmations: int | None,
+    renewal_upper_bound: int | None, lease_request_limit: int = 32,
+    approved_request_limit: int = 32) -> dict[str, Any]:
+    """Pure request envelope for existing recovery guard/ledger/checkpoints.
+
+    Counts include bounded retries/readbacks. This checks a declared envelope,
+    not that a caller supplied all execution branches. Provider row counts and
+    account capacity cannot be inferred from HTTP request counts.
+    """
+    components = dict(checkpointRequests=checkpoint_requests,
+        ledgerOperations=ledger_operations, runnerConfirmations=runner_confirmations,
+        renewalUpperBound=renewal_upper_bound)
+    for count in components.values():
+        if count is not None and (type(count) is not int or not 0 <= count <= 10_000):
+            raise ValueError("recovery_request_count_invalid")
+    if (type(lease_request_limit) is not int or not 1 <= lease_request_limit <= 32
+            or type(approved_request_limit) is not int or not 1 <= approved_request_limit <= 10_000):
+        raise ValueError("recovery_request_limit_invalid")
+    limit = min(lease_request_limit, approved_request_limit)
+    unknown = sorted(name for name, count in components.items() if count is None)
+    lease = worker = None
+    blockers = []
+    if unknown:
+        blockers.append("recovery_control_counts_unknown")
+    else:
+        # Each checkpoint operation: ledger GET + POST, each confirmed before
+        # and after (4 confirms), plus transport before/after (2 confirms).
+        # Recovery confirm fetches approval + current row (2 HTTP requests).
+        # Standalone ledger transitions use the same two-request CAS protocol.
+        # Each possible renewal adds at most 3 requests conservatively, rather
+        # than subtracting a replaced confirmation from the estimate.
+        lease = (2 + 12 * checkpoint_requests + 8 * ledger_operations
+                 + 2 * runner_confirmations + 3 * renewal_upper_bound)
+        worker = lease + 3 * checkpoint_requests + 2 * ledger_operations
+        if lease > limit:
+            blockers.append("recovery_lease_request_envelope_exceeded")
+    return {"schemaVersion": 1, "kind": "offline_recovery_control_preflight",
+        "status": "BLOCKED" if blockers else "DECLARED_ENVELOPE_CHECKED",
+        "components": components, "unknownComponents": unknown,
+        "leaseRequestsUpperBound": lease, "workerRequestsUpperBound": worker,
+        "effectiveLeaseRequestLimit": limit, "blockers": blockers,
+        "basis": "estimated_declared_envelope", "liveExecutionAllowed": False,
+        "providerRows": "UNKNOWN", "accountRemaining": "UNKNOWN"}
+
+
 def pipeline_task_preflight(
     *, identity: ApplicationIdentity, stages: list[str], stage_inputs: dict[str, str],
     bundles: dict[str, tuple[bytes, str]], stage_costs: dict[str, BudgetVector],
     overhead_costs: dict[str, BudgetVector], limits: ResourceLimits,
     measured: BudgetVector, reserved: BudgetVector, now: datetime,
     measurement_ttl_seconds: int, lifecycle_evidence: dict[str, Any] | None = None,
+    recovery_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate one declared plan, never reserve resources or authorize a run.
 
@@ -87,6 +134,16 @@ def pipeline_task_preflight(
         if checkpoint_cost.metrics[name].value is not None and checkpoint_cost.metrics[name].value < floor)
     if understated:
         blockers.append("checkpoint_cost_below_aggregate_transport_floor")
+    control = None
+    if recovery_control is not None:
+        control = recovery_control_preflight(**recovery_control)
+        blockers.extend(control["blockers"])
+        worker_floor = control["workerRequestsUpperBound"]
+        control_cost = overhead_costs.get("lease_control", BudgetVector.unknown()).add(
+            checkpoint_cost, scope="recovery_control")
+        worker_cost = control_cost.metrics["workerRequests"].value
+        if worker_floor is not None and worker_cost is not None and worker_cost < worker_floor:
+            blockers.append("recovery_control_worker_cost_understated")
     return {"schemaVersion": 1, "kind": "offline_pipeline_task_preflight",
         "status": "BLOCKED" if blockers else "LOCAL_INPUTS_CHECKED",
         "plan": plan, "artifacts": artifacts,
@@ -98,6 +155,7 @@ def pipeline_task_preflight(
         "missingOverheadCosts": missing_overhead, "budget": budget,
         "transportCostFloors": floors, "understatedDimensions": understated,
         "lifecycle": lifecycle, "blockers": sorted(set(blockers)),
+        "recoveryControl": control,
         "liveExecutionAllowed": False, "resourceReservationPerformed": False,
         "sideEffects": {"remoteReads": False, "remoteWrites": False, "filesystemWrites": False},
         "remainingRequirements": ["complete_bounded_retry_and_lease_cost_proof",
