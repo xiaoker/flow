@@ -263,7 +263,8 @@ export async function POST(request: Request) {
 
   try {
     const authority = Object.hasOwn(value, "pipelineExecution")
-      ? candidateUploadAuthority(runtime.DB, parseCandidateExecution(value.pipelineExecution, value.manifest, value.activationMode))
+      ? candidateUploadAuthority(runtime.DB, parseCandidateExecution(value.pipelineExecution, value.manifest, value.activationMode),
+        () => new Date(), { bucket: runtime.RAW_BUCKET, enabled: runtime.PIPELINE_RECOVERY_ENABLED })
       : null;
     let exactManifestJson: string | undefined;
     if (Object.hasOwn(value, "candidateManifestJson")) {

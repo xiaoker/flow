@@ -11,6 +11,8 @@ import hashlib
 import json
 import threading
 import time
+import copy
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,7 +22,10 @@ from .pipeline_publication import build_candidate_upload_body
 from .pipeline_publication_intent import PublicationIntentStore
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
-from .resource_budget_remote import SharedBudgetLedger
+from .resource_budget_remote import SharedBudgetLedger, RecoverySharedBudgetLedger
+from .pipeline_recovery_lease import RecoveryPipelineLease
+from .pipeline_recovery_scope import bind_recovery_runner_scope
+from .recovery_execution import plan_bytes, validate_recovery_plan
 
 MAX_REQUEST_SECONDS = 20
 MAX_RESPONSE_BYTES = 1_500_000
@@ -73,7 +78,9 @@ class CandidatePublicationTransport:
         if isinstance(self._ledger, SharedBudgetLedger):
             try:
                 self._ledger.validate_execution_identity(run_key=execution["runKey"], lease_owner=execution["leaseOwner"],
-                    attempt_count=execution["attemptCount"], target_date=execution["targetDate"], task_id=self._task)
+                    attempt_count=execution["attemptCount"], target_date=execution["targetDate"], task_id=self._task,
+                    **({"recovery_id": execution["recoveryId"], "recovery_plan_sha256": execution["planSha256"]}
+                       if "recoveryId" in execution else {}))
             except (ValueError, KeyError):
                 raise PipelineRunnerError("candidate_shared_budget_identity_mismatch") from None
         # Floors are endpoint operations, NOT provider measurements. The caller
@@ -92,6 +99,9 @@ class CandidatePublicationTransport:
                 floors["r2ClassA"] += 1
                 floors["d1RowsRead"] += 2
                 floors["r2Bytes"] += 4096
+        if "recoveryId" in execution:
+            floors["d1RowsRead"] += 12
+            floors["r2ClassB"] += 2
         if any(cost.metrics[key].value < minimum for key, minimum in floors.items()):
             raise PipelineRunnerError("candidate_resource_cost_understated")
         try:
@@ -289,3 +299,35 @@ class CandidatePublicationTransport:
                 "resourceAllowance": "server_authoritative_shared" if shared else "in_process_reference",
                 "sharedAuthorizations": self._shared_authorizations,
                 "budgetControlPlane": self._ledger.accounting_evidence() if shared else None}
+
+
+class RecoveryCandidatePublicationTransport(CandidatePublicationTransport):
+    """Approved publish-stage candidate only; never registers approval or activates."""
+    def __init__(self, *, approved_plan, now=None, **kwargs):
+        if not isinstance(kwargs.get("lease_guard"), RecoveryPipelineLease):
+            raise PipelineRunnerError("candidate_recovery_guard_required")
+        if not isinstance(kwargs.get("budget_ledger"), RecoverySharedBudgetLedger):
+            raise PipelineRunnerError("candidate_recovery_shared_budget_required")
+        self._plan = copy.deepcopy(approved_plan)
+        scope = validate_recovery_plan(self._plan)
+        self._scope_sha = plan_bytes(self._plan)[1]
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        super().__init__(**kwargs)
+        self._maximum = min(self._maximum, scope.max_requests)
+
+    def execution(self, context):
+        try:
+            bind_recovery_runner_scope(self._plan, context, ("publish",), now=self._now())
+        except ValueError:
+            raise PipelineRunnerError("candidate_recovery_scope_rejected") from None
+        if context.lease_attempt_count is None:
+            raise PipelineRunnerError("candidate_recovery_attempt_required")
+        return {"runKey": context.identity.run_key, "targetDate": context.identity.target_date,
+                "producerBuildSha": context.identity.producer_build_sha,
+                "leaseOwner": context.lease_owner, "attemptCount": context.lease_attempt_count,
+                "recoveryId": context.recovery_id, "planSha256": context.recovery_plan_sha256,
+                "scopeSha256": self._scope_sha}
+
+    def evidence(self):
+        return {**super().evidence(), "recoveryId": self._plan["recoveryId"],
+                "planSha256": self._plan["planHash"], "scopeSha256": self._scope_sha}
