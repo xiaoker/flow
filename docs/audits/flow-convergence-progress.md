@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11 approved recovery checkpoint authority
+
+- PR #173 merged `5f4da7e72e760b27ff8cbd773791a71ff9e6fe40`; main CI `38103045143` and deploy `38103045444` passed. Exact served build verified, no migrations to apply; Worker `de48c1cd-8b44-4cda-875a-600bec160c54`.
+- Fresh `codex/080-recovery-artifact-20261011` implements one opt-in recovery checkpoint contract through the existing endpoint. Exact immutable approval, owner/attempt/date, joint lease/approval SQL and same shared budget; ordinary behavior preserved. Only proven core_collection/publish stage mappings permitted; no generic handoff/domain mapping invented.
+- Audit/effects: `2026-10-11-080-recovery-checkpoint*`. No new migration; web merge triggers Worker deploy and pending migration apply (current pending UNKNOWN). Stop after final CI for combined merge/deploy/migration authorization.
+- Full local Python 936/Web 207 passed; build/lint passed. No production caller, flags, claim, collection, approval, active pointer or original protected-file edits. Actual account availability UNKNOWN.
+- Next: candidate publication recovery authority, exact domain mapping, trusted caller and full cost/lifecycle/canary/rollback. 080-RUNNER remains CODE_IN_PROGRESS, not recovery complete.
+
 ### 2026-10-11 recovery shared-account budget
 
 - PR #172 merged `dac896b2fc69f6065ba0be707c5c92a7aee15f6b`; main CI `38067224021` passed; no deployment required for that Python-only PR.

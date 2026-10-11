@@ -9,6 +9,8 @@ import hashlib
 import json
 import time
 import threading
+import copy
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,7 +20,10 @@ from .pipeline_checkpoint_bundle import verify_stage_bundle
 from .pipeline_checkpoint_handoff import verify_checkpoint_handoff
 from .pipeline_runner import PipelineExecutionContext, PipelineRunnerError
 from .resource_budget import BudgetLedger, BudgetVector
-from .resource_budget_remote import SharedBudgetLedger
+from .resource_budget_remote import SharedBudgetLedger, RecoverySharedBudgetLedger
+from .pipeline_recovery_lease import RecoveryPipelineLease
+from .pipeline_recovery_scope import bind_recovery_runner_scope
+from .recovery_execution import plan_bytes, validate_recovery_plan
 
 MAX_OBJECT_BYTES = 1024 * 1024
 MAX_REQUEST_SECONDS = 20
@@ -70,13 +75,20 @@ class CheckpointObjectTransport:
                 self._budget_ledger.validate_execution_identity(
                     run_key=params["runKey"], lease_owner=params["leaseOwner"],
                     attempt_count=params["attemptCount"], target_date=params["targetDate"],
-                    task_id=self._budget_task_id)
+                    task_id=self._budget_task_id,
+                    **({"recovery_id": params["recoveryId"], "recovery_plan_sha256": params["planSha256"]}
+                       if "recoveryId" in params else {}))
             except (ValueError, KeyError):
                 raise PipelineRunnerError("checkpoint_shared_budget_identity_mismatch") from None
         # Includes the server's readback and caller's lease checks/renewals.
         # These floors do not manufacture a complete estimate; caller supplies
         # all seven dimensions, including total lease and execution upper bounds.
         floors = {"workerRequests": 1, "r2ClassB": 1, "d1RowsRead": 1}
+        if "recoveryId" in params:
+            # Exact immutable plan HEAD/GET plus object read; up to four indexed
+            # joint lease/approval confirmations. These floors are not a full
+            # budget: callers also include ledger/lease control plane traffic.
+            floors.update(r2ClassB=3, d1RowsRead=8)
         if method == "POST":
             floors.update(r2ClassA=1, r2Bytes=len(data or b""))
         if any(cost.metrics[name].value < minimum for name, minimum in floors.items()):
@@ -210,3 +222,44 @@ class CheckpointObjectTransport:
                 "sharedDurableReservation": shared and self._shared_authorizations > 0,
                 "sharedAuthorizations": self._shared_authorizations,
                 "budgetControlPlane": self._budget_ledger.accounting_evidence() if shared else None}
+
+
+class RecoveryCheckpointObjectTransport(CheckpointObjectTransport):
+    """Opt-in approved recovery transport; no approval or claim operations."""
+    def __init__(self, *, approved_plan, stages, now=None, **kwargs):
+        if not isinstance(kwargs.get("lease_guard"), RecoveryPipelineLease):
+            raise PipelineRunnerError("checkpoint_recovery_guard_required")
+        if not isinstance(kwargs.get("budget_ledger"), RecoverySharedBudgetLedger):
+            raise PipelineRunnerError("checkpoint_recovery_shared_budget_required")
+        self._plan = copy.deepcopy(approved_plan)
+        scope = validate_recovery_plan(self._plan)
+        self._scope_sha = plan_bytes(self._plan)[1]
+        self._stages = tuple(stages)
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        super().__init__(**kwargs)
+        self._maximum = min(self._maximum, scope.max_requests)
+
+    def _params(self, context, stage, input_sha256, sha256):
+        try:
+            bind_recovery_runner_scope(self._plan, context, self._stages, now=self._now())
+        except ValueError:
+            raise PipelineRunnerError("checkpoint_recovery_scope_rejected") from None
+        if (stage not in self._stages or stage not in {"core_collection", "publish"}
+                or context.lease_attempt_count is None or context.identity.target_date is None):
+            raise PipelineRunnerError("checkpoint_recovery_stage_unproven")
+        return {"runKey": context.identity.run_key, "targetDate": context.identity.target_date,
+                "stage": stage, "inputSha256": input_sha256, "sha256": sha256,
+                "producerBuildSha": context.identity.producer_build_sha,
+                "leaseOwner": context.lease_owner, "attemptCount": context.lease_attempt_count,
+                "recoveryId": context.recovery_id, "planSha256": context.recovery_plan_sha256,
+                "scopeSha256": self._scope_sha}
+
+    def key(self, context, stage, input_sha256, sha256):
+        ordinary = super().key(context, stage, input_sha256, sha256)
+        prefix = "market-data/pipeline/checkpoints/v1/"
+        return prefix + f"recovery/{context.recovery_id}/{self._scope_sha}/" + ordinary.removeprefix(prefix)
+
+    def evidence(self):
+        return {**super().evidence(), "recoveryId": self._plan["recoveryId"],
+                "planSha256": self._plan["planHash"], "scopeSha256": self._scope_sha,
+                "recoveryStages": list(self._stages)}
