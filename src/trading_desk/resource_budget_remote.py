@@ -29,7 +29,8 @@ class SharedBudgetLedger(BudgetLedger):
                  access_client_secret: str, run_key: str, lease_owner: str,
                  attempt_count: int, target_date: str, lease_guard: Any,
                  maximum_requests: int = 32, session: Any = None,
-                 allow_loopback_fixture: bool = False, monotonic=time.monotonic):
+                 allow_loopback_fixture: bool = False, monotonic=time.monotonic,
+                 server_fenced_checks: bool = False):
         from .pipeline_application import parse_application_run_key
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
@@ -49,6 +50,10 @@ class SharedBudgetLedger(BudgetLedger):
             raise ValueError("shared_budget_request_limit_invalid")
         if not callable(getattr(lease_guard, "confirm", None)):
             raise ValueError("shared_budget_lease_guard_required")
+        if type(server_fenced_checks) is not bool:
+            raise ValueError("shared_budget_check_policy_invalid")
+        if server_fenced_checks and not callable(getattr(lease_guard, "check", None)):
+            raise ValueError("shared_budget_local_lease_check_required")
         if any(not isinstance(v, str) or not v.strip() or "\r" in v or "\n" in v
                for v in (ingest_key, access_client_id, access_client_secret)):
             raise ValueError("shared_budget_credentials_required")
@@ -62,6 +67,7 @@ class SharedBudgetLedger(BudgetLedger):
         self._identity = {"runKey": run_key, "leaseOwner": lease_owner, "attemptCount": attempt_count, "targetDate": target_date}
         self.task_id = f"{run_key}/{lease_owner}/{attempt_count}"
         self._guard, self._clock, self._maximum = lease_guard, monotonic, maximum_requests
+        self._server_fenced_checks = server_fenced_checks
         self._lock = threading.RLock()
         self._pending: dict | None = None
         self.request_count = 0
@@ -89,14 +95,25 @@ class SharedBudgetLedger(BudgetLedger):
                     "maximumRequests": self._maximum, "d1RowsRead": self.rows_read,
                     "d1RowsWritten": self.rows_written,
                     "pendingOperation": self._pending is not None,
-                    "accountRemaining": None}
+                    "accountRemaining": None,
+                    "leaseCheckPolicy": "server_fenced" if self._server_fenced_checks else "fresh_confirm"}
+
+    def _check_lease(self) -> None:
+        # Only the fixed, server-authoritative budget endpoint uses this policy.
+        # Its GET checks the live identity and POST fences the final atomic CAS.
+        # check() still rejects expired/unverified owners and renews when due;
+        # it is not permission for an object write or an external stage effect.
+        if self._server_fenced_checks:
+            self._guard.check()
+        else:
+            self._guard.confirm()
 
     def _request(self, method: str, payload: dict) -> dict:
         if self.request_count >= self._maximum:
             raise ValueError("shared_budget_request_limit")
         if self._inflight is not None and self._inflight.is_alive():
             raise ValueError("shared_budget_request_still_unconfirmed")
-        self._guard.confirm()
+        self._check_lease()
         self.request_count += 1
         received_meta = False
         try:
@@ -118,7 +135,7 @@ class SharedBudgetLedger(BudgetLedger):
                 if reply.status in {401, 409, 413, 422}:
                     self._pending = None
                 raise ValueError("shared_budget_request_rejected")
-            self._guard.confirm()
+            self._check_lease()
             return result
         except Exception:
             if not received_meta:

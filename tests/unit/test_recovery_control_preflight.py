@@ -1,5 +1,6 @@
 """Offline envelopes are diagnostics, never a budget grant or lease bypass."""
 import pytest
+from trading_desk.pipeline_runner import PipelineRunnerError
 from trading_desk.pipeline_checkpoint_preflight import recovery_control_preflight, pipeline_task_preflight
 from test_pipeline_task_preflight import task_arguments
 from test_pipeline_recovery_checkpoint import setup
@@ -43,6 +44,33 @@ def test_approval_cap_and_lifecycle_costs_are_not_ignored():
     assert recovery_control_preflight(**arguments(approved_request_limit=20))["status"] == "BLOCKED"
     with pytest.raises(ValueError):
         recovery_control_preflight(**arguments(lease_request_limit=33))
+
+
+def test_server_fenced_budget_still_counts_transport_and_renewals(tmp_path):
+    client, args, objects, budget, lease, _ = setup(tmp_path, server_fenced_checks=True)
+    receipt = client.upload(**args)
+    client.download(context=args["context"], stage=args["stage"],
+        input_sha256=args["input_sha256"], sha256=receipt["sha256"])
+    report = recovery_control_preflight(**arguments(), server_fenced_checks=True)
+    assert report["leaseRequestsUpperBound"] == len(lease.calls) == 10
+    assert report["workerRequestsUpperBound"] == 16
+    assert report["liveExecutionAllowed"] is False
+    bounded = recovery_control_preflight(**dict(arguments(), ledger_operations=3,
+        runner_confirmations=2, renewal_upper_bound=1), server_fenced_checks=True)
+    assert bounded["leaseRequestsUpperBound"] == 17
+    assert bounded["workerRequestsUpperBound"] == 29
+
+
+def test_candidate_budget_check_renews_and_rejects_revoked_approval(tmp_path):
+    client, args, objects, budget, lease, clock = setup(tmp_path, server_fenced_checks=True)
+    clock.seconds = 180
+    lease.approval_override = {"status": "REVOKED"}
+    with pytest.raises(PipelineRunnerError, match="checkpoint_resource_allowance_rejected"):
+        client.upload(**args)
+    with pytest.raises(PipelineRunnerError, match="recovery_lease_approval_conflict"):
+        client._guard.check()
+    assert not objects.calls and not budget.calls
+    assert [call[0] for call in lease.calls] == ["GET", "GET", "POST", "GET"]
 
 
 def test_existing_task_report_consumes_control_blockers(tmp_path):

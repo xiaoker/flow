@@ -25,9 +25,49 @@ def vector(value, measured=False):
 class Guard:
     def __init__(self):
         self.calls = 0
+        self.checks = 0
 
     def confirm(self):
         self.calls += 1
+
+    def check(self):
+        self.checks += 1
+
+
+def test_server_fenced_candidate_preserves_protocol_without_fresh_reads():
+    guard = Guard()
+    options = kwargs(session=Session(metadata(), receipt()))
+    options["lease_guard"] = guard
+    ledger = SharedBudgetLedger(**options, server_fenced_checks=True)
+    assert ledger.authorize_step(ledger.task_id, vector(1))["decision"] == "authorized"
+    assert guard.calls == 0 and guard.checks == 4
+    assert ledger.request_count == 2
+    assert ledger.accounting_evidence()["leaseCheckPolicy"] == "server_fenced"
+
+
+def test_server_fenced_expiry_stops_before_budget_http():
+    class Expired(Guard):
+        def check(self):
+            raise ValueError("expired")
+    session = Session()
+    options = kwargs(session=session)
+    options["lease_guard"] = Expired()
+    ledger = SharedBudgetLedger(**options, server_fenced_checks=True)
+    with pytest.raises(ValueError, match="expired"):
+        ledger.reserve(ledger.task_id, vector(1))
+    assert not session.calls and ledger.request_count == 0
+
+
+def test_candidate_policy_requires_boolean_and_local_check():
+    with pytest.raises(ValueError, match="check_policy_invalid"):
+        SharedBudgetLedger(**kwargs(), server_fenced_checks="true")
+    class ConfirmOnly:
+        def confirm(self):
+            pass
+    options = kwargs()
+    options["lease_guard"] = ConfirmOnly()
+    with pytest.raises(ValueError, match="local_lease_check_required"):
+        SharedBudgetLedger(**options, server_fenced_checks=True)
 
 
 class Response:
@@ -89,7 +129,8 @@ def recovery_options(plan, context):
         now=datetime(2026, 10, 3, 2, tzinfo=timezone.utc))
 
 
-def test_recovery_cross_language_real_http_and_sqlite_admission():
+@pytest.mark.parametrize("server_fenced_checks", [False, True])
+def test_recovery_cross_language_real_http_and_sqlite_admission(server_fenced_checks):
     plan, context = recovery_fixture()
     process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/shared-budget-server.mjs")],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -97,7 +138,7 @@ def test_recovery_cross_language_real_http_and_sqlite_admission():
     try:
         port = process.stdout.readline().strip()
         assert port.isdigit(), process.stderr.read() if process.poll() is not None else "fixture failed to start"
-        options = kwargs(allow_loopback_fixture=True)
+        options = kwargs(allow_loopback_fixture=True, server_fenced_checks=server_fenced_checks)
         options["base_url"] = f"http://127.0.0.1:{port}"
         ledger = RecoverySharedBudgetLedger(**options, **recovery_options(plan, context))
         assert ledger.reserve(ledger.task_id, vector(70))["decision"] == "allow"

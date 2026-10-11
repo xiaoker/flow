@@ -1,0 +1,15 @@
+{
+  "baseSha": "b1fa757a59a6696208849a0928d87059f1ba250c",
+  "scope": "080-RUNNER opt-in budget client server-fenced checks",
+  "mergeTriggers": ["main CI"],
+  "workerDeployment": false,
+  "migrationExecution": false,
+  "newMigrations": [],
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN",
+  "rollback": "reviewed revert PR; default policy and production unchanged"
+}

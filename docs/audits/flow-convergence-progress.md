@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11: candidate budget server-fenced checks
+
+- Base main b1fa757 (PR #179); isolated branch `codex/080-recovery-lifecycle-20261011`.
+- Explicit candidate mode removes redundant budget client fresh reads only; server atomic identity/approval CAS, due renewals and checkpoint fresh confirmations remain. Default unchanged.
+- Two checkpoint operations: fixture 10 lease / 16 total requests versus legacy 26 / 32. This is not full runner lifecycle or account-budget proof.
+- Web 215 tests, lint/build passed; Python and hosted results recorded in PR. Audit/effects: `2026-10-11-080-budget-fenced-checks*`.
+- No production caller, flag, migration, pointer, collection or protected-file change. Main CI only on merge. Stop for merge authorization after CI.
+- 080-RUNNER remains CODE_IN_PROGRESS. Next: integrate full runner-derived reservation/debit/settlement envelope and trusted entry before any separately authorized canary.
+
 ### 2026-10-11 dashboard recovery mapping
 
 - Base main 2e2055b (PR #176); fresh codex/080-dashboard-scope-20261011.
