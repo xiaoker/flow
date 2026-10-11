@@ -96,7 +96,7 @@ test("revoked approvals, takeover and exact identity mismatches never write", as
 });
 
 test("unsupported mappings and expired immutable deadline stay closed", async () => {
-  for (const stage of ["build", "dashboard", "handoff", "normalize", "verify_visible"]) {
+  for (const stage of ["dashboard", "handoff", "normalize", "verify_visible"]) {
     const f = fixture(); try { f.query.set("stage", stage); assert.equal((await f.run()).status, 422); assert(!f.calls.includes("put")); }
     finally { f.db.close(); }
   }
@@ -104,6 +104,23 @@ test("unsupported mappings and expired immutable deadline stay closed", async ()
   try { assert.equal((await f.run()).status, 409); assert(!f.calls.includes("put")); } finally { f.db.close(); }
   const g = fixture({ stages: ["publish"] });
   try { assert.equal((await g.run()).status, 409); assert(!g.calls.includes("put")); } finally { g.db.close(); }
+});
+
+test("dashboard scope maps only core build/verify checkpoint stages", async () => {
+  for (const stage of ["build", "verify"]) {
+    const f = fixture({ stages: ["dashboard"] });
+    try {
+      f.query.set("stage", stage);
+      const response = await f.run(); assert.equal(response.status, 200);
+      assert.match((await response.json()).key, new RegExp(`/${stage}/`));
+      assert.equal((await f.run("GET")).status, 200);
+    } finally { f.db.close(); }
+    for (const domain of ["core_collection", "etf_penetration", "stock_flow", "pcf_exact", "publish"]) {
+      const g = fixture({ stages: [domain] });
+      try { g.query.set("stage", stage); assert.equal((await g.run()).status, 409); assert(!g.calls.includes("put")); }
+      finally { g.db.close(); }
+    }
+  }
 });
 
 test("corrupt plan and approval revocation after plan read cannot authorize PUT", async () => {

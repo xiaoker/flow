@@ -79,7 +79,7 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
   if (recovery && !["1", "true"].includes(runtime.PIPELINE_RECOVERY_ENABLED ?? "")) {
     return response({ error: "pipeline_recovery_disabled" }, 404);
   }
-  if (recovery && !["core_collection", "publish"].includes(stage)) {
+  if (recovery && !["core_collection", "publish", "build", "verify"].includes(stage)) {
     return response({ error: "checkpoint_recovery_stage_unproven" }, 422);
   }
   const maximum = stage === "handoff" ? 16384 : CHECKPOINT_OBJECT_MAX_BYTES;
@@ -128,7 +128,8 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
       });
       planReads = 2; // HEAD + GET, not a physical D1 measurement.
       planDeadline = Date.parse(String(plan.deadline));
-      if (!(plan.dataDates as string[]).includes(target) || !(plan.requiredStages as string[]).includes(stage)
+      const domain = stage === "build" || stage === "verify" ? "dashboard" : stage;
+      if (!(plan.dataDates as string[]).includes(target) || !(plan.requiredStages as string[]).includes(domain)
           || !Number.isFinite(planDeadline) || planDeadline <= now().getTime() + 30_000) {
         throw new PipelineWindowError("checkpoint_recovery_scope_conflict", 409);
       }

@@ -244,7 +244,7 @@ class RecoveryCheckpointObjectTransport(CheckpointObjectTransport):
             bind_recovery_runner_scope(self._plan, context, self._stages, now=self._now())
         except ValueError:
             raise PipelineRunnerError("checkpoint_recovery_scope_rejected") from None
-        if (stage not in self._stages or stage not in {"core_collection", "publish"}
+        if (stage not in self._stages or stage not in {"core_collection", "publish", "build", "verify"}
                 or context.lease_attempt_count is None or context.identity.target_date is None):
             raise PipelineRunnerError("checkpoint_recovery_stage_unproven")
         return {"runKey": context.identity.run_key, "targetDate": context.identity.target_date,

@@ -47,9 +47,14 @@ def test_scope_does_not_widen_or_invent_domain_mapping(stages):
 
 
 def test_dashboard_approval_is_not_generic_build_permission():
+    from trading_desk.pipeline_recovery_scope import validate_recovery_dashboard_adapters
+    from test_pipeline_bundle_resume import Adapter, Guard
     plan, bound = fixture(("dashboard",))
-    with pytest.raises(ValueError, match="mapping_unproven"):
-        bind_recovery_runner_scope(plan, bound, ["build"], now=NOW)
+    evidence = bind_recovery_runner_scope(plan, bound, ["build", "verify"], now=NOW)
+    assert evidence["stageDomains"] == {"build": "dashboard", "verify": "dashboard"}
+    assert evidence["liveAuthorityVerified"] is False
+    with pytest.raises(ValueError, match="adapter_binding_required"):
+        validate_recovery_dashboard_adapters({"build": Adapter()}, Guard(), plan, bound, ["build"], now=NOW)
 
 
 def test_expired_plan_and_wrong_target_rejected():
