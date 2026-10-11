@@ -267,6 +267,13 @@ R2, D1, release, or receipt evidence.
 - **Protected paths:** `reports/phase0/latest-*`, `memory/`, and all other pre-existing user changes in the original worktree are untouched.
 # 2026-10-03 local budget persistence increment
 
+## 2026-10-11 recovery candidate staging continuation
+
+- Base PR #174 merge d6b7e861edae3d169a98798937e96c77622737bf; deployment 38105606394 verified exact build and no migrations.
+- Opt-in recovery candidate staging contract, no production caller/flag/active pointer changes.
+- Local Python 939 / Web 212 passed; build/lint passed. Details: 2026-10-11-080-recovery-publication.md.
+- Stop after hosted CI for merge and automatic deployment/migration-check authorization. 080-RUNNER remains CODE_IN_PROGRESS.
+
 - PR #151 merged as `48d1e6b86931b41d50d54ff63e2d589a4b1fa177`; main CI `37084824734` succeeded.
 - Fresh branch `codex/080-durable-budget-20261003` from that merge. Local-only SQLite adapter reuses existing budget transitions under bounded atomic journal replay; restart and separate processes sharing one file cannot forget allowance.
 - See `2026-10-03-080-local-budget-persistence.md` for trust boundary, limits and tests. No remote shared quota store, production caller, migrations or workflow changes.

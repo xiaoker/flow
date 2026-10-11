@@ -8,6 +8,10 @@ import pytest
 
 SOURCE = Path(__file__).parents[2] / "web/app/lib/candidate-upload-authority.ts"
 SQL = re.search(r"db\.prepare\(`(INSERT INTO release_manifest.*?)`\)", SOURCE.read_text(), re.S).group(1)
+# Materialize the ordinary branch of the literal SQL template. Recovery branch
+# is executed directly by the TypeScript SQLite integration tests.
+SQL = SQL.replace('${recovery ? recoveryPredicate : "recovery_id IS NULL"}', "recovery_id IS NULL")
+assert "${" not in SQL
 
 
 def database():

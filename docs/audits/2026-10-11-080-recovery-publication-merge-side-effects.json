@@ -1,0 +1,16 @@
+{
+  "baseSha": "d6b7e861edae3d169a98798937e96c77622737bf",
+  "scope": "080-RUNNER approved recovery candidate staging",
+  "mergeTriggers": ["main CI", "Deploy Flow Worker"],
+  "newMigrations": [],
+  "remotePendingMigrations": "UNKNOWN",
+  "lastMigrationEvidence": "PR174 deploy 38105606394: no migrations to apply",
+  "automaticMigrationCommand": "npx wrangler d1 migrations apply flow --remote",
+  "workerDeployment": true,
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN"
+}
