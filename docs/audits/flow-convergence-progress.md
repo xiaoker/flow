@@ -275,6 +275,13 @@ R2, D1, release, or receipt evidence.
 - **Protected paths:** `reports/phase0/latest-*`, `memory/`, and all other pre-existing user changes in the original worktree are untouched.
 # 2026-10-03 local budget persistence increment
 
+## 2026-10-11 recovery control request envelope
+
+- PR #178 merged `504e95750e42d0dfb603794d0e97775c7a83f783`; main CI 38116212581 and deploy 38116212696 succeeded. No migrations; production build identity verified.
+- Existing offline task preflight now accounts for nested recovery lease/ledger requests using explicit bounded counts; unknown counts and cap/cost mismatches block.
+- See `2026-10-11-080-recovery-control-preflight.md`. No production caller, workflow, migration or flag change; merge triggers main CI only.
+- 080-RUNNER remains CODE_IN_PROGRESS. Next: complete runner-derived cost/lifecycle envelope and trusted entry; no live recovery until a complete authorized canary package fits resource and request bounds.
+
 ## 2026-10-11 scoped recovery checkpoint handoff
 
 - Base PR #177 merge `ce0c56e2992aee959a8b0bcca745da468743dce0`; exact Worker deployment previously verified.

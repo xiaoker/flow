@@ -1,0 +1,15 @@
+{
+  "baseSha": "504e95750e42d0dfb603794d0e97775c7a83f783",
+  "scope": "080-RUNNER offline recovery control request envelope",
+  "mergeTriggers": ["main CI"],
+  "workerDeployment": false,
+  "migrationExecution": false,
+  "newMigrations": [],
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN",
+  "rollback": "reviewed revert PR; no production state changes"
+}
