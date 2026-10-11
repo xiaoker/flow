@@ -1,0 +1,14 @@
+{
+  "baseSha": "cf74f033b21b230f79400f019893a06b0f674501",
+  "scope": "080-RUNNER exact recovery publish adapter admission",
+  "mergeTriggers": ["main CI"],
+  "workerDeployment": false,
+  "newMigrations": [],
+  "migrationExecution": false,
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN"
+}

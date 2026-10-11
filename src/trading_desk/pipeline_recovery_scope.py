@@ -28,3 +28,33 @@ def bind_recovery_runner_scope(plan, context, stages, *, now=None):
     return {"recoveryId": scope.recovery_id, "planSha256": scope.plan_hash,
             "targetDate": context.identity.target_date, "stages": list(stages),
             "liveAuthorityVerified": False}
+
+
+def validate_recovery_publication_adapter(adapter, lease_guard, plan, context, *, now=None):
+    """Bind the only proven remote publication adapter; no domain aliases.
+
+    This validates wiring, not live authority. The runner must still verify the
+    lease and the transport/server must fence every actual operation.
+    """
+    from .pipeline_publish_adapter import CoreCandidatePublishAdapter
+    from .pipeline_candidate_transport import RecoveryCandidatePublicationTransport
+    from .pipeline_recovery_lease import RecoveryPipelineLease
+    from .resource_budget_remote import RecoverySharedBudgetLedger
+
+    bind_recovery_runner_scope(plan, context, ("publish",), now=now)
+    if (type(adapter) is not CoreCandidatePublishAdapter
+            or not isinstance(lease_guard, RecoveryPipelineLease)
+            or not isinstance(adapter.transport, RecoveryCandidatePublicationTransport)
+            or not isinstance(adapter.transport._ledger, RecoverySharedBudgetLedger)
+            or adapter.transport._guard is not lease_guard
+            or adapter.transport._ledger._guard is not lease_guard):
+        raise ValueError("recovery_publication_adapter_binding_required")
+    execution = adapter.transport.execution(context)
+    if execution != adapter.transport.execution(adapter.execution_context):
+        raise ValueError("recovery_publication_context_mismatch")
+    adapter.transport._ledger.validate_execution_identity(
+        run_key=execution["runKey"], lease_owner=execution["leaseOwner"],
+        attempt_count=execution["attemptCount"], target_date=execution["targetDate"],
+        task_id=adapter.transport._task, recovery_id=execution["recoveryId"],
+        recovery_plan_sha256=execution["planSha256"])
+    return True

@@ -410,6 +410,10 @@ def run_pipeline_request(
         from .pipeline_recovery_scope import bind_recovery_runner_scope
         try:
             bind_recovery_runner_scope(approved_recovery_plan, context, stages, now=now)
+            if "publish" in stages:
+                from .pipeline_recovery_scope import validate_recovery_publication_adapter
+                validate_recovery_publication_adapter((stage_adapters or {}).get("publish"),
+                    lease_guard, approved_recovery_plan, context, now=now)
         except ValueError as exc:
             raise PipelineRunnerError("recovery_scope_rejected") from exc
     elif approved_recovery_plan is not None:
@@ -471,7 +475,7 @@ def run_pipeline_request(
             ):
                 raise PipelineRunnerError("stage_adapter_effect_contract_required", stage)
             effect_set = set(effects)
-            if "candidate_publication_requests" in effect_set and (stage != "publish" or context.mode != "ordinary"):
+            if "candidate_publication_requests" in effect_set and stage != "publish":
                 raise PipelineRunnerError("candidate_publication_effect_scope_invalid", stage)
             if not effect_set or not effect_set.issubset(_ALLOWED_ADAPTER_EFFECTS):
                 raise PipelineRunnerError("unsupported_stage_adapter_effect", stage)
