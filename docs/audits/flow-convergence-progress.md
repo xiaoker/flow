@@ -267,6 +267,14 @@ R2, D1, release, or receipt evidence.
 - **Protected paths:** `reports/phase0/latest-*`, `memory/`, and all other pre-existing user changes in the original worktree are untouched.
 # 2026-10-03 local budget persistence increment
 
+## 2026-10-11 exact recovery publish runner admission
+
+- Base PR #175 cf74f033b21b230f79400f019893a06b0f674501 deployed via 38109879189.
+- Runner admits only proven recovery candidate adapter/transport with shared exact guard/task after approved publish scope binding.
+- Local Python 946 / Web 212 passed, build/lint passed. No production caller or domain aliases enabled.
+- Details: 2026-10-11-080-recovery-publish-runner.md. Main CI only, no auto deployment/migration; stop for merge approval after CI.
+- 080-RUNNER remains CODE_IN_PROGRESS; product-domain mapping, handoff, trusted caller and real acceptance remain.
+
 ## 2026-10-11 recovery candidate staging continuation
 
 - Base PR #174 merge d6b7e861edae3d169a98798937e96c77622737bf; deployment 38105606394 verified exact build and no migrations.
