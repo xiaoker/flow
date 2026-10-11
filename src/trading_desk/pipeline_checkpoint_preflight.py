@@ -18,7 +18,7 @@ from .resource_budget import BudgetVector, ResourceLimits, evaluate_budget
 def recovery_control_preflight(*, checkpoint_requests: int | None,
     ledger_operations: int | None, runner_confirmations: int | None,
     renewal_upper_bound: int | None, lease_request_limit: int = 32,
-    approved_request_limit: int = 32) -> dict[str, Any]:
+    approved_request_limit: int = 32, server_fenced_checks: bool = False) -> dict[str, Any]:
     """Pure request envelope for existing recovery guard/ledger/checkpoints.
 
     Counts include bounded retries/readbacks. This checks a declared envelope,
@@ -28,6 +28,8 @@ def recovery_control_preflight(*, checkpoint_requests: int | None,
     components = dict(checkpointRequests=checkpoint_requests,
         ledgerOperations=ledger_operations, runnerConfirmations=runner_confirmations,
         renewalUpperBound=renewal_upper_bound)
+    if type(server_fenced_checks) is not bool:
+        raise ValueError("recovery_check_policy_invalid")
     for count in components.values():
         if count is not None and (type(count) is not int or not 0 <= count <= 10_000):
             raise ValueError("recovery_request_count_invalid")
@@ -41,13 +43,15 @@ def recovery_control_preflight(*, checkpoint_requests: int | None,
     if unknown:
         blockers.append("recovery_control_counts_unknown")
     else:
-        # Each checkpoint operation: ledger GET + POST, each confirmed before
-        # and after (4 confirms), plus transport before/after (2 confirms).
+        # Legacy ledger GET + POST each confirm before/after (4 confirms).
+        # Server-fenced mode uses local checks instead; due renewals are counted
+        # separately. Transport before/after remains fresh in both modes.
         # Recovery confirm fetches approval + current row (2 HTTP requests).
         # Standalone ledger transitions use the same two-request CAS protocol.
         # Each possible renewal adds at most 3 requests conservatively, rather
         # than subtracting a replaced confirmation from the estimate.
-        lease = (2 + 12 * checkpoint_requests + 8 * ledger_operations
+        lease = (2 + (4 if server_fenced_checks else 12) * checkpoint_requests
+                 + (0 if server_fenced_checks else 8) * ledger_operations
                  + 2 * runner_confirmations + 3 * renewal_upper_bound)
         worker = lease + 3 * checkpoint_requests + 2 * ledger_operations
         if lease > limit:
@@ -55,6 +59,7 @@ def recovery_control_preflight(*, checkpoint_requests: int | None,
     return {"schemaVersion": 1, "kind": "offline_recovery_control_preflight",
         "status": "BLOCKED" if blockers else "DECLARED_ENVELOPE_CHECKED",
         "components": components, "unknownComponents": unknown,
+        "leaseCheckPolicy": "server_fenced" if server_fenced_checks else "fresh_confirm",
         "leaseRequestsUpperBound": lease, "workerRequestsUpperBound": worker,
         "effectiveLeaseRequestLimit": limit, "blockers": blockers,
         "basis": "estimated_declared_envelope", "liveExecutionAllowed": False,

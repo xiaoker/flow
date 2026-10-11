@@ -53,7 +53,7 @@ class ObjectSession:
         return Response(self.objects[key], headers={"X-Flow-Checkpoint-Sha256": p["sha256"], "X-Flow-Checkpoint-Key": key})
 
 
-def setup(tmp_path, stage="core_collection", domain="core_collection"):
+def setup(tmp_path, stage="core_collection", domain="core_collection", server_fenced_checks=False):
     clock = Clock()
     plan, context = fixture((domain,))
     plan.pop("planHash")
@@ -70,7 +70,8 @@ def setup(tmp_path, stage="core_collection", domain="core_collection"):
     budget_session = BudgetSession()
     ledger = RecoverySharedBudgetLedger(approved_plan=plan, context=context, stages=[stage], now=clock.now(),
         **common, run_key=context.identity.run_key, lease_owner=context.lease_owner, attempt_count=1,
-        target_date=context.identity.target_date, lease_guard=guard, session=budget_session)
+        target_date=context.identity.target_date, lease_guard=guard, session=budget_session,
+        server_fenced_checks=server_fenced_checks)
     cost = BudgetVector.estimated(dict.fromkeys(BudgetVector.unknown().metrics, MAX_OBJECT_BYTES))
     objects = ObjectSession()
     client = RecoveryCheckpointObjectTransport(approved_plan=plan, stages=[stage], now=clock.now,
