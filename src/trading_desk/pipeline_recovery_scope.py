@@ -5,10 +5,10 @@ from .recovery_execution import validate_recovery_plan
 
 
 def bind_recovery_runner_scope(plan, context, stages, *, now=None):
-    """Only identical stage semantics may be delegated by this first binding.
+    """Bind approved domains to the existing core stage semantics.
 
-    dashboard is a product domain, not permission to execute every build
-    adapter. Domain-specific mappings require their own proven adapter contract.
+    dashboard maps only to build/verify; the runner must separately enforce
+    the exact core adapters. This pure check is not generic adapter authority.
     This function never reads remote state, authorizes a lease or spends budget.
     """
     if context.mode != "recovery" or context.authorization_kind != "approved-recovery":
@@ -21,13 +21,34 @@ def bind_recovery_runner_scope(plan, context, stages, *, now=None):
     if current.tzinfo is None or current >= datetime.fromisoformat(scope.deadline.replace("Z", "+00:00")):
         raise ValueError("recovery_scope_deadline_expired")
     if (not isinstance(stages, (tuple, list)) or not stages or len(stages) != len(set(stages))
-            or any(stage not in {"core_collection", "publish"} for stage in stages)):
+            or any(stage not in {"core_collection", "publish", "build", "verify"} for stage in stages)):
         raise ValueError("recovery_scope_stage_mapping_unproven")
-    if any(stage not in scope.required_stages for stage in stages):
+    domains = {stage: "dashboard" if stage in {"build", "verify"} else stage for stage in stages}
+    if any(domain not in scope.required_stages for domain in domains.values()):
         raise ValueError("recovery_scope_stage_not_approved")
     return {"recoveryId": scope.recovery_id, "planSha256": scope.plan_hash,
             "targetDate": context.identity.target_date, "stages": list(stages),
+            "stageDomains": domains,
             "liveAuthorityVerified": False}
+
+
+def validate_recovery_dashboard_adapters(adapters, lease_guard, plan, context, stages, *, now=None):
+    """Only the existing offline dashboard builder and verifier are admitted.
+
+    Neither adapter fetches sources or publishes. Their existing exact input,
+    date, coverage, file inventory and recomputation checks remain mandatory.
+    """
+    from .pipeline_build_adapter import CoreReadModelBuildAdapter
+    from .pipeline_verify_adapter import CoreReadModelVerifyAdapter
+    from .pipeline_recovery_lease import RecoveryPipelineLease
+
+    bind_recovery_runner_scope(plan, context, stages, now=now)
+    expected = {"build": CoreReadModelBuildAdapter, "verify": CoreReadModelVerifyAdapter}
+    selected = [stage for stage in stages if stage in expected]
+    if (not selected or not isinstance(lease_guard, RecoveryPipelineLease)
+            or any(type(adapters.get(stage)) is not expected[stage] for stage in selected)):
+        raise ValueError("recovery_dashboard_adapter_binding_required")
+    return True
 
 
 def validate_recovery_publication_adapter(adapter, lease_guard, plan, context, *, now=None):

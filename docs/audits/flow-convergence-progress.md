@@ -7,6 +7,14 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-11 dashboard recovery mapping
+
+- Base main 2e2055b (PR #176); fresh codex/080-dashboard-scope-20261011.
+- dashboard approval maps only to existing exact core build/verify adapters, with recovery guard and unchanged hash/date/coverage/confirmed QA. Existing checkpoint client/server share this mapping without granting other domains.
+- Local Python 955 / Web 213 passed; build/lint passed. Audit: 2026-10-11-080-dashboard-recovery-mapping.md.
+- Web merge triggers Worker deployment/pending migration apply; no new migration, flags, caller, pointer or collection change. Stop after CI for combined authorization.
+- 080-RUNNER remains CODE_IN_PROGRESS; formal entry, cross-host handoff, full cost/lifecycle and real canary/rollback remain. Original protected paths unchanged.
+
 ### 2026-10-11 approved recovery checkpoint authority
 
 - PR #173 merged `5f4da7e72e760b27ff8cbd773791a71ff9e6fe40`; main CI `38103045143` and deploy `38103045444` passed. Exact served build verified, no migrations to apply; Worker `de48c1cd-8b44-4cda-875a-600bec160c54`.

@@ -410,6 +410,10 @@ def run_pipeline_request(
         from .pipeline_recovery_scope import bind_recovery_runner_scope
         try:
             bind_recovery_runner_scope(approved_recovery_plan, context, stages, now=now)
+            if any(stage in {"build", "verify"} for stage in stages):
+                from .pipeline_recovery_scope import validate_recovery_dashboard_adapters
+                validate_recovery_dashboard_adapters(stage_adapters or {}, lease_guard,
+                    approved_recovery_plan, context, stages, now=now)
             if "publish" in stages:
                 from .pipeline_recovery_scope import validate_recovery_publication_adapter
                 validate_recovery_publication_adapter((stage_adapters or {}).get("publish"),

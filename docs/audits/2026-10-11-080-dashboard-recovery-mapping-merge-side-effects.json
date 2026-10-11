@@ -1,0 +1,16 @@
+{
+  "baseSha": "2e2055b73acdd541db74c338851491969c64c026",
+  "scope": "080-RUNNER dashboard core build/verify mapping",
+  "mergeTriggers": ["main CI", "Deploy Flow Worker"],
+  "workerDeployment": true,
+  "migrationExecution": "existing deploy workflow applies pending migrations",
+  "newMigrations": [],
+  "remotePendingMigrations": "UNKNOWN",
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN",
+  "rollback": "revert mapping via reviewed PR; no immutable object deletion"
+}

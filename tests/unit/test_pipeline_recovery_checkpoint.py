@@ -53,9 +53,9 @@ class ObjectSession:
         return Response(self.objects[key], headers={"X-Flow-Checkpoint-Sha256": p["sha256"], "X-Flow-Checkpoint-Key": key})
 
 
-def setup(tmp_path):
+def setup(tmp_path, stage="core_collection", domain="core_collection"):
     clock = Clock()
-    plan, context = fixture()
+    plan, context = fixture((domain,))
     plan.pop("planHash")
     plan["maxRequests"] = 32
     plan["budgetManifest"] = {"runnerBudgetContract": "flow-shared-budget-v1",
@@ -64,26 +64,36 @@ def setup(tmp_path):
     context = replace(context, recovery_plan_sha256=plan["planHash"])
     lease_session = LeaseSession(clock, plan)
     common = dict(base_url="https://flow.xiaoker.com", ingest_key="fixture-key", access_client_id="fixture-id", access_client_secret="fixture-secret")
-    guard = RecoveryPipelineLease(approved_plan=plan, stages=["core_collection"], **common,
+    guard = RecoveryPipelineLease(approved_plan=plan, stages=[stage], **common,
         expected_attempt_count=1, session=lease_session, now=clock.now, monotonic=clock.monotonic)
     guard.verify(context)
     budget_session = BudgetSession()
-    ledger = RecoverySharedBudgetLedger(approved_plan=plan, context=context, stages=["core_collection"], now=clock.now(),
+    ledger = RecoverySharedBudgetLedger(approved_plan=plan, context=context, stages=[stage], now=clock.now(),
         **common, run_key=context.identity.run_key, lease_owner=context.lease_owner, attempt_count=1,
         target_date=context.identity.target_date, lease_guard=guard, session=budget_session)
     cost = BudgetVector.estimated(dict.fromkeys(BudgetVector.unknown().metrics, MAX_OBJECT_BYTES))
     objects = ObjectSession()
-    client = RecoveryCheckpointObjectTransport(approved_plan=plan, stages=["core_collection"], now=clock.now,
+    client = RecoveryCheckpointObjectTransport(approved_plan=plan, stages=[stage], now=clock.now,
         **common, lease_guard=guard, budget_ledger=ledger, budget_task_id=ledger.task_id,
         request_costs={"POST": cost, "GET": cost}, session=objects)
     workspace = tmp_path / "bundle"
     workspace.mkdir(); (workspace / "snapshot.json").write_text('{"asOf":"2026-09-29"}')
-    checkpoint = build_checkpoint(identity=context.identity, stage="core_collection", status="COMPLETED",
+    checkpoint = build_checkpoint(identity=context.identity, stage=stage, status="COMPLETED",
         input_sha256="c" * 64, output_sha256="d" * 64)
     data, digest = build_stage_bundle(workspace=workspace, checkpoint=checkpoint,
-        identity=context.identity, stage="core_collection", input_sha256="c" * 64)
-    args = dict(context=context, stage="core_collection", input_sha256="c" * 64, data=data, sha256=digest)
+        identity=context.identity, stage=stage, input_sha256="c" * 64)
+    args = dict(context=context, stage=stage, input_sha256="c" * 64, data=data, sha256=digest)
     return client, args, objects, budget_session, lease_session, clock
+
+
+@pytest.mark.parametrize("stage", ["build", "verify"])
+def test_dashboard_checkpoint_uses_same_recovery_authority_and_budget(tmp_path, stage):
+    client, args, objects, budget, _, _ = setup(tmp_path, stage=stage, domain="dashboard")
+    receipt = client.upload(**args)
+    assert f"/{stage}/" in receipt["key"]
+    assert "/recovery/fixture-recovery/" in receipt["key"]
+    assert [call[0] for call in objects.calls] == ["POST"]
+    assert len(budget.calls) == 2
 
 
 def test_exact_recovery_identity_sent_and_lost_receipt_reads_once(tmp_path):
