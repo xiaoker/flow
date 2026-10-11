@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from datetime import timezone
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from trading_desk.resource_budget import BudgetLedger, BudgetVector, RESOURCE_DIMENSIONS, ResourceLimits
-from trading_desk.resource_budget_remote import SharedBudgetLedger
+from trading_desk.resource_budget_remote import SharedBudgetLedger, RecoverySharedBudgetLedger
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = "2026-10-03T02:00:00Z"
@@ -64,6 +66,74 @@ def metadata():
 def receipt(decision="authorized", replayed=False):
     return Response({"decision": decision, "replayed": replayed, "rowsRead": 21, "rowsWritten": 1,
                      "revision": 1, "taskId": f"{KEY}/owner/1"})
+
+
+def recovery_fixture(manifest=None):
+    from trading_desk.recovery_execution import build_recovery_plan
+    from trading_desk.pipeline_application import build_application_identity
+    from trading_desk.pipeline_runner import PipelineExecutionContext
+    plan = build_recovery_plan(campaign_id="fixture", recovery_id="fixture-recovery", run_key=KEY,
+        data_dates=["2026-10-02"], required_stages=["core_collection"], artifact_root=".recovery/fixture",
+        state_dir=".recovery/fixture/state", max_dates=1, max_requests=20, deadline="2026-10-03T03:00:00Z",
+        budget_manifest=manifest or {"runnerBudgetContract": "flow-shared-budget-v1", "taskCostUpperBound": vector(80).as_dict()})
+    context = PipelineExecutionContext(identity=build_application_identity(run_key=KEY, window_date="2026-10-03",
+        target_date="2026-10-02", producer_build_sha="a" * 40), mode="recovery", lease_owner="owner",
+        lease_expires_at="2026-10-03T03:00:00Z", authorization_kind="approved-recovery",
+        recovery_id="fixture-recovery", recovery_plan_sha256=plan["planHash"], dependency_lock_sha256="b" * 64,
+        lease_attempt_count=1)
+    return plan, context
+
+
+def recovery_options(plan, context):
+    return dict(approved_plan=plan, context=context, stages=["core_collection"],
+        now=datetime(2026, 10, 3, 2, tzinfo=timezone.utc))
+
+
+def test_recovery_cross_language_real_http_and_sqlite_admission():
+    plan, context = recovery_fixture()
+    process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/shared-budget-server.mjs")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "FLOW_RECOVERY_FIXTURE_PLAN": json.dumps(plan)})
+    try:
+        port = process.stdout.readline().strip()
+        assert port.isdigit(), process.stderr.read() if process.poll() is not None else "fixture failed to start"
+        options = kwargs(allow_loopback_fixture=True)
+        options["base_url"] = f"http://127.0.0.1:{port}"
+        ledger = RecoverySharedBudgetLedger(**options, **recovery_options(plan, context))
+        assert ledger.reserve(ledger.task_id, vector(70))["decision"] == "allow"
+        assert ledger.authorize_step(ledger.task_id, vector(10))["decision"] == "authorized"
+        assert ledger.accounting_evidence()["accountRemaining"] is None
+        assert ledger.accounting_evidence()["d1RowsWritten"] is None
+        ordinary = SharedBudgetLedger(**options)
+        with pytest.raises(ValueError, match="allowance_not_granted"):
+            ordinary.reserve(ordinary.task_id, vector(1))
+        ledger.validate_execution_identity(run_key=KEY, lease_owner="owner", attempt_count=1,
+            target_date="2026-10-02", task_id=ledger.task_id,
+            recovery_id=context.recovery_id, recovery_plan_sha256=context.recovery_plan_sha256)
+        with pytest.raises(ValueError, match="identity_mismatch"):
+            ledger.validate_execution_identity(run_key=KEY, lease_owner="owner", attempt_count=1,
+                target_date="2026-10-02", task_id=ledger.task_id)
+    finally:
+        process.terminate()
+        process.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("manifest", [{"fixture": True}, {"runnerBudgetContract": "flow-shared-budget-v1", "taskCostUpperBound": vector(80).as_dict() | {"r2Bytes": {"value": None, "unit": "bytes", "basis": "unknown"}}}])
+def test_recovery_missing_or_unknown_upper_bound_rejected_before_http(manifest):
+    plan, context = recovery_fixture(manifest)
+    session = Session()
+    with pytest.raises(ValueError):
+        RecoverySharedBudgetLedger(**kwargs(session=session), **recovery_options(plan, context))
+    assert not session.calls
+
+
+def test_recovery_scope_overrun_rejected_locally_without_http():
+    plan, context = recovery_fixture()
+    session = Session()
+    ledger = RecoverySharedBudgetLedger(**kwargs(session=session), **recovery_options(plan, context))
+    with pytest.raises(ValueError, match="scope_over_budget"):
+        ledger.reserve(ledger.task_id, vector(81))
+    assert not session.calls
 
 
 def test_same_fixture_matches_existing_budget_ledger():

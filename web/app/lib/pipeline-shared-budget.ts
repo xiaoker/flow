@@ -1,6 +1,7 @@
 /** Candidate-only account reservation protocol. No scheduler or live runner caller. */
 import { parsePipelineRunKey, PipelineWindowError } from "./pipeline-window.ts";
 import resourceConfig from "../../../config/resource-budget.json" with { type: "json" };
+import { readRecoveryPlanObject, recoveryPlanObjectKey } from "./pipeline-recovery-plan.ts";
 
 export const DIMENSIONS = ["d1RowsRead", "d1RowsWritten", "workerRequests", "actionsMinutes", "r2Bytes", "r2ClassA", "r2ClassB"] as const;
 const UNITS = ["rows", "rows", "requests", "minutes", "bytes", "operations", "operations"];
@@ -23,7 +24,8 @@ export type SharedBudgetState = {
 };
 type Statement = { bind(...values: unknown[]): Statement; all<T>(): Promise<{ results: T[]; meta?: { rows_read?: number; rows_written?: number; changes?: number } }> };
 type DB = { prepare(sql: string): Statement; withSession?(constraint: string): DB };
-type Input = { runKey: string; leaseOwner: string; attemptCount: number; targetDate: string; operationId: string; operation: string; expectedRevision: number; vector?: Vector; outcome?: string };
+type Input = { runKey: string; leaseOwner: string; attemptCount: number; targetDate: string; operationId: string; operation: string; expectedRevision: number; vector?: Vector; outcome?: string;
+  recoveryId?: string; planSha256?: string; scopeSha256?: string };
 const fail = (code: string, status = 422): never => { throw new PipelineWindowError(code, status); };
 const integer = (n: unknown) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const zero = (): Numbers => Object.fromEntries(DIMENSIONS.map(d => [d, 0])) as Numbers;
@@ -151,6 +153,11 @@ function identity(input: Input) {
   if (typeof input.runKey !== "string" || !parsePipelineRunKey(input.runKey) || typeof input.leaseOwner !== "string"
       || !/^[A-Za-z0-9_.:/-]{1,128}$/.test(input.leaseOwner) || !integer(input.attemptCount) || !input.attemptCount || input.attemptCount > 999999999
       || typeof input.targetDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(input.targetDate)) fail("invalid_budget_identity");
+  const recovery = [input.recoveryId, input.planSha256, input.scopeSha256];
+  if (recovery.some(v => v !== undefined) && (typeof input.recoveryId !== "string"
+      || !/^[A-Za-z0-9:_-]{1,120}$/.test(input.recoveryId)
+      || !/^[a-f0-9]{64}$/.test(input.planSha256 ?? "")
+      || !/^[a-f0-9]{64}$/.test(input.scopeSha256 ?? ""))) fail("invalid_budget_recovery_identity");
 }
 async function digest(v: unknown) {
   const canonical = (x: unknown): string => x === null || typeof x !== "object" ? JSON.stringify(x)
@@ -167,7 +174,8 @@ async function body(request: Request) {
   try { const parsed = JSON.parse(new TextDecoder().decode(bytes)); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail("invalid_budget_request"); return parsed as Input; }
   catch { fail("invalid_budget_request"); }
 }
-export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; INGEST_API_KEY?: string }, clock = () => new Date(), limits: Caps = policyCaps) {
+export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; INGEST_API_KEY?: string;
+  PIPELINE_RECOVERY_ENABLED?: string; RAW_BUCKET?: Parameters<typeof readRecoveryPlanObject>[0] }, clock = () => new Date(), limits: Caps = policyCaps) {
   if (!authorized(request, runtime.INGEST_API_KEY ?? "")) return response({ error: "unauthorized" }, 401);
   if (!runtime.DB) return response({ error: "storage_unavailable" }, 503);
   if (!["GET", "POST"].includes(request.method)) return response({ error: "method_not_allowed" }, 405);
@@ -182,9 +190,36 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
     identity(input);
     const now = clock(); const cutoff = new Date(now.getTime() + 30000).toISOString();
     const db = runtime.DB.withSession?.("first-primary") ?? runtime.DB;
+    const recovery = input.recoveryId !== undefined;
+    if (recovery && !["1", "true"].includes(runtime.PIPELINE_RECOVERY_ENABLED ?? "")) fail("pipeline_recovery_disabled", 404);
+    // Use the same identity predicate for preflight and the final atomic CAS.
+    const fence = `run_key=? AND lease_owner=? AND attempt_count=? AND target_date=?
+      AND ${recovery ? `recovery_id=? AND EXISTS (SELECT 1 FROM pipeline_window_recovery r
+        WHERE r.recovery_id=pipeline_window.recovery_id AND r.run_key=pipeline_window.run_key
+        AND r.plan_sha256=? AND r.scope_sha256=? AND r.status='ACTIVE' AND julianday(r.expires_at)>julianday(?))` : "recovery_id IS NULL"}
+      AND status IN ('DISPATCHED','RUNNING') AND julianday(lease_expires_at)>julianday(?)`;
+    const fenceArgs = (until: string) => [input.runKey, input.leaseOwner, input.attemptCount, input.targetDate,
+      ...(recovery ? [input.recoveryId, input.planSha256, input.scopeSha256, until] : []), until];
     // Lease and account state read on the primary. CAS below fences the lease again atomically.
-    const lease = await db.prepare("SELECT run_key FROM pipeline_window WHERE run_key=? AND lease_owner=? AND attempt_count=? AND target_date=? AND recovery_id IS NULL AND status IN ('DISPATCHED','RUNNING') AND julianday(lease_expires_at)>julianday(?) LIMIT 1").bind(input.runKey, input.leaseOwner, input.attemptCount, input.targetDate, cutoff).all();
+    const lease = await db.prepare(`SELECT run_key FROM pipeline_window WHERE ${fence} LIMIT 1`).bind(...fenceArgs(cutoff)).all();
     count(lease.meta); if (!lease.results.length) fail("budget_lease_conflict", 409);
+    let recoveryLimit: Numbers | undefined; let recoveryDeadline: number | undefined;
+    const recoveryPrefix = recovery ? `recovery/${input.recoveryId}/${input.planSha256}/` : "";
+    if (recovery) {
+      if (!runtime.RAW_BUCKET) fail("budget_recovery_plan_storage_unavailable", 503);
+      const records = await db.prepare("SELECT plan_key FROM pipeline_window_recovery WHERE recovery_id=? AND run_key=? AND plan_sha256=? AND scope_sha256=? LIMIT 1")
+        .bind(input.recoveryId, input.runKey, input.planSha256, input.scopeSha256).all<{ plan_key: string }>();
+      count(records.meta);
+      const planKey = recoveryPlanObjectKey(input.recoveryId!, input.scopeSha256!);
+      if (records.results[0]?.plan_key !== planKey) fail("budget_recovery_plan_conflict", 409);
+      const plan = await readRecoveryPlanObject(runtime.RAW_BUCKET!, planKey, {
+        recoveryId: input.recoveryId!, runKey: input.runKey, planSha256: input.planSha256!, scopeSha256: input.scopeSha256! });
+      recoveryDeadline = Date.parse(String(plan.deadline));
+      if (!(plan.dataDates as string[]).includes(input.targetDate) || recoveryDeadline <= Date.parse(cutoff)) fail("budget_recovery_scope_conflict", 409);
+      const manifest = plan.budgetManifest as { runnerBudgetContract?: string; taskCostUpperBound?: Vector };
+      if (!manifest || manifest.runnerBudgetContract !== "flow-shared-budget-v1") fail("budget_recovery_upper_bound_required", 409);
+      recoveryLimit = numbers(manifest.taskCostUpperBound);
+    }
     const stored = await db.prepare("SELECT revision,state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").bind(BUDGET_SCOPE).all<{ revision: number; state_json: string }>();
     count(stored.meta); const row = stored.results[0]; if (!row) fail("budget_account_uninitialized", 409);
     if (!integer(row.revision) || new TextEncoder().encode(row.state_json).length > MAX_STATE_BYTES) fail("budget_state_corrupt", 503);
@@ -208,12 +243,24 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
     }
     if (row.revision !== input.expectedRevision) fail("budget_revision_conflict", 409);
     if (Object.keys(state.receipts).length >= MAX_RECEIPTS) fail("budget_receipt_capacity", 409);
-    const task = `${input.runKey}/${input.leaseOwner}/${input.attemptCount}`;
+    const task = `${recoveryPrefix}${input.runKey}/${input.leaseOwner}/${input.attemptCount}`;
+    if (recoveryLimit && input.operation === "reserve") {
+      const cost = numbers(input.vector);
+      let committedScope = zero();
+      // Known settlements also remain charged conservatively to the approved
+      // plan upper bound. Owner changes cannot multiply the approved envelope.
+      for (const [id, reservation] of Object.entries(state.reservations)) {
+        if (id.startsWith(recoveryPrefix) && id !== task) committedScope = add(committedScope, reservation.cost);
+      }
+      if (exceeds(add(committedScope, cost), recoveryLimit)) fail("budget_recovery_scope_over_budget", 409);
+    }
     const next = transitionSharedBudget(state, task, input, now);
     next.state.receipts[input.operationId] = { hash, result: next.result };
     if (size(next.state) > MAX_STATE_BYTES) fail("budget_state_capacity", 409);
-    const committed = await db.prepare("UPDATE pipeline_budget_account SET state_json=?,revision=revision+1,updated_at=? WHERE scope=? AND revision=? AND EXISTS (SELECT 1 FROM pipeline_window WHERE run_key=? AND lease_owner=? AND attempt_count=? AND target_date=? AND recovery_id IS NULL AND status IN ('DISPATCHED','RUNNING') AND julianday(lease_expires_at)>julianday(?)) RETURNING revision")
-      .bind(JSON.stringify(next.state), now.toISOString(), BUDGET_SCOPE, row.revision, input.runKey, input.leaseOwner, input.attemptCount, input.targetDate, new Date(clock().getTime() + 30000).toISOString()).all<{ revision: number }>();
+    const commitCutoff = new Date(clock().getTime() + 30000).toISOString();
+    if (recoveryDeadline !== undefined && recoveryDeadline <= Date.parse(commitCutoff)) fail("budget_recovery_scope_conflict", 409);
+    const committed = await db.prepare(`UPDATE pipeline_budget_account SET state_json=?,revision=revision+1,updated_at=? WHERE scope=? AND revision=? AND EXISTS (SELECT 1 FROM pipeline_window WHERE ${fence}) RETURNING revision`)
+      .bind(JSON.stringify(next.state), now.toISOString(), BUDGET_SCOPE, row.revision, ...fenceArgs(commitCutoff)).all<{ revision: number }>();
     count(committed.meta); if (!committed.results.length) fail("budget_revision_or_lease_conflict", 409);
     return response({ ...next.result, revision: committed.results[0].revision, replayed: false, rowsRead, rowsWritten });
   } catch (error) {
