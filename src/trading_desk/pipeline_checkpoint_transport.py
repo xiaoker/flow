@@ -244,7 +244,7 @@ class RecoveryCheckpointObjectTransport(CheckpointObjectTransport):
             bind_recovery_runner_scope(self._plan, context, self._stages, now=self._now())
         except ValueError:
             raise PipelineRunnerError("checkpoint_recovery_scope_rejected") from None
-        if (stage not in self._stages or stage not in {"core_collection", "publish", "build", "verify"}
+        if ((stage != "handoff" and (stage not in self._stages or stage not in {"core_collection", "publish", "build", "verify"}))
                 or context.lease_attempt_count is None or context.identity.target_date is None):
             raise PipelineRunnerError("checkpoint_recovery_stage_unproven")
         return {"runKey": context.identity.run_key, "targetDate": context.identity.target_date,
@@ -252,7 +252,20 @@ class RecoveryCheckpointObjectTransport(CheckpointObjectTransport):
                 "producerBuildSha": context.identity.producer_build_sha,
                 "leaseOwner": context.lease_owner, "attemptCount": context.lease_attempt_count,
                 "recoveryId": context.recovery_id, "planSha256": context.recovery_plan_sha256,
-                "scopeSha256": self._scope_sha}
+                "scopeSha256": self._scope_sha,
+                **({"handoffStages": ",".join(self._stages)} if stage == "handoff" else {})}
+
+    def _verify_object(self, data, digest, context, stage, input_sha256):
+        if stage == "handoff":
+            try:
+                references = verify_checkpoint_handoff(data, sha256=digest, context=context,
+                    input_sha256=input_sha256, approved_plan=self._plan, now=self._now())
+                if json.loads(data)["plan"]["stages"] != list(self._stages):
+                    raise ValueError("checkpoint_handoff_stage_set_mismatch")
+            except ValueError as exc:
+                raise PipelineRunnerError("checkpoint_handoff_invalid") from exc
+            return references
+        return super()._verify_object(data, digest, context, stage, input_sha256)
 
     def key(self, context, stage, input_sha256, sha256):
         ordinary = super().key(context, stage, input_sha256, sha256)

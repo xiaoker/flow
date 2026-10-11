@@ -275,6 +275,13 @@ R2, D1, release, or receipt evidence.
 - **Protected paths:** `reports/phase0/latest-*`, `memory/`, and all other pre-existing user changes in the original worktree are untouched.
 # 2026-10-03 local budget persistence increment
 
+## 2026-10-11 scoped recovery checkpoint handoff
+
+- Base PR #177 merge `ce0c56e2992aee959a8b0bcca745da468743dce0`; exact Worker deployment previously verified.
+- Existing handoff protocol now binds the recovery plan/scope and approved stage prefix. No production caller, flags, migration or collection changes.
+- Python 963 / Web 215 passed; lint/build passed. See `2026-10-11-080-recovery-handoff.md`, including the unchanged request-cap limitation.
+- 080-RUNNER remains CODE_IN_PROGRESS. Full lifecycle/budget proof and trusted entry must precede a real canary. Stop after hosted CI for merge/deployment authorization.
+
 ## 2026-10-11 exact recovery publish runner admission
 
 - Base PR #175 cf74f033b21b230f79400f019893a06b0f674501 deployed via 38109879189.

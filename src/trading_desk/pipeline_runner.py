@@ -496,12 +496,12 @@ def run_pipeline_request(
     if resume_handoff_sha256 is not None:
         if existing:
             raise PipelineRunnerError("resume_bundle_local_state_conflict")
-        plan_digest = handoff_input_sha256(context, stages, stage_inputs)
+        plan_digest = handoff_input_sha256(context, stages, stage_inputs, approved_recovery_plan, now)
         data = checkpoint_transport.download(context=context, stage="handoff",
             input_sha256=plan_digest, sha256=resume_handoff_sha256)
         try:
             references = verify_checkpoint_handoff(data, sha256=resume_handoff_sha256,
-                context=context, input_sha256=plan_digest)
+                context=context, input_sha256=plan_digest, approved_plan=approved_recovery_plan, now=now)
             resume_references = {stage: ref["sha256"] for stage, ref in references.items()}
             handoff_sizes = {stage: ref["bytes"] for stage, ref in references.items()}
         except ValueError as exc:
@@ -684,10 +684,10 @@ def run_pipeline_request(
                     bundle_descriptors[stage]["remote"] = descriptor
             lease_guard.confirm()
             if export_handoff and bundle_descriptors:
-                data, digest = build_checkpoint_handoff(context, stages, stage_inputs, bundle_descriptors)
+                data, digest = build_checkpoint_handoff(context, stages, stage_inputs, bundle_descriptors, approved_recovery_plan, now)
                 if handoff_descriptor is None or handoff_descriptor["sha256"] != digest:
                     handoff_descriptor = checkpoint_transport.upload(context=context, stage="handoff",
-                        input_sha256=handoff_input_sha256(context, stages, stage_inputs), data=data, sha256=digest)
+                        input_sha256=handoff_input_sha256(context, stages, stage_inputs, approved_recovery_plan, now), data=data, sha256=digest)
                     _write_json_atomic(state_dir / "handoff.json", handoff_descriptor)
         _write_json_atomic(
             checkpoints_path,

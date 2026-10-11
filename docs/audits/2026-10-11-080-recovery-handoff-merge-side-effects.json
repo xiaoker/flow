@@ -1,0 +1,16 @@
+{
+  "baseSha": "ce0c56e2992aee959a8b0bcca745da468743dce0",
+  "scope": "080-RUNNER scoped recovery checkpoint handoff",
+  "mergeTriggers": ["main CI", "Deploy Flow Worker"],
+  "workerDeployment": true,
+  "migrationExecution": "existing deploy workflow applies pending migrations",
+  "newMigrations": [],
+  "remotePendingMigrations": "UNKNOWN",
+  "productionCallerChanged": false,
+  "flagsChanged": false,
+  "activePointerChanged": false,
+  "collectionOrCanary": false,
+  "protectedOriginalPathsChanged": false,
+  "accountUsage": "UNKNOWN",
+  "rollback": "reviewed revert PR; retain immutable checkpoint objects"
+}

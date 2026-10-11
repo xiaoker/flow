@@ -1,6 +1,6 @@
 /** Candidate exact-key checkpoint transport. No listing, lease mutation or release writes. */
 import { getPipelineWindow, parsePipelineRunKey, PipelineWindowError } from "./pipeline-window.ts";
-import { readRecoveryPlanObject, recoveryPlanObjectKey } from "./pipeline-recovery-plan.ts";
+import { canonicalJson, readRecoveryPlanObject, recoveryPlanObjectKey } from "./pipeline-recovery-plan.ts";
 
 export const CHECKPOINT_OBJECT_MAX_BYTES = 1024 * 1024;
 const HASH = /^[0-9a-f]{64}$/;
@@ -79,10 +79,16 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
   if (recovery && !["1", "true"].includes(runtime.PIPELINE_RECOVERY_ENABLED ?? "")) {
     return response({ error: "pipeline_recovery_disabled" }, 404);
   }
-  if (recovery && !["core_collection", "publish", "build", "verify"].includes(stage)) {
+  if (recovery && !["core_collection", "publish", "build", "verify", "handoff"].includes(stage)) {
     return response({ error: "checkpoint_recovery_stage_unproven" }, 422);
   }
   const maximum = stage === "handoff" ? 16384 : CHECKPOINT_OBJECT_MAX_BYTES;
+  const handoffStages = query.get("handoffStages")?.split(",") ?? [];
+  if (recovery && stage === "handoff" && (!handoffStages.length || handoffStages.length > 4
+      || new Set(handoffStages).size !== handoffStages.length
+      || handoffStages.some(value => !["core_collection", "build", "verify", "publish"].includes(value)))) {
+    return response({ error: "checkpoint_handoff_stages_invalid" }, 422);
+  }
   if (!parsePipelineRunKey(runKey) || !STAGES.has(stage) || !HASH.test(input) || !HASH.test(sha256) || !SHA.test(producer)
       || !/^[A-Za-z0-9_.:/-]{1,128}$/.test(owner) || !/^[1-9][0-9]{0,8}$/.test(attemptText)
       || !/^\d{4}-\d{2}-\d{2}$/.test(target) || !Number.isSafeInteger(attempt)) {
@@ -128,8 +134,8 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
       });
       planReads = 2; // HEAD + GET, not a physical D1 measurement.
       planDeadline = Date.parse(String(plan.deadline));
-      const domain = stage === "build" || stage === "verify" ? "dashboard" : stage;
-      if (!(plan.dataDates as string[]).includes(target) || !(plan.requiredStages as string[]).includes(domain)
+      const domains = (stage === "handoff" ? handoffStages : [stage]).map(value => value === "build" || value === "verify" ? "dashboard" : value);
+      if (!(plan.dataDates as string[]).includes(target) || domains.some(domain => !(plan.requiredStages as string[]).includes(domain))
           || !Number.isFinite(planDeadline) || planDeadline <= now().getTime() + 30_000) {
         throw new PipelineWindowError("checkpoint_recovery_scope_conflict", 409);
       }
@@ -138,12 +144,41 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
     const runHash = await hash(new TextEncoder().encode(runKey));
     const namespace = recovery ? `recovery/${recoveryId}/${scopeSha256}/` : "";
     const key = `market-data/pipeline/checkpoints/v1/${namespace}${runHash}/${producer}/${stage}/${input}/${sha256}.json`;
+    const validateHandoff = async (bytes: Uint8Array) => {
+      if (!recovery || stage !== "handoff") return;
+      try {
+        const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+        const p = value.plan;
+        const identity = { runKey, windowDate: parsePipelineRunKey(runKey)!.windowDate, targetDate: target,
+          producerBuildSha: producer, contractVersion: "pipeline-application-v1" };
+        const binding = { recoveryId, planSha256, scopeSha256 };
+        if (canonicalJson(Object.keys(value).sort()) !== canonicalJson(["kind", "plan", "references", "schemaVersion"])
+            || value.schemaVersion !== 1 || value.kind !== "checkpoint_handoff"
+            || canonicalJson(Object.keys(p).sort()) !== canonicalJson(["dependencyLockSha256", "identity", "mode", "recovery", "stageInputs", "stages"])
+            || p.mode !== "recovery" || canonicalJson(p.identity) !== canonicalJson(identity)
+            || canonicalJson(p.recovery) !== canonicalJson(binding) || !HASH.test(p.dependencyLockSha256)
+            || canonicalJson(p.stages) !== canonicalJson(handoffStages)
+            || canonicalJson(Object.keys(p.stageInputs).sort()) !== canonicalJson([...handoffStages].sort())
+            || handoffStages.some(s => !HASH.test(p.stageInputs[s]))
+            || await hash(new TextEncoder().encode(canonicalJson(p))) !== input) throw new Error();
+        const refs = Object.keys(value.references);
+        if (!refs.length || refs.length > handoffStages.length
+            || refs.some(s => !handoffStages.slice(0, refs.length).includes(s))) throw new Error();
+        for (const s of refs) {
+          const ref = value.references[s];
+          if (canonicalJson(Object.keys(ref).sort()) !== canonicalJson(["bytes", "key", "sha256"])
+              || !HASH.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 1 || ref.bytes > CHECKPOINT_OBJECT_MAX_BYTES
+              || ref.key !== `market-data/pipeline/checkpoints/v1/${namespace}${runHash}/${producer}/${s}/${p.stageInputs[s]}/${ref.sha256}.json`) throw new Error();
+        }
+      } catch { throw new PipelineWindowError("checkpoint_handoff_contract_mismatch", 422); }
+    };
     let classA = 0;
     if (request.method === "POST") {
       const length = Number(request.headers.get("content-length"));
       if (length > maximum) return response({ error: "checkpoint_object_too_large" }, 413);
       const bytes = await boundedBytes(request.body, maximum);
       if (await hash(bytes) !== sha256) return response({ error: "checkpoint_digest_mismatch" }, 422);
+      await validateHandoff(bytes);
       await confirm();
       classA = 1;
       await bucket.put(key, bytes, {
@@ -164,6 +199,7 @@ export async function checkpointObjectRequest(request: Request, runtime: Runtime
     }
     const bytes = await boundedBytes(object.body, maximum);
     if (bytes.byteLength !== object.size || await hash(bytes) !== sha256) return response({ error: "checkpoint_object_conflict" }, 409);
+    await validateHandoff(bytes);
     await confirm(); // Immutable orphan writes never imply completion after lease loss.
     const usage = { d1RowsRead: null, d1RowsWritten: 0, r2ClassA: classA, r2ClassB: 1 + planReads, r2Bytes: bytes.byteLength };
     if (request.method === "POST") return response({ decision: "verified", key, sha256, bytes: bytes.byteLength, usage });
