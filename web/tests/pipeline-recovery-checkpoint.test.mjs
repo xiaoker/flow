@@ -7,7 +7,7 @@ import { checkpointObjectRequest } from "../app/lib/pipeline-checkpoint-object.t
 
 const now = () => new Date("2026-10-03T02:00:00Z");
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
-function fixture({ stages = ["core_collection"], deadline = "2026-10-03T03:00:00Z" } = {}) {
+function fixture({ stages = ["core_collection"], deadline = "2026-10-03T03:00:00Z", handoff = false, mutate = () => {} } = {}) {
   const plan = { schemaVersion: 1, contractVersion: "recovery-execution-v1", campaignId: "fixture",
     recoveryId: "fixture-recovery", runKey: "daily-market-data:2026-10-03:reconcile:v1",
     dataDates: ["2026-10-02"], requiredStages: stages, artifactRoot: ".recovery/fixture",
@@ -42,10 +42,24 @@ function fixture({ stages = ["core_collection"], deadline = "2026-10-03T03:00:00
       objects.set(key, { bytes: bytes.slice(), metadata: options.customMetadata }); return {};
     },
   };
-  const bytes = new TextEncoder().encode('{"fixture":"checkpoint"}');
+  const locatorPlan = {
+    identity: { runKey: plan.runKey, windowDate: "2026-10-03", targetDate: "2026-10-02", producerBuildSha: "a".repeat(40), contractVersion: "pipeline-application-v1" },
+    dependencyLockSha256: "b".repeat(64), mode: "recovery",
+    recovery: { recoveryId: plan.recoveryId, planSha256: plan.planHash, scopeSha256: scope },
+    stages: ["core_collection"], stageInputs: { core_collection: "b".repeat(64) },
+  };
+  const locator = { schemaVersion: 1, kind: "checkpoint_handoff", plan: locatorPlan, references: {
+    core_collection: { key: `market-data/pipeline/checkpoints/v1/recovery/${plan.recoveryId}/${scope}/${hash(plan.runKey)}/${"a".repeat(40)}/core_collection/${"b".repeat(64)}/${"c".repeat(64)}.json`, sha256: "c".repeat(64), bytes: 64 },
+  } };
+  mutate(locator);
+  const bytes = new TextEncoder().encode(handoff ? canonicalJson(locator) : '{"fixture":"checkpoint"}');
   const query = new URLSearchParams({ runKey: plan.runKey, targetDate: "2026-10-02", leaseOwner: "owner", attemptCount: "1",
     stage: "core_collection", inputSha256: "b".repeat(64), sha256: hash(bytes), producerBuildSha: "a".repeat(40),
     recoveryId: plan.recoveryId, planSha256: plan.planHash, scopeSha256: scope });
+  if (handoff) {
+    query.set("stage", "handoff"); query.set("handoffStages", "core_collection");
+    query.set("inputSha256", hash(canonicalJson(locatorPlan)));
+  }
   const request = (method = "POST", token = "fixture-key") => new Request(`https://flow.xiaoker.com/api/v1/admin/pipeline-window/checkpoint?${query}`,
     { method, headers: { Authorization: `Bearer ${token}` }, ...(method === "POST" ? { body: bytes } : {}) });
   const runtime = { DB: adapter, RAW_BUCKET: bucket, INGEST_API_KEY: "fixture-key", PIPELINE_RECOVERY_ENABLED: "1" };
@@ -69,6 +83,35 @@ test("recovery checkpoint binds immutable plan namespace, real indexed SQL and e
     assert(plan.filter(row => row.detail.includes("SEARCH")).length >= 2);
     assert(!plan.some(row => row.detail.includes("SCAN")));
   } finally { f.db.close(); }
+});
+
+test("recovery handoff is scoped, immutable and bounded on PUT and GET", async () => {
+  const f = fixture({ handoff: true });
+  try {
+    assert.equal((await f.run()).status, 200);
+    assert.equal((await f.run("GET")).status, 200);
+    assert.equal(f.objects.size, 1);
+    assert(f.sqls.every(sql => /LIMIT 1/.test(sql)));
+  } finally { f.db.close(); }
+});
+
+test("handoff conflicts cannot write even when content hash is recomputed", async () => {
+  const mutations = [
+    p => { p.plan.recovery.scopeSha256 = "f".repeat(64); },
+    p => { p.plan.identity.targetDate = "2026-10-01"; },
+    p => { p.plan.dependencyLockSha256 = "bad"; },
+    p => { p.references.core_collection.bytes = true; },
+    p => { p.references.core_collection.key = "market-data/pipeline/checkpoints/v1/ordinary.json"; },
+    p => { p.plan.stages = ["build"]; },
+  ];
+  for (const mutate of mutations) {
+    const f = fixture({ handoff: true, mutate });
+    try { assert.equal((await f.run()).status, 422); assert(!f.calls.includes("put")); }
+    finally { f.db.close(); }
+  }
+  const f = fixture({ handoff: true, stages: ["publish"] });
+  try { assert.equal((await f.run()).status, 409); assert(!f.calls.includes("put")); }
+  finally { f.db.close(); }
 });
 
 test("flag, authentication and partial recovery identity reject before storage", async () => {

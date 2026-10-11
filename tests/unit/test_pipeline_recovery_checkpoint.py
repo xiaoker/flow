@@ -111,7 +111,7 @@ def test_exact_recovery_identity_sent_and_lost_receipt_reads_once(tmp_path):
     assert len(budget.calls) == 4  # two separately bounded allowances; no refund.
 
 
-@pytest.mark.parametrize("stage", ["handoff", "build", "normalize", "publish"])
+@pytest.mark.parametrize("stage", ["build", "normalize", "publish"])
 def test_unapproved_stage_never_calls_budget_or_object(tmp_path, stage):
     client, args, objects, budget, _, _ = setup(tmp_path)
     with pytest.raises(PipelineRunnerError, match="stage_unproven"):
