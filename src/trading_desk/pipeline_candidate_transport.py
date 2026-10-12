@@ -46,6 +46,11 @@ class CandidatePublicationTransport:
             raise PipelineRunnerError("candidate_transport_credentials_required")
         if type(maximum_requests) is not int or not 1 <= maximum_requests <= 40:
             raise PipelineRunnerError("candidate_transport_budget_invalid")
+        profile = getattr(budget_ledger, "_request_profile", None)
+        if profile is not None:
+            if getattr(lease_guard, "_request_profile", None) is not profile or maximum_requests != 40:
+                raise PipelineRunnerError("candidate_transport_request_profile_invalid")
+            maximum_requests = profile.envelope()["requestsUpper"]["candidate"]
         self._session = session if session is not None else build_session(HttpSettings(total_retries=0))
         if any(getattr(getattr(adapter, "max_retries", None), "total", None) not in {0, False}
                for adapter in getattr(self._session, "adapters", {}).values()):
@@ -175,6 +180,9 @@ class CandidatePublicationTransport:
             manifest = body["manifest"]
             if not isinstance(manifest.get("releaseId"), str) or not 1 <= len(manifest["artifacts"]) <= 20:
                 raise PipelineRunnerError("candidate_transport_manifest_invalid")
+            profile = getattr(self._ledger, "_request_profile", None)
+            if profile is not None and len(manifest["artifacts"]) != profile.artifact_count:
+                raise PipelineRunnerError("candidate_transport_profile_artifact_mismatch")
             expected = self._receipt(body)
             if self._intent_store is not None:
                 recorded = self._intent_store.lookup(self._reference(body))
@@ -282,8 +290,8 @@ class CandidatePublicationTransport:
             raise PipelineRunnerError("candidate_transport_budget_exceeded")
         if isinstance(self._ledger, SharedBudgetLedger):
             control = self._ledger.accounting_evidence()
-            # Each authorization uses metadata GET then atomic operation POST.
-            if 2 * requests > control["maximumRequests"] - control["requests"]:
+            # v2 reuses confirmed server revisions; legacy still GETs per POST.
+            if self._ledger.authorization_request_upper(requests) > control["maximumRequests"] - control["requests"]:
                 raise PipelineRunnerError("candidate_shared_control_request_capacity")
 
     def evidence(self) -> dict:

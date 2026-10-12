@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import timezone
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +104,96 @@ def metadata():
     return Response({"revision": 0, "contract": "flow-shared-budget-v1", "rowsRead": 7, "rowsWritten": 0})
 
 
+def durable_options(tmp_path, session, *, reopen=False):
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    task = f"{KEY}/2026-10-02/flow-budget-task-v2"
+    path = tmp_path / "pending.sqlite"
+    factory = RemoteBudgetOperationStore if reopen else RemoteBudgetOperationStore.initialize
+    store = factory(path, task_id=task, input_sha256="c" * 64)
+    return {**kwargs(session=session), "task_input_sha256": "c" * 64, "operation_store": store}
+
+
+def durable_metadata():
+    return Response({"revision": 0, "contract": "flow-shared-budget-v1", "rowsRead": 7,
+                     "rowsWritten": 0, "taskId": f"{KEY}/2026-10-02/flow-budget-task-v2"})
+
+
+def durable_receipt(decision, revision, replayed=False):
+    return Response({"decision": decision, "replayed": replayed, "rowsRead": 21, "rowsWritten": 1,
+                     "revision": revision, "taskId": f"{KEY}/2026-10-02/flow-budget-task-v2"})
+
+
+def test_durable_candidate_reuses_verified_revision(tmp_path):
+    session = Session(durable_metadata(), durable_receipt("allow", 1), durable_receipt("running", 2))
+    ledger = SharedBudgetLedger(**durable_options(tmp_path, session))
+    ledger.reserve(ledger.task_id, vector(10))
+    ledger.mark_running(ledger.task_id)
+    assert [call[0] for call in session.calls] == ["GET", "POST", "POST"]
+    assert json.loads(session.calls[2][2]["data"])["expectedRevision"] == 1
+    assert ledger._operation_store.pending() is None
+
+
+def test_lost_reply_survives_new_client_with_same_operation_id(tmp_path):
+    session = Session(durable_metadata(), TimeoutError("fixture reply lost"))
+    ledger = SharedBudgetLedger(**durable_options(tmp_path, session))
+    with pytest.raises(ValueError, match="allowance_not_granted"):
+        ledger.reserve(ledger.task_id, vector(10))
+    pending = ledger._operation_store.pending()
+    assert pending is not None
+    resumed_session = Session(durable_receipt("idempotent", 1, replayed=True))
+    resumed = SharedBudgetLedger(**durable_options(tmp_path, resumed_session, reopen=True))
+    with pytest.raises(ValueError, match="outcome_unknown"):
+        resumed.mark_running(resumed.task_id)
+    assert not resumed_session.calls
+    assert resumed.resolve_pending()["decision"] == "idempotent"
+    sent = json.loads(resumed_session.calls[0][2]["data"])
+    assert sent == pending
+    assert resumed._operation_store.pending() is None
+
+
+def test_definitive_rejection_clears_only_rejected_pending(tmp_path):
+    session = Session(durable_metadata(), Response({"error": "budget_lease_conflict"}, status=409))
+    ledger = SharedBudgetLedger(**durable_options(tmp_path, session))
+    with pytest.raises(ValueError, match="allowance_not_granted"):
+        ledger.reserve(ledger.task_id, vector(10))
+    assert ledger._operation_store.pending() is None
+    assert ledger._revision is None
+    assert len(session.calls) == 2
+
+
+def test_explicit_revision_conflict_refreshes_once_with_same_operation(tmp_path):
+    refreshed = durable_metadata()
+    refreshed.value["revision"] = 8
+    session = Session(durable_metadata(), Response({"error": "budget_revision_conflict"}, status=409),
+                      refreshed, durable_receipt("allow", 9))
+    ledger = SharedBudgetLedger(**durable_options(tmp_path, session))
+    assert ledger.reserve(ledger.task_id, vector(10))["decision"] == "allow"
+    before, after = [json.loads(call[2]["data"]) for call in session.calls if call[0] == "POST"]
+    assert before["operationId"] == after["operationId"]
+    assert before["expectedRevision"] == 0 and after["expectedRevision"] == 8
+    assert {k: v for k, v in before.items() if k != "expectedRevision"} == {k: v for k, v in after.items() if k != "expectedRevision"}
+    assert ledger._operation_store.pending() is None
+
+
+def test_lost_authorization_reply_cannot_be_replayed_as_permission(tmp_path):
+    session = Session(durable_metadata(), TimeoutError("fixture grant reply lost"))
+    ledger = SharedBudgetLedger(**durable_options(tmp_path, session))
+    with pytest.raises(ValueError, match="allowance_not_granted"):
+        ledger.authorize_step(ledger.task_id, vector(1))
+    resumed = SharedBudgetLedger(**durable_options(tmp_path, Session(durable_receipt("not_authorized", 1, True)), reopen=True))
+    result = resumed.resolve_pending()
+    assert result["decision"] == "not_authorized"
+    assert result["reason"] == "ambiguous_allowance_retained"
+
+
+def test_durable_store_rejects_different_input_without_corrupting_pending(tmp_path):
+    options = durable_options(tmp_path, Session())
+    store = options["operation_store"]
+    with pytest.raises(ValueError, match="identity_conflict"):
+        store.begin({"taskContract": "flow-budget-task-v2", "taskInputSha256": "d" * 64, "operationId": "a" * 64})
+    assert store.pending() is None
+
+
 def receipt(decision="authorized", replayed=False):
     return Response({"decision": decision, "replayed": replayed, "rowsRead": 21, "rowsWritten": 1,
                      "revision": 1, "taskId": f"{KEY}/owner/1"})
@@ -127,6 +218,191 @@ def recovery_fixture(manifest=None):
 def recovery_options(plan, context):
     return dict(approved_plan=plan, context=context, stages=["core_collection"],
         now=datetime(2026, 10, 3, 2, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_stable_task_lifecycle_real_http_sqlite(tmp_path, recovery):
+    """Production-same budget endpoint; measured vectors are fixture evidence."""
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    plan, context = recovery_fixture()
+    process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/shared-budget-server.mjs")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, **({"FLOW_RECOVERY_FIXTURE_PLAN": json.dumps(plan)} if recovery else {})})
+    try:
+        port = process.stdout.readline().strip()
+        assert port.isdigit(), "local fixture failed to start"
+        task_id = f"{KEY}/2026-10-02/flow-budget-task-v2"
+        if recovery:
+            task_id = f"recovery/fixture-recovery/{plan['planHash']}/{task_id}"
+        store = RemoteBudgetOperationStore.initialize(tmp_path / "operation.sqlite", task_id=task_id, input_sha256="c" * 64)
+        options = kwargs(allow_loopback_fixture=True, server_fenced_checks=True,
+            task_input_sha256="c" * 64, operation_store=store)
+        options["base_url"] = f"http://127.0.0.1:{port}"
+        ledger = RecoverySharedBudgetLedger(**options, **recovery_options(plan, context)) if recovery else SharedBudgetLedger(**options)
+        assert ledger.task_id == task_id
+        assert ledger.reserve(task_id, vector(70))["decision"] == "allow"
+        assert ledger.mark_running(task_id)["decision"] == "running"
+        assert ledger.authorize_step(task_id, vector(12))["decision"] == "authorized"
+        assert ledger.debit(task_id, vector(5, measured=True))["decision"] == "debited"
+        result = ledger.settle(task_id, outcome="SUCCEEDED", actual=vector(5, measured=True))
+        assert result["decision"] == "settled"
+        assert ledger.request_count == 6  # One initial GET, five fenced mutations.
+        assert ledger.accounting_evidence()["d1RowsRead"] is None  # Fixture has no provider meta.
+        assert store.pending() is None
+        current = ledger.snapshot()
+        assert current["reservation"]["status"] == "SUCCEEDED"
+        assert current["reservation"]["consumed"] == dict.fromkeys(RESOURCE_DIMENSIONS, 5)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("separate_process", [False, True])
+def test_real_committed_grant_lost_reply_restart_retains_hold(tmp_path, separate_process):
+    """Discard a real server commit reply, not a mocked successful mutation."""
+    import requests
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+
+    class LoseGrantReply(requests.Session):
+        lost = False
+
+        def request(self, method, url, **options):
+            reply = super().request(method, url, **options)
+            if method == "POST" and json.loads(options.get("data", b"{}"))["operation"] == "authorize_step":
+                assert reply.status_code == 200
+                self.lost = True
+                reply.close()
+                raise TimeoutError("fixture discards committed response")
+            return reply
+
+    process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/shared-budget-server.mjs")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        port = process.stdout.readline().strip()
+        assert port.isdigit(), "local fixture failed to start"
+        task = f"{KEY}/2026-10-02/flow-budget-task-v2"
+        path = tmp_path / "operation.sqlite"
+        store = RemoteBudgetOperationStore.initialize(path, task_id=task, input_sha256="c" * 64)
+        session = LoseGrantReply()
+        options = kwargs(allow_loopback_fixture=True, server_fenced_checks=True,
+            task_input_sha256="c" * 64, operation_store=store, session=session)
+        options["base_url"] = f"http://127.0.0.1:{port}"
+        first = SharedBudgetLedger(**options)
+        first.reserve(task, vector(70))
+        with pytest.raises(ValueError, match="allowance_not_granted"):
+            first.authorize_step(task, vector(12))
+        assert session.lost
+        operation_id = store.pending()["operationId"]
+        options.pop("session")
+        options["operation_store"] = RemoteBudgetOperationStore(path, task_id=task, input_sha256="c" * 64)
+        if separate_process:
+            code = """import json,sys
+from test_resource_budget_remote import kwargs
+from trading_desk.resource_budget_remote import SharedBudgetLedger
+from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+task,path,url=sys.argv[1:]
+store=RemoteBudgetOperationStore(path,task_id=task,input_sha256='c'*64)
+options=kwargs(allow_loopback_fixture=True,server_fenced_checks=True,task_input_sha256='c'*64,operation_store=store)
+options['base_url']=url
+ledger=SharedBudgetLedger(**options)
+receipt=ledger.resolve_pending()
+print(json.dumps({'decision':receipt['decision'],'reservation':ledger.snapshot()['reservation']}))
+"""
+            child = subprocess.run([sys.executable, "-c", code, task, str(path), options["base_url"]],
+                cwd=ROOT, env={**os.environ, "PYTHONPATH": "src:.:tests/unit"},
+                capture_output=True, text=True, timeout=15, check=True)
+            result = json.loads(child.stdout)
+            assert result["decision"] == "not_authorized"
+            state = result["reservation"]
+        else:
+            restarted = SharedBudgetLedger(**options)
+            assert restarted.resolve_pending()["decision"] == "not_authorized"
+            state = restarted.snapshot()["reservation"]
+        assert state["authorized"] == dict.fromkeys(RESOURCE_DIMENSIONS, 12)
+        assert state["consumed"] == dict.fromkeys(RESOURCE_DIMENSIONS, 0)
+        assert state["cost"] == dict.fromkeys(RESOURCE_DIMENSIONS, 70)
+        assert operation_id is not None and store.pending() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("usage_known", [True, False])
+def test_runner_budget_boundaries_against_real_budget_endpoint(tmp_path, usage_known):
+    """Runner/ledger lifecycle integration; stage/lease adapters are fixtures.
+
+    Does not prove candidate R2 transport, physical provider metrics or canary.
+    """
+    from trading_desk.pipeline_runner import (run_pipeline_request, build_execution_context,
+        dependency_lock_digest, runner_budget_input_sha256)
+    from trading_desk.pipeline_application import canonical_sha256
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/shared-budget-server.mjs")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        port = process.stdout.readline().strip()
+        assert port.isdigit(), "local fixture failed to start"
+        payload = json.loads((ROOT / "tests/fixtures/pipeline/v060-c-ordinary.json").read_text())
+        payload["identity"] = {"runKey": KEY, "windowDate": "2026-10-03", "targetDate": "2026-10-02"}
+        payload["lease"].update(owner="owner", callbackOwner="owner", attemptCount=1)
+        payload.pop("stageResults")
+        payload.pop("dependencyLockSha256")
+        stages = payload["stages"]
+        payload["stageConfigs"] = {stage: {"fixture": stage} for stage in stages}
+        payload["stageInputs"] = {stage: canonical_sha256(config) for stage, config in payload["stageConfigs"].items()}
+        now = datetime(2026, 10, 3, 2, tzinfo=timezone.utc)
+        lock = ROOT / "web/package-lock.json"
+        payload["dependencyLockSha256"] = dependency_lock_digest([lock], root=ROOT)["sha256"]
+        context = build_execution_context(payload, producer_build_sha="a" * 40,
+            dependency_lock_sha256=dependency_lock_digest([lock], root=ROOT)["sha256"], now=now)
+        digest = runner_budget_input_sha256(context, stages, payload["stageInputs"])
+        task = f"{KEY}/2026-10-02/flow-budget-task-v2"
+        store = RemoteBudgetOperationStore.initialize(tmp_path / "operation.sqlite", task_id=task, input_sha256=digest)
+
+        class RunnerGuard(Guard):
+            renewal_count = 0
+
+            def verify(self, context):
+                return True
+
+            def evidence(self):
+                return {"basis": "fixture", "confirmations": self.calls}
+
+        class Adapter:
+            allowed_side_effects = ("filesystem:isolated_stage_workspace",)
+            calls = 0
+
+            def run(self, **options):
+                self.calls += 1
+                return {"status": "COMPLETED", "outputSha256": "a" * 64,
+                        "allowedSideEffects": ["filesystem:checkpoint"]}
+
+            def verify_checkpoint(self, **options):
+                return True
+
+        guard = RunnerGuard()
+        options = kwargs(allow_loopback_fixture=True, server_fenced_checks=True,
+            task_input_sha256=digest, operation_store=store)
+        options.update(base_url=f"http://127.0.0.1:{port}", lease_guard=guard)
+        ledger = SharedBudgetLedger(**options)
+        adapters = {stage: Adapter() for stage in stages}
+        report = run_pipeline_request(payload, state_dir=tmp_path / "state", output_path=tmp_path / "result.json",
+            producer_build_sha="a" * 40, dependency_lock_paths=[lock], project_root=ROOT, now=now,
+            stage_adapters=adapters, lease_guard=guard, budget_ledger=ledger, task_cost_upper=vector(70),
+            stage_cost_upper={stage: vector(1) for stage in stages},
+            resource_measurement=lambda kind, stage: vector(1 if kind == "stage" else 10, measured=True)
+                if kind == "stage" or usage_known else BudgetVector.unknown())
+        assert report["status"] == ("COMPLETED" if usage_known else "UNKNOWN")
+        assert report["stageExecutionStatus"] == "COMPLETED"
+        assert report["sideEffects"]["activeReleaseChanged"] is False
+        assert sum(adapter.calls for adapter in adapters.values()) == 6
+        assert report["budgetLifecycle"]["settlement"]["decision"] == ("settled" if usage_known else "unknown_outcome")
+        assert ledger.request_count == 16
+        assert (tmp_path / "state/checkpoints.json").is_file()
+        assert store.pending() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 @pytest.mark.parametrize("server_fenced_checks", [False, True])

@@ -1,0 +1,37 @@
+{
+  "purpose": "Advisory disclosure, not an extra authorization gate",
+  "stage": "080-FLOW",
+  "branch": "codex/080-flow-full-lifecycle-20261011",
+  "baseSha": "2850aa733052b28200dac6eb6ebaa449bd1da3d4",
+  "newMigrations": [],
+  "productionReadingPathChanged": false,
+  "productionRunnerEntryAdded": false,
+  "flagsChanged": false,
+  "collectionOrCanaryRequested": false,
+  "activePointerChanged": false,
+  "protectedOriginalFilesChanged": false,
+  "pullRequestEffects": {
+    "ciWorkflow": ".github/workflows/ci.yml",
+    "linuxJobs": 2,
+    "jobTimeoutMinutes": [10, 15],
+    "additionalExistingWorkflow": {
+      "workflow": ".github/workflows/branch-sync-check.yml",
+      "name": "Branch freshness",
+      "linuxJobs": 1,
+      "explicitJobTimeoutMinutes": null
+    },
+    "additionalWork": "Build the actual Worker before Python HTTP integration tests",
+    "officialActionsRemaining": "UNKNOWN",
+    "hostedCiExecuted": false
+  },
+  "mergeEffects": {
+    "workflow": ".github/workflows/deploy-worker.yml",
+    "trigger": "Merged PR to main containing web/** changes",
+    "workerAndAssetsDeployment": true,
+    "pendingD1MigrationCheckAndApply": true,
+    "remotePendingMigrationStatus": "UNKNOWN",
+    "deploymentJobTimeoutMinutes": 20,
+    "productionTaskDispatch": false
+  },
+  "authorization": "Merge, deployment, migration application and production execution remain unauthorized"
+}

@@ -39,6 +39,79 @@ function adapter(sqlite, options = {}) {
 const request = (payload, token = "fixture-key") => new Request("https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 const call = (db, p, opts) => sharedBudgetRequest(request(p), { DB: adapter(db, opts), INGEST_API_KEY: "fixture-key" }, () => now, nums(100));
 function readState(db) { return JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=?").get(BUDGET_SCOPE).state_json); }
+const stable = p => ({ ...p, taskContract: "flow-budget-task-v2", taskInputSha256: "a".repeat(64) });
+
+test("stable reservation without owner metadata fails closed", async () => {
+  const db = seed(); const p = stable(input());
+  const receipt = await (await call(db, p)).json();
+  const corrupted = readState(db);
+  delete corrupted.reservations[receipt.taskId].execution;
+  db.prepare("UPDATE pipeline_budget_account SET state_json=? WHERE scope=?").run(JSON.stringify(corrupted), BUDGET_SCOPE);
+  const response = await call(db, { ...p, operation: "mark_running", operationId: "b".repeat(64), expectedRevision: 1 });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "budget_state_corrupt");
+  assert.deepEqual(readState(db), corrupted);
+  db.close();
+});
+
+test("stable task atomic adoption preserves cumulative counters and fences old owner", async () => {
+  const db = seed(); const p = stable(input());
+  const reserved = await (await call(db, p)).json();
+  const task = reserved.taskId;
+  assert.equal((await (await call(db, { ...p, operation: "authorize_step", operationId: "b".repeat(64), expectedRevision: 1, vector: vec(12) })).json()).decision, "authorized");
+  await call(db, { ...p, operation: "debit", operationId: "c".repeat(64), expectedRevision: 2, vector: vec(5, true) });
+  const before = structuredClone(readState(db).reservations[task]);
+  db.prepare("UPDATE pipeline_window SET lease_owner='next',attempt_count=2 WHERE run_key=? AND lease_owner='owner0'").run(key(0));
+  const takeover = { ...p, leaseOwner: "next", attemptCount: 2, operation: "adopt", operationId: "d".repeat(64), expectedRevision: 3 };
+  const responses = await Promise.all(Array.from({ length: 20 }, (_, i) => call(db, { ...takeover, operationId: createHash("sha256").update(`adopt/${i}`).digest("hex") })));
+  assert.equal(responses.filter(r => r.status === 200).length, 1);
+  const after = readState(db).reservations[task];
+  for (const field of ["cost", "consumed", "authorized", "status", "expiresAt"]) assert.deepEqual(after[field], before[field]);
+  assert.equal(after.execution.leaseOwner, "next");
+  assert.equal(Object.keys(readState(db).reservations).length, 1);
+  assert.equal((await call(db, { ...p, operationId: "e".repeat(64), expectedRevision: 4 })).status, 409);
+  assert.equal((await call(db, { ...takeover, operation: "reserve", operationId: "f".repeat(64), expectedRevision: 4, taskInputSha256: "f".repeat(64) })).status, 409);
+  db.close();
+});
+
+test("stable adoption retains UNKNOWN and cannot regrant replayed allowance", async () => {
+  const db = seed(); const p = stable(input()); await call(db, p);
+  const grant = { ...p, operation: "authorize_step", operationId: "b".repeat(64), expectedRevision: 1, vector: vec(12) };
+  await call(db, grant);
+  await call(db, { ...p, operation: "settle", outcome: "UNKNOWN", operationId: "c".repeat(64), expectedRevision: 2 });
+  db.prepare("UPDATE pipeline_window SET lease_owner='next',attempt_count=2 WHERE run_key=? AND lease_owner='owner0'").run(key(0));
+  const current = { ...p, leaseOwner: "next", attemptCount: 2 };
+  const adopted = await (await call(db, { ...current, operation: "adopt", operationId: "d".repeat(64), expectedRevision: 3 })).json();
+  assert.equal(adopted.decision, "held"); assert.equal(adopted.status, "UNKNOWN");
+  const query = new URLSearchParams({ runKey: current.runKey, leaseOwner: current.leaseOwner, attemptCount: "2", targetDate: current.targetDate,
+    taskContract: current.taskContract, taskInputSha256: current.taskInputSha256, receiptId: grant.operationId });
+  const reply = await sharedBudgetRequest(new Request(`https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget?${query}`, { headers: { Authorization: "Bearer fixture-key" } }),
+    { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now, nums(100));
+  const evidence = await reply.json(); assert.equal(evidence.receipt.decision, "not_authorized");
+  assert.equal((await (await call(db, { ...current, operation: "authorize_step", operationId: "e".repeat(64), expectedRevision: 4, vector: vec(1) })).json()).decision, "not_authorized");
+  assert.equal(Object.keys(readState(db).reservations).length, 1); db.close();
+});
+
+test("v2 cannot reinterpret or duplicate legacy reservations", async () => {
+  const db = seed(); await call(db, input());
+  assert.equal((await call(db, stable({ ...input(), operationId: "b".repeat(64), expectedRevision: 1 }))).status, 409);
+  assert.equal(Object.keys(readState(db).reservations).length, 1); db.close();
+});
+test("legacy clients cannot duplicate an existing stable business hold", async () => {
+  for (const takeover of [false, true]) {
+    const db = seed();
+    await call(db, stable(input()));
+    if (takeover) db.prepare("UPDATE pipeline_window SET lease_owner='next',attempt_count=2 WHERE run_key=? AND lease_owner='owner0'").run(key(0));
+    const before = readState(db);
+    const response = await call(db, { ...input(0, "reserve", 1), expectedRevision: 1,
+      ...(takeover ? { leaseOwner: "next", attemptCount: 2 } : {}) });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, "budget_v2_task_requires_v2_contract");
+    assert.deepEqual(readState(db), before);
+    assert.equal(db.prepare("SELECT revision FROM pipeline_budget_account").get().revision, 1);
+    db.close();
+  }
+});
 function recoveryFixture(manifest = { runnerBudgetContract: "flow-shared-budget-v1", taskCostUpperBound: vec(80) }) {
   const db = seed();
   const plan = { schemaVersion: 1, contractVersion: "recovery-execution-v1", campaignId: "fixture", recoveryId: "fixture-recovery",

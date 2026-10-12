@@ -40,6 +40,7 @@ class OrdinaryPipelineLease:
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = time.monotonic,
         allow_loopback_fixture: bool = False,
+        request_profile: Any = None,
     ) -> None:
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
@@ -56,6 +57,26 @@ class OrdinaryPipelineLease:
             raise PipelineRunnerError("pipeline_lease_attempt_invalid")
         if isinstance(maximum_requests, bool) or not isinstance(maximum_requests, int) or not 1 <= maximum_requests <= 32:
             raise PipelineRunnerError("pipeline_lease_request_budget_invalid")
+        if request_profile is not None:
+            from .pipeline_checkpoint_preflight import (FreshCandidateRequestProfile, FreshRecoveryCandidateRequestProfile,
+                ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile)
+            from .pipeline_recovery_lease import RecoveryPipelineLease
+            if type(request_profile) not in {FreshCandidateRequestProfile, FreshRecoveryCandidateRequestProfile,
+                    ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}:
+                raise PipelineRunnerError("pipeline_lease_request_profile_invalid")
+            scope = getattr(self, "_scope", None)
+            is_resume = type(request_profile) in {ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}
+            ordinary = type(request_profile) in {FreshCandidateRequestProfile, ResumeCandidateRequestProfile} and type(self) is OrdinaryPipelineLease
+            approved_upper = request_profile.envelope().get("taskWorkerRequestsUpper", request_profile.envelope()["workerRequestsUpper"])
+            recovery = (type(request_profile) in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile} and type(self) is RecoveryPipelineLease and scope is not None
+                and scope.recovery_id == request_profile.recovery_id and scope.plan_hash == request_profile.plan_sha256
+                and tuple(getattr(self, "_stages", ())) == ("build", "verify", "publish")
+                and scope.max_requests >= approved_upper)
+            if not (ordinary or recovery) or maximum_requests != 32 or (is_resume and expected_attempt_count != 2):
+                raise PipelineRunnerError("pipeline_lease_request_profile_invalid")
+            maximum_requests = request_profile.envelope()["requestsUpper"]["lease"]
+            maximum_seconds = request_profile.maximum_seconds
+        self._request_profile = request_profile
         for value, low, high in ((maximum_seconds, 1, 3600), (renewal_interval_seconds, 60, 300)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
                 raise PipelineRunnerError("pipeline_lease_time_budget_invalid")

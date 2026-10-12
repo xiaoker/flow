@@ -360,7 +360,7 @@ def _checkpoint_from_stage_result(
     return checkpoint
 
 
-def run_pipeline_request(
+def _run_pipeline_request(
     payload: Mapping[str, Any],
     *,
     state_dir: Path,
@@ -379,6 +379,8 @@ def run_pipeline_request(
     export_handoff: bool = False,
     resume_handoff_sha256: str | None = None,
     approved_recovery_plan: Mapping[str, Any] | None = None,
+    _budget_boundary: Callable[[str, str], None] | None = None,
+    _budget_start: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Run fixture stages or explicitly injected, verified stage adapters.
 
@@ -488,6 +490,8 @@ def run_pipeline_request(
         if authorization_verifier is not None or lease_guard is not None or "stageConfigs" in payload:
             raise PipelineRunnerError("stage_adapter_configuration_without_adapters")
         stage_results = _mapping(payload.get("stageResults"), "stage_results")
+    if _budget_start is not None:
+        _budget_start()
     checkpoints_path = state_dir / "checkpoints.json"
     existing = _load_checkpoints(checkpoints_path)
     bundle_descriptors: dict[str, Any] = {}
@@ -574,6 +578,8 @@ def run_pipeline_request(
     def stage_runner(stage: str, input_sha256: str) -> Mapping[str, Any]:
         nonlocal source_request_count
         if adapter_mode:
+            if _budget_boundary is not None:
+                _budget_boundary("admit", stage)
             if context.lease_check is not None:
                 context.lease_check()
             adapter = (stage_adapters or {}).get(stage)
@@ -632,12 +638,15 @@ def run_pipeline_request(
             value = stage_results.get(stage)
             if not isinstance(value, Mapping):
                 raise PipelineRunnerError("stage_result_missing", stage)
-        return _checkpoint_from_stage_result(
+        checkpoint = _checkpoint_from_stage_result(
             context=context,
             stage=stage,
             input_sha256=input_sha256,
             value=value,
         )
+        if _budget_boundary is not None:
+            _budget_boundary("debit", stage)
+        return checkpoint
 
     def persist_progress(checkpoints: Sequence[Mapping[str, Any]]) -> None:
         nonlocal handoff_descriptor
@@ -746,6 +755,171 @@ def run_pipeline_request(
         report["sideEffects"]["remoteWrites"] |= checkpoint_transport.upload_attempts > 0
     _write_json_atomic(output_path, report)
     return report
+
+
+def runner_budget_input_sha256(context, stages, stage_inputs):
+    """Stable business input; current owner/attempt is deliberately excluded."""
+    return canonical_sha256({"contract": "flow-budget-task-v2", "runKey": context.identity.run_key,
+        "targetDate": context.identity.target_date, "applicationContract": APPLICATION_CONTRACT_VERSION,
+        "stages": list(stages), "stageInputs": dict(stage_inputs),
+        "dependencyLockSha256": context.dependency_lock_sha256,
+        "recoveryId": context.recovery_id, "recoveryPlanSha256": context.recovery_plan_sha256})
+
+
+def run_pipeline_request(payload, *, budget_ledger=None, task_cost_upper=None,
+                         stage_cost_upper=None, resource_measurement=None,
+                         control_request_cost_upper=None, runtime_cost_upper=None, **kwargs):
+    """Opt-in lifecycle around the existing runner; no production entry enabled.
+
+    Measurement is a trusted in-process provider adapter, never payload data.
+    Missing physical usage keeps the hold UNKNOWN, even if the candidate passed.
+    Full transport/control/fault cost proof is required by the future live entry.
+    """
+    if "_budget_boundary" in kwargs or "_budget_start" in kwargs:
+        raise PipelineRunnerError("private_budget_boundary_forbidden")
+    if budget_ledger is None:
+        if any(value is not None for value in (task_cost_upper, stage_cost_upper, resource_measurement,
+                                               control_request_cost_upper, runtime_cost_upper)):
+            raise PipelineRunnerError("runner_budget_binding_incomplete")
+        return _run_pipeline_request(payload, **kwargs)
+    from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS
+    from .resource_budget_remote import SharedBudgetLedger
+    if (not isinstance(budget_ledger, SharedBudgetLedger) or not budget_ledger._task_binding
+            or not isinstance(task_cost_upper, BudgetVector) or not task_cost_upper.all_known()
+            or not isinstance(stage_cost_upper, Mapping) or not callable(resource_measurement)
+            or kwargs.get("stage_adapters") is None or kwargs.get("lease_guard") is not budget_ledger._guard):
+        raise PipelineRunnerError("runner_budget_binding_incomplete")
+    root = (kwargs.get("project_root") or Path.cwd()).resolve()
+    locks = dependency_lock_digest(kwargs["dependency_lock_paths"], root=root)
+    context = build_execution_context(payload, producer_build_sha=kwargs["producer_build_sha"],
+        dependency_lock_sha256=locks["sha256"], now=kwargs.get("now"))
+    stages = _stage_names(payload)
+    inputs = _stage_inputs(payload, stages)
+    if set(stage_cost_upper) != set(stages) or any(not isinstance(v, BudgetVector) or not v.all_known() for v in stage_cost_upper.values()):
+        raise PipelineRunnerError("runner_stage_budget_incomplete")
+    if any(sum(v.metrics[d].value for v in stage_cost_upper.values()) > task_cost_upper.metrics[d].value for d in RESOURCE_DIMENSIONS):
+        raise PipelineRunnerError("runner_task_budget_understated")
+    if budget_ledger._task_binding["taskInputSha256"] != runner_budget_input_sha256(context, stages, inputs):
+        raise PipelineRunnerError("runner_budget_input_mismatch")
+    profile = getattr(budget_ledger, "_request_profile", None)
+    if profile is not None:
+        from .pipeline_checkpoint_preflight import (FreshRecoveryCandidateRequestProfile,
+            ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile)
+        is_resume = type(profile) in {ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}
+        expected_mode = "recovery" if type(profile) in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile} else "ordinary"
+        if (context.mode != expected_mode or tuple(stages) != ("build", "verify", "publish")
+                or kwargs.get("export_bundles") is not True or kwargs.get("export_handoff") is not True
+                or any(kwargs.get(key) is not None for key in ("resume_bundles", "resume_references"))
+                or (is_resume and (context.lease_attempt_count != 2 or not kwargs.get("resume_handoff_sha256")))
+                or (not is_resume and kwargs.get("resume_handoff_sha256") is not None)):
+            raise PipelineRunnerError("runner_request_profile_scope_invalid")
+        if (Path(kwargs["state_dir"]) / "checkpoints.json").exists():
+            raise PipelineRunnerError("runner_request_profile_requires_fresh_task")
+        upper = profile.envelope().get("taskWorkerRequestsUpper", profile.envelope()["workerRequestsUpper"])
+        if task_cost_upper.metrics["workerRequests"].value < upper + sum(
+                value.metrics["workerRequests"].value for value in stage_cost_upper.values()):
+            raise PipelineRunnerError("runner_control_budget_understated")
+        # Request counts alone cannot prove D1/R2/runtime cost. Transport
+        # estimates come from the actual connected clients, not payload data.
+        from .pipeline_checkpoint_preflight import candidate_task_cost_upper
+        if (not isinstance(control_request_cost_upper, Mapping)
+                or set(control_request_cost_upper) != {"lease", "budget"}
+                or not isinstance(runtime_cost_upper, BudgetVector)):
+            raise PipelineRunnerError("runner_overhead_budget_incomplete")
+        from math import ceil
+        runtime_minutes = ceil(profile.maximum_seconds / 60) * (2 if is_resume else 1)
+        if (runtime_cost_upper.metrics["actionsMinutes"].value is not None
+                and runtime_cost_upper.metrics["actionsMinutes"].value < runtime_minutes):
+            raise PipelineRunnerError("runner_runtime_budget_understated")
+        request_costs = dict(control_request_cost_upper)
+        for name, transport, attribute in (
+            ("candidate", getattr(kwargs["stage_adapters"].get("publish"), "transport", None), "_costs"),
+            ("checkpoint", kwargs.get("checkpoint_transport"), "_request_costs")):
+            costs = getattr(transport, attribute, {})
+            if set(costs) != {"GET", "POST"} or any(not isinstance(v, BudgetVector) for v in costs.values()):
+                raise PipelineRunnerError("runner_overhead_budget_incomplete")
+            request_costs[name] = BudgetVector.estimated({dimension: None if any(
+                v.metrics[dimension].value is None for v in costs.values()) else max(
+                v.metrics[dimension].value for v in costs.values()) for dimension in RESOURCE_DIMENSIONS})
+        try:
+            full_cost = candidate_task_cost_upper(profile=profile, stage_costs=stage_cost_upper,
+                request_costs=request_costs, runtime_cost=runtime_cost_upper)
+        except ValueError as exc:
+            raise PipelineRunnerError("runner_overhead_budget_incomplete") from exc
+        if not full_cost.all_known():
+            raise PipelineRunnerError("runner_overhead_budget_unknown")
+        if any(full_cost.metrics[d].value > task_cost_upper.metrics[d].value for d in RESOURCE_DIMENSIONS):
+            raise PipelineRunnerError("runner_task_budget_understated")
+    budget_ledger.validate_execution_identity(run_key=context.identity.run_key, lease_owner=context.lease_owner,
+        attempt_count=context.lease_attempt_count, target_date=context.identity.target_date, task_id=budget_ledger.task_id,
+        **({"recovery_id": context.recovery_id, "recovery_plan_sha256": context.recovery_plan_sha256} if context.mode == "recovery" else {}))
+    lifecycle_started = False
+    unmetered_stages = []
+    def start():
+        nonlocal lifecycle_started
+        # Existing runner has already verified the real guard and full adapter
+        # scope. Do not initialize a one-shot lease client twice.
+        budget_ledger._restore_pending()
+        if budget_ledger._pending is not None:
+            budget_ledger.resolve_pending()  # Bookkeeping only; never effect permission.
+        current = budget_ledger.snapshot().get("reservation")
+        if current is not None:
+            if profile is not None and not is_resume:
+                raise PipelineRunnerError("runner_request_profile_requires_fresh_task")
+            adoption = budget_ledger.adopt()
+            if adoption["decision"] != "adopted":
+                raise PipelineRunnerError("runner_budget_hold_unresolved")
+        elif profile is not None and is_resume:
+            raise PipelineRunnerError("runner_resume_budget_reservation_missing")
+        admitted = budget_ledger.reserve(budget_ledger.task_id, task_cost_upper)
+        if admitted["decision"] not in {"allow", "warn", "idempotent"}:
+            raise PipelineRunnerError("runner_budget_reservation_rejected")
+        lifecycle_started = True
+        budget_ledger.mark_running(budget_ledger.task_id)
+
+    def boundary(operation, stage):
+        if operation == "admit":
+            if budget_ledger.authorize_step(budget_ledger.task_id, stage_cost_upper[stage])["decision"] != "authorized":
+                raise PipelineRunnerError("runner_stage_budget_rejected", stage)
+        else:
+            actual = resource_measurement("stage", stage)
+            if not isinstance(actual, BudgetVector):
+                raise PipelineRunnerError("runner_stage_usage_invalid", stage)
+            if not actual.all_known():
+                # Execution/checkpoint proof is known; usage is not. Retain the
+                # full stage allowance instead of inventing a zero debit or
+                # requiring delayed provider billing before the next stage.
+                # The task's full reservation and subsequent admissions remain
+                # enforced; final UNKNOWN measurement never releases the hold.
+                unmetered_stages.append(stage)
+                return
+            if budget_ledger.debit(budget_ledger.task_id, actual)["decision"] != "debited":
+                raise PipelineRunnerError("runner_stage_debit_rejected", stage)
+
+    try:
+        report = _run_pipeline_request(payload, _budget_boundary=boundary, _budget_start=start, **kwargs)
+        actual = resource_measurement("task", None)
+        known = isinstance(actual, BudgetVector) and actual.all_known()
+        outcome = ("SUCCEEDED" if report["status"] == "COMPLETED" else "FAILED_KNOWN") if known else "UNKNOWN"
+        settlement = budget_ledger.settle(budget_ledger.task_id, outcome=outcome, actual=actual if known else None)
+        report["stageExecutionStatus"] = report["status"]
+        if settlement["decision"] != "settled":
+            report["status"] = "OVER_BUDGET" if settlement["decision"] == "over_budget" else "UNKNOWN"
+        report["budgetLifecycle"] = {"taskId": budget_ledger.task_id, "settlement": settlement,
+                                     "controlEvidence": budget_ledger.accounting_evidence(),
+                                     "stageUsageUnknown": unmetered_stages}
+        report["sideEffects"]["remoteWrites"] = True
+        _write_json_atomic(Path(kwargs["output_path"]), report)
+        return report
+    except Exception:
+        # Never replace a lost-operation receipt, clear a hold or hide the
+        # original failure. A stale owner cannot settle; server fence rejects it.
+        if lifecycle_started:
+            try:
+                budget_ledger.settle(budget_ledger.task_id, outcome="UNKNOWN")
+            except Exception:
+                pass
+        raise
 
 
 __all__ = [

@@ -25,6 +25,159 @@ MAX_EVENT_BYTES = 16_384
 MAX_JOURNAL_BYTES = 2_097_152
 
 
+class RemoteBudgetOperationStore:
+    """One bounded durable pending request, not a quota or permission ledger.
+
+    Retain/transfer this evidence with the existing checkpoint facilities.
+    A fresh empty file cannot resolve a remote uncertain effect.
+    """
+
+    @classmethod
+    def initialize(cls, path: Path, *, task_id: str, input_sha256: str):
+        path = Path(path).absolute()
+        cls._safe(path)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        return cls(path, task_id=task_id, input_sha256=input_sha256, _initialize=True)
+
+    @staticmethod
+    def _safe(path):
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError("budget_operation_store_symlink")
+        from .pipeline_runner import _assert_safe_output
+        _assert_safe_output(path)
+
+    def __init__(self, path: Path, *, task_id: str, input_sha256: str, _initialize=False):
+        import re
+        self.path = Path(path).absolute()
+        self._safe(self.path)
+        if not self.path.is_file() or not isinstance(task_id, str) or not task_id or not re.fullmatch(r"[a-f0-9]{64}", input_sha256):
+            raise ValueError("budget_operation_store_contract_invalid")
+        self.task_id, self.input_sha256 = task_id, input_sha256
+        self._contract = _encode({"contract": "flow-budget-task-v2", "taskId": task_id, "inputSha256": input_sha256})
+        with self._connect() as db:
+            if _initialize:
+                db.execute("CREATE TABLE contract (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
+                db.execute("INSERT INTO contract VALUES (1,?)", (self._contract,))
+                db.execute("CREATE TABLE pending (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT, digest TEXT)")
+                db.execute("INSERT INTO pending VALUES (1,NULL,NULL)")
+                db.execute("CREATE TABLE receipt_owner (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT, attempt INTEGER)")
+                db.execute("INSERT INTO receipt_owner VALUES (1,NULL,NULL)")
+            self._check(db)
+
+    @contextmanager
+    def _connect(self):
+        self._safe(self.path)
+        if not self.path.is_file() or self.path.stat().st_size > MAX_JOURNAL_BYTES:
+            raise ValueError("budget_operation_store_missing_or_oversized")
+        db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=5)
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def _check(self, db):
+        if db.execute("SELECT payload FROM contract WHERE id=1").fetchone() != (self._contract,):
+            raise ValueError("budget_operation_store_identity_conflict")
+        import re
+        try:
+            receipt_owner = db.execute("SELECT owner,attempt FROM receipt_owner WHERE id=1").fetchone()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("budget_operation_store_corrupt") from exc
+        if receipt_owner is None or (receipt_owner != (None, None) and (
+                not isinstance(receipt_owner[0], str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", receipt_owner[0])
+                or type(receipt_owner[1]) is not int or not 1 <= receipt_owner[1] <= 999999999)):
+            raise ValueError("budget_operation_store_corrupt")
+
+    def _read(self, db):
+        self._check(db)
+        row = db.execute("SELECT payload,digest FROM pending WHERE id=1").fetchone()
+        if row is None:
+            raise ValueError("budget_operation_store_corrupt")
+        payload, digest = row
+        if payload is None and digest is None:
+            return None
+        if not isinstance(payload, str) or len(payload.encode()) > MAX_EVENT_BYTES or hashlib.sha256(payload.encode()).hexdigest() != digest:
+            raise ValueError("budget_operation_store_corrupt")
+        value = json.loads(payload)
+        if not isinstance(value, dict) or value.get("taskInputSha256") != self.input_sha256 or value.get("taskContract") != "flow-budget-task-v2":
+            raise ValueError("budget_operation_store_identity_conflict")
+        return value
+
+    def pending(self):
+        with self._connect() as db:
+            return self._read(db)
+
+    def begin(self, payload):
+        if (not isinstance(payload, dict) or payload.get("taskInputSha256") != self.input_sha256
+                or payload.get("taskContract") != "flow-budget-task-v2"
+                or not isinstance(payload.get("operationId"), str)):
+            raise ValueError("budget_operation_store_identity_conflict")
+        encoded = _encode(payload)
+        if len(encoded.encode()) > MAX_EVENT_BYTES:
+            raise ValueError("budget_operation_store_record_limit")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._read(db) is not None:
+                raise ValueError("budget_operation_store_pending")
+            owner, attempt = db.execute("SELECT owner,attempt FROM receipt_owner WHERE id=1").fetchone()
+            incoming = (payload.get("leaseOwner"), payload.get("attemptCount"))
+            if owner is not None and incoming != (owner, attempt):
+                if payload.get("operation") != "adopt" or type(incoming[1]) is not int or incoming[1] <= attempt:
+                    raise ValueError("budget_operation_store_stale_owner")
+            db.execute("UPDATE pending SET payload=?,digest=? WHERE id=1", (encoded, hashlib.sha256(encoded.encode()).hexdigest()))
+            db.commit()
+
+    def bind_receipt_owner(self, operation_id, owner, attempt):
+        """Mirror an authenticated receipt; never claim a remote lease.
+
+        The client calls this only after validating the exact pending server
+        reply. A higher attempt can be learned only from atomic adopt. This
+        prevents an old process from poisoning the current journal after takeover.
+        """
+        import re
+        if (not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", owner)
+                or type(attempt) is not int or not 1 <= attempt <= 999999999):
+            raise ValueError("budget_operation_store_receipt_owner_invalid")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pending = self._read(db)
+            if (pending is None or pending.get("operationId") != operation_id
+                    or (pending.get("leaseOwner"), pending.get("attemptCount")) != (owner, attempt)):
+                raise ValueError("budget_operation_store_pending_conflict")
+            previous = db.execute("SELECT owner,attempt FROM receipt_owner WHERE id=1").fetchone()
+            if previous[0] is not None and previous != (owner, attempt):
+                if pending.get("operation") != "adopt" or attempt <= previous[1]:
+                    raise ValueError("budget_operation_store_stale_owner")
+            db.execute("UPDATE receipt_owner SET owner=?,attempt=? WHERE id=1", (owner, attempt))
+            db.commit()
+
+    def clear(self, operation_id):
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pending = self._read(db)
+            if pending is None or pending.get("operationId") != operation_id:
+                raise ValueError("budget_operation_store_pending_conflict")
+            db.execute("UPDATE pending SET payload=NULL,digest=NULL WHERE id=1")
+            db.commit()
+
+    def update_revision(self, operation_id, revision):
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("budget_operation_store_revision_invalid")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pending = self._read(db)
+            if pending is None or pending.get("operationId") != operation_id:
+                raise ValueError("budget_operation_store_pending_conflict")
+            pending["expectedRevision"] = revision
+            encoded = _encode(pending)
+            db.execute("UPDATE pending SET payload=?,digest=? WHERE id=1",
+                       (encoded, hashlib.sha256(encoded.encode()).hexdigest()))
+            db.commit()
+
+
 def _encode(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 

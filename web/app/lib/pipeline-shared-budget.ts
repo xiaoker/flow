@@ -14,7 +14,8 @@ type Numbers = Record<Dimension, number>;
 type Caps = Record<Dimension, number | null>;
 type Metric = { value: number | null; unit: string; basis: string; measuredAt?: string; scope?: string };
 type Vector = Record<Dimension, Metric>;
-type Reservation = { cost: Numbers; consumed: Numbers; authorized: Numbers; status: string; expiresAt: string; settled?: string };
+type Reservation = { cost: Numbers; consumed: Numbers; authorized: Numbers; status: string; expiresAt: string; settled?: string;
+  execution?: { contract: "flow-budget-task-v2"; inputSha256: string; leaseOwner: string; attemptCount: number } };
 export type SharedBudgetState = {
   contract: "flow-shared-budget-v1"; epochDay: string; epochMonth: string;
   evidence: Vector; caps: Record<Dimension, number | null>; targets: Partial<Numbers>;
@@ -25,7 +26,8 @@ export type SharedBudgetState = {
 type Statement = { bind(...values: unknown[]): Statement; all<T>(): Promise<{ results: T[]; meta?: { rows_read?: number; rows_written?: number; changes?: number } }> };
 type DB = { prepare(sql: string): Statement; withSession?(constraint: string): DB };
 type Input = { runKey: string; leaseOwner: string; attemptCount: number; targetDate: string; operationId: string; operation: string; expectedRevision: number; vector?: Vector; outcome?: string;
-  recoveryId?: string; planSha256?: string; scopeSha256?: string };
+  recoveryId?: string; planSha256?: string; scopeSha256?: string;
+  taskContract?: string; taskInputSha256?: string; receiptId?: string };
 const fail = (code: string, status = 422): never => { throw new PipelineWindowError(code, status); };
 const integer = (n: unknown) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const zero = (): Numbers => Object.fromEntries(DIMENSIONS.map(d => [d, 0])) as Numbers;
@@ -68,10 +70,15 @@ function validateState(s: SharedBudgetState) {
         || (m.basis === "unknown" ? m.value !== null : !integer(m.value))
         || !(cap === null || integer(cap)) || (s.targets?.[d] !== undefined && !integer(s.targets[d]))) fail("budget_state_corrupt", 503);
   }
-  for (const r of Object.values(s.reservations)) {
+  for (const [taskId, r] of Object.entries(s.reservations)) {
     validNumbers(r.cost); validNumbers(r.consumed); validNumbers(r.authorized);
     if (!["RESERVED", "RUNNING", "UNKNOWN", "OVER_BUDGET", "SUCCEEDED", "FAILED_KNOWN"].includes(r.status)
         || !Number.isFinite(Date.parse(r.expiresAt))) fail("budget_state_corrupt", 503);
+    if (taskId.endsWith("/flow-budget-task-v2") && !r.execution) fail("budget_state_corrupt", 503);
+    if (r.execution && (r.execution.contract !== "flow-budget-task-v2"
+        || !/^[a-f0-9]{64}$/.test(r.execution.inputSha256)
+        || !/^[A-Za-z0-9_.:/-]{1,128}$/.test(r.execution.leaseOwner)
+        || !integer(r.execution.attemptCount) || !r.execution.attemptCount || r.execution.attemptCount > 999999999)) fail("budget_state_corrupt", 503);
   }
   for (const r of Object.values(s.receipts)) if (!/^[a-f0-9]{64}$/.test(r.hash) || !r.result || typeof r.result.decision !== "string") fail("budget_state_corrupt", 503);
 }
@@ -158,6 +165,9 @@ function identity(input: Input) {
       || !/^[A-Za-z0-9:_-]{1,120}$/.test(input.recoveryId)
       || !/^[a-f0-9]{64}$/.test(input.planSha256 ?? "")
       || !/^[a-f0-9]{64}$/.test(input.scopeSha256 ?? ""))) fail("invalid_budget_recovery_identity");
+  if ((input.taskContract !== undefined || input.taskInputSha256 !== undefined)
+      && (input.taskContract !== "flow-budget-task-v2" || !/^[a-f0-9]{64}$/.test(input.taskInputSha256 ?? ""))) fail("invalid_budget_task_contract");
+  if (input.receiptId !== undefined && (!input.taskContract || !/^[a-f0-9]{64}$/.test(input.receiptId))) fail("invalid_budget_receipt_identity");
 }
 async function digest(v: unknown) {
   const canonical = (x: unknown): string => x === null || typeof x !== "object" ? JSON.stringify(x)
@@ -229,12 +239,37 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
       if (!(cap === null || integer(cap))) fail("invalid_budget_policy", 503);
       state.caps[d] = cap === null || state.caps[d] === null ? null : Math.min(cap, state.caps[d]!);
     }
-    if (request.method === "GET") return response({ revision: row.revision, contract: state.contract, epochDay: state.epochDay,
-      evidenceReady: evidenceReady(state, now), rowsRead, rowsWritten });
+    // Explicit v2 opt-in; existing attempt keys are never reinterpreted or migrated.
+    // The key excludes the input digest so changing inputs cannot create another
+    // reservation for the same window/date. The first reservation binds it.
+    const task = input.taskContract
+      ? `${recoveryPrefix}${input.runKey}/${input.targetDate}/flow-budget-task-v2`
+      : `${recoveryPrefix}${input.runKey}/${input.leaseOwner}/${input.attemptCount}`;
+    const reservation = state.reservations[task];
+    if (input.taskContract && reservation?.execution?.inputSha256 !== undefined
+        && reservation.execution.inputSha256 !== input.taskInputSha256) fail("budget_task_input_conflict", 409);
+    if (request.method === "GET") {
+      const prior = input.receiptId ? state.receipts[input.receiptId] : undefined;
+      if (prior && prior.result.taskId !== task) fail("budget_operation_conflict", 409);
+      return response({ revision: row.revision, contract: state.contract, epochDay: state.epochDay,
+        evidenceReady: evidenceReady(state, now), rowsRead, rowsWritten,
+        ...(input.taskContract ? { taskId: task, reservation: reservation ?? null,
+          ...(input.receiptId ? { receipt: prior ? { ...prior.result, replayed: true,
+            ...(prior.result.decision === "authorized" ? { decision: "not_authorized", priorDecision: "authorized" } : {}) } : null } : {}) } : {}) });
+    }
+    // Compatibility is bidirectional: an old client cannot allocate a fresh
+    // attempt hold after this business task has opted into stable v2 identity.
+    // Legacy-only tasks retain their existing semantics; no row is converted.
+    if (!input.taskContract && state.reservations[`${recoveryPrefix}${input.runKey}/${input.targetDate}/flow-budget-task-v2`]) {
+      fail("budget_v2_task_requires_v2_contract", 409);
+    }
     if (!/^[a-f0-9]{64}$/.test(input.operationId) || !integer(input.expectedRevision)) fail("invalid_budget_request");
     const semantic = { ...input } as Partial<Input>;
     delete semantic.expectedRevision;
     const hash = await digest(semantic); const prior = state.receipts[input.operationId];
+    if (input.taskContract && reservation?.execution
+        && input.operation !== "adopt"
+        && (reservation.execution.leaseOwner !== input.leaseOwner || reservation.execution.attemptCount !== input.attemptCount)) fail("budget_task_adoption_required", 409);
     if (prior) {
       if (prior.hash !== hash) fail("budget_operation_conflict", 409);
       // Replayed allowance is the SAME logical action, not permission for a second I/O.
@@ -243,7 +278,11 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
     }
     if (row.revision !== input.expectedRevision) fail("budget_revision_conflict", 409);
     if (Object.keys(state.receipts).length >= MAX_RECEIPTS) fail("budget_receipt_capacity", 409);
-    const task = `${recoveryPrefix}${input.runKey}/${input.leaseOwner}/${input.attemptCount}`;
+    if (input.operation === "adopt" && !input.taskContract) fail("invalid_budget_operation");
+    if (input.taskContract && input.operation === "reserve" && !reservation
+        && Object.keys(state.reservations).some(id => id.startsWith(`${recoveryPrefix}${input.runKey}/`) && !id.endsWith("/flow-budget-task-v2"))) {
+      fail("budget_legacy_task_requires_reconciliation", 409);
+    }
     if (recoveryLimit && input.operation === "reserve") {
       const cost = numbers(input.vector);
       let committedScope = zero();
@@ -254,7 +293,22 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
       }
       if (exceeds(add(committedScope, cost), recoveryLimit)) fail("budget_recovery_scope_over_budget", 409);
     }
-    const next = transitionSharedBudget(state, task, input, now);
+    let next;
+    if (input.operation === "adopt") {
+      if (!reservation?.execution) fail("budget_reservation_not_found", 409);
+      if (input.attemptCount < reservation.execution.attemptCount
+          || (input.attemptCount === reservation.execution.attemptCount && input.leaseOwner !== reservation.execution.leaseOwner)) fail("budget_task_attempt_conflict", 409);
+      const s = structuredClone(state); const r = s.reservations[task];
+      if (["RESERVED", "RUNNING"].includes(r.status) && Date.parse(r.expiresAt) <= now.getTime()) r.status = "UNKNOWN";
+      r.execution = { contract: "flow-budget-task-v2", inputSha256: input.taskInputSha256!, leaseOwner: input.leaseOwner, attemptCount: input.attemptCount };
+      next = { state: s, result: { decision: ["RESERVED", "RUNNING"].includes(r.status) ? "adopted" : "held",
+        taskId: task, status: r.status, costUpperBound: r.cost, consumed: r.consumed, authorizedUpperBound: r.authorized, expiresAt: r.expiresAt } };
+    } else {
+      next = transitionSharedBudget(state, task, input, now);
+      if (input.taskContract && input.operation === "reserve" && !reservation && next.state.reservations[task]) {
+        next.state.reservations[task].execution = { contract: "flow-budget-task-v2", inputSha256: input.taskInputSha256!, leaseOwner: input.leaseOwner, attemptCount: input.attemptCount };
+      }
+    }
     next.state.receipts[input.operationId] = { hash, result: next.result };
     if (size(next.state) > MAX_STATE_BYTES) fail("budget_state_capacity", 409);
     const commitCutoff = new Date(clock().getTime() + 30000).toISOString();
