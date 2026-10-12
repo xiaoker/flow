@@ -44,6 +44,11 @@ class CheckpointObjectTransport:
             raise PipelineRunnerError("checkpoint_transport_credentials_required")
         if isinstance(maximum_requests, bool) or not isinstance(maximum_requests, int) or not 1 <= maximum_requests <= 12:
             raise PipelineRunnerError("checkpoint_transport_budget_invalid")
+        profile = getattr(budget_ledger, "_request_profile", None)
+        if profile is not None:
+            if getattr(lease_guard, "_request_profile", None) is not profile or maximum_requests != 12:
+                raise PipelineRunnerError("checkpoint_transport_request_profile_invalid")
+            maximum_requests = profile.envelope()["requestsUpper"]["checkpoint"]
         self._session = session if session is not None else build_session(HttpSettings(total_retries=0))
         if any(getattr(getattr(adapter, "max_retries", None), "total", None) not in {0, False}
                for adapter in getattr(self._session, "adapters", {}).values()):

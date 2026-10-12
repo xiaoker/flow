@@ -74,6 +74,23 @@ def guard(clock, session=None, **kwargs):
                                  monotonic=clock.monotonic, **kwargs)
 
 
+def test_legacy_request_ceiling_is_not_silently_raised():
+    clock = Clock()
+    assert guard(clock)._maximum_requests == 32
+    with pytest.raises(PipelineRunnerError, match="request_budget_invalid"):
+        guard(clock, maximum_requests=33)
+
+
+def test_explicit_candidate_profile_sets_derived_limit_and_short_deadline():
+    from trading_desk.pipeline_checkpoint_preflight import FreshCandidateRequestProfile
+    profile = FreshCandidateRequestProfile("a" * 64, 7)
+    lease = guard(Clock(), request_profile=profile)
+    assert lease._maximum_requests == 89
+    assert lease._maximum_seconds == 300
+    with pytest.raises(PipelineRunnerError, match="request_profile_invalid"):
+        guard(Clock(), maximum_requests=31, request_profile=profile)
+
+
 def test_real_authority_checked_and_heartbeat_not_per_boundary_poll():
     clock = Clock()
     session = Session(clock)

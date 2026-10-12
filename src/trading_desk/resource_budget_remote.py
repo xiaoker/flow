@@ -22,6 +22,13 @@ from .resource_budget import BudgetLedger, BudgetVector
 
 MAX_REQUEST_SECONDS = 20
 
+class DefinitiveBudgetRejection(ValueError):
+    """Validated HTTP rejection: no successful budget mutation to reconcile."""
+
+    def __init__(self, code=None):
+        self.code = code
+        super().__init__("shared_budget_request_failed; allowance_not_granted")
+
 class SharedBudgetLedger(BudgetLedger):
     """Use existing admin auth and fenced ordinary pipeline identity only."""
 
@@ -30,7 +37,8 @@ class SharedBudgetLedger(BudgetLedger):
                  attempt_count: int, target_date: str, lease_guard: Any,
                  maximum_requests: int = 32, session: Any = None,
                  allow_loopback_fixture: bool = False, monotonic=time.monotonic,
-                 server_fenced_checks: bool = False):
+                 server_fenced_checks: bool = False, task_input_sha256: str | None = None,
+                 operation_store: Any = None, request_profile: Any = None):
         from .pipeline_application import parse_application_run_key
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
@@ -66,6 +74,29 @@ class SharedBudgetLedger(BudgetLedger):
                          "CF-Access-Client-Secret": access_client_secret, "Content-Type": "application/json"}
         self._identity = {"runKey": run_key, "leaseOwner": lease_owner, "attemptCount": attempt_count, "targetDate": target_date}
         self.task_id = f"{run_key}/{lease_owner}/{attempt_count}"
+        self._task_binding = {}
+        self._operation_store = operation_store
+        self._revision = None
+        if task_input_sha256 is not None:
+            from .resource_budget_store import RemoteBudgetOperationStore
+            if not re.fullmatch(r"[a-f0-9]{64}", task_input_sha256) or not isinstance(operation_store, RemoteBudgetOperationStore):
+                raise ValueError("shared_budget_durable_task_contract_required")
+            self._task_binding = {"taskContract": "flow-budget-task-v2", "taskInputSha256": task_input_sha256}
+            self._identity.update(self._task_binding)
+            self.task_id = f"{run_key}/{target_date}/flow-budget-task-v2"
+        elif operation_store is not None:
+            raise ValueError("shared_budget_durable_task_contract_required")
+        if request_profile is not None:
+            from .pipeline_checkpoint_preflight import (FreshCandidateRequestProfile, FreshRecoveryCandidateRequestProfile,
+                ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile)
+            kind_matches = ((type(request_profile) in {FreshCandidateRequestProfile, ResumeCandidateRequestProfile} and type(self) is SharedBudgetLedger)
+                or (type(request_profile) in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile} and type(self) is RecoverySharedBudgetLedger))
+            if (not kind_matches or not server_fenced_checks
+                    or task_input_sha256 != request_profile.input_sha256 or maximum_requests != 32
+                    or getattr(lease_guard, "_request_profile", None) is not request_profile):
+                raise ValueError("shared_budget_request_profile_invalid")
+            maximum_requests = request_profile.envelope()["requestsUpper"]["budget"]
+        self._request_profile = request_profile
         self._guard, self._clock, self._maximum = lease_guard, monotonic, maximum_requests
         self._server_fenced_checks = server_fenced_checks
         self._lock = threading.RLock()
@@ -85,7 +116,7 @@ class SharedBudgetLedger(BudgetLedger):
         """Local equality fence, not lease verification or budget permission."""
         if (task_id != self.task_id or type(attempt_count) is not int
                 or self._identity != {"runKey": run_key, "leaseOwner": lease_owner,
-                                      "attemptCount": attempt_count, "targetDate": target_date}):
+                                      "attemptCount": attempt_count, "targetDate": target_date, **self._task_binding}):
             raise ValueError("shared_budget_execution_identity_mismatch")
 
     def accounting_evidence(self) -> dict:
@@ -95,6 +126,7 @@ class SharedBudgetLedger(BudgetLedger):
                     "maximumRequests": self._maximum, "d1RowsRead": self.rows_read,
                     "d1RowsWritten": self.rows_written,
                     "pendingOperation": self._pending is not None,
+                    "revisionReuse": bool(self._task_binding),
                     "accountRemaining": None,
                     "leaseCheckPolicy": "server_fenced" if self._server_fenced_checks else "fresh_confirm"}
 
@@ -133,10 +165,12 @@ class SharedBudgetLedger(BudgetLedger):
             if reply.status != 200:
                 # 409 is a definitive rejection, not a successful hidden commit.
                 if reply.status in {401, 409, 413, 422}:
-                    self._pending = None
+                    raise DefinitiveBudgetRejection(result.get("error"))
                 raise ValueError("shared_budget_request_rejected")
             self._check_lease()
             return result
+        except DefinitiveBudgetRejection:
+            raise
         except Exception:
             if not received_meta:
                 self.rows_read = self.rows_written = None
@@ -148,28 +182,68 @@ class SharedBudgetLedger(BudgetLedger):
             revision = result.get("revision")
             if result.get("contract") != "flow-shared-budget-v1" or isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
                 raise ValueError("shared_budget_contract_invalid")
+            if self._task_binding:
+                if result.get("taskId") != self.task_id:
+                    raise ValueError("shared_budget_task_mismatch")
+                self._revision = revision
             return result  # Metadata, not a full account-availability claim.
+
+    def _restore_pending(self):
+        if self._operation_store is not None:
+            if self._operation_store.task_id != self.task_id:
+                raise ValueError("shared_budget_operation_store_identity_conflict")
+            self._pending = self._operation_store.pending()
+
+    def _clear_pending(self):
+        if self._operation_store is not None and self._pending is not None:
+            self._operation_store.clear(self._pending["operationId"])
+        self._pending = None
 
     def _execute(self, task_id: str, operation: str, **kwargs: Any) -> dict:
         with self._lock:
+            self._restore_pending()
             if task_id != self.task_id:
                 raise ValueError("shared_budget_task_mismatch")
             if self._pending is not None:
                 raise ValueError("shared_budget_outcome_unknown; reconcile_before_new_operation")
-            revision = self.snapshot()["revision"]
+            revision = self._revision if self._task_binding and self._revision is not None else self.snapshot()["revision"]
             operation_id = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
             self._pending = {**self._identity, "operationId": operation_id, "operation": operation,
                              "expectedRevision": revision, **kwargs}
-            result = self._request("POST", self._pending)
+            if self._operation_store is not None:
+                self._operation_store.begin(self._pending)
+            try:
+                result = self._request("POST", self._pending)
+            except DefinitiveBudgetRejection as exc:
+                if self._task_binding and exc.code == "budget_revision_conflict":
+                    # Only an explicit pre-commit revision mismatch permits one
+                    # bounded refresh. Same durable operation, never new grant.
+                    revision = self.snapshot()["revision"]
+                    self._operation_store.update_revision(operation_id, revision)
+                    self._pending["expectedRevision"] = revision
+                    try:
+                        result = self._request("POST", self._pending)
+                    except DefinitiveBudgetRejection:
+                        self._clear_pending()
+                        self._revision = None
+                        raise
+                else:
+                    self._clear_pending()
+                    self._revision = None
+                    raise
             self._validate_result(result, operation)
-            self._pending = None
+            if self._operation_store is not None and not (operation == "reserve" and result["decision"] not in {"allow", "warn", "idempotent"}):
+                self._operation_store.bind_receipt_owner(operation_id, self._identity["leaseOwner"], self._identity["attemptCount"])
+            if self._task_binding:
+                self._revision = result["revision"]
+            self._clear_pending()
             return result
 
     def _validate_result(self, result: dict, operation: str) -> None:
         allowed = {"reserve": {"allow", "warn", "idempotent", "unknown_metrics", "over_budget"},
                    "mark_running": {"running"}, "authorize_step": {"authorized", "not_authorized", "unknown_metrics", "step_over_budget"},
                    "debit": {"debited", "not_debitable", "over_budget"},
-                   "settle": {"settled", "unknown_outcome", "over_budget"}}
+                   "settle": {"settled", "unknown_outcome", "over_budget"}, "adopt": {"adopted", "held"}}
         revision = result.get("revision")
         if (result.get("decision") not in allowed[operation] or not isinstance(result.get("replayed"), bool)
                 or result.get("taskId") != self.task_id or isinstance(revision, bool)
@@ -181,21 +255,54 @@ class SharedBudgetLedger(BudgetLedger):
     def resolve_pending(self) -> dict:
         """One explicit same-ID attempt; never creates a new allowance ID."""
         with self._lock:
+            self._restore_pending()
             if self._pending is None:
                 raise ValueError("shared_budget_no_pending_operation")
             operation = self._pending["operation"]
-            result = self._request("POST", self._pending)
+            if self._task_binding and any(self._pending.get(k) != self._identity.get(k) for k in ("leaseOwner", "attemptCount")):
+                # Current-owner read of the old immutable receipt is bookkeeping,
+                # never replay of a stale-owner request or new effect permission.
+                metadata = self._request("GET", {**self._identity, "receiptId": self._pending["operationId"]})
+                result = metadata.get("receipt")
+                if not isinstance(result, dict):
+                    raise ValueError("shared_budget_outcome_unknown; prior_receipt_missing")
+                result = {**result, "revision": metadata.get("revision")}
+            else:
+                try:
+                    result = self._request("POST", self._pending)
+                except DefinitiveBudgetRejection:
+                    self._clear_pending()
+                    self._revision = None
+                    raise
             # Even a freshly committed late authorization is not returned as
             # execution permission. The caller stopped on an uncertain result.
             if operation == "authorize_step":
                 # Validate the receipt before clearing ambiguity; temporarily
                 # strip replay solely for validation, never for execution.
                 self._validate_result({**result, "replayed": False}, operation)
-                self._pending = None
+                if self._operation_store is not None and all(self._pending.get(k) == self._identity[k] for k in ("leaseOwner", "attemptCount")):
+                    self._operation_store.bind_receipt_owner(self._pending["operationId"], self._identity["leaseOwner"], self._identity["attemptCount"])
+                if self._task_binding:
+                    self._revision = result["revision"]
+                self._clear_pending()
                 return {**result, "decision": "not_authorized", "reason": "ambiguous_allowance_retained"}
             self._validate_result(result, operation)
-            self._pending = None
+            if (self._operation_store is not None and all(self._pending.get(k) == self._identity[k] for k in ("leaseOwner", "attemptCount"))
+                    and not (operation == "reserve" and result["decision"] not in {"allow", "warn", "idempotent"})):
+                self._operation_store.bind_receipt_owner(self._pending["operationId"], self._identity["leaseOwner"], self._identity["attemptCount"])
+            if self._task_binding:
+                self._revision = result["revision"]
+            self._clear_pending()
             return result
+
+    def adopt(self):
+        if not self._task_binding:
+            raise ValueError("shared_budget_task_contract_required")
+        return self._execute(self.task_id, "adopt")
+
+    def authorization_request_upper(self, operations: int) -> int:
+        """Normal-path capacity only; conflict/renewal envelopes are separate."""
+        return operations + (0 if self._revision is not None else 1) if self._task_binding else 2 * operations
 
     def reserve(self, task_id: str, task_cost: BudgetVector) -> dict:
         return self._execute(task_id, "reserve", vector=task_cost.as_dict())
@@ -233,6 +340,16 @@ class RecoverySharedBudgetLedger(SharedBudgetLedger):
         self._approved_upper = BudgetVector.from_mapping(upper)
         if not self._approved_upper.all_known():
             raise ValueError("budget_recovery_upper_bound_unknown")
+        profile = kwargs.get("request_profile")
+        if profile is not None:
+            from .pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile
+            if type(profile) not in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}:
+                raise ValueError("budget_recovery_request_profile_scope_invalid")
+            approved_upper = profile.envelope().get("taskWorkerRequestsUpper", profile.envelope()["workerRequestsUpper"])
+            if (type(profile) not in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}
+                    or profile.recovery_id != scope.recovery_id or profile.plan_sha256 != scope.plan_hash
+                    or scope.max_requests < approved_upper):
+                raise ValueError("budget_recovery_request_profile_scope_invalid")
         super().__init__(**kwargs)
         self.validate_execution_identity(run_key=context.identity.run_key, lease_owner=context.lease_owner,
             attempt_count=context.lease_attempt_count, target_date=context.identity.target_date, task_id=self.task_id)
@@ -251,7 +368,7 @@ class RecoverySharedBudgetLedger(SharedBudgetLedger):
                 or recovery_plan_sha256 != self._recovery_binding["planSha256"]
                 or task_id != self.task_id or type(attempt_count) is not int
                 or self._identity != {"runKey": run_key, "leaseOwner": lease_owner,
-                    "attemptCount": attempt_count, "targetDate": target_date, **self._recovery_binding}):
+                    "attemptCount": attempt_count, "targetDate": target_date, **self._recovery_binding, **self._task_binding}):
             raise ValueError("shared_budget_execution_identity_mismatch")
 
     def reserve(self, task_id, task_cost):
