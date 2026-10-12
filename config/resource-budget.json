@@ -30,6 +30,27 @@
     "reservationTtlSeconds": 1800,
     "conservativeLimitBasis": "min(official,hard)",
     "unknownOutcomePolicy": "retain_reservation",
+    "candidateEntryPolicy": {
+      "schemaVersion": 1,
+      "evidence": {
+        "basis": "reviewed-upper-bound",
+        "reference": "docs/audits/2026-10-12-080-entry.md"
+      },
+      "stage": {
+        "build": {"d1RowsRead": 0, "d1RowsWritten": 0, "workerRequests": 0, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0},
+        "verify": {"d1RowsRead": 0, "d1RowsWritten": 0, "workerRequests": 0, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0},
+        "publish": {"d1RowsRead": 0, "d1RowsWritten": 0, "workerRequests": 0, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}
+      },
+      "control": {
+        "lease": {"d1RowsRead": 32, "d1RowsWritten": 32, "workerRequests": 1, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0},
+        "budget": {"d1RowsRead": 16, "d1RowsWritten": 2, "workerRequests": 1, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 2}
+      },
+      "transport": {
+        "candidate": {"d1RowsRead": 64, "d1RowsWritten": 3, "workerRequests": 1, "actionsMinutes": 0, "r2Bytes": 1569632, "r2ClassA": 3, "r2ClassB": 24},
+        "checkpoint": {"d1RowsRead": 16, "d1RowsWritten": 0, "workerRequests": 1, "actionsMinutes": 0, "r2Bytes": 1048576, "r2ClassA": 1, "r2ClassB": 3}
+      },
+      "runtime": {"d1RowsRead": 0, "d1RowsWritten": 0, "workerRequests": 0, "actionsMinutes": 10, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}
+    },
     "dimensions": {
       "d1RowsRead": "rows",
       "d1RowsWritten": "rows",

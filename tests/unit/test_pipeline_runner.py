@@ -208,6 +208,6 @@ def test_runner_accepts_exact_github_sha_and_persists_before_later_stage_error(t
 
 def test_candidate_workflow_installs_runtime_dependencies_before_cli() -> None:
     workflow = (ROOT / ".github/workflows/pipeline-executor-candidate.yml").read_text(encoding="utf-8")
-    install = workflow.index("python -m pip install --disable-pip-version-check -e .")
+    install = workflow.index("python -m pip install --disable-pip-version-check --no-deps -r config/pipeline-python-runtime.lock")
     run_cli = workflow.index("trading_desk.cli pipeline")
     assert install < run_cli

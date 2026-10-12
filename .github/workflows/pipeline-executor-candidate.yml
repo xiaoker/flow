@@ -1,21 +1,48 @@
 name: Candidate pipeline executor
 
 on:
-  # Manual fixture-only smoke test.  It is intentionally not a schedule,
-  # push, pull_request, or production dispatch path.
+  # One manual entry, never scheduled or triggered by push/pull_request.
+  # Candidate writes require separately authorized existing server authority.
   workflow_dispatch:
+    inputs:
+      execution_mode:
+        description: Fixture/dry-run default safety; candidate requires separately authorized existing lease
+        type: choice
+        default: fixture
+        options:
+          - fixture
+          - dry-run
+          - candidate
+      request_json:
+        description: Non-secret bounded execution request; never enter credentials
+        type: string
+        default: ''
+      source_artifact_id:
+        description: Exact archived collector artifact ID (candidate only)
+        type: string
+        default: ''
+      source_run_id:
+        description: Exact collector run ID (candidate only)
+        type: string
+        default: ''
+      approved_recovery_plan_json:
+        description: Existing approved recovery plan, optional; no secrets
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: pipeline-executor-candidate-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  fixture:
+  entry:
+    if: ${{ inputs.execution_mode != 'candidate' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout the exact requested producer SHA
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
@@ -31,20 +58,80 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Install the Python project runtime
-        run: python -m pip install --disable-pip-version-check -e .
+      - name: Install the exact Python runtime (source runs through PYTHONPATH)
+        run: python -m pip install --disable-pip-version-check --no-deps -r config/pipeline-python-runtime.lock
+
+      - name: Prepare one exact archived source (no collection or execution authority)
+        if: ${{ inputs.execution_mode == 'candidate' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLOW_ENTRY_REQUEST_JSON: ${{ inputs.request_json }}
+          FLOW_ENTRY_RECOVERY_PLAN_JSON: ${{ inputs.approved_recovery_plan_json }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          PYTHONPATH=src:. python -m trading_desk.cli pipeline-source \
+            --destination "$RUNNER_TEMP/flow-pipeline-source" \
+            --artifact-id "$SOURCE_ARTIFACT_ID" --source-run-id "$SOURCE_RUN_ID"
+
+      - name: Prepare the actual declared dry-run request (no network)
+        if: ${{ inputs.execution_mode == 'dry-run' && inputs.request_json != '' }}
+        env:
+          FLOW_ENTRY_REQUEST_JSON: ${{ inputs.request_json }}
+        run: |
+          PYTHONPATH=src:. python -m trading_desk.cli pipeline-request \
+            --destination "$RUNNER_TEMP/flow-pipeline-source"
 
       - name: Run the shared candidate executor
         shell: bash
+        env:
+          EXECUTION_MODE: ${{ inputs.execution_mode || 'fixture' }}
+          FLOW_INGEST_API_KEY: ${{ inputs.execution_mode == 'candidate' && secrets.FLOW_INGEST_API_KEY || '' }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ inputs.execution_mode == 'candidate' && secrets.FLOW_CF_ACCESS_CLIENT_ID || '' }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ inputs.execution_mode == 'candidate' && secrets.FLOW_CF_ACCESS_CLIENT_SECRET || '' }}
         run: |
           set -euo pipefail
+          case "$EXECUTION_MODE" in fixture|dry-run|candidate) ;; *) exit 2 ;; esac
           mkdir -p "$RUNNER_TEMP/flow-pipeline-candidate"
+          if [ "$EXECUTION_MODE" = candidate ]; then
+            extra=()
+            if [ -f "$RUNNER_TEMP/flow-pipeline-source/approved-plan.json" ]; then
+              extra+=(--approved-recovery-plan "$RUNNER_TEMP/flow-pipeline-source/approved-plan.json")
+            fi
+            PYTHONPATH=src:. python -m trading_desk.cli pipeline \
+              --execution-mode candidate \
+              --request "$RUNNER_TEMP/flow-pipeline-source/request.json" \
+              --snapshot "$RUNNER_TEMP/flow-pipeline-source/dashboard-snapshot.json" \
+              --budget-journal "$RUNNER_TEMP/flow-pipeline-candidate/budget.sqlite" \
+              --state-dir "$RUNNER_TEMP/flow-pipeline-candidate/state" \
+              --output "$RUNNER_TEMP/flow-pipeline-candidate/result.json" \
+              --dependency-lock web/package-lock.json --dependency-lock config/pipeline-python-runtime.lock \
+              --producer-build-sha "$GITHUB_SHA" \
+              "${extra[@]}" > "$RUNNER_TEMP/flow-pipeline-candidate/summary.json"
+            exit 0
+          fi
+          request=tests/fixtures/pipeline/v060-c-ordinary.json
+          locks=(--dependency-lock web/package-lock.json)
+          if [ "$EXECUTION_MODE" = dry-run ] && [ -f "$RUNNER_TEMP/flow-pipeline-source/request.json" ]; then
+            request="$RUNNER_TEMP/flow-pipeline-source/request.json"
+            locks+=(--dependency-lock config/pipeline-python-runtime.lock)
+          fi
           PYTHONPATH=src:. python -m trading_desk.cli pipeline \
-            --request tests/fixtures/pipeline/v060-c-ordinary.json \
+            --execution-mode "$EXECUTION_MODE" \
+            --request "$request" \
             --state-dir "$RUNNER_TEMP/flow-pipeline-candidate/state" \
             --output "$RUNNER_TEMP/flow-pipeline-candidate/result.json" \
-            --dependency-lock web/package-lock.json \
-            --producer-build-sha "$GITHUB_SHA"
+            "${locks[@]}" \
+            --producer-build-sha "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/flow-pipeline-candidate/summary.json"
+          if [ "$EXECUTION_MODE" = dry-run ]; then
+            jq -e '(.status == "DECLARED_INPUT_CHECKED") and
+              (.liveExecutionAllowed == false) and (.serverAuthorityVerified == false) and
+              (.sideEffects | all(. == false))' "$RUNNER_TEMP/flow-pipeline-candidate/summary.json"
+            test ! -e "$RUNNER_TEMP/flow-pipeline-candidate/state"
+            test ! -e "$RUNNER_TEMP/flow-pipeline-candidate/result.json"
+            exit 0
+          fi
           jq -e '
             (.status == "COMPLETED") and
             (.sideEffects.remoteWrites == false) and
@@ -54,9 +141,14 @@ jobs:
           ' "$RUNNER_TEMP/flow-pipeline-candidate/result.json"
 
       - name: Upload candidate evidence only
+        if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, Node 24
         with:
           name: pipeline-executor-candidate-${{ github.sha }}
           if-no-files-found: error
           retention-days: 7
-          path: ${{ runner.temp }}/flow-pipeline-candidate/**
+          path: |
+            ${{ runner.temp }}/flow-pipeline-candidate/summary.json
+            ${{ runner.temp }}/flow-pipeline-candidate/result.json
+            ${{ runner.temp }}/flow-pipeline-candidate/budget.sqlite
+            ${{ runner.temp }}/flow-pipeline-candidate/state/intent.sqlite
