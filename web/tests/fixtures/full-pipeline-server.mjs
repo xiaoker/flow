@@ -49,6 +49,7 @@ const state = createSharedBudgetState({ epochDay: "2026-10-03", epochMonth: "202
   measurementTtlSeconds: 3600, reservationTtlSeconds: 1800 });
 db.prepare("INSERT INTO pipeline_budget_account VALUES (?,0,?,?)").run(BUDGET_SCOPE, JSON.stringify(state), NOW);
 const counters = { http: {}, sql: 0, r2Put: 0, r2Get: 0, r2Head: 0, bytesStored: 0 };
+const queryPlans = new Map();
 const adapter = { withSession() { return this; }, async batch(statements) {
   if (!Array.isArray(statements) || statements.length > 8) throw new Error("fixture batch limit");
   db.exec("BEGIN IMMEDIATE");
@@ -58,6 +59,10 @@ const adapter = { withSession() { return this; }, async batch(statements) {
     return result;
   } catch (error) { db.exec("ROLLBACK"); throw error; }
 }, prepare(sql) { return { bind(...args) {
+  if (process.env.FLOW_FULL_FIXTURE_QUERY_PLANS === "1" && !queryPlans.has(sql)) {
+    if (queryPlans.size >= 128) throw new Error("fixture query-plan envelope exceeded");
+    queryPlans.set(sql, db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => row.detail));
+  }
   return { async all() { counters.sql++; return { results: db.prepare(sql).all(...args), meta: {} }; },
     async first() { counters.sql++; return db.prepare(sql).get(...args) ?? null; },
     runSync() {
@@ -142,7 +147,7 @@ const server = createServer(async (req, res) => {
       revisionConflictInjected = true;
     }
     const result = path === "/fixture/stats"
-      ? Response.json({ ...counters, active: db.prepare("SELECT count(*) AS n FROM active_release").get().n,
+      ? Response.json({ ...counters, queryPlans: [...queryPlans.values()], active: db.prepare("SELECT count(*) AS n FROM active_release").get().n,
           releases: db.prepare("SELECT status FROM release_manifest LIMIT 10").all(),
           budgetReservations: JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").get(BUDGET_SCOPE).state_json).reservations })
       : path.endsWith("/budget")
