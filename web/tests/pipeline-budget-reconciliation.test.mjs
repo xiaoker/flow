@@ -62,6 +62,82 @@ function periodPayload(at = now, cycleStart = "2026-09-16T00:00:00.000Z", cycleE
   return p;
 }
 
+function boundedPayload() {
+  const p = periodPayload(); p.evidenceContract = "flow-account-evidence-v3";
+  for (const d of DIMENSIONS) Object.assign(p.evidence[d], {
+    value: 100, lowerBound: 10, basis: "estimated", precision: "conservative_upper", boundReference: p.evidenceReference,
+  });
+  return p;
+}
+
+test("proved usage upper bounds admit only costs fitting the remaining lower bound", async () => {
+  const f = fixture(); const p = boundedPayload();
+  p.evidence.actionsMinutes = periodPayload().evidence.actionsMinutes;
+  const prepared = await (await f.call(p)).json();
+  assert.equal(prepared.decision, "account_reconciliation_prepared");
+  assert.equal(prepared.rowsWritten, 0); assert.equal(f.row(), undefined);
+  assert.equal((await f.call({ ...p, dryRun: false })).status, 200);
+  const state = JSON.parse(f.row().state_json);
+  assert.equal(state.evidence.r2ClassA.basis, "estimated");
+  for (const d of DIMENSIONS) {
+    const cost = evidence(); for (const k of DIMENSIONS) cost[k].value = 0;
+    cost[d].value = caps[d] - p.evidence[d].value;
+    assert.equal(transitionSharedBudget(state, `fit-${d}`, { operation: "reserve", vector: cost }, now).result.decision, "allow");
+    cost[d].value++;
+    assert.equal(transitionSharedBudget(state, `over-${d}`, { operation: "reserve", vector: cost }, now).result.decision, "over_budget");
+  }
+  f.db.close();
+});
+
+test("bounds require explicit contract, valid proof reference, interval, freshness and units", async () => {
+  const f = fixture();
+  for (const mutate of [
+    p => { p.evidenceContract = "flow-account-evidence-v2"; },
+    p => { delete p.evidenceContract; },
+    p => { delete p.evidence.r2ClassA.boundReference; },
+    p => { p.evidence.r2ClassA.boundReference = `official-usage-sha256:${"e".repeat(64)}`; },
+    p => { p.evidence.r2ClassA.lowerBound = 101; },
+    p => { p.evidence.r2ClassA.value = null; },
+    p => { p.evidence.r2ClassA.basis = "unknown"; },
+    p => { p.evidence.r2ClassA.precision = "rounded"; },
+    p => { p.evidence.r2ClassA.measuredAt = "2026-10-12T02:00:00.000Z"; },
+    p => { p.evidence.r2ClassA.unit = "requests"; },
+  ]) {
+    const p = boundedPayload(); mutate(p);
+    assert.notEqual((await f.call({ ...p, dryRun: false })).status, 200);
+    assert.equal(f.row(), undefined);
+  }
+  f.db.close();
+});
+
+test("interval refinement preserves UNKNOWN occupancy and cannot regress proven usage or downgrade", async () => {
+  const f = fixture(); await f.call({ ...boundedPayload(), dryRun: false });
+  const state = JSON.parse(f.row().state_json);
+  const nums = n => Object.fromEntries(DIMENSIONS.map(d => [d, n]));
+  state.settled = nums(4);
+  state.reservations.task = { cost: nums(50), consumed: nums(9), authorized: nums(11), status: "UNKNOWN", expiresAt: now.toISOString() };
+  f.db.prepare("UPDATE pipeline_budget_account SET state_json=? WHERE scope=?").run(JSON.stringify(state), BUDGET_SCOPE);
+  const p = { ...boundedPayload(), dryRun: false, expectedRevision: 0, operationId: "b".repeat(64) };
+  for (const d of DIMENSIONS) { p.evidence[d].value = 20; p.evidence[d].lowerBound = 0; }
+  assert.equal((await f.call(p)).status, 200);
+  const next = JSON.parse(f.row().state_json);
+  assert.equal(next.evidence.r2ClassA.lowerBound, 10);
+  assert.deepEqual(next.reservations, state.reservations); assert.deepEqual(next.settled, state.settled);
+  assert.deepEqual(next.receipts["a".repeat(64)], state.receipts["a".repeat(64)]);
+  const exact = { ...periodPayload(), evidenceContract: "flow-account-evidence-v3", dryRun: false, expectedRevision: 1, operationId: "c".repeat(64) };
+  for (const d of DIMENSIONS) exact.evidence[d].value = 15;
+  assert.equal((await f.call(exact)).status, 200);
+  const regress = { ...boundedPayload(), dryRun: false, expectedRevision: 2, operationId: "d".repeat(64) };
+  regress.evidence.r2ClassA.value = 14;
+  assert.equal((await f.call(regress)).status, 409);
+  assert.equal((await f.call({ ...periodPayload(), dryRun: false, expectedRevision: 2, operationId: "e".repeat(64) })).status, 409);
+  const cost = evidence(); for (const d of DIMENSIONS) cost[d].basis = "estimated";
+  assert.throws(() => transitionSharedBudget(next, "task", { operation: "settle", outcome: "SUCCEEDED", vector: cost }, now), /budget_requires_measured_vector/);
+  const running = structuredClone(next); running.reservations.task.status = "RUNNING";
+  assert.throws(() => transitionSharedBudget(running, "task", { operation: "debit", vector: cost }, now), /budget_requires_measured_vector/);
+  assert.equal(f.row().revision, 2); f.db.close();
+});
+
 test("period-aware initialization is explicit, exact and read-only in dry-run", async () => {
   const f = fixture(); const p = periodPayload();
   const r = await (await f.call(p)).json();
