@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-13: 080-CANARY prerequisites / budget readiness delivery
+
+- PR #182 merged `56e8a8d336eaa63693238ca09b5529335173d11f`; main CI `38282712426`, deploy `38282713110` passed; exact served SHA verified, no migrations to apply. Real candidate and production switch NOT RUN.
+- Bounded source verification: artifact `11721908335`, Collect `38193100238`, snapshot SHA256 `908ff478a6fced6ae044f9ff29f2e20c1b3d7fd191b7f76f3ada73abe9b18da1`, 2173496 bytes, confirmed asOf `2026-10-09`. No recollection. Exact-key production reads (read 1/write 0) show source lease COMPLETED, account flow-account-v1 absent. Current official usage UNKNOWN.
+- User authorized synchronization of three affected tests and one PR/initial CI. Existing endpoint/row/auth now has opt-in account_reconcile, dry-run, insert-if-absent, CAS, stable replay, measured evidence and preserved UNKNOWN/counters/receipts. Fixed R2 caps added to existing policy; unknown-policy tests retain fail-closed assertions. No production initialization, lease/approval, collection, flag or active-pointer mutation authorized or performed.
+- Temporary uncommitted worktree was removed before shipping. Restored from the recorded patches to persistent managed checkout `/Users/xiaoker/.codex/worktrees/080-budget-readiness/交易台`, branch `codex/080-budget-readiness-delivery-20261013`, latest main `56e8a8d`. Fresh restored-source verification: Web lint/build plus 228 tests passed; then complete root Python 1111 passed in 51.50s. Independent coverage/plan audit found no blocker; six requested coverage areas were added (31 narrow budget tests pass). Prior results are historical, not reused as proof. User authorized one PR/initial CI; next delivery state is CI_PENDING, not merge/deploy authorization. Guide/effects: `docs/audits/2026-10-13-080-budget-readiness.md`. No report-only CI or helper platform.
+- Next: one coherent PR/necessary initial CI, then stop for merge/deploy authority. Actual official evidence, account initialization and legitimate execution authority must precede the separately authorized bounded candidate. STAGED may supply candidate evidence while accounting UNKNOWN keeps the hold; neither production acceptance nor task completion is implied.
+
+Prior entries are historical.
+
 ### 2026-10-12: 080-ENTRY / r4 — LOCAL_VALIDATION_COMPLETE / DELIVERY_PENDING
 
 - 2026-10-13 delivery authorization received: one ENTRY PR and its necessary initial CI only; merge, deployment, production candidate and canary remain unauthorized. Delivery verification re-runs the complete Python suite, Web build/test/lint and named-file scope check. Ship coverage audit identified optional rejection-branch gaps; 15 bounded metadata/ZIP/runtime/policy probes were added before the initial PR, not by repeatedly spending CI minutes. Plan audit found the nine ENTRY code-contract requirements addressed; hosted Linux execution remains for this CI and production acceptance remains separate.

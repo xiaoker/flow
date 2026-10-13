@@ -36,6 +36,11 @@ const add = (a: Numbers, b: Numbers): Numbers => Object.fromEntries(DIMENSIONS.m
 })) as Numbers;
 const exceeds = (a: Numbers, b: Numbers) => DIMENSIONS.some(d => a[d] > b[d]);
 const size = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).byteLength;
+function r2PolicyCap(name: "r2ClassA" | "r2ClassB"): number | null {
+  const official = (resourceConfig.limits as Record<string, unknown>)[name];
+  const hard = (resourceConfig.hardLimits as Record<string, unknown>)[name];
+  return integer(official) && integer(hard) ? Math.min(official as number, hard as number) : null;
+}
 // Config remains the single policy source. A stored evidence row cannot raise
 // code-configured caps; absent provider limits stay UNKNOWN, not unlimited.
 const policyCaps: Caps = {
@@ -44,8 +49,8 @@ const policyCaps: Caps = {
   workerRequests: Math.min(resourceConfig.limits.workersRequestsPerDay, resourceConfig.hardLimits.workersRequestsPerDay),
   actionsMinutes: Math.min(resourceConfig.limits.githubActionsMinutesPerMonth, resourceConfig.hardLimits.githubActionsMinutesPerMonth),
   r2Bytes: resourceConfig.storage.r2SoftBytes,
-  r2ClassA: integer((resourceConfig.limits as Record<string, unknown>).r2ClassA) ? (resourceConfig.limits as Record<string, number>).r2ClassA : null,
-  r2ClassB: integer((resourceConfig.limits as Record<string, unknown>).r2ClassB) ? (resourceConfig.limits as Record<string, number>).r2ClassB : null,
+  r2ClassA: r2PolicyCap("r2ClassA"),
+  r2ClassB: r2PolicyCap("r2ClassB"),
 };
 function numbers(v: Vector | undefined, measured = false): Numbers {
   if (!v || typeof v !== "object" || Object.keys(v).length !== 7) fail("budget_incomplete_vector");
@@ -82,13 +87,13 @@ function validateState(s: SharedBudgetState) {
   }
   for (const r of Object.values(s.receipts)) if (!/^[a-f0-9]{64}$/.test(r.hash) || !r.result || typeof r.result.decision !== "string") fail("budget_state_corrupt", 503);
 }
-/** Offline provisioning seam only. No HTTP initialization, rollover or reset API. */
+/** Pure state constructor; the opt-in administrative path validates evidence/CAS. */
 export function createSharedBudgetState(config: Omit<SharedBudgetState, "contract" | "settled" | "reservations" | "receipts">): SharedBudgetState {
   const state: SharedBudgetState = structuredClone({ ...config, contract: "flow-shared-budget-v1", settled: zero(), reservations: {}, receipts: {} });
   validateState(state); return state;
 }
 function evidenceReady(s: SharedBudgetState, now: Date) {
-  // Period change is NOT a reset. Reconciliation/provisioning is a separate future authorized action.
+  // Period change is NOT a reset. Explicit account reconciliation retains all holds.
   if (s.epochDay !== now.toISOString().slice(0, 10) || s.epochMonth !== now.toISOString().slice(0, 7)) return false;
   return DIMENSIONS.every(d => {
     const m = s.evidence[d]; const age = now.getTime() - Date.parse(m.measuredAt ?? "");
@@ -184,6 +189,82 @@ async function body(request: Request) {
   try { const parsed = JSON.parse(new TextDecoder().decode(bytes)); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail("invalid_budget_request"); return parsed as Input; }
   catch { fail("invalid_budget_request"); }
 }
+type AccountReconciliation = {
+  operation: "account_reconcile"; operationId: string; expectedRevision: number | null;
+  dryRun: boolean; evidence: Vector; evidenceReference: string;
+};
+async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now: Date, limits: Caps,
+  count: (meta?: { rows_read?: number; rows_written?: number }) => void,
+  measurement: () => { rowsRead: number | null; rowsWritten: number | null }) {
+  // Administrative evidence attestation, never an execution allowance. Caller
+  // cannot supply caps, counters, reservations, epochs, TTLs or arbitrary state.
+  if (Object.keys(input).sort().join(",") !== "dryRun,evidence,evidenceReference,expectedRevision,operation,operationId"
+      || typeof input.dryRun !== "boolean" || !/^[a-f0-9]{64}$/.test(input.operationId)
+      || !(input.expectedRevision === null || integer(input.expectedRevision))
+      || typeof input.evidenceReference !== "string" || !/^official-usage-sha256:[a-f0-9]{64}$/.test(input.evidenceReference)) fail("invalid_budget_reconciliation");
+  numbers(input.evidence, true);
+  for (const d of DIMENSIONS) {
+    if (Object.keys(input.evidence[d]).sort().join(",") !== "basis,measuredAt,scope,unit,value") fail("invalid_budget_reconciliation");
+  }
+  for (const d of DIMENSIONS) if (!integer(limits[d])) fail("budget_policy_unknown", 409);
+  const stored = await db.prepare("SELECT revision,state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1")
+    .bind(BUDGET_SCOPE).all<{ revision: number; state_json: string }>();
+  count(stored.meta);
+  const row = stored.results[0];
+  let priorState: SharedBudgetState | undefined;
+  if (row) {
+    if (!integer(row.revision) || new TextEncoder().encode(row.state_json).length > MAX_STATE_BYTES) fail("budget_state_corrupt", 503);
+    priorState = JSON.parse(row.state_json); validateState(priorState!);
+  }
+  const hash = await digest({ ...input, dryRun: false });
+  const replay = priorState?.receipts[input.operationId];
+  if (replay) {
+    if (replay.hash !== hash || replay.result.decision !== "account_reconciled") fail("budget_operation_conflict", 409);
+    return response({ ...replay.result, revision: row!.revision, replayed: true, ...measurement() });
+  }
+  if ((row ? row.revision : null) !== input.expectedRevision) fail("budget_revision_conflict", 409);
+  const epochDay = now.toISOString().slice(0, 10), epochMonth = epochDay.slice(0, 7);
+  const next = priorState ? structuredClone(priorState) : createSharedBudgetState({
+    epochDay, epochMonth, evidence: input.evidence, caps: limits, targets: {},
+    measurementTtlSeconds: resourceConfig.resourceAccounting.measurementTtlSeconds,
+    reservationTtlSeconds: resourceConfig.resourceAccounting.reservationTtlSeconds });
+  if (priorState) {
+    // Same-period cumulative provider counters cannot move backwards. Storage
+    // occupancy may fall legitimately. Rollover retains all local charges and
+    // UNKNOWN holds conservatively; this operation never frees task budget.
+    for (const d of DIMENSIONS) {
+      const samePeriod = ["d1RowsRead", "d1RowsWritten", "workerRequests"].includes(d)
+        ? priorState.epochDay === epochDay : priorState.epochMonth === epochMonth;
+      const old = priorState.evidence[d];
+      if (d !== "r2Bytes" && samePeriod && old.basis === "measured" && old.value !== null
+          && input.evidence[d].value! < old.value) fail("budget_evidence_regressed", 409);
+      next.caps[d] = priorState.caps[d] === null ? limits[d] : Math.min(priorState.caps[d]!, limits[d]!);
+    }
+  }
+  next.epochDay = epochDay; next.epochMonth = epochMonth;
+  next.evidence = structuredClone(input.evidence);
+  next.measurementTtlSeconds = resourceConfig.resourceAccounting.measurementTtlSeconds;
+  if (!evidenceReady(next, now)) fail("budget_evidence_not_ready", 409);
+  if (Object.keys(next.receipts).length >= MAX_RECEIPTS) fail("budget_receipt_capacity", 409);
+  const result = { decision: "account_reconciled", scope: BUDGET_SCOPE, epochDay, epochMonth,
+    evidenceReference: input.evidenceReference, evidenceSha256: await digest(input.evidence), executionAllowed: false };
+  next.receipts[input.operationId] = { hash, result };
+  validateState(next);
+  if (size(next) > MAX_STATE_BYTES) fail("budget_state_capacity", 409);
+  if (input.dryRun) return response({ ...result, decision: "account_reconciliation_prepared",
+    expectedRevision: input.expectedRevision, proposalSha256: await digest(next), remoteWrites: false,
+    executionAllowed: false, ...measurement() });
+  const commit = row
+    ? db.prepare("UPDATE pipeline_budget_account SET state_json=?,revision=revision+1,updated_at=? WHERE scope=? AND revision=? RETURNING revision")
+        .bind(JSON.stringify(next), now.toISOString(), BUDGET_SCOPE, row.revision)
+    : db.prepare("INSERT INTO pipeline_budget_account (scope,revision,state_json,updated_at) VALUES (?,0,?,?) ON CONFLICT(scope) DO NOTHING RETURNING revision")
+        .bind(BUDGET_SCOPE, JSON.stringify(next), now.toISOString());
+  const committed = await commit.all<{ revision: number }>(); count(committed.meta);
+  if (committed.results.length !== 1) fail("budget_revision_conflict", 409);
+  return response({ ...result, revision: committed.results[0].revision, replayed: false,
+    executionAllowed: false, ...measurement() });
+}
+
 export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; INGEST_API_KEY?: string;
   PIPELINE_RECOVERY_ENABLED?: string; RAW_BUCKET?: Parameters<typeof readRecoveryPlanObject>[0] }, clock = () => new Date(), limits: Caps = policyCaps) {
   if (!authorized(request, runtime.INGEST_API_KEY ?? "")) return response({ error: "unauthorized" }, 401);
@@ -197,9 +278,13 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
   try {
     const query = Object.fromEntries(new URL(request.url).searchParams);
     const input = request.method === "POST" ? await body(request) : { ...query, attemptCount: Number(query.attemptCount) } as Input;
-    identity(input);
     const now = clock(); const cutoff = new Date(now.getTime() + 30000).toISOString();
     const db = runtime.DB.withSession?.("first-primary") ?? runtime.DB;
+    if (request.method === "POST" && input.operation === "account_reconcile") {
+      return await reconcileBudgetAccount(input as unknown as AccountReconciliation, db, now, limits, count,
+        () => ({ rowsRead, rowsWritten }));
+    }
+    identity(input);
     const recovery = input.recoveryId !== undefined;
     if (recovery && !["1", "true"].includes(runtime.PIPELINE_RECOVERY_ENABLED ?? "")) fail("pipeline_recovery_disabled", 404);
     // Use the same identity predicate for preflight and the final atomic CAS.

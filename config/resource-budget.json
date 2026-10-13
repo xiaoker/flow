@@ -5,7 +5,9 @@
     "d1RowsReadPerDay": 5000000,
     "d1RowsWrittenPerDay": 100000,
     "workersRequestsPerDay": 100000,
-    "githubActionsMinutesPerMonth": 2000
+    "githubActionsMinutesPerMonth": 2000,
+    "r2ClassA": 1000000,
+    "r2ClassB": 10000000
   },
   "storage": {
     "d1Bytes": 5368709120,
@@ -22,7 +24,9 @@
     "d1RowsReadPerDay": 2500000,
     "d1RowsWrittenPerDay": 50000,
     "workersRequestsPerDay": 50000,
-    "githubActionsMinutesPerMonth": 1500
+    "githubActionsMinutesPerMonth": 1500,
+    "r2ClassA": 500000,
+    "r2ClassB": 5000000
   },
   "resourceAccounting": {
     "schemaVersion": 1,
