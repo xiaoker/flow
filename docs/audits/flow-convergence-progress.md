@@ -7,6 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-13: 080-CANARY prerequisites / archive-first bounded evidence
+
+- PR #184 merged as `afc203b57dde7b6cae697aae549f1042d1ba9a51`. Main CI `38353108037` and deploy `38353108257` succeeded; served merge SHA verified, Worker version `75abe1aa-4d8e-4b29-8422-ff93230cf96e`, no migrations to apply.
+- Current independent worktree: `080-archive-bounded-budget`, branch `codex/080-archive-bounded-budget-20261013`, based on that merged main. Only the existing shared-budget contract, regression tests and explanation/index are changed. No production state mutation or new subsystem.
+- Correction: roadmap admission can use proved conservative remaining lower bounds. Explicit evidence v3 stores consumption upper intervals truthfully as estimated; all seven caps, periods, freshness, UNKNOWN occupancy and measured-only actual settlement remain enforced. Exact legacy/v2 contracts remain supported. See `docs/audits/2026-10-13-080-archive-bounded-budget.md`.
+- Archive source 11721908335 reverified read-only: confirmed `2026-10-09`, pinned hash matches, unexpired; zero new collection requests. This is one reusable source day, not all-history completion or permission to borrow its completed lease.
+- Delivery authorization: one PR and its initial CI only. Final ship verification: Web lint/build and 240 tests passed; complete root Python suite passed 1111 tests in 50.29s. Independent coverage/plan reviews found no code blocker; the settlement test now explicitly asserts measured-only rejection, with debit rejection too. Delivery state CI_PENDING, not merge/deploy authorization. No production budget apply, claim, dispatch or real candidate. Next: wait for initial checks, then disclose actual merge/deploy effects for authorization; later prepare a separately authorized bounded archived-input candidate.
+- Components merged YES; complete prior local/CI call YES; formal entry code YES, real authority/budget readiness not established; real canary NOT RUN; production switch/ten-day acceptance NOT RUN. Original protected paths and other user changes preserved.
+
+## Historical implementation notes
+
 ### 2026-10-13: 080-CANARY prerequisites / provider-period contract repair
 
 - Base main `e3633bf2f221d2680adbcc0182d03ade2d4b7214`; PR #183 merged with explicit authorization. Main CI `38345547463` and automatic deploy `38345548001` passed; served SHA matches merge, Worker `e6d8691f-97e4-40c6-8732-5da5e62d1d8e`, D1 `No migrations to apply!`.
