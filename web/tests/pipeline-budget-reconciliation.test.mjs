@@ -180,6 +180,32 @@ test("period-aware concurrent CAS refresh has one winner, and backwards observat
   assert.equal((await f.call({ ...older, dryRun: false, expectedRevision: 1, operationId: "e".repeat(64) })).status, 409);
   assert.equal(f.row().revision, 1); f.db.close();
 });
+
+test("R2 monthly cycles accept both 28-day February and 31-day boundaries", async () => {
+  for (const [at, start, end] of [
+    ["2027-02-20T02:00:00Z", "2027-02-16T00:00:00.000Z", "2027-03-16T00:00:00.000Z"],
+    ["2027-02-10T02:00:00Z", "2027-01-16T00:00:00.000Z", "2027-02-16T00:00:00.000Z"],
+  ]) {
+    const clock = new Date(at); const f = fixture({ clock: () => clock });
+    const response = await (await f.call(periodPayload(clock, start, end))).json();
+    assert.equal(response.decision, "account_reconciliation_prepared");
+    assert.equal(response.rowsWritten, 0); assert.equal(f.row(), undefined); f.db.close();
+  }
+});
+
+test("expired R2 interval alone rejects admission despite fresh observations and current daily/monthly evidence", async () => {
+  const f = fixture(); await f.call({ ...periodPayload(), dryRun: false });
+  const state = JSON.parse(f.row().state_json);
+  const clock = new Date("2026-10-16T00:00:00.000Z");
+  state.epochDay = "2026-10-16";
+  state.evidence = periodPayload(clock, "2026-10-16T00:00:00.000Z", "2026-11-16T00:00:00.000Z").evidence;
+  const priorCycle = periodPayload(new Date("2026-10-15T23:59:59.000Z")).evidence;
+  for (const d of ["r2ClassA", "r2ClassB"]) state.evidence[d] = priorCycle[d];
+  const cost = evidence(); for (const d of DIMENSIONS) cost[d].value = 1;
+  const result = transitionSharedBudget(state, "next-cycle", { operation: "reserve", vector: cost }, clock);
+  assert.equal(result.result.decision, "unknown_metrics");
+  assert.deepEqual(result.state.reservations, {}); f.db.close();
+});
 test("concurrent initialization has one winner; exact replay is read-only", async () => {
   const f = fixture();
   const results = await Promise.all(Array.from({ length: 20 }, (_, i) => f.call({ ...payload(), dryRun: false,

@@ -65,8 +65,8 @@ SQLite/real transition tests cover explicit initialization/dry-run/replay,
 calendar-month crossing without R2 reset, mid-month R2 rollover retaining UNKNOWN,
 overlap/backward/downgrade rejection, malformed periods/rounded counts/GB-months,
 UTC end-exclusive admission, all seven caps, concurrent CAS and legacy upgrade.
-Existing legacy tests are retained unchanged. Final Web lint/build and 235 tests
-passed; complete root Python regression passed 1111 tests in 52.25s. The same
+Existing legacy tests are retained unchanged. Final ship Web lint/build and 237 tests
+passed; complete root Python regression passed 1111 tests in 53.98s. The same
 legal period fixture returns 422 on prior main and a read-only prepared response
 on the fixed handler (writes 0). These are local tests, not production verification.
 The lockfile was unchanged; npm ci reported 32 existing dependency vulnerabilities,
