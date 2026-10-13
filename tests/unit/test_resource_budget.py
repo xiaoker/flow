@@ -261,6 +261,8 @@ def test_full_admission_unknown_r2_limit_is_not_treated_as_zero() -> None:
     config = json.loads(
         (Path(__file__).resolve().parents[2] / "config/resource-budget.json").read_text()
     )
+    config["limits"].pop("r2ClassA", None)
+    config["limits"].pop("r2ClassB", None)
     zero = {dimension: 0 for dimension in ("d1RowsRead", "d1RowsWritten", "workerRequests", "actionsMinutes", "r2Bytes", "r2ClassA", "r2ClassB")}
     report = build_admission_report(
         config=config,

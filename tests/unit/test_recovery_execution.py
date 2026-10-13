@@ -233,7 +233,10 @@ def test_budget_unknown_metrics_fail_closed() -> None:
 def test_budget_unknown_r2_operation_limits_fail_closed_even_with_usage_inputs() -> None:
     scope = validate_recovery_plan(plan(dates=["2026-08-28"]))
     zero = {"d1Reads": 0, "d1Writes": 0, "workersRequests": 0, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}
-    report = estimate_recovery_budget(scope=scope, config=CONFIG, retry_attempts=1, measured=zero, reserved=zero)
+    missing_limits = json.loads(json.dumps(CONFIG))
+    missing_limits["limits"].pop("r2ClassA", None)
+    missing_limits["limits"].pop("r2ClassB", None)
+    report = estimate_recovery_budget(scope=scope, config=missing_limits, retry_attempts=1, measured=zero, reserved=zero)
     assert report["decision"] == "unknown_metrics"
     assert "r2ClassALimit" in report["unknownMetrics"]
     assert "r2ClassBLimit" in report["unknownMetrics"]
@@ -242,9 +245,8 @@ def test_budget_unknown_r2_operation_limits_fail_closed_even_with_usage_inputs()
 def test_budget_upper_bound_includes_retries_and_blocks_over_limit() -> None:
     scope = validate_recovery_plan(plan(dates=["2026-08-28"]))
     config = json.loads(json.dumps(CONFIG))
-    # R2 operation quotas are intentionally not present in the checked-in
-    # baseline; an explicit test fixture proves that supplying them is the
-    # only way an offline estimate can become eligible.
+    # Explicit known operation caps test eligibility; missing caps remain
+    # fail-closed in the separate regression above.
     config["limits"]["r2ClassA"] = 1_000_000
     config["limits"]["r2ClassB"] = 10_000_000
     safe = {

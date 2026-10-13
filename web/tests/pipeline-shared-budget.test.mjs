@@ -331,12 +331,24 @@ test("no auto-initialize, no period reset, bounded receipts and body", async () 
   const huge = { ...input(), junk: "x".repeat(20000) };
   assert.equal((await call(db, huge)).status, 413); db.close();
 });
-test("actual repository policy keeps missing R2 caps UNKNOWN and cannot be raised by a row", async () => {
+test("missing R2 policy caps remain UNKNOWN and cannot be raised by a row", async () => {
   const db = seed();
-  const response = await sharedBudgetRequest(request(input()), { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now);
+  const response = await sharedBudgetRequest(request(input()), { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now, { ...nums(100), r2ClassA: null, r2ClassB: null });
   assert.equal((await response.json()).decision, "unknown_metrics");
   assert.deepEqual(readState(db).reservations, {});
   const s = state(); s.caps = nums(1000000); db.prepare("UPDATE pipeline_budget_account SET state_json=?").run(JSON.stringify(s));
   const restricted = await sharedBudgetRequest(request({ ...input(), expectedRevision: 1 }), { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now, nums(60));
   assert.equal((await restricted.json()).decision, "over_budget"); db.close();
+});
+
+test("configured repository R2 caps permit known evidence but remain hard bounded", async () => {
+  const db = seed();
+  const response = await sharedBudgetRequest(request(input()), { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now);
+  assert.equal((await response.json()).decision, "allow");
+  const s = state(); s.caps = nums(10000000);
+  db.prepare("UPDATE pipeline_budget_account SET state_json=?").run(JSON.stringify(s));
+  const huge = vec(1); huge.r2ClassA.value = 500001;
+  const blocked = await sharedBudgetRequest(request({ ...input(), expectedRevision: 1, operationId: "f".repeat(64), vector: huge }), { DB: adapter(db), INGEST_API_KEY: "fixture-key" }, () => now);
+  assert.equal((await blocked.json()).decision, "over_budget");
+  assert.deepEqual(readState(db).reservations, {}); db.close();
 });
