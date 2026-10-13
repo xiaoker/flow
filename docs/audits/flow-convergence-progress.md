@@ -7,6 +7,18 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-13: 080-CANARY prerequisites / provider-period contract repair
+
+- Base main `e3633bf2f221d2680adbcc0182d03ade2d4b7214`; PR #183 merged with explicit authorization. Main CI `38345547463` and automatic deploy `38345548001` passed; served SHA matches merge, Worker `e6d8691f-97e4-40c6-8732-5da5e62d1d8e`, D1 `No migrations to apply!`.
+- Official account login/read-only usage inspection succeeded. Actual R2 usage periods follow a subscription cycle, while prior reconciliation uses calendar epochMonth. Rounded UI counts and GB-month storage are not exact current counters/bytes. No private financial values or exports included here.
+- Current worktree `/Users/xiaoker/.codex/worktrees/080-budget-periods/交易台`, branch `codex/080-budget-period-contract-20261013`; no open PR at start. Reuses existing account/endpoint/CAS/auth and preserves UNKNOWN holds, cumulative task counters and receipts. Explicit evidence v2 adds per-dimension UTC day/calendar month/billing cycle/instant precision contract; legacy behavior is retained, upgrade is explicit and downgrade rejected. Details/merge effects: `docs/audits/2026-10-13-080-budget-period-contract.md`.
+- State LOCAL_VALIDATION_COMPLETE / DELIVERY_AUTHORIZATION_PENDING. Final `npm run lint` and `npm test` passed build plus 235 tests; then root `PYTHONPATH=src:. /Users/xiaoker/Documents/交易台/.venv/bin/python -m pytest -o addopts='' -q --tb=short` passed 1111 tests in 52.25s. Seven new behavior scenarios include SQLite concurrency and real admission transitions. Same legal fixture evidence returns 422 on prior main and a read-only prepared response (writes 0) on the fixed handler. This is local evidence, not production usage or acceptance. No production claim, account dry-run/apply, recovery approval, workflow dispatch, collection, canary, flags or active-pointer mutation.
+- Independent states: components merged YES (PR #181/#182/#183); complete local/hosted call passed YES for prior versions; formal entry code merged YES but true execution readiness blocked on valid account evidence/authority; real canary NOT RUN; production switch/ten-day acceptance NOT RUN.
+- Next allowed action: authorization for one repair PR/initial CI requested (4–8 Linux runner minutes estimate, not measured); previous one-CI authorization was consumed by PR #183. After delivery/CI, stop for merge/deploy authorization. Then obtain exact truthful current provider evidence and prepare a bounded account dry-run. Actual initialization/apply and one real candidate need separately disclosed authorization. This repair is not telemetry acquisition or CANARY_PASSED.
+- Original `reports/phase0/latest-*`, `memory/` and user edits unchanged. Prior persistent worktree's local merge/evidence notes retained, not overwritten or separately pushed. No additional ledger, workflow, migration, dependency upgrade or manual JSON gate.
+
+## Historical implementation notes
+
 ### 2026-10-13: 080-CANARY prerequisites / budget readiness delivery
 
 - PR #182 merged `56e8a8d336eaa63693238ca09b5529335173d11f`; main CI `38282712426`, deploy `38282713110` passed; exact served SHA verified, no migrations to apply. Real candidate and production switch NOT RUN.

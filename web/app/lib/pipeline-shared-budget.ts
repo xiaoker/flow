@@ -12,7 +12,9 @@ export const MAX_RECEIPTS = 128;
 type Dimension = typeof DIMENSIONS[number];
 type Numbers = Record<Dimension, number>;
 type Caps = Record<Dimension, number | null>;
-type Metric = { value: number | null; unit: string; basis: string; measuredAt?: string; scope?: string };
+type Period = { kind: "utc_day" | "calendar_month" | "billing_cycle" | "instant"; start: string; end: string };
+type Metric = { value: number | null; unit: string; basis: string; measuredAt?: string; scope?: string;
+  precision?: "exact"; period?: Period };
 type Vector = Record<Dimension, Metric>;
 type Reservation = { cost: Numbers; consumed: Numbers; authorized: Numbers; status: string; expiresAt: string; settled?: string;
   execution?: { contract: "flow-budget-task-v2"; inputSha256: string; leaseOwner: string; attemptCount: number } };
@@ -22,6 +24,7 @@ export type SharedBudgetState = {
   measurementTtlSeconds: number; reservationTtlSeconds: number;
   settled: Numbers; reservations: Record<string, Reservation>;
   receipts: Record<string, { hash: string; result: Record<string, unknown> }>;
+  evidenceContract?: "flow-account-evidence-v2";
 };
 type Statement = { bind(...values: unknown[]): Statement; all<T>(): Promise<{ results: T[]; meta?: { rows_read?: number; rows_written?: number; changes?: number } }> };
 type DB = { prepare(sql: string): Statement; withSession?(constraint: string): DB };
@@ -62,6 +65,37 @@ function numbers(v: Vector | undefined, measured = false): Numbers {
   })) as Numbers;
 }
 function validNumbers(v: Numbers) { if (!v || Object.keys(v).length !== 7 || DIMENSIONS.some(d => !integer(v[d]))) fail("budget_state_corrupt", 503); }
+function canonicalTime(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+function validPeriod(d: Dimension, m: Metric): boolean {
+  const p = m.period;
+  if (!p || Object.keys(p).sort().join(",") !== "end,kind,start" || !canonicalTime(p.start) || !canonicalTime(p.end)
+      || !canonicalTime(m.measuredAt) || m.precision !== "exact") return false;
+  if (d === "r2Bytes") return p.kind === "instant" && p.start === m.measuredAt && p.end === p.start;
+  const start = new Date(p.start), end = new Date(p.end);
+  if (p.start.slice(11) !== "00:00:00.000Z" || p.end.slice(11) !== "00:00:00.000Z"
+      || Date.parse(m.measuredAt) < start.getTime() || Date.parse(m.measuredAt) >= end.getTime()) return false;
+  if (["d1RowsRead", "d1RowsWritten", "workerRequests"].includes(d)) {
+    return p.kind === "utc_day" && end.getTime() - start.getTime() === 86400000;
+  }
+  if (d === "actionsMinutes") {
+    const next = new Date(start); next.setUTCMonth(next.getUTCMonth() + 1);
+    return p.kind === "calendar_month" && start.getUTCDate() === 1 && p.end === next.toISOString();
+  }
+  const days = (end.getTime() - start.getTime()) / 86400000;
+  return p.kind === "billing_cycle" && days >= 28 && days <= 31;
+}
+function matchingPeriods(a: Metric, b: Metric) {
+  return a.period?.kind === b.period?.kind && a.period?.start === b.period?.start && a.period?.end === b.period?.end;
+}
+function validatePeriodEvidence(v: Vector) {
+  if (DIMENSIONS.some(d => v[d]?.precision !== "exact")) fail("budget_requires_exact_evidence", 422);
+  if (DIMENSIONS.some(d => !validPeriod(d, v[d])) || !matchingPeriods(v.d1RowsRead, v.d1RowsWritten)
+      || !matchingPeriods(v.d1RowsRead, v.workerRequests) || !matchingPeriods(v.r2ClassA, v.r2ClassB)) {
+    fail("budget_invalid_evidence_period", 422);
+  }
+}
 function validateState(s: SharedBudgetState) {
   if (!s || s.contract !== "flow-shared-budget-v1" || !/^\d{4}-\d{2}-\d{2}$/.test(s.epochDay)
       || s.epochMonth !== s.epochDay.slice(0, 7) || !integer(s.measurementTtlSeconds) || !s.measurementTtlSeconds || s.measurementTtlSeconds > 3600
@@ -69,6 +103,10 @@ function validateState(s: SharedBudgetState) {
       || Object.keys(s.reservations).length > MAX_RESERVATIONS || Object.keys(s.receipts).length > MAX_RECEIPTS
       || size(s) > MAX_STATE_BYTES) fail("budget_state_corrupt", 503);
   validNumbers(s.settled);
+  if (s.evidenceContract !== undefined) {
+    if (s.evidenceContract !== "flow-account-evidence-v2") fail("budget_state_corrupt", 503);
+    try { validatePeriodEvidence(s.evidence); } catch { fail("budget_state_corrupt", 503); }
+  }
   for (const [i, d] of DIMENSIONS.entries()) {
     const m = s.evidence?.[d]; const cap = s.caps?.[d];
     if (!m || m.unit !== UNITS[i] || !["measured", "estimated", "unknown"].includes(m.basis)
@@ -94,10 +132,12 @@ export function createSharedBudgetState(config: Omit<SharedBudgetState, "contrac
 }
 function evidenceReady(s: SharedBudgetState, now: Date) {
   // Period change is NOT a reset. Explicit account reconciliation retains all holds.
-  if (s.epochDay !== now.toISOString().slice(0, 10) || s.epochMonth !== now.toISOString().slice(0, 7)) return false;
+  if (!s.evidenceContract && (s.epochDay !== now.toISOString().slice(0, 10) || s.epochMonth !== now.toISOString().slice(0, 7))) return false;
   return DIMENSIONS.every(d => {
     const m = s.evidence[d]; const age = now.getTime() - Date.parse(m.measuredAt ?? "");
     return m.basis === "measured" && m.scope === "account" && s.caps[d] !== null
+      && (!s.evidenceContract || (validPeriod(d, m) && (d === "r2Bytes"
+        || (Date.parse(m.period!.start) <= now.getTime() && now.getTime() < Date.parse(m.period!.end)))))
       && Number.isFinite(age) && age >= 0 && age <= s.measurementTtlSeconds * 1000;
   });
 }
@@ -192,20 +232,26 @@ async function body(request: Request) {
 type AccountReconciliation = {
   operation: "account_reconcile"; operationId: string; expectedRevision: number | null;
   dryRun: boolean; evidence: Vector; evidenceReference: string;
+  evidenceContract?: "flow-account-evidence-v2";
 };
 async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now: Date, limits: Caps,
   count: (meta?: { rows_read?: number; rows_written?: number }) => void,
   measurement: () => { rowsRead: number | null; rowsWritten: number | null }) {
   // Administrative evidence attestation, never an execution allowance. Caller
   // cannot supply caps, counters, reservations, epochs, TTLs or arbitrary state.
-  if (Object.keys(input).sort().join(",") !== "dryRun,evidence,evidenceReference,expectedRevision,operation,operationId"
+  const periodAware = input.evidenceContract === "flow-account-evidence-v2";
+  if (Object.keys(input).sort().join(",") !== (periodAware
+    ? "dryRun,evidence,evidenceContract,evidenceReference,expectedRevision,operation,operationId"
+    : "dryRun,evidence,evidenceReference,expectedRevision,operation,operationId")
       || typeof input.dryRun !== "boolean" || !/^[a-f0-9]{64}$/.test(input.operationId)
       || !(input.expectedRevision === null || integer(input.expectedRevision))
       || typeof input.evidenceReference !== "string" || !/^official-usage-sha256:[a-f0-9]{64}$/.test(input.evidenceReference)) fail("invalid_budget_reconciliation");
   numbers(input.evidence, true);
   for (const d of DIMENSIONS) {
-    if (Object.keys(input.evidence[d]).sort().join(",") !== "basis,measuredAt,scope,unit,value") fail("invalid_budget_reconciliation");
+    if (Object.keys(input.evidence[d]).sort().join(",") !== (periodAware
+      ? "basis,measuredAt,period,precision,scope,unit,value" : "basis,measuredAt,scope,unit,value")) fail("invalid_budget_reconciliation");
   }
+  if (periodAware) validatePeriodEvidence(input.evidence);
   for (const d of DIMENSIONS) if (!integer(limits[d])) fail("budget_policy_unknown", 409);
   const stored = await db.prepare("SELECT revision,state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1")
     .bind(BUDGET_SCOPE).all<{ revision: number; state_json: string }>();
@@ -223,6 +269,7 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
     return response({ ...replay.result, revision: row!.revision, replayed: true, ...measurement() });
   }
   if ((row ? row.revision : null) !== input.expectedRevision) fail("budget_revision_conflict", 409);
+  if (priorState?.evidenceContract && !periodAware) fail("budget_evidence_contract_downgrade", 409);
   const epochDay = now.toISOString().slice(0, 10), epochMonth = epochDay.slice(0, 7);
   const next = priorState ? structuredClone(priorState) : createSharedBudgetState({
     epochDay, epochMonth, evidence: input.evidence, caps: limits, targets: {},
@@ -233,9 +280,14 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
     // occupancy may fall legitimately. Rollover retains all local charges and
     // UNKNOWN holds conservatively; this operation never frees task budget.
     for (const d of DIMENSIONS) {
-      const samePeriod = ["d1RowsRead", "d1RowsWritten", "workerRequests"].includes(d)
-        ? priorState.epochDay === epochDay : priorState.epochMonth === epochMonth;
       const old = priorState.evidence[d];
+      const incoming = input.evidence[d];
+      const samePeriod = periodAware ? (!priorState.evidenceContract || matchingPeriods(old, incoming))
+        : ["d1RowsRead", "d1RowsWritten", "workerRequests"].includes(d)
+          ? priorState.epochDay === epochDay : priorState.epochMonth === epochMonth;
+      if (periodAware && priorState.evidenceContract && d !== "r2Bytes" && !samePeriod
+          && Date.parse(incoming.period!.start) < Date.parse(old.period!.end)) fail("budget_evidence_period_conflict", 409);
+      if (periodAware && old.measuredAt && Date.parse(incoming.measuredAt!) < Date.parse(old.measuredAt)) fail("budget_evidence_regressed", 409);
       if (d !== "r2Bytes" && samePeriod && old.basis === "measured" && old.value !== null
           && input.evidence[d].value! < old.value) fail("budget_evidence_regressed", 409);
       next.caps[d] = priorState.caps[d] === null ? limits[d] : Math.min(priorState.caps[d]!, limits[d]!);
@@ -243,10 +295,12 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
   }
   next.epochDay = epochDay; next.epochMonth = epochMonth;
   next.evidence = structuredClone(input.evidence);
+  if (periodAware) next.evidenceContract = "flow-account-evidence-v2";
   next.measurementTtlSeconds = resourceConfig.resourceAccounting.measurementTtlSeconds;
   if (!evidenceReady(next, now)) fail("budget_evidence_not_ready", 409);
   if (Object.keys(next.receipts).length >= MAX_RECEIPTS) fail("budget_receipt_capacity", 409);
   const result = { decision: "account_reconciled", scope: BUDGET_SCOPE, epochDay, epochMonth,
+    ...(periodAware ? { evidenceContract: next.evidenceContract } : {}),
     evidenceReference: input.evidenceReference, evidenceSha256: await digest(input.evidence), executionAllowed: false };
   next.receipts[input.operationId] = { hash, result };
   validateState(next);
@@ -337,6 +391,8 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
       const prior = input.receiptId ? state.receipts[input.receiptId] : undefined;
       if (prior && prior.result.taskId !== task) fail("budget_operation_conflict", 409);
       return response({ revision: row.revision, contract: state.contract, epochDay: state.epochDay,
+        ...(state.evidenceContract ? { evidenceContract: state.evidenceContract,
+          evidencePeriods: Object.fromEntries(DIMENSIONS.map(d => [d, state.evidence[d].period])) } : {}),
         evidenceReady: evidenceReady(state, now), rowsRead, rowsWritten,
         ...(input.taskContract ? { taskId: task, reservation: reservation ?? null,
           ...(input.receiptId ? { receipt: prior ? { ...prior.result, replayed: true,
