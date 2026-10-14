@@ -110,6 +110,56 @@ class RemoteBudgetOperationStore:
         with self._connect() as db:
             return self._read(db)
 
+    def bind_candidate_attempt(self, *, owner, generation, resume):
+        """Local bounded execution history; never a remote lease or allowance.
+
+        Consume the slot before I/O. A lost response does not permit another
+        invocation. Legacy journals without this history cannot prove a resume.
+        """
+        import re
+        if (not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", owner)
+                or type(generation) is not int or not 1 <= generation <= 999999999
+                or type(resume) is not bool):
+            raise ValueError("candidate_attempt_identity_invalid")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check(db)
+            db.execute("CREATE TABLE IF NOT EXISTS candidate_attempt (ordinal INTEGER PRIMARY KEY CHECK(ordinal IN (1,2)), owner TEXT NOT NULL, generation INTEGER NOT NULL)")
+            rows = db.execute("SELECT ordinal,owner,generation FROM candidate_attempt ORDER BY ordinal LIMIT 3").fetchall()
+            self._check_candidate_history(rows)
+            if not resume:
+                if rows or db.execute("SELECT owner FROM receipt_owner WHERE id=1").fetchone()[0] is not None or self._read(db) is not None:
+                    raise ValueError("candidate_attempt_not_fresh")
+                ordinal = 1
+            else:
+                if (len(rows) != 1 or rows[0][0] != 1 or owner == rows[0][1]
+                        or generation <= rows[0][2]):
+                    raise ValueError("candidate_attempt_resume_unproved_or_exhausted")
+                ordinal = 2
+            db.execute("INSERT INTO candidate_attempt VALUES (?,?,?)", (ordinal, owner, generation))
+            db.commit()
+            return ordinal
+
+    def candidate_attempt(self, *, owner, generation):
+        with self._connect() as db:
+            self._check(db)
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_attempt'").fetchone():
+                return None
+            rows = db.execute("SELECT ordinal,owner,generation FROM candidate_attempt ORDER BY ordinal LIMIT 3").fetchall()
+            self._check_candidate_history(rows)
+            if not rows or rows[-1][1:] != (owner, generation):
+                raise ValueError("candidate_attempt_identity_conflict")
+            return rows[-1][0]
+
+    @staticmethod
+    def _check_candidate_history(rows):
+        import re
+        if (len(rows) > 2 or [r[0] for r in rows] != list(range(1, len(rows) + 1))
+                or any(not isinstance(r[1], str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", r[1])
+                       or type(r[2]) is not int or not 1 <= r[2] <= 999999999 for r in rows)
+                or (len(rows) == 2 and (rows[0][1] == rows[1][1] or rows[0][2] >= rows[1][2]))):
+            raise ValueError("candidate_attempt_history_corrupt")
+
     def begin(self, payload):
         if (not isinstance(payload, dict) or payload.get("taskInputSha256") != self.input_sha256
                 or payload.get("taskContract") != "flow-budget-task-v2"

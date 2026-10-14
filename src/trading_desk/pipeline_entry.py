@@ -432,7 +432,7 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
         project_root=root, now=now)
     recovery = context.mode == "recovery"
     resume = resume_handoff_sha256 is not None
-    if context.lease_attempt_count != (2 if resume else 1):
+    if type(context.lease_attempt_count) is not int or not 1 <= context.lease_attempt_count <= 999999999:
         raise PipelineRunnerError("entry_candidate_attempt_invalid")
     if recovery != (approved_recovery_plan is not None):
         raise PipelineRunnerError("entry_recovery_plan_binding_required")
@@ -459,7 +459,6 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
     common = {"base_url": origin, **candidate_credentials(environment), "allow_loopback_fixture": fixture}
     clock = (lambda: now) if now is not None else (lambda: datetime.now(timezone.utc))
     guard_args = {**common, "expected_attempt_count": context.lease_attempt_count, "now": clock, "request_profile": profile}
-    guard = RecoveryPipelineLease(**guard_args, approved_plan=approved_recovery_plan, stages=request["stages"]) if recovery else OrdinaryPipelineLease(**guard_args)
     task = f"{context.identity.run_key}/{context.identity.target_date}/flow-budget-task-v2"
     if recovery:
         task = f"recovery/{context.recovery_id}/{context.recovery_plan_sha256}/{task}"
@@ -471,6 +470,13 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
     budget_journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     store_factory = RemoteBudgetOperationStore if budget_journal.exists() else RemoteBudgetOperationStore.initialize
     store = store_factory(budget_journal, task_id=task, input_sha256=digest)
+    try:
+        ordinal = store.bind_candidate_attempt(owner=context.lease_owner,
+            generation=context.lease_attempt_count, resume=resume)
+    except ValueError as exc:
+        raise PipelineRunnerError("entry_candidate_attempt_invalid") from exc
+    guard_args["candidate_attempt_ordinal"] = ordinal
+    guard = RecoveryPipelineLease(**guard_args, approved_plan=approved_recovery_plan, stages=request["stages"]) if recovery else OrdinaryPipelineLease(**guard_args)
     budget_args = {**common, "lease_guard": guard, "run_key": context.identity.run_key,
         "lease_owner": context.lease_owner, "attempt_count": context.lease_attempt_count,
         "target_date": context.identity.target_date, "server_fenced_checks": True,
