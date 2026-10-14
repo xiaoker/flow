@@ -41,6 +41,7 @@ class OrdinaryPipelineLease:
         monotonic: Callable[[], float] = time.monotonic,
         allow_loopback_fixture: bool = False,
         request_profile: Any = None,
+        candidate_attempt_ordinal: int | None = None,
     ) -> None:
         parsed = urlparse(base_url)
         fixture = allow_loopback_fixture and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
@@ -72,10 +73,20 @@ class OrdinaryPipelineLease:
                 and scope.recovery_id == request_profile.recovery_id and scope.plan_hash == request_profile.plan_sha256
                 and tuple(getattr(self, "_stages", ())) == ("build", "verify", "publish")
                 and scope.max_requests >= approved_upper)
-            if not (ordinary or recovery) or maximum_requests != 32 or (is_resume and expected_attempt_count != 2):
+            # Global lease generation remains the exact server fence. The
+            # fixed entry may supply its separately persisted candidate ordinal;
+            # old clients retain the original resumed-generation-2 contract.
+            if candidate_attempt_ordinal is not None and (
+                    type(candidate_attempt_ordinal) is not int
+                    or candidate_attempt_ordinal != (2 if is_resume else 1)):
+                raise PipelineRunnerError("pipeline_lease_request_profile_invalid")
+            if not (ordinary or recovery) or maximum_requests != 32 or (
+                    is_resume and candidate_attempt_ordinal is None and expected_attempt_count != 2):
                 raise PipelineRunnerError("pipeline_lease_request_profile_invalid")
             maximum_requests = request_profile.envelope()["requestsUpper"]["lease"]
             maximum_seconds = request_profile.maximum_seconds
+        elif candidate_attempt_ordinal is not None:
+            raise PipelineRunnerError("pipeline_lease_request_profile_invalid")
         self._request_profile = request_profile
         for value, low, high in ((maximum_seconds, 1, 3600), (renewal_interval_seconds, 60, 300)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:

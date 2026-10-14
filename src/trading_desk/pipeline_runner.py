@@ -806,11 +806,21 @@ def run_pipeline_request(payload, *, budget_ledger=None, task_cost_upper=None,
         from .pipeline_checkpoint_preflight import (FreshRecoveryCandidateRequestProfile,
             ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile)
         is_resume = type(profile) in {ResumeCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile}
+        store = getattr(budget_ledger, "_operation_store", None)
+        try:
+            ordinal = store.candidate_attempt(owner=context.lease_owner, generation=context.lease_attempt_count) if store else None
+        except ValueError as exc:
+            raise PipelineRunnerError("runner_request_profile_scope_invalid") from exc
+        # Old direct clients retain their original resumed-generation-2 contract. Only a retained
+        # durable candidate history can separate ordinal from lease generation.
+        if ((ordinal is not None and ordinal != (2 if is_resume else 1))
+                or (ordinal is None and is_resume and context.lease_attempt_count != 2)):
+            raise PipelineRunnerError("runner_request_profile_scope_invalid")
         expected_mode = "recovery" if type(profile) in {FreshRecoveryCandidateRequestProfile, ResumeRecoveryCandidateRequestProfile} else "ordinary"
         if (context.mode != expected_mode or tuple(stages) != ("build", "verify", "publish")
                 or kwargs.get("export_bundles") is not True or kwargs.get("export_handoff") is not True
                 or any(kwargs.get(key) is not None for key in ("resume_bundles", "resume_references"))
-                or (is_resume and (context.lease_attempt_count != 2 or not kwargs.get("resume_handoff_sha256")))
+                or (is_resume and not kwargs.get("resume_handoff_sha256"))
                 or (not is_resume and kwargs.get("resume_handoff_sha256") is not None)):
             raise PipelineRunnerError("runner_request_profile_scope_invalid")
         if (Path(kwargs["state_dir"]) / "checkpoints.json").exists():

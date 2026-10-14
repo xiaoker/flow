@@ -365,7 +365,8 @@ def test_source_cannot_export_inline_secret_even_with_matching_hash(tmp_path):
             dependency_lock_paths=[LOCK, RUNTIME_LOCK], project_root=ROOT)
 
 
-def test_unknown_entry_cost_fails_before_journal_or_network(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lease_generation", [1, 2, 7])
+def test_unknown_entry_cost_fails_before_journal_or_network(tmp_path, monkeypatch, lease_generation):
     from trading_desk.pipeline_entry import run_candidate_entry
     from trading_desk.resource_budget import BudgetVector, RESOURCE_DIMENSIONS
     import requests
@@ -373,7 +374,9 @@ def test_unknown_entry_cost_fails_before_journal_or_network(tmp_path, monkeypatc
         pytest.fail("unknown cost must not make network requests")
     monkeypatch.setattr(requests.Session, "request", forbidden)
     request, source = core_request(tmp_path)
-    request["lease"]["attemptCount"] = 1
+    # A fresh candidate can acquire a later global lease generation. Unknown
+    # cost must still fail closed, not be mistaken for an invalid runner retry.
+    request["lease"]["attemptCount"] = lease_generation
     unit = BudgetVector.estimated(dict.fromkeys(RESOURCE_DIMENSIONS, 1))
     policy = {"task": BudgetVector.unknown(), "stage": dict.fromkeys(("build", "verify", "publish"), unit),
         "control": dict.fromkeys(("lease", "budget"), unit), "transport": dict.fromkeys(("candidate", "checkpoint"), unit),
@@ -388,7 +391,8 @@ def test_unknown_entry_cost_fails_before_journal_or_network(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("probe", ["fresh", "cli", "resume"])
 @pytest.mark.parametrize("recovery", [False, True])
-def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path, recovery, probe, monkeypatch, capsys):
+@pytest.mark.parametrize("lease_generation", [1, 7])
+def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path, recovery, probe, monkeypatch, capsys, lease_generation):
     from datetime import datetime, timezone
     from trading_desk.pipeline_entry import run_candidate_entry, prepare_core_candidate, load_candidate_cost_policy
     from trading_desk.resource_budget import BudgetVector, RESOURCE_DIMENSIONS
@@ -399,7 +403,7 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
     import requests
     now = datetime(2026, 10, 3, 2, tzinfo=timezone.utc)
     request, source = core_request(tmp_path)
-    request["lease"]["attemptCount"] = 1
+    request["lease"]["attemptCount"] = lease_generation
     upper = {**dict.fromkeys(RESOURCE_DIMENSIONS, 100000), "r2Bytes": 500000000}
     plan = None
     if recovery:
@@ -423,6 +427,7 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**os.environ,
             "FLOW_FULL_FIXTURE_RUN_KEY": context.identity.run_key, "FLOW_FULL_FIXTURE_TARGET": context.identity.target_date,
             "FLOW_FULL_FIXTURE_OWNER": context.lease_owner,
+            "FLOW_FULL_FIXTURE_GENERATION": str(lease_generation),
             "FLOW_FULL_FIXTURE_QUERY_PLANS": "1",
             "FLOW_FULL_FIXTURE_REQUEST_LIMIT": str(total_profile.envelope()["taskWorkerRequestsUpper"] + 16),
             **({"FLOW_FULL_FIXTURE_PLAN": json.dumps(plan)} if plan else {})})
@@ -476,7 +481,7 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
             headers = {"Authorization": "Bearer fixture-only"}
             assert requests.post(origin + "/fixture/expire-lease", headers=headers, timeout=5).status_code == 200
             next_request = json.loads(json.dumps(request))
-            next_request["lease"].update(owner="second-owner", callbackOwner="second-owner", attemptCount=2)
+            next_request["lease"].update(owner="second-owner", callbackOwner="second-owner", attemptCount=lease_generation + 1)
             claim = {"runKey": context.identity.run_key, "leaseOwner": "second-owner"}
             if recovery:
                 claim["recoveryId"] = plan["recoveryId"]
@@ -532,3 +537,97 @@ def entry_resume_child(config):
         environment={"FLOW_PUBLIC_URL": config["origin"], "FLOW_INGEST_API_KEY": "fixture-only",
                      "FLOW_CF_ACCESS_CLIENT_ID": "fixture-id", "FLOW_CF_ACCESS_CLIENT_SECRET": "fixture-secret"})
     print(json.dumps(report))
+
+
+def test_candidate_attempt_history_is_durable_bounded_and_not_a_lease(tmp_path):
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    path = tmp_path / "attempt.sqlite"
+    store = RemoteBudgetOperationStore.initialize(path, task_id="candidate-test", input_sha256="a" * 64)
+    assert store.bind_candidate_attempt(owner="first", generation=7, resume=False) == 1
+    reopened = RemoteBudgetOperationStore(path, task_id="candidate-test", input_sha256="a" * 64)
+    for owner, generation, resume in [("first", 7, False), ("first", 8, True), ("second", 7, True)]:
+        with pytest.raises(ValueError, match="candidate_attempt_"):
+            reopened.bind_candidate_attempt(owner=owner, generation=generation, resume=resume)
+    assert reopened.bind_candidate_attempt(owner="second", generation=9, resume=True) == 2
+    assert reopened.candidate_attempt(owner="second", generation=9) == 2
+    with pytest.raises(ValueError, match="candidate_attempt_identity_conflict"):
+        store.candidate_attempt(owner="first", generation=7)
+    with pytest.raises(ValueError, match="candidate_attempt_resume_unproved_or_exhausted"):
+        reopened.bind_candidate_attempt(owner="third", generation=10, resume=True)
+    assert reopened.pending() is None  # No remote permission/allowance invented.
+
+
+def test_candidate_resume_cannot_invent_missing_history(tmp_path):
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    store = RemoteBudgetOperationStore.initialize(tmp_path / "empty.sqlite", task_id="candidate-test", input_sha256="a" * 64)
+    with pytest.raises(ValueError, match="candidate_attempt_resume_unproved_or_exhausted"):
+        store.bind_candidate_attempt(owner="second", generation=8, resume=True)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_candidate_attempt_concurrent_connections_have_one_winner(tmp_path, resume):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    path = tmp_path / "concurrent.sqlite"
+    original = RemoteBudgetOperationStore.initialize(path, task_id="candidate-test", input_sha256="a" * 64)
+    if resume:
+        original.bind_candidate_attempt(owner="first", generation=7, resume=False)
+    barrier = Barrier(2)
+    def compete(owner):
+        store = RemoteBudgetOperationStore(path, task_id="candidate-test", input_sha256="a" * 64)
+        barrier.wait()
+        try:
+            return store.bind_candidate_attempt(owner=owner, generation=8 if resume else 7, resume=resume)
+        except ValueError:
+            return "rejected"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(compete, ["owner-a", "owner-b"]))
+    assert results.count(2 if resume else 1) == results.count("rejected") == 1
+
+
+def test_candidate_attempt_binding_retains_unconfirmed_operation(tmp_path):
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    path = tmp_path / "pending.sqlite"
+    store = RemoteBudgetOperationStore.initialize(path, task_id="candidate-test", input_sha256="a" * 64)
+    store.bind_candidate_attempt(owner="first", generation=7, resume=False)
+    operation = {"taskContract": "flow-budget-task-v2", "taskInputSha256": "a" * 64,
+        "operationId": "unconfirmed-reserve", "operation": "reserve", "leaseOwner": "first", "attemptCount": 7}
+    store.begin(operation)
+    reopened = RemoteBudgetOperationStore(path, task_id="candidate-test", input_sha256="a" * 64)
+    assert reopened.bind_candidate_attempt(owner="second", generation=8, resume=True) == 2
+    assert reopened.pending() == operation
+    # A rejected third invocation rolls back without losing either history or
+    # the original operation identity. It is not another execution permission.
+    with pytest.raises(ValueError, match="candidate_attempt_resume_unproved_or_exhausted"):
+        reopened.bind_candidate_attempt(owner="third", generation=9, resume=True)
+    assert reopened.pending() == operation
+    assert reopened.candidate_attempt(owner="second", generation=8) == 2
+
+
+def test_corrupt_candidate_history_fails_closed(tmp_path):
+    import sqlite3
+    from trading_desk.resource_budget_store import RemoteBudgetOperationStore
+    path = tmp_path / "corrupt.sqlite"
+    store = RemoteBudgetOperationStore.initialize(path, task_id="candidate-test", input_sha256="a" * 64)
+    store.bind_candidate_attempt(owner="first", generation=7, resume=False)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE candidate_attempt SET generation=-1 WHERE ordinal=1")
+    with pytest.raises(ValueError, match="candidate_attempt_history_corrupt"):
+        store.candidate_attempt(owner="first", generation=7)
+    with pytest.raises(ValueError, match="candidate_attempt_history_corrupt"):
+        store.bind_candidate_attempt(owner="second", generation=8, resume=True)
+
+
+def test_lease_profile_retains_old_client_contract_without_candidate_history():
+    from trading_desk.pipeline_lease import OrdinaryPipelineLease
+    from trading_desk.pipeline_checkpoint_preflight import ResumeCandidateRequestProfile
+    args = dict(base_url="http://127.0.0.1:1", ingest_key="fixture-only",
+        access_client_id="fixture-id", access_client_secret="fixture-secret",
+        expected_attempt_count=8, allow_loopback_fixture=True,
+        request_profile=ResumeCandidateRequestProfile("a" * 64, 7))
+    with pytest.raises(PipelineRunnerError, match="pipeline_lease_request_profile_invalid"):
+        OrdinaryPipelineLease(**args)
+    with pytest.raises(PipelineRunnerError, match="pipeline_lease_request_profile_invalid"):
+        OrdinaryPipelineLease(**args, candidate_attempt_ordinal=True)
+    OrdinaryPipelineLease(**args, candidate_attempt_ordinal=2)

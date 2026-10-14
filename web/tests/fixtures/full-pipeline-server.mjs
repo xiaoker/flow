@@ -36,12 +36,14 @@ db.exec("ALTER TABLE release_manifest ADD observed_at TEXT");
 const runKey = process.env.FLOW_FULL_FIXTURE_RUN_KEY;
 const target = process.env.FLOW_FULL_FIXTURE_TARGET;
 const owner = process.env.FLOW_FULL_FIXTURE_OWNER;
+const generation = Number(process.env.FLOW_FULL_FIXTURE_GENERATION || "1");
+if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("fixture generation invalid");
 const plan = process.env.FLOW_FULL_FIXTURE_PLAN ? JSON.parse(process.env.FLOW_FULL_FIXTURE_PLAN) : null;
 if (!runKey || !target || !owner) throw new Error("fixture identity required");
 db.prepare(`INSERT INTO pipeline_window (run_key,pipeline,window_date,window_name,contract_version,
   target_date,status,lease_owner,lease_expires_at,attempt_count,created_at,updated_at)
-  VALUES (?,'daily-market-data',?,'reconcile','v1',?,'RUNNING',?,'2026-10-03T03:00:00Z',1,?,?)`)
-  .run(runKey, runKey.split(":")[1], target, owner, NOW, NOW);
+  VALUES (?,'daily-market-data',?,'reconcile','v1',?,'RUNNING',?,'2026-10-03T03:00:00Z',?,?,?)`)
+  .run(runKey, runKey.split(":")[1], target, owner, generation, NOW, NOW);
 const caps = Object.fromEntries(DIMENSIONS.map(d => [d, 1_000_000_000]));
 const units = ["rows", "rows", "requests", "minutes", "bytes", "operations", "operations"];
 const state = createSharedBudgetState({ epochDay: "2026-10-03", epochMonth: "2026-10", caps, targets: {},
