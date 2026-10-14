@@ -196,6 +196,7 @@ def _build_official_etf_daily_changes_from_artifacts(
     serialized: list[dict[str, Any]],
     as_of: str,
     workspace_root: Path,
+    archived: list[tuple[dict, pd.DataFrame]] | None = None,
 ) -> dict[str, Any] | None:
     scale_artifacts = [
         artifact
@@ -257,6 +258,9 @@ def _build_official_etf_daily_changes_from_artifacts(
             # construction always has a matching serialized artifact.
             raise ValueError("etf_scale_serialized_release_missing")
 
+    for ref, frame in archived or []:
+        by_market["szse"].append(frame)
+        release_ids.append(f"etf_scale:szse:{ref['tradeDate']}:{ref['revisionId'][:16]}")
     sse = pd.concat(by_market["sse"], ignore_index=True, sort=False) if by_market["sse"] else pd.DataFrame()
     szse = pd.concat(by_market["szse"], ignore_index=True, sort=False) if by_market["szse"] else pd.DataFrame()
     if sse.empty and szse.empty:
@@ -293,6 +297,7 @@ def build_history_bundle(
     finished_at: str,
     workspace_root: Path,
     run_key: str | None = None,
+    archived: list[tuple[dict, pd.DataFrame]] | None = None,
 ) -> dict[str, Any]:
     artifact_list = list(artifacts)
     serialized = [
@@ -321,8 +326,12 @@ def build_history_bundle(
             serialized=serialized,
             as_of=as_of,
             workspace_root=workspace_root,
+            archived=archived,
         )
         if adjacent is not None:
+            if archived:
+                adjacent["archivedInputs"] = [{k:v for k,v in ref.items() if k != "normalizedPath"}
+                    for ref, _frame in archived]
             history["officialEtfDailyChanges"] = adjacent
     return {
         "version": 1,
@@ -335,6 +344,7 @@ def build_history_bundle_from_files(
 ) -> dict[str, Any]:
     snapshot = _read_json(snapshot_path)
     manifest = _read_json(manifest_path)
+    from .etf_archive_adjacent import archived_inputs
     return build_history_bundle(
         snapshot=snapshot,
         artifacts=manifest.get("artifacts") or [],
@@ -343,4 +353,5 @@ def build_history_bundle_from_files(
         finished_at=str(manifest.get("finished_at") or ""),
         workspace_root=workspace_root,
         run_key=run_key,
+        archived=archived_inputs(manifest, workspace_root, snapshot["asOf"]),
     )

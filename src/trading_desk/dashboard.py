@@ -610,6 +610,9 @@ def build_dashboard_snapshot(
         if paths.get("szse_etf")
         else pd.DataFrame()
     )
+    from .etf_archive_adjacent import archived_inputs
+    for _reference, archived_frame in archived_inputs(manifest, workspace_root, target_as_of):
+        szse_etf = pd.concat([szse_etf, archived_frame], ignore_index=True, sort=False)
     sse_margin = _read_csv(workspace_root, paths["sse_margin"])
     szse_margin = _read_csv(workspace_root, paths["szse_margin"])
     bse_margin = (

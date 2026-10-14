@@ -996,7 +996,15 @@ jobs:
             '{status:"dispatched",workflow:$workflow,dates:$dates}' | tee pcf-dispatch-evidence.json
 
       - name: Build dashboard snapshot
-        run: python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src:. python -m trading_desk.etf_archive_adjacent
+          python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json
 
       - name: Reconcile evidence, mappings and dashboard values
         shell: bash
