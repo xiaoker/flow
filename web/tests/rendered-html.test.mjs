@@ -1319,6 +1319,8 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
   const adjacentInputSha256 = createHash("sha256").update(adjacentInput).digest("hex");
   const statements = [];
   const objects = new Map();
+  let archivedReceipt = null;
+  const archivedBytes = Buffer.from("trade_date,market,instrument_code,shares\n2026-07-13,SZSE,158000,100\n");
   const db = {
     prepare(sql) {
       return {
@@ -1335,10 +1337,21 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
         async all() {
           throw new Error("legacy_d1_etf_query_called");
         },
+        async first() { return this.sql.includes("history_artifact_pointer") ? archivedReceipt : null; },
       };
     },
   };
   const bucket = {
+    async get(key) {
+      if (archivedReceipt?.object_key === key) return {size:archivedBytes.length,
+        arrayBuffer:async () => archivedBytes.buffer.slice(archivedBytes.byteOffset,archivedBytes.byteOffset+archivedBytes.byteLength)};
+      if (objects.has(key)) {
+        const data=Buffer.from(objects.get(key));
+        return {body:true,size:data.length,text:async()=>data.toString("utf8"),
+          arrayBuffer:async()=>data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength)};
+      }
+      return null;
+    },
     async head(key) {
       return objects.has(key) ? { customMetadata: {} } : null;
     },
@@ -1406,6 +1419,63 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
       ],
     },
   };
+  const ref = {sourceId:"szse", tradeDate:"2026-07-13", revisionId:"a".repeat(64), sha256:createHash("sha256").update(archivedBytes).digest("hex"),
+    objectKey:`market-data/normalized/szse/etf_scale/2026-07-13/${"a".repeat(64)}/data.csv`};
+  for (const fault of ["date", "key", "missing_receipt", "wrong_hash", "wrong_previous_shares", "absent_code"]) {
+    const candidate = structuredClone(bundle);
+    candidate.history.officialEtfDailyChanges.archivedInputs = [structuredClone(ref)];
+    if (fault === "date") candidate.history.officialEtfDailyChanges.archivedInputs[0].tradeDate = snapshot.asOf;
+    if (fault === "key") candidate.history.officialEtfDailyChanges.archivedInputs[0].objectKey = "outside/data.csv";
+    if (["missing_receipt", "wrong_hash", "wrong_previous_shares", "absent_code"].includes(fault)) {
+      const ids = [releaseId, `etf_scale:szse:2026-07-13:${"a".repeat(16)}`].sort();
+      candidate.history.officialEtfDailyChanges.sourceReleaseIds = ids;
+      candidate.history.officialEtfDailyChanges.inputSha256 = createHash("sha256").update([
+        snapshot.asOf, "2026-07-13", ids.join(","), "SSE,510300,2026-07-13,130,100,30,1,aligned",
+      ].join("\n")).digest("hex");
+      if (fault === "wrong_hash") {
+        candidate.history.officialEtfDailyChanges.archivedInputs[0].sha256="0".repeat(64);
+        archivedReceipt={object_key:ref.objectKey,sha256:"0".repeat(64),revision_id:ref.revisionId,row_count:1};
+      }
+      if (fault === "wrong_previous_shares" || fault === "absent_code") {
+        archivedReceipt={object_key:ref.objectKey,sha256:ref.sha256,revision_id:ref.revisionId,row_count:1};
+        candidate.history.officialEtfDailyChanges.rows.push({market:"SZSE",code:"158000",previousTradeDate:"2026-07-13",
+          currentShares:130,previousShares:99,changeShares:31,aligned:true,alignmentReason:"aligned"});
+        candidate.history.officialEtfDailyChanges.inputSha256=createHash("sha256").update([
+          snapshot.asOf,"2026-07-13",ids.join(","),"SSE,510300,2026-07-13,130,100,30,1,aligned",
+          "SZSE,158000,2026-07-13,130,99,31,1,aligned",
+        ].join("\n")).digest("hex");
+        if (fault === "absent_code") {
+          candidate.history.officialEtfDailyChanges.rows[1].code = "159999";
+          candidate.history.officialEtfDailyChanges.inputSha256 = createHash("sha256").update([
+            snapshot.asOf,"2026-07-13",ids.join(","),"SSE,510300,2026-07-13,130,100,30,1,aligned",
+            "SZSE,159999,2026-07-13,130,99,31,1,aligned",
+          ].join("\n")).digest("hex");
+        }
+      }
+    }
+    const rejected = await worker.fetch(new Request("http://localhost/api/v1/admin/history-import", {
+      method:"POST", headers:{authorization:"Bearer test-key","content-type":"application/json"},body:JSON.stringify(candidate),
+    }), {...env,DB:db,RAW_BUCKET:bucket,INGEST_API_KEY:"test-key",HISTORY_IMPORT_ARCHIVE_ONLY:"1"}, context);
+    assert.equal(rejected.status, 422, fault);
+    const rejection = await rejected.json();
+    assert.equal(rejection.error, ["wrong_previous_shares", "absent_code"].includes(fault) ? "archived_etf_previous_shares_mismatch" : fault === "wrong_hash" ? "archived_etf_hash_mismatch" : fault === "missing_receipt" ? "archived_etf_receipt_mismatch" : "invalid_history_bundle");
+    assert.equal(statements.length, 0, "invalid archived input must stop before writes");
+    assert.equal(objects.size, 0);
+  }
+  const verifiedCandidate = structuredClone(bundle);
+  const verifiedIds = [releaseId, `etf_scale:szse:2026-07-13:${"a".repeat(16)}`].sort();
+  verifiedCandidate.history.officialEtfDailyChanges.archivedInputs = [ref];
+  verifiedCandidate.history.officialEtfDailyChanges.sourceReleaseIds = verifiedIds;
+  verifiedCandidate.history.officialEtfDailyChanges.inputSha256 = createHash("sha256").update([
+    snapshot.asOf,"2026-07-13",verifiedIds.join(","),"SSE,510300,2026-07-13,130,100,30,1,aligned",
+  ].join("\n")).digest("hex");
+  archivedReceipt={object_key:ref.objectKey,sha256:ref.sha256,revision_id:ref.revisionId,row_count:1};
+  const verifiedResponse=await worker.fetch(new Request("http://localhost/api/v1/admin/history-import",{
+    method:"POST",headers:{authorization:"Bearer test-key","content-type":"application/json"},body:JSON.stringify(verifiedCandidate),
+  }),{...env,DB:db,RAW_BUCKET:bucket,INGEST_API_KEY:"test-key",HISTORY_IMPORT_ARCHIVE_ONLY:"1"},context);
+  const verifiedBody=await verifiedResponse.json();
+  assert.equal(verifiedResponse.status,200,JSON.stringify(verifiedBody));
+  assert.equal(verifiedBody.status,"archived");
   const response = await worker.fetch(
     new Request("http://localhost/api/v1/admin/history-import", {
       method: "POST",

@@ -82,6 +82,7 @@ type OfficialEtfDailyChangeRow = {
 };
 
 type OfficialEtfDailyChangesContract = {
+  archivedInputs?: Array<{sourceId: "szse"; tradeDate: string; objectKey: string; sha256: string; revisionId: string}>;
   schemaVersion: 1;
   asOf: string;
   expectedPreviousDate: string | null;
@@ -318,6 +319,16 @@ function isOfficialEtfDailyChanges(
   history: HistoryBundle["history"],
 ): value is OfficialEtfDailyChangesContract {
   if (!isRecord(value) || value.schemaVersion !== 1) return false;
+  if (value.archivedInputs !== undefined) {
+    if (!Array.isArray(value.archivedInputs) || value.archivedInputs.length !== 1) return false;
+    for (const ref of value.archivedInputs) {
+      if (!isRecord(ref) || Object.keys(ref).sort().join(",") !== "objectKey,revisionId,sha256,sourceId,tradeDate"
+        || ref.sourceId !== "szse" || typeof ref.tradeDate !== "string" || !ISO_DATE.test(ref.tradeDate)
+        || ref.tradeDate !== value.expectedPreviousDate || typeof ref.sha256 !== "string" || !SHA256.test(ref.sha256)
+        || typeof ref.revisionId !== "string" || !SHA256.test(ref.revisionId)
+        || ref.objectKey !== `market-data/normalized/szse/etf_scale/${ref.tradeDate}/${ref.revisionId}/data.csv`) return false;
+    }
+  }
   if (
     typeof value.asOf !== "string" ||
     !ISO_DATE.test(value.asOf) ||
@@ -344,6 +355,7 @@ function isOfficialEtfDailyChanges(
   const availableReleaseIds = new Set([
     ...history.artifacts.map((artifact) => artifact.releaseId),
     ...(history.expectedArtifacts ?? []),
+    ...((value.archivedInputs ?? []) as Array<{tradeDate: string; revisionId: string}>).map((ref) => `etf_scale:szse:${ref.tradeDate}:${ref.revisionId.slice(0, 16)}`),
   ]);
   if (value.sourceReleaseIds.some((releaseId) => !availableReleaseIds.has(releaseId))) {
     return false;
@@ -1254,6 +1266,34 @@ export async function POST(request: Request) {
   try {
     const { history } = value;
     const officialEtfDailyChanges = history.officialEtfDailyChanges;
+    // Referenced previous input is not a newly uploaded source. Verify the
+    // existing indexed receipt and exact immutable bytes before any writes.
+    for (const ref of officialEtfDailyChanges?.archivedInputs ?? []) {
+      const pointer = await runtime.DB.prepare(
+        "SELECT object_key,sha256,revision_id,row_count FROM history_artifact_pointer WHERE source_id=? AND dataset='etf_scale' AND trade_date=? AND file_name='data' AND status='READY' LIMIT 1",
+      ).bind(ref.sourceId, ref.tradeDate).first<{object_key: string; sha256: string; revision_id: string; row_count: number}>();
+      if (!pointer || pointer.object_key !== ref.objectKey || pointer.sha256 !== ref.sha256 || pointer.revision_id !== ref.revisionId) {
+        return NextResponse.json({error: "archived_etf_receipt_mismatch"}, {status: 422});
+      }
+      const object = await runtime.RAW_BUCKET.get(ref.objectKey);
+      if (!object || object.size > 2_000_000) return NextResponse.json({error: "archived_etf_object_unavailable"}, {status: 503});
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      if (bytes.length > 2_000_000 || await sha256Hex(bytes) !== ref.sha256) return NextResponse.json({error: "archived_etf_hash_mismatch"}, {status: 422});
+      const rows = parseCsv(bytes);
+      const shares = new Map<string, number>();
+      for (const row of rows) {
+        const count = Number(row.shares);
+        if (row.trade_date !== ref.tradeDate || row.market !== "SZSE" || !/^\d{6}$/.test(row.instrument_code)
+          || !Number.isSafeInteger(count) || count < 0 || shares.has(row.instrument_code)) return NextResponse.json({error:"archived_etf_rows_invalid"}, {status:422});
+        shares.set(row.instrument_code, count);
+      }
+      if (rows.length !== pointer.row_count) return NextResponse.json({error:"archived_etf_rows_invalid"}, {status:422});
+      for (const row of officialEtfDailyChanges?.rows ?? []) {
+        if (row.market === "SZSE" && (shares.has(row.code)
+          ? row.previousTradeDate !== ref.tradeDate || row.previousShares !== shares.get(row.code)
+          : row.previousTradeDate !== null || row.previousShares !== null || row.aligned)) return NextResponse.json({error:"archived_etf_previous_shares_mismatch"}, {status:422});
+      }
+    }
     const finalizeRequested = history.finalize !== false;
     const snapshot = history.snapshot;
     const etfQualityIssues = snapshot

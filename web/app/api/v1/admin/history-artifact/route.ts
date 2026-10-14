@@ -29,8 +29,8 @@ function matchesFile(key: string, file: string): boolean {
   return key.endsWith(`/${file}.csv`) || key.endsWith(`/${file}.csv.gz`);
 }
 
-async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string) {
-  if (!runtime.DB || source !== "sse" || dataset !== "etf_pcf") return null;
+async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string, indexed = false) {
+  if (!runtime.DB || (!indexed && (source !== "sse" || dataset !== "etf_pcf"))) return null;
   try {
     return await runtime.DB.prepare(
       `SELECT revision_id AS revisionId, object_key AS objectKey, sha256, content_encoding AS contentEncoding,
@@ -39,7 +39,8 @@ async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, sourc
         WHERE source_id = ? AND dataset = ? AND trade_date = ? AND file_name = ? AND status = 'READY'
         LIMIT 1`,
     ).bind(source, dataset, tradeDate, file).first<Record<string, unknown>>();
-  } catch {
+  } catch (error) {
+    if (indexed) throw error; // A failed lookup is not a proven missing archive.
     // The additive pointer table may not exist on an older Worker schema.
     // Falling back preserves the legacy route until the migration is deployed.
     return null;
@@ -67,10 +68,12 @@ export async function GET(request: Request): Promise<Response> {
 
   const dateCandidates = [tradeDate, tradeDate.replaceAll("-", "")];
   try {
-    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file);
+    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1");
+    if (query.get("indexed") === "1" && !pointer) return badRequest("artifact_not_found", 404);
     if (pointer?.objectKey && typeof pointer.objectKey === "string") {
       const object = await runtime.RAW_BUCKET.get(pointer.objectKey);
       if (!object?.body) return badRequest("artifact_not_found", 404);
+      if (query.get("indexed") === "1" && object.size > 2_000_000) return badRequest("artifact_too_large", 413);
       const isGzip = pointer.objectKey.endsWith(".gz");
       return new Response(object.body, {
         headers: {
