@@ -15,6 +15,8 @@ from .pipeline_runner import (PipelineRunnerError, build_execution_context,
 
 MAX_REQUEST_BYTES = 65536
 MAX_SOURCE_ARCHIVE_BYTES = 6 * 1024 * 1024
+CANDIDATE_PREPARATION_CONTRACT = "flow-candidate-preparation-v1"
+MAX_CANDIDATE_PREPARATION_REQUESTS = 8
 _SECRET_KEYS = {"token", "secret", "password", "apikey", "ingestapikey", "clientsecret",
                 "cfaccessclientsecret", "flowingestapikey", "flowcfaccessclientsecret",
                 "accesstoken", "refreshtoken", "githubtoken", "privatekey"}
@@ -282,7 +284,15 @@ def candidate_credentials(environment):
     return values
 
 
-def load_candidate_cost_policy(project_root, *, profile=None):
+def candidate_preparation_cost_upper(policy):
+    """Eight fixed control calls; reviewed worst-operation cost, no allowance."""
+    from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS
+    operations = [*policy["control"].values(), *policy["transport"].values()]
+    return BudgetVector.estimated({d: MAX_CANDIDATE_PREPARATION_REQUESTS * max(v.metrics[d].value for v in operations)
+        for d in RESOURCE_DIMENSIONS}, scope="candidate_preparation_reviewed_upper")
+
+
+def load_candidate_cost_policy(project_root, *, profile=None, approved_recovery_plan=None):
     """Read only reviewed repository policy, never a request-supplied path.
 
     Daily limits and allocation targets do not establish operation upper bounds.
@@ -338,6 +348,20 @@ def load_candidate_cost_policy(project_root, *, profile=None):
         raise PipelineRunnerError("entry_cost_profile_invalid")
     result["task"] = candidate_task_cost_upper(profile=total_profile, stage_costs=result["stage"],
         request_costs={**result["control"], **result["transport"]}, runtime_cost=total_runtime)
+    manifest = approved_recovery_plan.get("budgetManifest", {}) if isinstance(approved_recovery_plan, dict) else {}
+    if isinstance(manifest, dict) and any(k in manifest for k in ("candidatePreparationContract", "candidatePreparationUpperBound")):
+        try:
+            declared = BudgetVector.from_mapping(manifest.get("candidatePreparationUpperBound"))
+            upper = candidate_preparation_cost_upper(result)
+            if (manifest.get("candidatePreparationContract") != CANDIDATE_PREPARATION_CONTRACT
+                    or not declared.all_known() or declared.numeric() != upper.numeric()
+                    or any(m.basis != "estimated" for m in declared.metrics.values())):
+                raise ValueError()
+        except (TypeError, ValueError, AttributeError):
+            raise PipelineRunnerError("entry_preparation_budget_invalid") from None
+        # The immutable plan carries this one-time scope through owner changes.
+        # Both fresh/resume reserve the same total; legacy plans are unchanged.
+        result["task"] = result["task"].add(upper, scope="candidate_with_preparation_upper")
     return result
 
 
@@ -442,7 +466,7 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
     profile = profile_type(digest, len(manifest["artifacts"]), **({"recovery_id": context.recovery_id,
         "plan_sha256": context.recovery_plan_sha256} if recovery else {}))
     if cost_policy is None:
-        cost_policy = load_candidate_cost_policy(root, profile=profile)
+        cost_policy = load_candidate_cost_policy(root, profile=profile, approved_recovery_plan=approved_recovery_plan)
     if not isinstance(cost_policy, dict) or set(cost_policy) != {"task", "stage", "control", "transport", "runtime"}:
         raise PipelineRunnerError("entry_cost_policy_required")
     try:
