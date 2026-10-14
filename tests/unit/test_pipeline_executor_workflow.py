@@ -59,7 +59,9 @@ def test_candidate_workflow_dry_run_is_explicit_and_non_authoritative() -> None:
 def test_manual_entry_shell_blocks_parse_and_do_not_interpolate_inputs() -> None:
     workflow = (ROOT / ".github/workflows/pipeline-executor-candidate.yml").read_text()
     blocks = re.findall(r"(?m)^        run: \|\n((?:          [^\n]*\n|\n)+)", workflow)
-    assert len(blocks) == 3
+    # Include the explicit preparation guard and the one-shot authority entry;
+    # every shell block still receives syntax and input-boundary validation.
+    assert len(blocks) == 5
     for block in blocks:
         script = textwrap.dedent(block)
         assert "${{" not in script  # Untrusted declarations cross environment only.

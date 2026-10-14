@@ -39,17 +39,19 @@ const owner = process.env.FLOW_FULL_FIXTURE_OWNER;
 const generation = Number(process.env.FLOW_FULL_FIXTURE_GENERATION || "1");
 if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("fixture generation invalid");
 const plan = process.env.FLOW_FULL_FIXTURE_PLAN ? JSON.parse(process.env.FLOW_FULL_FIXTURE_PLAN) : null;
+const preparation = process.env.FLOW_FULL_FIXTURE_PREPARATION === "1";
 if (!runKey || !target || !owner) throw new Error("fixture identity required");
 db.prepare(`INSERT INTO pipeline_window (run_key,pipeline,window_date,window_name,contract_version,
   target_date,status,lease_owner,lease_expires_at,attempt_count,created_at,updated_at)
   VALUES (?,'daily-market-data',?,'reconcile','v1',?,'RUNNING',?,'2026-10-03T03:00:00Z',?,?,?)`)
   .run(runKey, runKey.split(":")[1], target, owner, generation, NOW, NOW);
+if (preparation) db.prepare("UPDATE pipeline_window SET status='COMPLETED',lease_owner=NULL,lease_expires_at=NULL WHERE run_key=?").run(runKey);
 const caps = Object.fromEntries(DIMENSIONS.map(d => [d, 1_000_000_000]));
 const units = ["rows", "rows", "requests", "minutes", "bytes", "operations", "operations"];
 const state = createSharedBudgetState({ epochDay: "2026-10-03", epochMonth: "2026-10", caps, targets: {},
   evidence: Object.fromEntries(DIMENSIONS.map((d, i) => [d, { value: 0, basis: "measured", unit: units[i], measuredAt: NOW, scope: "account" }])),
   measurementTtlSeconds: 3600, reservationTtlSeconds: 1800 });
-db.prepare("INSERT INTO pipeline_budget_account VALUES (?,0,?,?)").run(BUDGET_SCOPE, JSON.stringify(state), NOW);
+if (!preparation) db.prepare("INSERT INTO pipeline_budget_account VALUES (?,0,?,?)").run(BUDGET_SCOPE, JSON.stringify(state), NOW);
 const counters = { http: {}, sql: 0, r2Put: 0, r2Get: 0, r2Head: 0, bytesStored: 0 };
 const queryPlans = new Map();
 const adapter = { withSession() { return this; }, async batch(statements) {
@@ -77,7 +79,7 @@ const adapter = { withSession() { return this; }, async batch(statements) {
     }, async run() { return this.runSync(); } };
 } }; } };
 const objects = new Map();
-if (plan) {
+if (plan && !preparation) {
   const bytes = Buffer.from(canonicalJson(plan) + "\n");
   const digest = createHash("sha256").update(bytes).digest("hex");
   const key = `market-data/recovery/plans/${plan.recoveryId}-${digest}.json`;
@@ -151,7 +153,7 @@ const server = createServer(async (req, res) => {
     const result = path === "/fixture/stats"
       ? Response.json({ ...counters, queryPlans: [...queryPlans.values()], active: db.prepare("SELECT count(*) AS n FROM active_release").get().n,
           releases: db.prepare("SELECT status FROM release_manifest LIMIT 10").all(),
-          budgetReservations: JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").get(BUDGET_SCOPE).state_json).reservations })
+          budgetReservations: JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").get(BUDGET_SCOPE)?.state_json ?? '{"reservations":{}}').reservations })
       : path.endsWith("/budget")
         ? await sharedBudgetRequest(request, env, () => new Date(NOW), caps)
         : await worker.fetch(request, env, { waitUntil() {}, passThroughOnException() {} });
