@@ -77,6 +77,66 @@ def test_pending_source_does_not_hydrate_or_change_manifest(tmp_path, monkeypatc
     adjacent.main()
     assert manifest.read_text() == payload
 
+@pytest.mark.parametrize("data", [b"", b"\n", b"trade_date,market,instrument_code,shares\n"])
+def test_deferred_empty_current_source_does_not_abort_preparation(tmp_path, monkeypatch, capsys, data):
+    import json
+    import trading_desk.etf_archive_adjacent as adjacent
+    (tmp_path/"current.csv").write_bytes(data)
+    folder=tmp_path/"reports/phase0"; folder.mkdir(parents=True)
+    manifest=folder/"latest-manifest.json"
+    payload=json.dumps({"requested_dates":["2026-10-14","2026-10-15"],
+        "combined_paths":{"szse_etf":"current.csv"}})
+    manifest.write_text(payload)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(adjacent.requests,"get",lambda *a,**k:pytest.fail("empty source must not fetch archive"))
+    adjacent.main()
+    assert "adjacent_archive_no_current" in capsys.readouterr().out
+    assert manifest.read_text()==payload
+    assert not (folder/"adjacent-szse.csv").exists()
+
+@pytest.mark.parametrize("fault", ["missing", "malformed"])
+def test_invalid_current_file_is_not_swallowed_as_deferred(tmp_path, monkeypatch, fault):
+    import json
+    import trading_desk.etf_archive_adjacent as adjacent
+    if fault=="malformed":
+        (tmp_path/"current.csv").write_text('trade_date,market\n"unterminated')
+    folder=tmp_path/"reports/phase0"; folder.mkdir(parents=True)
+    manifest=folder/"latest-manifest.json"
+    payload=json.dumps({"requested_dates":["2026-10-14","2026-10-15"],"combined_paths":{"szse_etf":"current.csv"}})
+    manifest.write_text(payload)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(adjacent.requests,"get",lambda *a,**k:pytest.fail("invalid source must not fetch archive"))
+    with pytest.raises(FileNotFoundError if fault=="missing" else pd.errors.ParserError):
+        adjacent.main()
+    assert manifest.read_text()==payload
+
+def test_deferred_source_reaches_existing_dashboard_pending_gate(tmp_path, monkeypatch):
+    import json
+    import trading_desk.etf_archive_adjacent as adjacent
+    from trading_desk.dashboard import build_dashboard_snapshot
+    dates=["2026-10-14","2026-10-15"]
+    (tmp_path/"current.csv").write_bytes(b"\n")
+    pd.DataFrame([{"trade_date":d,"instrument_code":"510300","instrument_name":"沪深300ETF","shares":100}
+        for d in dates]).to_csv(tmp_path/"sse.csv",index=False)
+    pd.DataFrame([{"trade_date":d,"financing_balance_yuan":1000} for d in dates]).to_csv(tmp_path/"margin.csv",index=False)
+    pd.DataFrame([{"trade_date":d,"market":m,"direction":"southbound","total_turnover":1000,"net_buy":100}
+        for d in dates for m in ("SSE","SZSE")]).to_csv(tmp_path/"connect.csv",index=False)
+    folder=tmp_path/"reports/phase0"; folder.mkdir(parents=True)
+    manifest=folder/"latest-manifest.json"
+    manifest.write_text(json.dumps({"requested_dates":dates,"finished_at":"2026-10-15T19:15:00+08:00",
+        "combined_paths":{"szse_etf":"current.csv","sse_etf":"sse.csv","sse_margin":"margin.csv",
+            "szse_margin":"margin.csv","stock_connect_summary":"connect.csv"}}))
+    quality=folder/"quality.json"
+    quality.write_text(json.dumps({"counts":{"pass":4,"warn":0,"fail":0},"phase0_gate_status":"pending"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(adjacent.requests,"get",lambda *a,**k:pytest.fail("deferred source must not fetch"))
+    adjacent.main()
+    snapshot=build_dashboard_snapshot(manifest_path=manifest,quality_path=quality,workspace_root=tmp_path)
+    assert snapshot["publication"]["status"]=="pending"
+    assert snapshot["publication"]["pendingDomains"]
+    assert snapshot["publication"]["targetAsOf"]==dates[-1]
+    assert not json.loads(manifest.read_text()).get("archivedEtfInputs")
+
 @pytest.mark.parametrize("status", [200,404,403,503])
 def test_one_indexed_read_and_missing_vs_control_failure(tmp_path, monkeypatch, status):
     import json

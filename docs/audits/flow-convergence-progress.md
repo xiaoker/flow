@@ -7,6 +7,19 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-15: 080-DATA merged / normal-day deferred-input hotfix
+
+- PR #189 explicitly authorized and squash-merged at 2026-10-15 22:40:53 Asia/Shanghai as `80a58928b84a633aa45b7bd29bc4c5b2a80057cd`. PR CI `38741540288` and branch-freshness `38741540439` passed on fixed head `140b8de`; main CI `38753561983` passed (Python 2m9s, Web 1m22s). Remote feature branch is absent after merge.
+- Exact merge-commit run listing shows only main CI, no Worker deploy. This Python/docs-only PR has no migration and does not match the automatic deploy filter; no deployment or remote migration was dispatched. No production candidate, collection, recovery approval, flag, history write or active-pointer change occurred.
+- 051–070 / 080-FLOW / 080-ENTRY / 080-DATA code: SATISFIED_EXISTING. Complete prior local/CI runner calls passed; new real-archive DATA builder/checkpoint/verify passed offline. Real canary, historical restoration, production takeover and real-trading-day acceptance remain NOT RUN / NOT COMPLETE.
+- Current independent worktree `/private/tmp/flow-080-reconcile-20261015`, branch renamed to `codex/fix-deferred-etf-input-20261015`, starts from this exact merged main. Under roadmap 0.4 this is a separate minimal normal-day hotfix, not 080-RECONCILE development or a report-only PR. Do not reactivate old approvals or reuse completed leases.
+- Read-only operational finding, predating this merge: Collect `38726068764` at old SHA `5833492` fails in `etf_archive_adjacent.main` reading an empty current SZSE CSV (`pandas.errors.EmptyDataError`). PCF `38726330312`, same old SHA, rejects `sse_share_date_not_ready:2026-10-15`. This proves neither an exchange outage nor a new merge regression. Do not retry blindly; preserve source readiness and fix the empty-input boundary with regression before claiming this normal-day issue solved.
+- Root cause verified in `phase0.py`: source-scoped windows deliberately serialize deferred feeds as empty partitions. Dashboard/history readers already accept EmptyDataError; the new archive-preparation entry lacked that boundary. Red regression before fix: 2 failures on empty bytes/newline. The fix catches only EmptyDataError, performs no archive request/manifest write and reaches the existing pending dashboard gate. Missing files and malformed non-empty CSVs still fail. Adjacent tests 20 passed (6 added cases); independent coverage review found no blocker. PCF date readiness is unchanged and not claimed repaired.
+- Read-only official billing UI refreshed for current October period: Actions Linux 1168 minutes, billed $0, compared with the configured 1500-minute hard cap. One initial CI fits the observed margin; this is not permission for a real candidate or a promise of future capacity. Final full Python verification: 1187 passed in 72.29s; Web lint/build and 240 tests pass. Next: deliver this one coherent hotfix PR/CI, wait for merge authorization, then continue bounded archive-first candidate preparation and independent safe RECONCILE work. No production task was triggered.
+- Original dirty checkout and protected paths unchanged. Current production data/long-period recovery not established by this merge.
+
+## Historical implementation notes
+
 ### 2026-10-15: r5 / 080-DATA integrity connection (local validation)
 
 - Base `origin/main=583349274b8654e1050bcb78a8425e5d4edd0e3b` (PR #188). No open PR at initial check. Independent worktree `/private/tmp/flow-080-data-20261015`, branch `codex/080-data-integrity-20261015`. The original dirty checkout is untouched.
