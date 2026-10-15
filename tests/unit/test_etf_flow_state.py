@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,32 @@ from trading_desk.etf_flow_state import (
     materialize_dashboard_snapshot,
     materialize_etf_terminal,
 )
+
+
+def test_official_calendar_gap_cannot_be_hidden_by_older_cached_rows():
+    dates = ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"]
+    calendar = {"sourceId":"sse_official_trading_calendar", "sha256":"a"*64,
+        "dates":dates, "datesSha256":hashlib.sha256(json.dumps(dates,separators=(",", ":")).encode()).hexdigest()}
+    state = {"version":1,"dates":[dates[0],dates[1],dates[3],dates[4]],
+        "officialCalendar":calendar,
+        "instruments":[{"code":"510300","market":"SSE","name":"沪深300ETF","values":[1.,2.,3.,4.]}]}
+    terminal = materialize_etf_terminal(state)
+    assert terminal["instruments"][0]["periods"]["3d"] is None
+    assert terminal["instruments"][0]["periods"]["1d"] == 4.0
+    assert terminal["windowEvidence"]["periods"]["3d"]["missingDatesByMarket"]["SSE"] == [dates[2]]
+    assert next(r for r in terminal["dailySeries"] if r["date"]=="07-22")["value"] is None
+
+
+def test_official_calendar_materialization_does_not_promote_pending_or_missing_market():
+    dates=["2026-07-23","2026-07-24"]
+    calendar={"sourceId":"sse_official_trading_calendar","sha256":"a"*64,"dates":dates,
+        "datesSha256":hashlib.sha256(json.dumps(dates,separators=(",", ":")).encode()).hexdigest()}
+    state={"version":1,"dates":dates,"officialCalendar":calendar,
+        "instruments":[{"code":"510300","market":"SSE","name":"沪深300ETF","values":[None,1.]}]}
+    snapshot={"asOf":dates[-1],"gate":"pending","publication":{"status":"pending","pendingDomains":["szse_etf"]},"dataStatus":[]}
+    result=materialize_dashboard_snapshot(snapshot,state)
+    assert result["publication"]["status"] == "pending"
+    assert "szse_etf" in result["publication"]["pendingDomains"]
 
 
 def _snapshot(

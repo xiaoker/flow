@@ -20,10 +20,14 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--official-calendar", type=Path,
+        help="Explicit verified official calendar for candidate-only integrity materialization; preserves base publication status")
     args = parser.parse_args()
 
     snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
     state = json.loads(args.state.read_text(encoding="utf-8"))
+    if args.official_calendar:
+        state["officialCalendar"] = json.loads(args.official_calendar.read_text(encoding="utf-8"))
     state_dates = [str(value) for value in state.get("dates") or []]
     snapshot = materialize_dashboard_snapshot(snapshot, state, as_of=args.as_of)
 

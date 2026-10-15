@@ -30,7 +30,9 @@ PERIOD_LOOKBACKS: dict[str, int] = {
 PERIOD_ORDER = ("1d", "3d", "1w", "2w", "1m", "3m", "6m", "ytd", "12m")
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path | bytes) -> str:
+    if isinstance(path, bytes):
+        return hashlib.sha256(path).hexdigest()
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -38,21 +40,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _classification(item: dict[str, Any]) -> Any:
+def _classification(item: dict[str, Any], *, canonical_etf: bool = False) -> Any:
     asset_class = str(item.get("assetClass") or "")
     return classify_etf(
         name=str(item.get("name") or item.get("code") or ""),
         code=str(item.get("code") or "").zfill(6),
         market=str(item.get("market") or "SSE"),
-        etf_type="跨境" if asset_class == "跨境" else None,
+        # The candidate replay receives rows already admitted by the official
+        # adapter. Preserve their ETF product identity when forwarding asset
+        # metadata; “跨境” alone is not an official ETF product type.
+        etf_type=("跨境ETF" if canonical_etf else "跨境") if asset_class == "跨境" else None,
         investment_type=asset_class or None,
     )
 
 
 def build_etf_flow_state(
-    snapshots: Iterable[tuple[Path, dict[str, Any]]],
+    snapshots: Iterable[tuple[Path | bytes, dict[str, Any]]],
     *,
     max_trading_days: int = MAX_TRADING_DAYS,
+    canonical_etf: bool = False,
 ) -> dict[str, Any]:
     """Build a compact rolling ETF daily-flow state from verified snapshots.
 
@@ -60,7 +66,7 @@ def build_etf_flow_state(
     and normalized CSVs remain the immutable source of truth in R2.
     """
 
-    by_date: dict[str, tuple[Path, dict[str, Any]]] = {}
+    by_date: dict[str, tuple[Path | bytes, dict[str, Any]]] = {}
     for path, snapshot in snapshots:
         as_of = str(snapshot.get("asOf") or "")
         if not as_of:
@@ -81,7 +87,7 @@ def build_etf_flow_state(
     for trade_date in dates:
         path, snapshot = by_date[trade_date]
         source_snapshots.append(
-            {"date": trade_date, "sha256": _sha256(path), "file": path.name}
+            {"date": trade_date, "sha256": _sha256(path), "file": path.name if isinstance(path, Path) else "content-addressed-snapshot"}
         )
         terminal = snapshot.get("etfTerminal") or {}
         seen: set[str] = set()
@@ -111,7 +117,7 @@ def build_etf_flow_state(
                 rejected_rows += 1
                 continue
 
-            classification = _classification(raw_item)
+            classification = _classification(raw_item, canonical_etf=canonical_etf)
             if not classification.eligible:
                 continue
             row = instruments.setdefault(
@@ -217,6 +223,9 @@ def materialize_etf_terminal(
     needed by the UI, so the serving path only streams a published artifact.
     """
 
+    window_evidence = None
+    if "officialCalendar" in state:
+        state, window_evidence = _align_official_calendar(state)
     dates = [str(value) for value in state.get("dates") or []]
     if not dates:
         raise ValueError("ETF state has no dates")
@@ -313,7 +322,7 @@ def materialize_etf_terminal(
         cash_observed = [value for value in cash_values if value is not None]
         daily_series.append({
             "date": trade_date[5:],
-            "value": round(sum(share_observed), 6),
+            "value": round(sum(share_observed), 6) if share_observed or window_evidence is None else None,
             "coverage": len(share_observed),
             "cashValue": round(sum(cash_observed), 2) if cash_observed else None,
             "cashCoverage": len(cash_observed),
@@ -327,6 +336,7 @@ def materialize_etf_terminal(
             "periods": {period: 0.0 for period in available_periods},
             "estimatedCashPeriods": {period: 0.0 for period in available_periods},
             "estimatedCashCoverage": {period: 0 for period in available_periods},
+            "cashComparableCount": {period: 0 for period in available_periods},
             "componentCount": 0,
             "comparableCount": {period: 0 for period in available_periods},
         })
@@ -339,13 +349,14 @@ def materialize_etf_terminal(
             cash_value = item["estimatedCashPeriods"].get(period)
             if cash_value is not None:
                 aggregate["estimatedCashPeriods"][period] += cash_value
+                aggregate["cashComparableCount"][period] += 1
             aggregate["estimatedCashCoverage"][period] += item["cashPeriodCoverage"].get(period, 0)
     group_periods = [
         {
             "name": name,
             "groupType": aggregate["groupType"],
             "periods": {period: round(value, 6) if aggregate["comparableCount"][period] else None for period, value in aggregate["periods"].items()},
-            "estimatedCashPeriods": {period: round(value, 2) if aggregate["estimatedCashCoverage"][period] else None for period, value in aggregate["estimatedCashPeriods"].items()},
+            "estimatedCashPeriods": {period: round(value, 2) if (aggregate["cashComparableCount"][period] if window_evidence is not None else aggregate["estimatedCashCoverage"][period]) else None for period, value in aggregate["estimatedCashPeriods"].items()},
             "estimatedCashCoverage": aggregate["estimatedCashCoverage"],
             "componentCount": aggregate["componentCount"],
             "comparableCount": aggregate["comparableCount"],
@@ -363,7 +374,7 @@ def materialize_etf_terminal(
         category_counts[category] = category_counts.get(category, 0) + 1
     cash_eligible = sum(item["estimatedCashPeriods"].get("1d") is not None for item in instruments)
     previous_terminal = base_terminal or {}
-    return {
+    result = {
         "scope": previous_terminal.get("scope", "SSE+SZSE"),
         "dailySeries": daily_series,
         "instruments": instruments,
@@ -399,6 +410,56 @@ def materialize_etf_terminal(
             "cashFlowEligible": cash_eligible,
         },
     }
+    if window_evidence is not None:
+        result["windowEvidence"] = window_evidence
+        result["historyCoverage"]["calendarSha256"] = window_evidence["calendarSha256"]
+    return result
+
+
+def _align_official_calendar(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    # The planner's expected sessions, never the cache's surviving row count,
+    # define the window. Missing sessions become null, not a compressed clock.
+    from .etf_period_dependencies import validate_official_calendar, _window_for_target
+    calendar, digest = validate_official_calendar(state["officialCalendar"])
+    old = state.get("dates")
+    if not isinstance(old, list) or not old or old != sorted(set(old)) or any(d not in calendar for d in old):
+        raise ValueError("etf_state_calendar_dates_invalid")
+    dates = [d for d in calendar if d <= old[-1]][-MAX_TRADING_DAYS:]
+    indices = {d:i for i,d in enumerate(old)}
+    aligned = deepcopy(state)
+    aligned["dates"] = dates
+    seen = set()
+    rows = aligned.get("instruments")
+    if not isinstance(rows, list):
+        raise ValueError("etf_state_rows_invalid")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("market") not in {"SSE", "SZSE"}:
+            raise ValueError("etf_state_rows_invalid")
+        key = (row["market"],row.get("code"))
+        if key in seen:
+            raise ValueError("etf_state_duplicate_code")
+        seen.add(key)
+        for field in ("values", "cashValues"):
+            values = row.get(field, [None]*len(old))
+            if not isinstance(values, list) or len(values) != len(old) or any(v is not None and (isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v)) for v in values):
+                raise ValueError("etf_state_values_invalid")
+            row[field] = [values[indices[d]] if d in indices else None for d in dates]
+    windows = {}
+    date_index = {d:i for i,d in enumerate(calendar)}
+    observed = {market:{d for row in rows if row["market"]==market
+        for d,value in zip(dates,row["values"]) if value is not None} for market in ("SSE","SZSE")}
+    for period in PERIOD_ORDER:
+        window = _window_for_target(calendar,date_index,dates[-1],period)
+        if window["status"] == "READY":
+            required = window["dailyChangeDates"]
+            missing = {market:[d for d in required if d not in observed[market]] for market in ("SSE","SZSE")}
+            windows[period] = {"status":"READY" if not any(missing.values()) else "MISSING",
+                "baselineDate":window["baselineDate"],"dates":required,"expectedChanges":len(required),"missingDatesByMarket":missing}
+        else:
+            windows[period] = {"status":"UNKNOWN","reasonCode":window["reasonCode"]}
+    return aligned, {"contractVersion":"flow-etf-window-v0.8.0","calendarSourceId":state["officialCalendar"]["sourceId"],
+        "calendarSha256":digest,"datesSha256":state["officialCalendar"]["datesSha256"],
+        "observedTradingDays":len(old),"periods":windows}
 
 
 def _trim_etf_flow_state(state: dict[str, Any], as_of: str) -> dict[str, Any]:
@@ -456,7 +517,18 @@ def materialize_dashboard_snapshot(
         trimmed_state,
         base_terminal=result.get("etfTerminal") or {},
     )
-    # The rolling state is the canonical source for every ETF-facing view.
+    strict = "officialCalendar" in trimmed_state
+    if strict:
+        # Materialization is not source confirmation. Never upgrade the base
+        # publication, or allow one surviving market to stand for SSE+SZSE.
+        publication = deepcopy(snapshot.get("publication") or {"status":"pending"})
+        missing = [m.lower()+"_etf" for m in ("SSE","SZSE") if not any(r.get("market")==m and r.get("periods",{}).get("1d") is not None for r in result["etfTerminal"]["instruments"])]
+        if missing:
+            publication["status"] = "pending"
+            publication["pendingDomains"] = sorted(set(publication.get("pendingDomains",[])) | set(missing))
+        result["publication"] = publication
+        result["gate"] = snapshot.get("gate", "conditional_pass") if publication.get("status")=="confirmed" else "pending"
+    # Every ETF-facing view consumes the same materialized projection.
     # Re-derive the homepage headline/top-five after materialization so the
     # state overlay cannot leave an older partial ``etfFlows`` value behind.
     etf_flows, etf_summary = latest_etf_flows_from_terminal(result["etfTerminal"])
@@ -474,6 +546,8 @@ def materialize_dashboard_snapshot(
             if isinstance(basis, dict):
                 basis["detail"] = "上交所与深交所当日官方份额 − 前一交易日官方份额"
     for row in result.get("dataStatus") or []:
+        if strict:
+            continue  # Keep actual source status/date evidence, not cache claims.
         if isinstance(row, dict) and row.get("name") in {"上交所 ETF", "深交所 ETF"}:
             row["asOf"] = target[5:]
             row["status"] = "ready"

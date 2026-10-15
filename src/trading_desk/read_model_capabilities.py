@@ -85,6 +85,11 @@ def _is_date(value: Any) -> bool:
 
 
 def _expected_period_days(period: str, terminal: dict[str, Any], as_of: str) -> int | None:
+    evidence = terminal.get("windowEvidence")
+    if isinstance(evidence, dict):
+        window = evidence.get("periods", {}).get(period, {})
+        count = window.get("expectedChanges")
+        return count if isinstance(count,int) and not isinstance(count,bool) and count>0 else None
     fixed = PERIOD_DAY_WINDOWS.get(period)
     if fixed is not None:
         return fixed
@@ -211,7 +216,7 @@ def _period_states(terminal: dict[str, Any], as_of: str) -> tuple[str, dict[str,
                         or isinstance(count, bool)
                         or count < 0
                         or (expected_days is not None and count > expected_days)
-                        or (expected_days is None and period == "ytd")
+                        or (expected_days is None and (period == "ytd" or isinstance(terminal.get("windowEvidence"),dict)))
                         or (_is_finite_number(value) and (count == 0 or (expected_days is not None and count != expected_days)))
                         or (value is None and expected_days is not None and count == expected_days)
                         or (value is not None and not _is_finite_number(value))

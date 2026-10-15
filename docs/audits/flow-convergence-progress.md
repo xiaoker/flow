@@ -7,6 +7,19 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-15: r5 / 080-DATA integrity connection (local validation)
+
+- Base `origin/main=583349274b8654e1050bcb78a8425e5d4edd0e3b` (PR #188). No open PR at initial check. Independent worktree `/private/tmp/flow-080-data-20261015`, branch `codex/080-data-integrity-20261015`. The original dirty checkout is untouched.
+- 051–070, 080-FLOW and 080-ENTRY code are SATISFIED_EXISTING. Their local/CI evidence is not real canary, production takeover, trading-day acceptance or historical restoration.
+- Reproduced two failures before fixing: surviving cache records hid a missing official day; materialization promoted pending/partial-market input to confirmed. Candidate replay now uses the same official-date contract as the dependency planner, inserts null gaps, derives period evidence/capabilities from the actual aligned rows, and preserves source publication status. Legacy callers without an explicit calendar/profile retain their behavior.
+- Explicit pinned archive replay uses the existing exchange builder, rolling-state projection, candidate builder/verify adapters and schema-4 candidate contract. No new workflow, server endpoint, lease, ledger, migration, flag, remote write or active-pointer operation. Official product identity is preserved only for adapter-admitted replay rows; classification rules/formula are unchanged.
+- Real archive evidence: 12 normalized partitions, baseline 2026-09-29 through target 2026-10-13, independent official business-date response hash `ff35516b7e648f461d58290dbc65c17a1a301b05c6b25f4b47f9eec23740b722`. One-week comparable samples SSE 916 / SZSE 749 match the independently checked archived calculation; longer windows remain unavailable. This does NOT establish 2w/1m/3m/6m/YTD/12m recovery.
+- Final full Python regression: 1181 passed in 62.78s; Web lint/build and 240 tests passed. Independent coverage review caught missing full-period NAV samples being aggregated as zero; strict candidate aggregation now keeps null without a complete sample and retains legitimate zero (three added regressions). Actual archive replay passed the existing adapter's bounded `.run`, saved-checkpoint resume after source removal, and verify adapter. The 3,251,069-byte pinned input fits the unchanged 4 MiB ceiling; eight candidate artifacts total 1,523,695 bytes. Source SHA256 `897857ebf688566f0d4601cdae172af1e41355d9a8361172b98c22cb64121899`; final output semantic digest `a466abef633f1741f6c63efdf7d4e8816219beb29c36816c9050c169a6e4704d`. No official source requests or remote writes. This is not a real runner/canary execution.
+- Official GitHub billing UI, current month 2026-10, read-only check: Actions Linux 1159 minutes / billed $0. Repository resource hard cap 1500 minutes leaves 341 minutes at this observation; not a future-usage guarantee. The token billing API returns missing-user-scope 404; no scope expansion or synthetic usage JSON. One necessary CI is within the observed remaining margin. CI NOT RUN; merge/deploy NOT AUTHORIZED; real canary NOT RUN; history recovery NOT PERFORMED.
+- State LOCAL_VALIDATION_COMPLETE / DELIVERY_IN_PROGRESS; real-adapter replay, independent plan/coverage review, original-tree protection and CI resource check complete. Next: deliver one implementation PR and its initial CI, then stop for merge authorization. This Python/docs-only diff does not trigger automatic Worker deploy/migration under the current path filter. No production operation is implied by this block.
+
+## Historical implementation notes
+
 ### 2026-10-13: 080-CANARY prerequisites / archive-first bounded evidence
 
 - PR #184 merged as `afc203b57dde7b6cae697aae549f1042d1ba9a51`. Main CI `38353108037` and deploy `38353108257` succeeded; served merge SHA verified, Worker version `75abe1aa-4d8e-4b29-8422-ff93230cf96e`, no migrations to apply.
