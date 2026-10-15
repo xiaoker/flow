@@ -57,7 +57,14 @@ def main():
     current_path = manifest.get("combined_paths", {}).get("szse_etf")
     if not current_path:
         print("adjacent_archive_no_current"); return
-    frame = pd.read_csv(root / current_path, dtype={"instrument_code": str})
+    try:
+        frame = pd.read_csv(root / current_path, dtype={"instrument_code": str})
+    except pd.errors.EmptyDataError:
+        # Source-scoped collection intentionally writes empty partitions for
+        # deferred feeds. Match dashboard/history readers: no current facts
+        # means no archive hydration, not a completed source or a parse crash.
+        # Missing files and malformed non-empty CSVs must still fail loudly.
+        print("adjacent_archive_no_current"); return
     if frame.empty or "trade_date" not in frame:
         print("adjacent_archive_no_current"); return
     dates = sorted(manifest["requested_dates"])
