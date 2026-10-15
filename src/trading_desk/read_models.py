@@ -653,6 +653,7 @@ def _bootstrap_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
         "calculation",
         "cashFlow",
         "historyCoverage",
+        "windowEvidence",
         "universe",
     )
     result = {key: terminal[key] for key in allowed if key in terminal}
@@ -777,6 +778,8 @@ def _national_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
         "historyCoverage": terminal.get("historyCoverage"),
         "universe": projected_universe,
     }
+    if "windowEvidence" in terminal:
+        projected["windowEvidence"] = terminal["windowEvidence"]
     # ``universe`` is deliberately recomputed above; do not copy unrelated
     # fields from the full terminal into this child view.
     _ = universe
@@ -947,6 +950,8 @@ def build_view_payloads(
         "historyCoverage": terminal.get("historyCoverage"),
         "universe": terminal.get("universe"),
     }
+    if "windowEvidence" in terminal:
+        rotation["windowEvidence"] = terminal["windowEvidence"]
     connect = {
         "connect": effective_snapshot.get("connect", []),
         "connectSeries": effective_snapshot.get("connectSeries", []),
@@ -988,6 +993,10 @@ def build_read_models(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Return view payloads and a release manifest without touching storage."""
 
+    if "etfReplayInput" in snapshot:
+        raise ReadModelError("etf_replay_core_slot_required")
+    if "windowEvidence" in (snapshot.get("etfTerminal") or {}) and capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+        raise ReadModelError("etf_replay_candidate_contract_required")
     validate_snapshot(snapshot, require_materialized=require_materialized)
     stock_flow = snapshot.get("etfStockFlow")
     if isinstance(stock_flow, dict) and stock_flow.get("available") is True and stock_catalog is None:
@@ -1133,6 +1142,13 @@ def build_market_read_models(
     separate ``etf_penetration`` slot when their own date gate passes.
     """
 
+    if "etfReplayInput" in snapshot:
+        from .etf_replay import replay_snapshot
+        if capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+            raise ReadModelError("etf_replay_candidate_contract_required")
+        snapshot = replay_snapshot(snapshot)
+    if "windowEvidence" in (snapshot.get("etfTerminal") or {}) and capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+        raise ReadModelError("etf_replay_candidate_contract_required")
     validate_snapshot(snapshot, require_materialized=require_materialized)
     compact_history = None
     effective_snapshot = snapshot

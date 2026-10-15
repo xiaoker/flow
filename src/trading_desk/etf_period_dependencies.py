@@ -10,6 +10,7 @@ stage, and only missing or stale downstream model nodes are marked for build.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import re
 from datetime import date
@@ -21,6 +22,7 @@ from .etf_flow_state import CALCULATION_METHOD, CASH_CALCULATION_METHOD
 
 PLAN_CONTRACT_VERSION = "flow-etf-period-dependencies-v0.7.0"
 OFFICIAL_CALENDAR_SOURCE = "sse_official_trading_calendar"
+OFFICIAL_MARGIN_DATES_SOURCE = "sse_official_margin_business_dates"
 MAX_TARGET_DATES = 280
 MAX_CALENDAR_DATES = 533  # 280 target sessions + 252 lookback sessions + baseline.
 MAX_SOURCE_EVIDENCE = MAX_CALENDAR_DATES * 2
@@ -102,7 +104,7 @@ def _canonical_hash(value: Any) -> str:
 def _calendar(value: Any) -> tuple[list[str], str]:
     if not isinstance(value, dict):
         raise ValueError("official_calendar_missing")
-    if value.get("sourceId") != OFFICIAL_CALENDAR_SOURCE:
+    if not isinstance(value.get("sourceId"),str) or value.get("sourceId") not in {OFFICIAL_CALENDAR_SOURCE, OFFICIAL_MARGIN_DATES_SOURCE}:
         raise ValueError("official_calendar_source_invalid")
     source_hash = _sha256(value.get("sha256"), field="official_calendar_sha256")
     raw_dates = value.get("dates")
@@ -116,7 +118,34 @@ def _calendar(value: Any) -> tuple[list[str], str]:
     expected_dates_hash = _canonical_hash(dates)
     if value.get("datesSha256") != expected_dates_hash:
         raise ValueError("official_calendar_dates_hash_mismatch")
+    if value.get("sourceId") == OFFICIAL_MARGIN_DATES_SOURCE:
+        evidence = value.get("evidence")
+        if not isinstance(evidence, dict) or set(evidence) != {"contentBase64", "rangeStart", "rangeEnd"}:
+            raise ValueError("official_business_dates_evidence_missing")
+        start = _date(evidence["rangeStart"], field="official_calendar_range")
+        end = _date(evidence["rangeEnd"], field="official_calendar_range")
+        encoded = evidence["contentBase64"]
+        if not isinstance(encoded, str) or len(encoded) > 2_800_000:
+            raise ValueError("official_business_dates_size_exceeded")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            response = json.loads(raw)
+            rows = response["result"]
+            page = response["pageHelp"]
+            observed = sorted(_date(str(row["opDate"])[:4]+"-"+str(row["opDate"])[4:6]+"-"+str(row["opDate"])[6:], field="official_calendar_date") for row in rows)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise ValueError("official_business_dates_evidence_invalid") from None
+        if (len(raw) > 2_000_000 or hashlib.sha256(raw).hexdigest() != source_hash
+            or not isinstance(rows, list) or not rows or len(rows) > MAX_CALENDAR_DATES
+            or not isinstance(page,dict) or page.get("pageCount") != 1 or page.get("total") != len(rows)
+            or observed != dates or start > dates[0] or end < dates[-1] or start > end):
+            raise ValueError("official_business_dates_evidence_invalid")
     return dates, source_hash
+
+
+def validate_official_calendar(value: Any) -> tuple[list[str], str]:
+    """Shared bounded calendar contract for planning and actual materialization."""
+    return _calendar(value)
 
 
 def _source_index(rows: Any) -> dict[tuple[str, str], dict[str, Any]]:

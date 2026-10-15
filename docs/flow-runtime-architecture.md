@@ -68,3 +68,45 @@ cd web && npm test && npm run lint
 python scripts/build_stock_pressure_state.py --catalog stock-flow-catalog.json --output stock-pressure-catalog.json --before-date "$(jq -r '.asOf' stock-flow-catalog.json)"
 python scripts/build_read_models.py --snapshot dashboard-snapshot.json --output-dir read-models --stock-catalog stock-pressure-catalog.json --require-materialized
 ```
+## 080-DATA: explicit candidate archive replay (r5)
+
+An immutable, provenance-pinned dashboard source may opt into
+`etfReplayInput.contractVersion=flow-etf-archive-replay-v0.8.0`. This is a
+candidate-only input profile, not an automatic production reader or collector.
+The existing `CoreReadModelBuildAdapter` and verify adapter consume it through
+`build_market_read_models`; schema 4 / the v0.7 capability contract is mandatory.
+Sources without the profile retain the legacy behavior.
+
+The profile contains `calendar` (the dependency planner's shared official-date
+contract) and `partitions`. Each partition pins sourceId `sse`/`szse`, tradeDate,
+the immutable normalized ETF objectKey, SHA256 and exact base64 CSV bytes.
+The enclosing approved/pinned artifact establishes provenance; a caller-created
+hash does not prove official origin. No arbitrary URL is fetched by replay.
+An SSE margin business-date response uses the truthful source ID
+`sse_official_margin_business_dates`, with its actual response bytes/hash,
+query range and complete single-page result. It is not renamed a calendar feed.
+
+Actual normalized bytes are replayed through the existing exchange adapter and
+daily formula. The rolling state is a rebuildable projection, not a source of
+expected sessions. A missing official day stays null even when enough older
+cache rows survive. Window evidence pins calendar/input identities, expected
+daily-change dates, baseline and market gaps. Pending source publication cannot
+be promoted by materialization. Daily and each period/metric remain separate.
+
+Bounds remain explicit: at most 533 calendar dates / 1066 partitions, 5000 rows
+per partition, 2 MB total decoded normalized CSVs; existing 4 MiB pinned input
+and 32 MiB output limits still apply. These limits may reject a long-window
+bundle. They are not raised implicitly and a one-week success does not prove
+all long periods runnable. Future bounded replay planning must reuse verified
+inputs/checkpoints under the existing runner budget, not fetch everything again.
+
+`rebuild_dashboard_snapshot_from_state.py --official-calendar PATH` can apply
+the same strict date contract to a verified offline projection. Without this
+option its legacy behavior is unchanged. Strict outputs require the candidate
+contract; this option is not permission to register, publish or activate them.
+
+This change adds no Worker deployment path, migration, production flag or
+schedule. A Python/docs-only PR does not match the current automatic Worker
+deployment workflow's `web/**` filter. PR CI and later main CI still consume
+Actions minutes. Real candidates, historical writes and latest activation each
+retain their existing authorization and resource admission requirements.
