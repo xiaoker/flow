@@ -110,3 +110,33 @@ schedule. A Python/docs-only PR does not match the current automatic Worker
 deployment workflow's `web/**` filter. PR CI and later main CI still consume
 Actions minutes. Real candidates, historical writes and latest activation each
 retain their existing authorization and resource admission requirements.
+
+### Formal archived-source hydration
+
+The existing manual candidate workflow can explicitly supply `archiveReplaySource`
+in its request. Omission preserves the legacy single GitHub snapshot path.
+Contract `flow-archive-replay-source-v1` pins `baseSnapshotSha256`,
+`calendarGzipBase64`, `calendarSha256` (decompressed canonical calendar bytes),
+and `partitions` containing only sourceId/tradeDate/objectKey/sha256. The recipe
+hash and request count must match `budgetManifest.archiveReplaySource` in the
+immutable approved recovery plan. It is not approval by itself.
+
+Before any source request, the preparation confirmation must match the request
+and plan and remain valid for at most ten minutes, within the plan deadline.
+The helper makes exactly three bounded GitHub reads and at most sixteen
+sequential indexed normalized-archive reads to the existing fixed admin endpoint.
+It never lists R2, fetches official sites, dispatches or writes remotely. GitHub
+and admin credentials remain isolated; redirects receive neither credential.
+Each returned key/hash, actual CSV facts and the final materialized source hash
+are checked before any local source file is saved. Calendar expansion is bounded
+to 2.8 MB, compressed base64 to 51,200 characters; the existing 2 MB CSV / 4 MiB
+source limits remain. This recent-batch limit is not long-history capacity.
+
+The existing shared budget includes both attempts' archive-read upper estimate
+in the initial hold; resume does not create a second allowance. Pure account
+budget checks run before source reads and again against the actual built graph.
+`sourceReadRequests` reports GitHub and archive reads separately from later
+control requests. Estimates are not measured account capacity. The unchanged
+job timeout, live resource admission, lease, approval and UNKNOWN rules remain
+authoritative. An interrupted read does not save partial input or permit a
+blind retry. No real execution is authorized by adding a recipe or merging code.

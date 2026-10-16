@@ -26,13 +26,11 @@ MAX_SOURCE_BYTES = 2_000_000
 MAX_PARTITIONS = MAX_CALENDAR_DATES * 2
 
 
-def replay_snapshot(snapshot: dict) -> dict:
-    """Consume explicit immutable normalized inputs, not damaged rolling state."""
-    profile = snapshot.get("etfReplayInput")
+def validated_replay_inputs(profile: dict, target: str):
+    """Validate exact pinned canonical bytes without materializing a view."""
     if not isinstance(profile, dict) or set(profile) != {"contractVersion", "calendar", "partitions"} or profile.get("contractVersion") != REPLAY_CONTRACT:
         raise ValueError("etf_replay_contract_invalid")
     dates, _ = validate_official_calendar(profile["calendar"])
-    target = snapshot.get("asOf")
     if target not in dates:
         raise ValueError("etf_replay_target_not_in_calendar")
     dates = dates[:dates.index(target)+1]
@@ -79,6 +77,13 @@ def replay_snapshot(snapshot: dict) -> dict:
         evidence.append({k:part[k] for k in ("sourceId","tradeDate","objectKey","sha256")})
     if not any(day==target for _,day in frames):
         raise ValueError("etf_replay_target_partition_missing")
+    return dates, frames, evidence
+
+
+def replay_snapshot(snapshot: dict) -> dict:
+    """Consume explicit immutable normalized inputs, not damaged rolling state."""
+    profile = snapshot.get("etfReplayInput")
+    dates, frames, evidence = validated_replay_inputs(profile, snapshot.get("asOf"))
     daily = []
     for i,day in enumerate(dates[1:],1):
         if not any((source,day) in frames for source in ("sse","szse")):
