@@ -18,7 +18,8 @@ from .http import HttpSettings, build_session
 from .pipeline_application import canonical_sha256
 from .pipeline_entry import (candidate_credentials, load_candidate_cost_policy, prepare_core_candidate,
     read_entry_request, reject_inline_credentials, verify_clean_candidate_code, verify_candidate_runtime,
-    candidate_preparation_cost_upper, CANDIDATE_PREPARATION_CONTRACT, MAX_CANDIDATE_PREPARATION_REQUESTS)
+    candidate_preparation_cost_upper, CANDIDATE_PREPARATION_CONTRACT, MAX_CANDIDATE_PREPARATION_REQUESTS,
+    archive_replay_source_binding)
 from .pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile
 from .pipeline_recovery_scope import bind_recovery_runner_scope
 from .pipeline_runner import PipelineRunnerError, _assert_safe_output, _write_json_atomic, runner_budget_input_sha256
@@ -101,12 +102,21 @@ def validate_preparation(package, confirmation, payload, *, snapshot_path, appro
     _require(approved_plan["budgetManifest"].get("candidatePreparationContract") == CONTRACT,
         "preparation_plan_contract_invalid")
     policy = load_candidate_cost_policy(root, profile=profile, approved_recovery_plan=approved_plan)
+    source_binding = archive_replay_source_binding(payload.get("archiveReplaySource"))
+    _require(approved_plan["budgetManifest"].get("archiveReplaySource") == source_binding,
+        "preparation_replay_scope_mismatch")
     # Reuse the reviewed worst-operation policies, not caller-supplied costs.
     # Preparation shares the same ten-minute job already counted by runtime.
-    upper = candidate_preparation_cost_upper(policy)
+    upper = candidate_preparation_cost_upper(policy, archive_requests=source_binding["requestCount"] if source_binding else 0)
     total = policy["task"]
     _require(approved_plan["maxRequests"] >= total.metrics["workerRequests"].value,
         "preparation_request_scope_understated")
+    validate_preparation_budget(approved_plan, reconcile, total, root)
+    return context, encoded_plan, previous, upper, total
+
+
+def validate_preparation_budget(approved_plan, reconcile, total, root):
+    """Shared pure admission check, usable before source I/O and after build."""
     config = json.loads((root / "config/resource-budget.json").read_bytes())
     names = {"d1RowsRead": "d1RowsReadPerDay", "d1RowsWritten": "d1RowsWrittenPerDay",
         "workerRequests": "workersRequestsPerDay", "actionsMinutes": "githubActionsMinutesPerMonth",
@@ -124,7 +134,6 @@ def validate_preparation(package, confirmation, payload, *, snapshot_path, appro
         raise
     except (KeyError, TypeError, ValueError, AttributeError):
         raise PipelineRunnerError("preparation_budget_unknown_or_understated") from None
-    return context, encoded_plan, previous, upper, total
 
 
 def prepare_candidate_authority(package, confirmation, payload, *, snapshot_path, approved_plan,

@@ -17,6 +17,10 @@ MAX_REQUEST_BYTES = 65536
 MAX_SOURCE_ARCHIVE_BYTES = 6 * 1024 * 1024
 CANDIDATE_PREPARATION_CONTRACT = "flow-candidate-preparation-v1"
 MAX_CANDIDATE_PREPARATION_REQUESTS = 8
+ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-archive-replay-source-v1"
+# One bounded recent-window batch (a baseline plus up to seven sessions in
+# both markets). Larger histories use a later bounded batch, not more calls.
+MAX_ARCHIVE_REPLAY_REQUESTS = 16
 _SECRET_KEYS = {"token", "secret", "password", "apikey", "ingestapikey", "clientsecret",
                 "cfaccessclientsecret", "flowingestapikey", "flowcfaccessclientsecret",
                 "accesstoken", "refreshtoken", "githubtoken", "privatekey"}
@@ -91,6 +95,49 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
         raise PipelineRunnerError("entry_source_reference_invalid")
     request = read_environment_request(environment)
     plan = read_environment_request(environment, "FLOW_ENTRY_RECOVERY_PLAN_JSON", required=False)
+    replay = archive_replay_source_binding(request.get("archiveReplaySource"))
+    if replay is not None:
+        from .pipeline_application import canonical_sha256
+        from .recovery_execution import plan_bytes
+        if not isinstance(plan, dict) or plan.get("budgetManifest", {}).get("archiveReplaySource") != replay:
+            raise PipelineRunnerError("entry_replay_approval_binding_required")
+        try:
+            plan_bytes(plan)
+        except (ValueError, TypeError):
+            raise PipelineRunnerError("entry_replay_approval_binding_required") from None
+        preparation = read_environment_request(environment, "FLOW_ENTRY_PREPARATION_JSON")
+        if (canonical_sha256(preparation) != environment.get("FLOW_ENTRY_PREPARATION_SHA256")
+                or preparation.get("contract") != CANDIDATE_PREPARATION_CONTRACT
+                or preparation.get("requestSha256") != canonical_sha256(request)
+                or preparation.get("planSha256") != plan.get("planHash")
+                or request.get("recovery", {}).get("planSha256") != plan.get("planHash")):
+            raise PipelineRunnerError("entry_replay_preparation_required")
+        from datetime import datetime, timezone
+        try:
+            expiry = datetime.fromisoformat(preparation["expiresAt"].replace("Z", "+00:00"))
+            remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+            deadline = datetime.fromisoformat(plan["deadline"].replace("Z", "+00:00"))
+            if not 0 < remaining <= 600 or deadline < expiry:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError):
+            raise PipelineRunnerError("entry_replay_preparation_expired") from None
+        # Before archive I/O, check the full declared hold against truthful
+        # account evidence. The actual graph is checked again after hydration;
+        # one artifact is only a lower bound here, never execution authority.
+        from .pipeline_preparation import validate_preparation_budget
+        from .pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile
+        from .resource_budget import BudgetVector
+        try:
+            policy = load_candidate_cost_policy(Path(__file__).resolve().parents[2],
+                profile=FreshRecoveryCandidateRequestProfile("a"*64, 1,
+                    recovery_id=plan["recoveryId"], plan_sha256=plan["planHash"]), approved_recovery_plan=plan)
+            declared = BudgetVector.from_mapping(plan["budgetManifest"]["taskCostUpperBound"])
+            validate_preparation_budget(plan, preparation["accountReconciliation"], policy["task"], Path(__file__).resolve().parents[2])
+            validate_preparation_budget(plan, preparation["accountReconciliation"], declared, Path(__file__).resolve().parents[2])
+            if plan["maxRequests"] < declared.metrics["workerRequests"].value:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise PipelineRunnerError("entry_replay_budget_invalid") from None
     token = environment.get("GITHUB_TOKEN")
     if not isinstance(token, str) or not token.strip() or "\n" in token or "\r" in token:
         raise PipelineRunnerError("entry_source_authentication_required")
@@ -150,9 +197,13 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
                 raise PipelineRunnerError("entry_source_snapshot_size_mismatch")
         value = json.loads(snapshot)
         reject_inline_credentials(value)
+        expected_source = (request["archiveReplaySource"]["baseSnapshotSha256"] if replay is not None
+            else request.get("stageConfigs", {}).get("build", {}).get("snapshotSha256"))
         if (not isinstance(value, dict) or value.get("asOf") != request.get("identity", {}).get("targetDate")
-                or hashlib.sha256(snapshot).hexdigest() != request.get("stageConfigs", {}).get("build", {}).get("snapshotSha256")):
+                or hashlib.sha256(snapshot).hexdigest() != expected_source):
             raise PipelineRunnerError("entry_source_snapshot_binding_mismatch")
+        if replay is not None:
+            snapshot = hydrate_archive_replay_source(value, request, exchange=exchange, environment=environment)
     except PipelineRunnerError:
         raise
     except (BoundedHTTPError, ValueError, OSError, KeyError, AttributeError, zipfile.BadZipFile, RuntimeError):
@@ -166,7 +217,91 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
             os.chmod(root / name, 0o600)
             stream.write(data)
     return {"status": "PINNED_SOURCE_PREPARED", "artifactId": artifact_id, "sourceRunId": source_run_id,
-        "snapshotSha256": hashlib.sha256(snapshot).hexdigest(), "serverAuthorityVerified": False}
+        "snapshotSha256": hashlib.sha256(snapshot).hexdigest(), "serverAuthorityVerified": False,
+        "sourceReadRequests": {"github": 3, "archive": replay["requestCount"] if replay else 0}}
+
+
+def archive_replay_source_binding(recipe):
+    """Public non-secret scope, bound by both request and immutable approval."""
+    if recipe is None:
+        return None
+    if (not isinstance(recipe, dict) or set(recipe) != {"contract", "baseSnapshotSha256",
+            "calendarGzipBase64", "calendarSha256", "partitions"}
+            or recipe.get("contract") != ARCHIVE_REPLAY_SOURCE_CONTRACT
+            or any(not isinstance(recipe.get(k), str) or not re.fullmatch(r"[a-f0-9]{64}", recipe[k])
+                for k in ("baseSnapshotSha256", "calendarSha256"))
+            or not isinstance(recipe["calendarGzipBase64"], str)
+            or len(recipe["calendarGzipBase64"]) > 51200
+            or not isinstance(recipe["partitions"], list)
+            or not 1 <= len(recipe["partitions"]) <= MAX_ARCHIVE_REPLAY_REQUESTS):
+        raise PipelineRunnerError("entry_replay_recipe_invalid")
+    return {"contract": ARCHIVE_REPLAY_SOURCE_CONTRACT, "recipeSha256":
+        hashlib.sha256(json.dumps(recipe, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "requestCount": len(recipe["partitions"])}
+
+
+def hydrate_archive_replay_source(base, request, *, exchange, environment):
+    """Read only exact indexed normalized objects; no list, retry or write."""
+    import base64
+    import gzip
+    import io
+    from .etf_replay import REPLAY_CONTRACT, MAX_SOURCE_BYTES, validated_replay_inputs
+    from .etf_period_dependencies import validate_official_calendar
+    from .read_models import canonical_json_bytes
+    recipe = request["archiveReplaySource"]
+    archive_replay_source_binding(recipe)
+    if "etfReplayInput" in base:
+        raise PipelineRunnerError("entry_replay_base_already_materialized")
+    try:
+        compressed = base64.b64decode(recipe["calendarGzipBase64"], validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            data = stream.read(2_800_001)
+        if len(data) > 2_800_000 or hashlib.sha256(data).hexdigest() != recipe["calendarSha256"]:
+            raise ValueError()
+        calendar = json.loads(data)
+        reject_inline_credentials(calendar)
+        dates, _ = validate_official_calendar(calendar)
+        target = request["identity"]["targetDate"]
+        refs = recipe["partitions"]
+        seen = set()
+        for ref in refs:
+            if (not isinstance(ref, dict) or set(ref) != {"sourceId", "tradeDate", "objectKey", "sha256"}
+                    or ref["sourceId"] not in {"sse", "szse"} or ref["tradeDate"] not in dates
+                    or ref["tradeDate"] > target or (ref["sourceId"], ref["tradeDate"]) in seen
+                    or not isinstance(ref["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", ref["sha256"])
+                    or not isinstance(ref["objectKey"], str) or not re.fullmatch(
+                        rf'market-data/normalized/{ref["sourceId"]}/etf_scale/{ref["tradeDate"]}/[a-f0-9]{{64}}/data\.csv',ref["objectKey"])):
+                raise ValueError()
+            seen.add((ref["sourceId"],ref["tradeDate"]))
+        if target not in dates:
+            raise ValueError()
+    except (ValueError, TypeError, KeyError, OSError, EOFError):
+        raise PipelineRunnerError("entry_replay_recipe_invalid") from None
+    creds = candidate_credentials(environment)
+    headers = {"Authorization": "Bearer " + creds["ingest_key"],
+        "CF-Access-Client-Id": creds["access_client_id"], "CF-Access-Client-Secret": creds["access_client_secret"]}
+    parts, total = [], 0
+    for ref in refs:
+        reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
+            max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+            headers=headers, params={"source":ref["sourceId"], "dataset":"etf_scale",
+                "date":ref["tradeDate"], "file":"data", "indexed":"1"})
+        total += len(reply.content)
+        if (reply.status != 200 or total > MAX_SOURCE_BYTES
+                or hashlib.sha256(reply.content).hexdigest() != ref["sha256"]
+                or reply.headers.get("x-flow-normalized-key") != ref["objectKey"]
+                or reply.headers.get("x-flow-normalized-sha256") != ref["sha256"]):
+            raise PipelineRunnerError("entry_replay_archive_mismatch")
+        parts.append({**ref, "contentBase64":base64.b64encode(reply.content).decode()})
+    value = {**base, "etfReplayInput":{"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}}
+    try:
+        validated_replay_inputs(value["etfReplayInput"], target)
+    except (ValueError, TypeError):
+        raise PipelineRunnerError("entry_replay_facts_invalid") from None
+    encoded = canonical_json_bytes(value)
+    if len(encoded) > 4*1024*1024 or hashlib.sha256(encoded).hexdigest() != request["stageConfigs"]["build"]["snapshotSha256"]:
+        raise PipelineRunnerError("entry_replay_snapshot_binding_mismatch")
+    return encoded
 
 
 def reject_inline_credentials(value):
@@ -284,11 +419,15 @@ def candidate_credentials(environment):
     return values
 
 
-def candidate_preparation_cost_upper(policy):
+def candidate_preparation_cost_upper(policy, *, archive_requests=0):
     """Eight fixed control calls; reviewed worst-operation cost, no allowance."""
     from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS
     operations = [*policy["control"].values(), *policy["transport"].values()]
-    return BudgetVector.estimated({d: MAX_CANDIDATE_PREPARATION_REQUESTS * max(v.metrics[d].value for v in operations)
+    if type(archive_requests) is not int or not 0 <= archive_requests <= MAX_ARCHIVE_REPLAY_REQUESTS:
+        raise PipelineRunnerError("entry_replay_cost_invalid")
+    # A resumed workflow may repeat source hydration before a build checkpoint
+    # exists. Reserve both reads up front; takeover cannot mint a new hold.
+    return BudgetVector.estimated({d: (MAX_CANDIDATE_PREPARATION_REQUESTS + 2 * archive_requests) * max(v.metrics[d].value for v in operations)
         for d in RESOURCE_DIMENSIONS}, scope="candidate_preparation_reviewed_upper")
 
 
@@ -349,10 +488,21 @@ def load_candidate_cost_policy(project_root, *, profile=None, approved_recovery_
     result["task"] = candidate_task_cost_upper(profile=total_profile, stage_costs=result["stage"],
         request_costs={**result["control"], **result["transport"]}, runtime_cost=total_runtime)
     manifest = approved_recovery_plan.get("budgetManifest", {}) if isinstance(approved_recovery_plan, dict) else {}
+    if isinstance(manifest, dict) and "archiveReplaySource" in manifest and "candidatePreparationContract" not in manifest:
+        raise PipelineRunnerError("entry_preparation_budget_invalid")
     if isinstance(manifest, dict) and any(k in manifest for k in ("candidatePreparationContract", "candidatePreparationUpperBound")):
         try:
             declared = BudgetVector.from_mapping(manifest.get("candidatePreparationUpperBound"))
-            upper = candidate_preparation_cost_upper(result)
+            source = manifest.get("archiveReplaySource")
+            count = 0
+            if source is not None:
+                if (not isinstance(source,dict) or set(source) != {"contract","recipeSha256","requestCount"}
+                    or source["contract"] != ARCHIVE_REPLAY_SOURCE_CONTRACT
+                    or not isinstance(source["recipeSha256"],str) or not re.fullmatch(r"[a-f0-9]{64}",source["recipeSha256"])
+                    or type(source["requestCount"]) is not int or not 1 <= source["requestCount"] <= MAX_ARCHIVE_REPLAY_REQUESTS):
+                    raise ValueError()
+                count = source["requestCount"]
+            upper = candidate_preparation_cost_upper(result, archive_requests=count)
             if (manifest.get("candidatePreparationContract") != CANDIDATE_PREPARATION_CONTRACT
                     or not declared.all_known() or declared.numeric() != upper.numeric()
                     or any(m.basis != "estimated" for m in declared.metrics.values())):
@@ -460,6 +610,9 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
         raise PipelineRunnerError("entry_candidate_attempt_invalid")
     if recovery != (approved_recovery_plan is not None):
         raise PipelineRunnerError("entry_recovery_plan_binding_required")
+    binding = archive_replay_source_binding(payload.get("archiveReplaySource"))
+    if binding is not None and (not recovery or approved_recovery_plan.get("budgetManifest", {}).get("archiveReplaySource") != binding):
+        raise PipelineRunnerError("entry_replay_approval_binding_required")
     digest = runner_budget_input_sha256(context, request["stages"], request["stageInputs"])
     profile_type = ((ResumeRecoveryCandidateRequestProfile if resume else FreshRecoveryCandidateRequestProfile)
         if recovery else (ResumeCandidateRequestProfile if resume else FreshCandidateRequestProfile))

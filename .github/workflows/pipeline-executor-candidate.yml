@@ -89,6 +89,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           FLOW_ENTRY_REQUEST_JSON: ${{ inputs.request_json }}
           FLOW_ENTRY_RECOVERY_PLAN_JSON: ${{ inputs.approved_recovery_plan_json }}
+          # Only the explicit pinned replay recipe consumes these. Legacy
+          # archive reads still never forward them to the signed GitHub host.
+          FLOW_ENTRY_PREPARATION_JSON: ${{ inputs.preparation_json }}
+          FLOW_ENTRY_PREPARATION_SHA256: ${{ inputs.confirm_preparation_sha256 }}
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
           SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |

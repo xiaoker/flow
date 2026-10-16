@@ -1,0 +1,16 @@
+{
+  "stage": "080-DATA-to-ENTRY-archive-source",
+  "baseSha": "2c43f3adaba08ac89462897fe501e336d60d1d8d",
+  "automaticOnPullRequest": ["CI", "branch-freshness"],
+  "automaticOnMerge": ["main CI"],
+  "workerDeployment": false,
+  "workerDeploymentReason": "No changed web/** path; existing deploy workflow path filter does not match.",
+  "migration": false,
+  "sourceCollection": false,
+  "candidateDispatch": false,
+  "activePointerChange": false,
+  "featureFlagChange": false,
+  "productionWritesPerformed": false,
+  "ciMinutes": {"basis": "estimated", "pullRequestLinuxUpper": 8, "mergeLinuxUpper": 8},
+  "manualCandidateExecution": "Requires separate bounded authorization and existing live resource admission; this document grants none."
+}
