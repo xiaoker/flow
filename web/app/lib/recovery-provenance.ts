@@ -185,7 +185,7 @@ type ManifestArtifact = {
 type ValidatedArtifact = {
   artifact: ManifestArtifact;
   rawSha256: string;
-  normalized: Array<{ key: string; fileName: string; sha256: string; rowCount: number; contentEncoding: "gzip" | null }>;
+  normalized: Array<{ key: string; fileName: string; sha256: string; rowCount: number; contentEncoding: "gzip" | null; revisionId?: string }>;
   observedAt: string;
 };
 
@@ -402,7 +402,7 @@ async function validateArtifact(
   const normalized: ValidatedArtifact["normalized"] = [];
   for (const key of artifact.normalizedKeys) {
     const match = NORMALIZED_KEY.exec(key);
-    if (!match || match[1] !== artifact.sourceId || match[2] !== artifact.dataset || match[3] !== artifact.requestedDate || match[4] !== raw[4]) {
+    if (!match || match[1] !== artifact.sourceId || match[2] !== artifact.dataset || match[3] !== artifact.requestedDate) {
       issues.push({ code: "NORMALIZED_KEY_INVALID", asOf, domain, detail: key });
       return null;
     }
@@ -420,6 +420,16 @@ async function validateArtifact(
       return null;
     }
     const sha256 = metadata.sha256 ?? "";
+    const contentAddressed = metadata.normalizedKeyVersion === "normalized-source-wire-sha256-v1";
+    if (contentAddressed
+      ? artifact.dataset !== "etf_scale" || metadata.rawSha256 !== raw[4]
+        || !SHA256.test(metadata.wireSha256 ?? "")
+        || await sha256Hex(new TextEncoder().encode(`${raw[4]}:${metadata.wireSha256}`)) !== match[4]
+        || (!key.endsWith(".gz") && sha256 !== metadata.wireSha256)
+      : metadata.normalizedKeyVersion !== undefined || match[4] !== raw[4]) {
+      issues.push({ code: "NORMALIZED_KEY_INVALID", asOf, domain, detail: key });
+      return null;
+    }
     const rowCount = Number(metadata.rowCount);
     if (!SHA256.test(sha256)) {
       issues.push({ code: "NORMALIZED_HASH_MISSING", asOf, domain, detail: key });
@@ -433,7 +443,8 @@ async function validateArtifact(
       issues.push({ code: "NORMALIZED_ROW_COUNT_INVALID", asOf, domain, detail: key });
       return null;
     }
-    normalized.push({ key, fileName: match[5].replace(/\.gz$/, ""), sha256, rowCount, contentEncoding: key.endsWith(".gz") ? "gzip" : null });
+    normalized.push({ key, fileName: match[5].replace(/\.gz$/, ""), sha256, rowCount, contentEncoding: key.endsWith(".gz") ? "gzip" : null,
+      ...(contentAddressed ? { revisionId: match[4] } : {}) });
   }
   const observedAt = canonicalObservedAt(artifact.observedAt, `${asOf}T00:00:00.000Z`);
   if (!observedAt) {
@@ -501,7 +512,7 @@ function appendCandidates(
           dataset: pointer,
           tradeDate,
           fileName: file.fileName,
-          revisionId: artifact.releaseId,
+          revisionId: file.revisionId ?? artifact.releaseId,
           objectKey: file.key,
           sha256: file.sha256,
           contentEncoding: file.contentEncoding,

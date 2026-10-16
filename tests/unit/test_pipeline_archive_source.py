@@ -89,6 +89,7 @@ class ArchiveSession:
         p=kw["params"]
         assert p["indexed"]=="1" and p["file"]=="data"
         row=next(r for r in self.rows if r["sourceId"]==p["source"] and r["tradeDate"]==p["date"])
+        assert p["revision"] == row["objectKey"].split("/")[-2]
         data=base64.b64decode(row["contentBase64"])
         status=404 if self.fault=="missing" else 403 if self.fault=="forbidden" else 200
         if self.fault=="lost": raise OSError("fixture-secret-must-not-leak")

@@ -1,4 +1,5 @@
 import { runtimeEnv } from "@/app/lib/dashboard-store";
+import { sha256Hex } from "@/app/lib/source-observation";
 
 export const dynamic = "force-dynamic";
 
@@ -65,9 +66,35 @@ export async function GET(request: Request): Promise<Response> {
     return badRequest("invalid_artifact_identity");
   }
   if (!expectedPair(source, dataset)) return badRequest("unsupported_artifact_pair");
+  const revision = query.get("revision");
+  if (revision !== null && (query.get("indexed") !== "1" || dataset !== "etf_scale"
+      || file !== "data" || !/^[a-f0-9]{64}$/.test(revision))) return badRequest("invalid_archive_revision");
 
   const dateCandidates = [tradeDate, tradeDate.replaceAll("-", "")];
   try {
+    // A pinned candidate must not follow the mutable latest-pointer row.
+    // The caller can read only this exact source/date/data.csv namespace;
+    // it still verifies response key, stored hash and actual body bytes.
+    if (revision !== null) {
+      const key = `market-data/normalized/${source}/etf_scale/${tradeDate}/${revision}/data.csv`;
+      const object = await runtime.RAW_BUCKET.get(key);
+      if (!object?.body) return badRequest("artifact_not_found", 404);
+      if (object.size > 2_000_000) return badRequest("artifact_too_large", 413);
+      const metadata = object.customMetadata ?? {};
+      if (!/^[a-f0-9]{64}$/.test(metadata.sha256 ?? "") || metadata.sourceId !== source
+          || metadata.dataset !== dataset || (metadata.normalizedKeyVersion !== undefined
+            && (metadata.normalizedKeyVersion !== "normalized-source-wire-sha256-v1"
+              || !/^[a-f0-9]{64}$/.test(metadata.rawSha256 ?? "")
+              || metadata.wireSha256 !== metadata.sha256
+              || await sha256Hex(new TextEncoder().encode(`${metadata.rawSha256}:${metadata.wireSha256}`)) !== revision))) {
+        return badRequest("archive_revision_metadata_mismatch", 409);
+      }
+      return new Response(object.body, { headers: {
+        "Cache-Control": "private, no-store", "Content-Type": "text/csv; charset=utf-8",
+        "X-Flow-Normalized-Key": key, "X-Flow-Normalized-Sha256": metadata.sha256,
+        "X-Flow-Trade-Date": tradeDate, "X-Flow-Pcf-Revision": revision,
+      } });
+    }
     const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1");
     if (query.get("indexed") === "1" && !pointer) return badRequest("artifact_not_found", 404);
     if (pointer?.objectKey && typeof pointer.objectKey === "string") {

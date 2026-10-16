@@ -621,7 +621,7 @@ async function persistArchivedArtifactEvidence(
             dataset,
             tradeDate,
             file.name,
-            artifact.releaseId,
+            dataset === "etf_scale" ? objectKey.split("/").at(-2)! : artifact.releaseId,
             objectKey,
             file.sha256,
             file.contentEncoding === "gzip" ? "gzip" : null,
@@ -1411,7 +1411,14 @@ export async function POST(request: Request) {
           if ((await sha256Hex(content)) !== normalized.sha256) {
             throw new Error(`normalized_sha256_mismatch:${artifact.releaseId}:${normalized.name}`);
           }
-          const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${artifact.sha256}/${normalized.name}${normalized.contentEncoding === "gzip" ? ".csv.gz" : ".csv"}`;
+          // ETF CSVs include observation metadata: the same raw response can
+          // produce different normalized bytes. Pin the actual stored bytes,
+          // not the raw response hash, so later observations cannot replace
+          // an earlier approved input. Other datasets retain their contract.
+          const wireSha256 = artifact.dataset === "etf_scale" ? await sha256Hex(wireContent) : null;
+          const revision = wireSha256
+            ? await sha256Hex(new TextEncoder().encode(`${artifact.sha256}:${wireSha256}`)) : artifact.sha256;
+          const key = `market-data/normalized/${artifact.sourceId}/${artifact.dataset}/${artifact.requestedDate}/${revision}/${normalized.name}${normalized.contentEncoding === "gzip" ? ".csv.gz" : ".csv"}`;
           await runtime.RAW_BUCKET.put(key, normalized.contentEncoding === "gzip" ? wireContent : content, {
             httpMetadata: {
               contentType: normalized.contentEncoding === "gzip"
@@ -1423,6 +1430,11 @@ export async function POST(request: Request) {
               dataset: artifact.dataset,
               rowCount: String(normalized.rowCount),
               sha256: normalized.sha256,
+              ...(wireSha256 ? {
+                normalizedKeyVersion: "normalized-source-wire-sha256-v1",
+                rawSha256: artifact.sha256,
+                wireSha256,
+              } : {}),
             },
           });
           normalizedKeys.push(key);
