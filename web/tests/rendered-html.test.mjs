@@ -16,6 +16,46 @@ const env = {
 };
 const context = { waitUntil() {}, passThroughOnException() {} };
 
+test("pinned ETF archives ignore a moved latest pointer and preserve legacy reads", async () => {
+  const worker = await loadWorker();
+  const bytes = "code,shares\n510050,123\n";
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  const legacy = "a".repeat(64);
+  const pinned = createHash("sha256").update(`${legacy}:${sha}`).digest("hex");
+  const gets = [];
+  let mismatch = false;
+  const runtime = { ...env, INGEST_API_KEY: "test-key",
+    DB: { prepare() { throw new Error("pinned reads must not consult latest pointer"); } },
+    RAW_BUCKET: { async get(key) {
+      gets.push(key);
+      if (!key.includes(`/${pinned}/`) && !key.includes(`/${legacy}/`)) return null;
+      return { body: bytes, size: bytes.length, customMetadata: {
+        sourceId: "sse", dataset: "etf_scale", sha256: sha,
+        ...(key.includes(`/${pinned}/`) ? { normalizedKeyVersion: "normalized-source-wire-sha256-v1", rawSha256: legacy,
+          wireSha256: mismatch ? legacy : sha } : {}),
+      } };
+    }, list() { throw new Error("pinned reads must not list"); } },
+  };
+  const request = (revision, auth = true) => worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?source=sse&dataset=etf_scale&date=2026-10-13&indexed=1&revision=${revision}`,
+    { headers: auth ? { authorization: "Bearer test-key" } : {} }), runtime, context);
+  for (const revision of [pinned, legacy]) {
+    const response = await request(revision);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), bytes);
+    assert.equal(response.headers.get("X-Flow-Normalized-Sha256"), sha);
+    assert.equal(response.headers.get("X-Flow-Normalized-Key"),
+      `market-data/normalized/sse/etf_scale/2026-10-13/${revision}/data.csv`);
+  }
+  assert.equal((await request("b".repeat(64))).status, 404);
+  mismatch = true;
+  assert.equal((await request(pinned)).status, 409);
+  const count = gets.length;
+  assert.equal((await request("../invalid")).status, 400);
+  assert.equal((await request(sha, false)).status, 401);
+  assert.equal(gets.length, count);
+});
+
 test("serves a static dashboard shell", async () => {
   const worker = await loadWorker();
   const response = await worker.fetch(
@@ -1292,6 +1332,44 @@ test("archives full-source history with server-side hash verification", async ()
   const manifest = [...objects.entries()].find(([key]) => key.includes("history-manifests/"));
   assert.ok(manifest);
   assert.match(String(manifest[1]), /"officialEtfDailyChanges"/);
+  // Same raw publication, later observation: normalized bytes must not replace
+  // an already pinned CSV. Raw response identity is not normalized identity.
+  const revisionFor = (rawHash, wireHash) => createHash("sha256").update(`${rawHash}:${wireHash}`).digest("hex");
+  const firstRevision = revisionFor(etfSha256, etfNormalizedSha256);
+  const firstKey = `market-data/normalized/sse/etf_scale/${snapshot.asOf}/${firstRevision}/data.csv`;
+  assert.ok(objects.has(firstKey));
+  const firstBytes = Buffer.from(objects.get(firstKey));
+  const repeated = structuredClone(bundle);
+  const changed = repeated.history.artifacts.find((a) => a.dataset === "etf_scale");
+  changed.observedAt = "2026-07-23T09:15:20+08:00";
+  const changedBytes = Buffer.from(etfNormalized.toString().replaceAll("2026-07-22T09:15:20", "2026-07-23T09:15:20"));
+  const changedHash = createHash("sha256").update(changedBytes).digest("hex");
+  changed.normalized[0].contentBase64 = changedBytes.toString("base64");
+  changed.normalized[0].sha256 = changedHash;
+  const submit = () => worker.fetch(new Request("http://localhost/api/v1/admin/history-import", {
+    method: "POST", headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+    body: JSON.stringify(repeated),
+  }), { ...env, DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key" }, context);
+  assert.equal((await submit()).status, 200);
+  const secondRevision = revisionFor(etfSha256, changedHash);
+  const secondKey = `market-data/normalized/sse/etf_scale/${snapshot.asOf}/${secondRevision}/data.csv`;
+  assert.deepEqual(Buffer.from(objects.get(firstKey)), firstBytes);
+  assert.deepEqual(Buffer.from(objects.get(secondKey)), changedBytes);
+  assert.ok(statements.some(({sql, values}) => sql.includes("INSERT INTO history_artifact_pointer") && values[4] === secondRevision && values[5] === secondKey));
+  const countBefore = [...objects.keys()].filter((k) => k.includes("/normalized/sse/etf_scale/")).length;
+  assert.equal((await submit()).status, 200);
+  assert.equal([...objects.keys()].filter((k) => k.includes("/normalized/sse/etf_scale/")).length, countBefore);
+  // Different raw bytes with identical CSV must retain separate lineage too.
+  const otherRaw = Buffer.from(`${etfRaw.toString()} `);
+  changed.sha256 = createHash("sha256").update(otherRaw).digest("hex");
+  changed.rawContentBase64 = otherRaw.toString("base64");
+  changed.metadata.sha256 = changed.sha256;
+  changed.releaseId = `etf_scale:sse:${snapshot.asOf}:${changed.sha256.slice(0, 16)}`;
+  assert.equal((await submit()).status, 200);
+  const thirdKey = `market-data/normalized/sse/etf_scale/${snapshot.asOf}/${revisionFor(changed.sha256, changedHash)}/data.csv`;
+  assert.notEqual(thirdKey, secondKey);
+  assert.deepEqual(Buffer.from(objects.get(thirdKey)), changedBytes);
+  assert.deepEqual(Buffer.from(objects.get(secondKey)), changedBytes);
 });
 
 test("archive-only history imports archive ETF scale without D1 etf writes", async () => {

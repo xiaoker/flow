@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
@@ -17,6 +18,7 @@ const SNAPSHOT_KEY = `market-data/history/${AS_OF}/${SHA("c")}.json`;
 const MANIFEST_KEY = `market-data/history-manifests/repair-fixture/${AS_OF}.json`;
 const RAW_SHA = SHA("a");
 const NORMALIZED_SHA = SHA("b");
+const NORMALIZED_REVISION = createHash("sha256").update(`${RAW_SHA}:${NORMALIZED_SHA}`).digest("hex");
 const RAW_KEY = `market-data/raw/sse/etf_scale/${AS_OF}/${RAW_SHA}.json`;
 const METADATA_KEY = `market-data/raw/sse/etf_scale/${AS_OF}/${RAW_SHA}.metadata.json`;
 const NORMALIZED_KEY = `market-data/normalized/sse/etf_scale/${AS_OF}/${RAW_SHA}/data.csv`;
@@ -54,7 +56,12 @@ function marginArtifact() {
   };
 }
 
-function fixture({ artifactOrder = [artifact()], manifestOverride = {}, missingManifest = false, rawHash = RAW_SHA } = {}) {
+function fixture({ artifactOrder = [artifact()], manifestOverride = {}, missingManifest = false, rawHash = RAW_SHA,
+  normalizedIdentity = false, normalizedRawHash = RAW_SHA, gzipIdentity = false,
+  normalizedWireHash = gzipIdentity ? SHA("e") : NORMALIZED_SHA } = {}) {
+  const expectedRevision = gzipIdentity ? createHash("sha256").update(`${RAW_SHA}:${SHA("e")}`).digest("hex") : NORMALIZED_REVISION;
+  const normalizedKey = normalizedIdentity ? NORMALIZED_KEY.replace(RAW_SHA, expectedRevision) + (gzipIdentity ? ".gz" : "") : NORMALIZED_KEY;
+  if (normalizedIdentity) artifactOrder = artifactOrder.map((item) => item.dataset === "etf_scale" ? {...item, normalizedKeys:[normalizedKey]} : item);
   const manifest = {
     version: 1,
     runId: "repair-fixture",
@@ -72,7 +79,8 @@ function fixture({ artifactOrder = [artifact()], manifestOverride = {}, missingM
     [SNAPSHOT_KEY, { size: 10, customMetadata: { sha256: SHA("c") } }],
     [RAW_KEY, { size: 10, customMetadata: { sourceId: "sse", dataset: "etf_scale", requestedDate: AS_OF, sha256: rawHash } }],
     [METADATA_KEY, { size: 10, customMetadata: { sha256: rawHash } }],
-    [NORMALIZED_KEY, { size: 20, customMetadata: { sourceId: "sse", dataset: "etf_scale", rowCount: "3", sha256: NORMALIZED_SHA } }],
+    [normalizedKey, { size: 20, customMetadata: { sourceId: "sse", dataset: "etf_scale", rowCount: "3", sha256: NORMALIZED_SHA,
+      ...(normalizedIdentity ? {normalizedKeyVersion:"normalized-source-wire-sha256-v1",rawSha256:normalizedRawHash,wireSha256:normalizedWireHash} : {}) } }],
     [MARGIN_RAW_KEY, { size: 10, customMetadata: { sourceId: "sse", dataset: "margin_market_daily", requestedDate: AS_OF, sha256: MARGIN_RAW_SHA } }],
     [MARGIN_METADATA_KEY, { size: 10, customMetadata: { sha256: MARGIN_RAW_SHA } }],
     [MARGIN_NORMALIZED_KEY, { size: 20, customMetadata: { sourceId: "sse", dataset: "margin_market_daily", rowCount: "5", sha256: SHA("e") } }],
@@ -185,6 +193,40 @@ test("artifact and JSON member ordering does not change canonical plan hash", as
   const left = await buildRecoveryProvenancePlan(first.runtime, query);
   const right = await buildRecoveryProvenancePlan(second.runtime, query);
   assert.equal(left.planHash, right.planHash);
+});
+
+test("versioned ETF content identity keeps raw lineage and pointer revision", async () => {
+  const value=fixture({normalizedIdentity:true});
+  const plan=await buildRecoveryProvenancePlan(value.runtime,parseProvenanceQuery(new URLSearchParams(`start=${AS_OF}&end=${AS_OF}`)));
+  assert.equal(plan.status,"READY_TO_APPLY_METADATA_ONLY");
+  assert.equal(plan.pointerRows[0].revisionId,NORMALIZED_REVISION);
+  assert.equal(plan.pointerRows[0].objectKey,NORMALIZED_KEY.replace(RAW_SHA,NORMALIZED_REVISION));
+  assert.equal(plan.pointerRows[0].sha256,NORMALIZED_SHA);
+  assert.equal(value.calls.d1Writes,0);
+});
+
+for (const fault of ["normalizedRawHash","normalizedWireHash"]) {
+  test(`versioned ETF identity rejects ${fault} mismatch`,async () => {
+    const value=fixture({normalizedIdentity:true,[fault]:SHA("f")});
+    const plan=await buildRecoveryProvenancePlan(value.runtime,parseProvenanceQuery(new URLSearchParams(`start=${AS_OF}&end=${AS_OF}`)));
+    assert.equal(plan.status,"INCOMPLETE");
+    assert.ok(plan.issues.some((i)=>i.code==="NORMALIZED_KEY_INVALID"));
+    assert.equal(plan.pointerRows.length,0);
+  });
+}
+
+test("versioned gzip identity binds wire hash separately from decoded CSV hash", async () => {
+  for (const corrupt of [false, true]) {
+    const value = fixture({normalizedIdentity:true, gzipIdentity:true,
+      ...(corrupt ? {normalizedWireHash:SHA("f")} : {})});
+    const plan = await buildRecoveryProvenancePlan(value.runtime,parseProvenanceQuery(new URLSearchParams(`start=${AS_OF}&end=${AS_OF}`)));
+    assert.equal(plan.status,corrupt ? "INCOMPLETE" : "READY_TO_APPLY_METADATA_ONLY");
+    if (!corrupt) {
+      assert.equal(plan.pointerRows[0].contentEncoding,"gzip");
+      assert.equal(plan.pointerRows[0].sha256,NORMALIZED_SHA);
+      assert.notEqual(plan.pointerRows[0].revisionId,NORMALIZED_SHA);
+    } else assert.ok(plan.issues.some((i)=>i.code==="NORMALIZED_KEY_INVALID"));
+  }
 });
 
 test("missing archive manifest remains provenance-incomplete and cannot be applied", async () => {

@@ -285,7 +285,8 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
         reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
             max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
             headers=headers, params={"source":ref["sourceId"], "dataset":"etf_scale",
-                "date":ref["tradeDate"], "file":"data", "indexed":"1"})
+                "date":ref["tradeDate"], "file":"data", "indexed":"1",
+                "revision":ref["objectKey"].split("/")[-2]})
         total += len(reply.content)
         if (reply.status != 200 or total > MAX_SOURCE_BYTES
                 or hashlib.sha256(reply.content).hexdigest() != ref["sha256"]
