@@ -162,7 +162,12 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
         metadata = json.loads(metadata_reply.content)
         if (not isinstance(metadata, dict) or metadata.get("id") != int(artifact_id)
                 or metadata.get("expired") is not False
-                or metadata.get("name") not in {f"market-data-collection-source-{source_run_id}", f"market-data-recovery-source-{source_run_id}"}
+                # Collector reports retain the same exact source snapshot
+                # longer than the short-lived source-only artifact. Accept
+                # only this exact run namespace, not publish/other reports;
+                # the same ZIP/date/body-hash checks below remain mandatory.
+                or metadata.get("name") not in {f"market-data-collection-source-{source_run_id}",
+                    f"market-data-recovery-source-{source_run_id}", f"market-data-{source_run_id}"}
                 or not isinstance(metadata.get("workflow_run"), dict)
                 or metadata["workflow_run"].get("id") != int(source_run_id)
                 or type(metadata.get("size_in_bytes")) is not int
