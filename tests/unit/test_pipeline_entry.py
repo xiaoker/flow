@@ -111,7 +111,8 @@ def test_fixed_policy_derives_full_task_and_two_attempt_cost():
 
 
 @pytest.mark.parametrize("fault", [None, "traversal", "duplicate", "wrong_date", "bad_redirect", "wrong_run", "secret",
-    "expired", "oversized_metadata", "metadata_http", "metadata_json", "archive_http", "bad_zip", "zip_symlink", "zip_count"])
+    "expired", "oversized_metadata", "metadata_http", "metadata_json", "archive_http", "bad_zip", "zip_symlink", "zip_count",
+    "retained_report", "retained_expired", "retained_wrong_run", "retained_wrong_hash", "publisher_report", "lookalike_report"])
 def test_workflow_source_is_exact_bounded_and_never_forwards_token(tmp_path, monkeypatch, fault):
     import io
     import zipfile
@@ -140,6 +141,18 @@ def test_workflow_source_is_exact_bounded_and_never_forwards_token(tmp_path, mon
     data = buffer.getvalue()
     metadata = {"id": 17, "expired": False, "name": "market-data-collection-source-9",
                 "workflow_run": {"id": 10 if fault == "wrong_run" else 9}, "size_in_bytes": len(data)}
+    if fault and fault.startswith("retained_"):
+        metadata["name"] = "market-data-9"
+    if fault == "retained_expired":
+        metadata["expired"] = True
+    if fault == "retained_wrong_run":
+        metadata["workflow_run"]["id"] = 10
+    if fault == "retained_wrong_hash":
+        request["stageConfigs"]["build"]["snapshotSha256"] = "0" * 64
+    if fault == "publisher_report":
+        metadata["name"] = "market-data-publish-9"
+    if fault == "lookalike_report":
+        metadata["name"] = "market-data-90"
     if fault == "expired":
         metadata["expired"] = True
     if fault == "oversized_metadata":
@@ -170,7 +183,7 @@ def test_workflow_source_is_exact_bounded_and_never_forwards_token(tmp_path, mon
     monkeypatch.setattr(http, "build_session", lambda settings: Session())
     env = {"GITHUB_TOKEN": "fixture-github-secret", "FLOW_ENTRY_REQUEST_JSON": json.dumps(request)}
     destination = tmp_path / "prepared"
-    if fault:
+    if fault not in {None, "retained_report"}:
         with pytest.raises(PipelineRunnerError) as rejected:
             prepare_workflow_inputs(destination, artifact_id="17", source_run_id="9", environment=env)
         assert "fixture-github-secret" not in str(rejected.value)
