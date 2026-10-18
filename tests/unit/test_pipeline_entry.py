@@ -402,7 +402,7 @@ def test_unknown_entry_cost_fails_before_journal_or_network(tmp_path, monkeypatc
     assert not (tmp_path / "budget.sqlite").exists() and not (tmp_path / "job").exists()
 
 
-@pytest.mark.parametrize("probe", ["fresh", "cli", "resume"])
+@pytest.mark.parametrize("probe", ["fresh", "cli", "resume", "resume_compressed"])
 @pytest.mark.parametrize("recovery", [False, True])
 @pytest.mark.parametrize("lease_generation", [1, 7])
 def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path, recovery, probe, monkeypatch, capsys, lease_generation):
@@ -416,6 +416,12 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
     import requests
     now = datetime(2026, 10, 3, 2, tzinfo=timezone.utc)
     request, source = core_request(tmp_path)
+    if probe == "resume_compressed":
+        import hashlib
+        snapshot = json.loads(source.read_bytes())
+        snapshot["capacityRegressionPadding"] = "official-input-" * (1048576 // len("official-input-"))
+        source.write_text(json.dumps(snapshot))
+        request["stageConfigs"]["build"]["snapshotSha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
     request["lease"]["attemptCount"] = lease_generation
     upper = {**dict.fromkeys(RESOURCE_DIMENSIONS, 100000), "r2Bytes": 500000000}
     plan = None
@@ -482,7 +488,7 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
             assert rejected.value.code == 2  # UNKNOWN must not look successful.
             assert json.loads(capsys.readouterr().out)["status"] == "UNKNOWN"
             report = json.loads(options["output_path"].read_bytes())
-        elif probe == "resume":
+        elif probe in {"resume", "resume_compressed"}:
             from trading_desk.pipeline_publish_adapter import CoreCandidatePublishAdapter
             real_run = CoreCandidatePublishAdapter.run
             def interrupt(*args, **kwargs):
@@ -490,6 +496,10 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
             monkeypatch.setattr(CoreCandidatePublishAdapter, "run", interrupt)
             with pytest.raises(SystemExit, match="fixture crash"):
                 run_candidate_entry(request, **options)
+            if probe == "resume_compressed":
+                bundles = list((options["state_dir"] / "bundles").glob("*.json"))
+                assert bundles and any(json.loads(p.read_bytes())["schemaVersion"] == 2 for p in bundles)
+                assert all(p.stat().st_size <= MAX_OBJECT_BYTES for p in bundles)
             monkeypatch.setattr(CoreCandidatePublishAdapter, "run", real_run)
             headers = {"Authorization": "Bearer fixture-only"}
             assert requests.post(origin + "/fixture/expire-lease", headers=headers, timeout=5).status_code == 200
@@ -517,7 +527,7 @@ def test_fixed_entry_assembly_calls_real_worker_and_keeps_unknown_usage(tmp_path
             report = run_candidate_entry(request, **options)
         assert report["stageExecutionStatus"] == "COMPLETED"
         assert report["status"] == "UNKNOWN"
-        assert report["budgetLifecycle"]["stageUsageUnknown"] == (["publish"] if probe == "resume" else ["build", "verify", "publish"])
+        assert report["budgetLifecycle"]["stageUsageUnknown"] == (["publish"] if probe in {"resume", "resume_compressed"} else ["build", "verify", "publish"])
         assert report["sideEffects"]["activeReleaseChanged"] is False
         stats = requests.get(origin + "/fixture/stats", headers={"Authorization": "Bearer fixture-only"}, timeout=5).json()
         assert stats["active"] == 0

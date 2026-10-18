@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from .http import HttpSettings, build_session
@@ -46,6 +48,60 @@ def _instant(value):
         return result
     except (AttributeError, TypeError, ValueError):
         raise PipelineRunnerError("preparation_time_invalid") from None
+
+
+def preflight_candidate_checkpoints(request, context, snapshot_path):
+    """Exercise real local build/verify/export before any authority mutation.
+
+    Temporary workspaces are removed on success or failure. No transport,
+    credential, lease or production state is consumed by this capacity check.
+    """
+    from .pipeline_build_adapter import CoreReadModelBuildAdapter, _read
+    from .pipeline_adapters import PipelineAdapterError
+    from .pipeline_verify_adapter import CoreReadModelVerifyAdapter
+    from .pipeline_publication import build_candidate_upload_body
+    from .pipeline_checkpoint_bundle import build_stage_bundle, CheckpointBundleError
+    from .pipeline_checkpoint_transport import MAX_OBJECT_BYTES
+    from .pipeline_runner import _checkpoint_from_stage_result
+    local = SimpleNamespace(identity=context.identity, lease_check=None)
+    sizes = {}
+    with tempfile.TemporaryDirectory(prefix="flow-candidate-checkpoint-preflight-",
+                                     dir=Path(tempfile.gettempdir()).resolve()) as folder:
+        root = Path(folder)
+        adapters = {"build": CoreReadModelBuildAdapter(Path(snapshot_path)),
+                    "verify": CoreReadModelVerifyAdapter(root / "build")}
+        for stage, adapter in adapters.items():
+            result = adapter.run(context=local, input_sha256=request["stageInputs"][stage],
+                                 config=request["stageConfigs"][stage], workspace=root / stage)
+            if stage == "build":
+                # Validate the other existing wire boundary too, before any
+                # control mutation. This is the publisher's pure constructor,
+                # not a second publication/QA implementation or a transport.
+                manifest_bytes = _read(root / stage / "manifest.json", 65536)
+                names = sorted(json.loads(manifest_bytes)["artifacts"])
+                execution = {"targetDate": context.identity.target_date,
+                             "producerBuildSha": context.identity.producer_build_sha}
+                try:
+                    for index, name in enumerate(names):
+                        build_candidate_upload_body(manifest_bytes, name,
+                            _read(root / stage / f"{name}.json", 1_500_000),
+                            execution=execution, finalize=index == len(names) - 1)
+                except (ValueError, PipelineAdapterError) as error:
+                    raise PipelineRunnerError("preparation_candidate_payload_invalid") from error
+            evidence = {**result["evidence"], "runnerBinding": {
+                "dependencyLockSha256": context.dependency_lock_sha256, "mode": context.mode,
+                "recoveryId": context.recovery_id, "recoveryPlanSha256": context.recovery_plan_sha256,
+                "leaseOwner": context.lease_owner, "attemptCount": context.lease_attempt_count}}
+            checkpoint = _checkpoint_from_stage_result(context=context, stage=stage,
+                input_sha256=request["stageInputs"][stage], value={**result, "evidence": evidence})
+            try:
+                data, _digest = build_stage_bundle(workspace=root / stage, checkpoint=checkpoint,
+                    identity=context.identity, stage=stage, input_sha256=request["stageInputs"][stage])
+            except CheckpointBundleError as error:
+                raise PipelineRunnerError("preparation_checkpoint_capacity_invalid") from error
+            _require(len(data) <= MAX_OBJECT_BYTES, "preparation_checkpoint_capacity_invalid")
+            sizes[stage] = len(data)
+    return sizes
 
 
 def validate_preparation(package, confirmation, payload, *, snapshot_path, approved_plan,
@@ -112,6 +168,7 @@ def validate_preparation(package, confirmation, payload, *, snapshot_path, appro
     _require(approved_plan["maxRequests"] >= total.metrics["workerRequests"].value,
         "preparation_request_scope_understated")
     validate_preparation_budget(approved_plan, reconcile, total, root)
+    preflight_candidate_checkpoints(request, context, snapshot_path)
     return context, encoded_plan, previous, upper, total
 
 

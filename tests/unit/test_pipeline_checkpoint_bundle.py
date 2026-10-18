@@ -31,6 +31,62 @@ def test_deterministic_complete_bundle_and_separate_environment(tmp_path):
     assert not (tmp_path / "other-machine").exists()  # verifier has no filesystem effects
 
 
+def test_large_repetitive_bundle_fits_unchanged_transport_and_restores(tmp_path):
+    from trading_desk.pipeline_checkpoint_transport import MAX_OBJECT_BYTES
+    root, checkpoint = fixture(tmp_path)
+    content = b'{"officialDate":"2026-09-15","shares":123456}\n' * 70000
+    (root / "input-snapshot.json").write_bytes(content)
+    data, digest = build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+    assert len(data) <= MAX_OBJECT_BYTES
+    assert json.loads(data)["schemaVersion"] == 2
+    assert (data, digest) == build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+    restored_checkpoint, files = verify_stage_bundle(data, sha256=digest,
+        identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+    assert restored_checkpoint == checkpoint
+    assert files["input-snapshot.json"] == content
+
+
+@pytest.mark.parametrize("fault", ["size", "hash", "codec", "truncated", "deflate", "expanded_limit", "nested"])
+def test_compressed_envelope_rejects_corruption_and_expansion(tmp_path, monkeypatch, fault):
+    import base64
+    import gzip
+    import trading_desk.pipeline_checkpoint_bundle as module
+    root, checkpoint = fixture(tmp_path)
+    (root / "large.json").write_bytes(b"official-input" * 100000)
+    data, _ = build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+    value = json.loads(data)
+    assert value["schemaVersion"] == 2
+    if fault == "size": value["decodedBytes"] -= 1
+    elif fault == "hash": value["decodedSha256"] = "0" * 64
+    elif fault == "codec": value["encoding"] = "unknown"
+    elif fault == "truncated": value["data"] = base64.b64encode(base64.b64decode(value["data"])[:-8]).decode()
+    elif fault == "deflate":
+        compressed = bytearray(base64.b64decode(value["data"]))
+        compressed[10] = (compressed[10] & 0xF8) | 0x07  # invalid DEFLATE block type
+        value["data"] = base64.b64encode(compressed).decode()
+    elif fault == "expanded_limit": monkeypatch.setattr(module, "MAX_BUNDLE_BYTES", len(data) + 1)
+    else:
+        nested = json.dumps(value).encode()
+        value.update(decodedBytes=len(nested), decodedSha256=hashlib.sha256(nested).hexdigest(),
+                     data=base64.b64encode(gzip.compress(nested, mtime=0)).decode())
+    data = json.dumps(value).encode()
+    with pytest.raises(CheckpointBundleError):
+        verify_stage_bundle(data, sha256=hashlib.sha256(data).hexdigest(),
+            identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+
+
+def test_incompressible_bundle_still_rejected_at_original_wire_cap(tmp_path):
+    import random
+    root, checkpoint = fixture(tmp_path)
+    (root / "large.bin").write_bytes(random.Random(42).randbytes(1100000))
+    with pytest.raises(CheckpointBundleError, match="bundle_transport_size_exceeded"):
+        build_stage_bundle(workspace=root, checkpoint=checkpoint,
+            identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
+
+
 @pytest.mark.parametrize("change", ["digest", "input", "identity", "stage"])
 def test_wrong_contract_rejected(tmp_path, change):
     root, checkpoint = fixture(tmp_path)

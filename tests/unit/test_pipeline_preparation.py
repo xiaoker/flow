@@ -67,6 +67,33 @@ def inputs(tmp_path, previous=None):
     return package, request, source, plan
 
 
+def test_checkpoint_capacity_failure_happens_before_any_authority_call(tmp_path, monkeypatch):
+    from trading_desk.pipeline_checkpoint_bundle import CheckpointBundleError
+    package, request, source, plan = inputs(tmp_path)
+    transport = Sequence(package, request)
+    def oversized(**kwargs):
+        raise CheckpointBundleError("bundle_transport_size_exceeded")
+    monkeypatch.setattr("trading_desk.pipeline_checkpoint_bundle.build_stage_bundle", oversized)
+    with pytest.raises(PipelineRunnerError, match="preparation_checkpoint_capacity_invalid"):
+        execute(tmp_path, package, request, source, plan, session=transport)
+    assert transport.calls == []
+
+
+def test_publication_payload_limit_is_checked_before_authority(tmp_path):
+    import hashlib
+    package, request, source, plan = inputs(tmp_path)
+    snapshot = json.loads(source.read_bytes())
+    snapshot["capacityRegressionPadding"] = "x" * 1500001
+    source.write_text(json.dumps(snapshot))
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    request["stageConfigs"]["build"]["snapshotSha256"] = digest
+    package.update(snapshotSha256=digest, requestSha256=canonical_sha256(request))
+    transport = Sequence(package, request)
+    with pytest.raises(PipelineRunnerError, match="preparation_candidate_payload_invalid"):
+        execute(tmp_path, package, request, source, plan, session=transport)
+    assert transport.calls == []
+
+
 class Reply:
     def __init__(self, code, body):
         self.status_code, self.body = code, body
@@ -207,9 +234,19 @@ def test_preparation_cost_stays_in_same_hold_across_owner_attempts(tmp_path):
         load_candidate_cost_policy(ROOT, profile=fresh, approved_recovery_plan=bad)
 
 
-@pytest.mark.parametrize("entry_mode", ["functions", "cli"])
-def test_real_worker_preparation_then_real_entry_keeps_unknown_hold(tmp_path, monkeypatch, capsys, entry_mode):
+@pytest.mark.parametrize("entry_mode,large_source", [("functions", False), ("cli", False), ("functions", True)])
+def test_real_worker_preparation_then_real_entry_keeps_unknown_hold(tmp_path, monkeypatch, capsys, entry_mode, large_source):
     package, request, source, plan = inputs(tmp_path)
+    if large_source:
+        import hashlib
+        snapshot = json.loads(source.read_bytes())
+        # Exceed checkpoint JSON/base64 capacity while staying below the
+        # separate 1.5 MB per-publication-artifact contract.
+        snapshot["capacityRegressionPadding"] = "official-input-" * (1048576 // len("official-input-"))
+        source.write_text(json.dumps(snapshot))
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        request["stageConfigs"]["build"]["snapshotSha256"] = digest
+        package.update(snapshotSha256=digest, requestSha256=canonical_sha256(request))
     process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/full-pipeline-server.mjs")],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**os.environ,
             "FLOW_FULL_FIXTURE_RUN_KEY": request["identity"]["runKey"], "FLOW_FULL_FIXTURE_TARGET": request["identity"]["targetDate"],
@@ -264,6 +301,10 @@ def test_real_worker_preparation_then_real_entry_keeps_unknown_hold(tmp_path, mo
             budget_journal=tmp_path / "budget.sqlite", cost_policy=None, environment=env,
             approved_recovery_plan=plan, now=NOW, allow_loopback_fixture=True)
         assert result["stageExecutionStatus"] == "COMPLETED" and result["status"] == "UNKNOWN"
+        if large_source:
+            bundles = list((tmp_path / "candidate" / "bundles").glob("*.json"))
+            assert bundles and any(json.loads(p.read_bytes())["schemaVersion"] == 2 for p in bundles)
+            assert all(p.stat().st_size <= 1048576 for p in bundles)
         stats = requests.get(origin + "/fixture/stats", headers=headers, timeout=5).json()
         assert stats["active"] == 0 and len(stats["budgetReservations"]) == 1
         assert next(iter(stats["budgetReservations"].values()))["status"] == "UNKNOWN"
