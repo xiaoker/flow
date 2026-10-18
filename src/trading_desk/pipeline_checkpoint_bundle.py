@@ -6,9 +6,12 @@ bytes by digest. Verification never interprets an existing file as completion.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
+import zlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 
@@ -18,6 +21,9 @@ MAX_FILES = 256
 MAX_FILE_BYTES = 8_000_000
 MAX_TOTAL_BYTES = 24_000_000
 MAX_BUNDLE_BYTES = 34_000_000
+# Existing client/server wire cap remains unchanged. Large v1 JSON bundles
+# use a versioned compressed envelope; expanded limits still apply separately.
+MAX_WIRE_BYTES = 1024 * 1024
 
 
 class CheckpointBundleError(ValueError):
@@ -76,11 +82,28 @@ def build_stage_bundle(*, workspace: Path, checkpoint: Mapping[str, Any], identi
                           "data": base64.b64encode(data).decode("ascii")})
     if not files:
         raise CheckpointBundleError("bundle_outputs_missing")
+    return encode_stage_bundle(files=files, checkpoint=checkpoint)
+
+
+def encode_stage_bundle(*, files: list[dict[str, Any]], checkpoint: Mapping[str, Any]) -> tuple[bytes, str]:
+    """Shared exact wire encoder for runtime export and pure entry preflight."""
     value = {"schemaVersion": 1, "checkpoint": dict(checkpoint), "files": sorted(files, key=lambda item: item["path"])}
     value["bundleManifestSha256"] = canonical_sha256(value)
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if len(data) > MAX_BUNDLE_BYTES:
         raise CheckpointBundleError("bundle_byte_limit")
+    if len(data) > MAX_WIRE_BYTES:
+        compressed = io.BytesIO()
+        # GzipFile fixes the OS byte as well as time/name, unlike older
+        # gzip.compress(mtime=0) implementations delegated to platform zlib.
+        with gzip.GzipFile(fileobj=compressed, mode="wb", filename="", mtime=0) as stream:
+            stream.write(data)
+        envelope = {"schemaVersion": 2, "encoding": "gzip-base64",
+                    "decodedBytes": len(data), "decodedSha256": hashlib.sha256(data).hexdigest(),
+                    "data": base64.b64encode(compressed.getvalue()).decode("ascii")}
+        data = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+        if len(data) > MAX_WIRE_BYTES:
+            raise CheckpointBundleError("bundle_transport_size_exceeded")
     return data, hashlib.sha256(data).hexdigest()
 
 
@@ -91,6 +114,17 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
         raise CheckpointBundleError("bundle_digest_or_size_mismatch")
     try:
         value = json.loads(data)
+        if isinstance(value, dict) and value.get("schemaVersion") == 2:
+            if (len(data) > MAX_WIRE_BYTES or set(value) != {"schemaVersion", "encoding", "decodedBytes", "decodedSha256", "data"}
+                    or value["encoding"] != "gzip-base64" or type(value["decodedBytes"]) is not int
+                    or not 0 < value["decodedBytes"] <= MAX_BUNDLE_BYTES):
+                raise CheckpointBundleError("invalid_compressed_bundle_schema")
+            compressed = base64.b64decode(value["data"], validate=True)
+            with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+                expanded = stream.read(min(value["decodedBytes"], MAX_BUNDLE_BYTES) + 1)
+            if len(expanded) != value["decodedBytes"] or hashlib.sha256(expanded).hexdigest() != value["decodedSha256"]:
+                raise CheckpointBundleError("compressed_bundle_digest_or_size_mismatch")
+            value = json.loads(expanded)
         if not isinstance(value, dict) or set(value) != {"schemaVersion", "checkpoint", "files", "bundleManifestSha256"} or value["schemaVersion"] != 1:
             raise CheckpointBundleError("invalid_bundle_schema")
         if value["bundleManifestSha256"] != canonical_sha256({k: v for k, v in value.items() if k != "bundleManifestSha256"}):
@@ -120,7 +154,7 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
         return checkpoint, result
     except CheckpointBundleError:
         raise
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError, OSError, EOFError, zlib.error) as exc:
         raise CheckpointBundleError("invalid_bundle_encoding") from exc
 
 
