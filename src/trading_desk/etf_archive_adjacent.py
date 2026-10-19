@@ -11,6 +11,22 @@ import requests
 
 MAX_BYTES = 2_000_000
 
+def archived_source_release_id(reference):
+    """Validate both pointer generations without rewriting their identity."""
+    day = reference.get("tradeDate")
+    if reference.get("sourceId") != "szse" or not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError("adjacent_archive_identity_invalid")
+    key = reference.get("objectKey")
+    prefix = f"market-data/normalized/szse/etf_scale/{day}/"
+    match = re.fullmatch(re.escape(prefix) + r"([a-f0-9]{64})/data\.csv", key) if isinstance(key, str) else None
+    if not match:
+        raise ValueError("adjacent_archive_identity_invalid")
+    revision = match.group(1)
+    release_id = f"etf_scale:szse:{day}:{revision[:16]}"
+    if reference.get("revisionId") not in (revision, release_id):
+        raise ValueError("adjacent_archive_identity_invalid")
+    return release_id
+
 def load_archived_frame(reference, root):
     required = {"sourceId", "tradeDate", "objectKey", "sha256", "revisionId", "normalizedPath"}
     if not isinstance(reference, dict) or set(reference) != required or reference["sourceId"] != "szse":
@@ -18,9 +34,7 @@ def load_archived_frame(reference, root):
     day = reference["tradeDate"]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not re.fullmatch(r"[a-f0-9]{64}", reference["sha256"]):
         raise ValueError("adjacent_archive_identity_invalid")
-    revision = reference["revisionId"]
-    if not re.fullmatch(r"[a-f0-9]{64}", revision) or reference["objectKey"] != f"market-data/normalized/szse/etf_scale/{day}/{revision}/data.csv":
-        raise ValueError("adjacent_archive_identity_invalid")
+    archived_source_release_id(reference)
     root = Path(root).resolve()
     path = root / reference["normalizedPath"]
     if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file() or path.stat().st_size > MAX_BYTES:

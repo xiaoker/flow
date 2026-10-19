@@ -12,8 +12,11 @@ def reference(tmp_path):
     return {"sourceId":"szse", "tradeDate":"2026-10-12", "objectKey":"market-data/normalized/szse/etf_scale/2026-10-12/" + "a"*64 + "/data.csv",
         "sha256":hashlib.sha256(data).hexdigest(), "revisionId":"a"*64, "normalizedPath":"previous.csv"}
 
-def test_archived_previous_restores_exact_daily_change(tmp_path):
+@pytest.mark.parametrize("pointer_identity", ["digest", "legacy_release"])
+def test_archived_previous_restores_exact_daily_change(tmp_path, pointer_identity):
     ref = reference(tmp_path)
+    if pointer_identity == "legacy_release":
+        ref["revisionId"] = "etf_scale:szse:2026-10-12:" + "a" * 16
     manifest = {"requested_dates":["2026-10-09","2026-10-12","2026-10-13"], "archivedEtfInputs":[ref]}
     older = archived_inputs(manifest, tmp_path, "2026-10-13")[0][1]
     current = older.copy(); current["trade_date"] = "2026-10-13"; current["shares"] = 38925835
@@ -41,12 +44,16 @@ def test_archived_previous_restores_exact_daily_change(tmp_path):
     terminal=_build_etf_terminal_data(pd.DataFrame(),pd.concat([older,current],ignore_index=True),manifest["requested_dates"])
     assert terminal["instruments"][0]["periods"]["1d"] == -0.01
 
-@pytest.mark.parametrize("fault", ["hash","date","market","duplicate","path","count"])
+@pytest.mark.parametrize("fault", ["hash","date","market","duplicate","path","count","legacy_date","legacy_source","legacy_digest","revision_digest"])
 def test_invalid_archived_reference_is_rejected(tmp_path, fault):
     ref = reference(tmp_path)
     if fault == "hash": ref["sha256"]="0"*64
     if fault == "date": ref["tradeDate"]="2026-10-09"
     if fault == "path": ref["normalizedPath"]="../previous.csv"
+    if fault == "legacy_date": ref["revisionId"]="etf_scale:szse:2026-10-09:"+"a"*16
+    if fault == "legacy_source": ref["revisionId"]="etf_scale:sse:2026-10-12:"+"a"*16
+    if fault == "legacy_digest": ref["revisionId"]="etf_scale:szse:2026-10-12:"+"b"*16
+    if fault == "revision_digest": ref["revisionId"]="b"*64
     if fault in {"market","duplicate"}:
         path = tmp_path / "previous.csv"
         data = path.read_bytes()
@@ -138,10 +145,13 @@ def test_deferred_source_reaches_existing_dashboard_pending_gate(tmp_path, monke
     assert not json.loads(manifest.read_text()).get("archivedEtfInputs")
 
 @pytest.mark.parametrize("status", [200,404,403,503])
-def test_one_indexed_read_and_missing_vs_control_failure(tmp_path, monkeypatch, status):
+@pytest.mark.parametrize("pointer_identity", ["digest", "legacy_release"])
+def test_one_indexed_read_and_missing_vs_control_failure(tmp_path, monkeypatch, status, pointer_identity):
     import json
     import trading_desk.etf_archive_adjacent as adjacent
     ref=reference(tmp_path)
+    if pointer_identity == "legacy_release":
+        ref["revisionId"] = "etf_scale:szse:2026-10-12:" + "a" * 16
     data=(tmp_path/"previous.csv").read_bytes()
     current=pd.read_csv(tmp_path/"previous.csv",dtype={"instrument_code":str})
     current["trade_date"]="2026-10-13"

@@ -1372,7 +1372,8 @@ test("archives full-source history with server-side hash verification", async ()
   assert.deepEqual(Buffer.from(objects.get(secondKey)), changedBytes);
 });
 
-test("archive-only history imports archive ETF scale without D1 etf writes", async () => {
+for (const pointerIdentity of ["digest", "legacy-release"]) {
+test(`archive-only history imports archive ETF scale without D1 etf writes (${pointerIdentity})`, async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(
     new Request("http://localhost/api/v1/overview"),
@@ -1497,19 +1498,30 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
       ],
     },
   };
-  const ref = {sourceId:"szse", tradeDate:"2026-07-13", revisionId:"a".repeat(64), sha256:createHash("sha256").update(archivedBytes).digest("hex"),
+  const ref = {sourceId:"szse", tradeDate:"2026-07-13",
+    revisionId:pointerIdentity === "digest" ? "a".repeat(64) : `etf_scale:szse:2026-07-13:${"a".repeat(16)}`,
+    sha256:createHash("sha256").update(archivedBytes).digest("hex"),
     objectKey:`market-data/normalized/szse/etf_scale/2026-07-13/${"a".repeat(64)}/data.csv`};
-  for (const fault of ["date", "key", "missing_receipt", "wrong_hash", "wrong_previous_shares", "absent_code"]) {
+  for (const fault of ["date", "key", "revision", "missing_receipt", "wrong_pointer_revision", "other_pointer_representation", "wrong_hash", "wrong_previous_shares", "absent_code"]) {
+    archivedReceipt = null;
     const candidate = structuredClone(bundle);
     candidate.history.officialEtfDailyChanges.archivedInputs = [structuredClone(ref)];
     if (fault === "date") candidate.history.officialEtfDailyChanges.archivedInputs[0].tradeDate = snapshot.asOf;
     if (fault === "key") candidate.history.officialEtfDailyChanges.archivedInputs[0].objectKey = "outside/data.csv";
-    if (["missing_receipt", "wrong_hash", "wrong_previous_shares", "absent_code"].includes(fault)) {
+    if (fault === "revision") candidate.history.officialEtfDailyChanges.archivedInputs[0].revisionId = `etf_scale:szse:2026-07-13:${"b".repeat(16)}`;
+    if (["missing_receipt", "wrong_pointer_revision", "other_pointer_representation", "wrong_hash", "wrong_previous_shares", "absent_code"].includes(fault)) {
       const ids = [releaseId, `etf_scale:szse:2026-07-13:${"a".repeat(16)}`].sort();
       candidate.history.officialEtfDailyChanges.sourceReleaseIds = ids;
       candidate.history.officialEtfDailyChanges.inputSha256 = createHash("sha256").update([
         snapshot.asOf, "2026-07-13", ids.join(","), "SSE,510300,2026-07-13,130,100,30,1,aligned",
       ].join("\n")).digest("hex");
+      if (fault === "wrong_pointer_revision") {
+        archivedReceipt={object_key:ref.objectKey,sha256:ref.sha256,revision_id:"b".repeat(64),row_count:1};
+      }
+      if (fault === "other_pointer_representation") {
+        archivedReceipt={object_key:ref.objectKey,sha256:ref.sha256,
+          revision_id:pointerIdentity === "digest" ? `etf_scale:szse:2026-07-13:${"a".repeat(16)}` : "a".repeat(64),row_count:1};
+      }
       if (fault === "wrong_hash") {
         candidate.history.officialEtfDailyChanges.archivedInputs[0].sha256="0".repeat(64);
         archivedReceipt={object_key:ref.objectKey,sha256:"0".repeat(64),revision_id:ref.revisionId,row_count:1};
@@ -1536,7 +1548,7 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
     }), {...env,DB:db,RAW_BUCKET:bucket,INGEST_API_KEY:"test-key",HISTORY_IMPORT_ARCHIVE_ONLY:"1"}, context);
     assert.equal(rejected.status, 422, fault);
     const rejection = await rejected.json();
-    assert.equal(rejection.error, ["wrong_previous_shares", "absent_code"].includes(fault) ? "archived_etf_previous_shares_mismatch" : fault === "wrong_hash" ? "archived_etf_hash_mismatch" : fault === "missing_receipt" ? "archived_etf_receipt_mismatch" : "invalid_history_bundle");
+    assert.equal(rejection.error, ["wrong_previous_shares", "absent_code"].includes(fault) ? "archived_etf_previous_shares_mismatch" : fault === "wrong_hash" ? "archived_etf_hash_mismatch" : ["missing_receipt", "wrong_pointer_revision", "other_pointer_representation"].includes(fault) ? "archived_etf_receipt_mismatch" : "invalid_history_bundle");
     assert.equal(statements.length, 0, "invalid archived input must stop before writes");
     assert.equal(objects.size, 0);
   }
@@ -1598,6 +1610,8 @@ test("archive-only history imports archive ETF scale without D1 etf writes", asy
     values.some((value) => typeof value === "string" && value.includes('"archiveVerified":true')),
   ));
 });
+
+}
 
 test("archive-only history accepts a pending snapshot without an ETF delta contract", async () => {
   const worker = await loadWorker();
