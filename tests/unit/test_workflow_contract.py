@@ -14,6 +14,20 @@ PCF_WORKFLOW = WORKFLOWS / "pcf-v2-capture.yml"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 
 
+def test_source_checkpoints_precede_downstream_computation_and_finalize_after_qa():
+    workflow = COLLECT_WORKFLOW.read_text()
+    early = workflow.index("- name: Preserve collected source checkpoints before downstream computation")
+    assert workflow.index("- name: Collect and validate official data") < early
+    assert early < workflow.index("- name: Run opt-in PCF shadow parity")
+    assert early < workflow.index("python -m trading_desk.etf_archive_adjacent")
+    assert "--sources-only" in workflow[early:early + 900] and "--checkpoint-only" in workflow[early:early + 900]
+    final = workflow.index("- name: Finalize previously archived official sources after computation")
+    assert workflow.index("python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json") < final
+    assert final < workflow.index("- name: Materialize final dashboard after ETF state import")
+    assert "--finalize-only" in workflow[final:final + 900]
+    assert "--checkpoint-bundle source-checkpoint-bundle.json" in workflow[final:final + 900]
+
+
 def test_market_data_split_has_watchdog_and_cloudflare_dispatch() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     watchdog = WATCHDOG_WORKFLOW.read_text(encoding="utf-8")

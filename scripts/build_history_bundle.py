@@ -5,12 +5,14 @@ import json
 import os
 from pathlib import Path
 
-from trading_desk.history_bundle import build_history_bundle_from_files
+from trading_desk.history_bundle import build_history_bundle_from_files, build_source_history_bundle_from_files
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, default=Path("dashboard-snapshot.json"))
+    parser.add_argument("--sources-only", action="store_true",
+                        help="Retain sources without computing or publishing a snapshot")
     parser.add_argument(
         "--manifest", type=Path, default=Path("reports/phase0/latest-manifest.json")
     )
@@ -22,8 +24,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     run_key = args.run_key or os.environ.get("FLOW_PIPELINE_RUN_KEY") or None
-    bundle = build_history_bundle_from_files(
-        snapshot_path=args.snapshot,
+    builder = build_source_history_bundle_from_files if args.sources_only else build_history_bundle_from_files
+    bundle = builder(
+        **({} if args.sources_only else {"snapshot_path": args.snapshot}),
         manifest_path=args.manifest,
         workspace_root=Path.cwd(),
         run_key=run_key,
