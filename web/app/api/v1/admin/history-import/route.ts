@@ -314,6 +314,15 @@ function officialEtfDailyChangesFingerprintInput(
   return lines.join("\n");
 }
 
+function archivedSourceReleaseId(day: string, objectKey: unknown, revisionId: unknown): string | null {
+  const prefix = `market-data/normalized/szse/etf_scale/${day}/`;
+  if (typeof objectKey !== "string" || !objectKey.startsWith(prefix)) return null;
+  const match = /^([a-f0-9]{64})\/data\.csv$/.exec(objectKey.slice(prefix.length));
+  if (!match) return null;
+  const releaseId = `etf_scale:szse:${day}:${match[1].slice(0, 16)}`;
+  return revisionId === match[1] || revisionId === releaseId ? releaseId : null;
+}
+
 function isOfficialEtfDailyChanges(
   value: unknown,
   history: HistoryBundle["history"],
@@ -325,8 +334,7 @@ function isOfficialEtfDailyChanges(
       if (!isRecord(ref) || Object.keys(ref).sort().join(",") !== "objectKey,revisionId,sha256,sourceId,tradeDate"
         || ref.sourceId !== "szse" || typeof ref.tradeDate !== "string" || !ISO_DATE.test(ref.tradeDate)
         || ref.tradeDate !== value.expectedPreviousDate || typeof ref.sha256 !== "string" || !SHA256.test(ref.sha256)
-        || typeof ref.revisionId !== "string" || !SHA256.test(ref.revisionId)
-        || ref.objectKey !== `market-data/normalized/szse/etf_scale/${ref.tradeDate}/${ref.revisionId}/data.csv`) return false;
+        || archivedSourceReleaseId(ref.tradeDate, ref.objectKey, ref.revisionId) === null) return false;
     }
   }
   if (
@@ -355,7 +363,7 @@ function isOfficialEtfDailyChanges(
   const availableReleaseIds = new Set([
     ...history.artifacts.map((artifact) => artifact.releaseId),
     ...(history.expectedArtifacts ?? []),
-    ...((value.archivedInputs ?? []) as Array<{tradeDate: string; revisionId: string}>).map((ref) => `etf_scale:szse:${ref.tradeDate}:${ref.revisionId.slice(0, 16)}`),
+    ...((value.archivedInputs ?? []) as Array<{tradeDate: string; objectKey: string; revisionId: string}>).map((ref) => archivedSourceReleaseId(ref.tradeDate, ref.objectKey, ref.revisionId)!),
   ]);
   if (value.sourceReleaseIds.some((releaseId) => !availableReleaseIds.has(releaseId))) {
     return false;

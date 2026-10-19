@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from .etf_daily_changes import build_official_etf_daily_changes
+from .etf_archive_adjacent import archived_source_release_id
 from .etf_facts import build_canonical_etf_daily_fact
 from .models import FetchArtifact
 
@@ -261,7 +262,7 @@ def _build_official_etf_daily_changes_from_artifacts(
 
     for ref, frame in archived or []:
         by_market["szse"].append(frame)
-        release_ids.append(f"etf_scale:szse:{ref['tradeDate']}:{ref['revisionId'][:16]}")
+        release_ids.append(archived_source_release_id(ref))
     sse = pd.concat(by_market["sse"], ignore_index=True, sort=False) if by_market["sse"] else pd.DataFrame()
     szse = pd.concat(by_market["szse"], ignore_index=True, sort=False) if by_market["szse"] else pd.DataFrame()
     if sse.empty and szse.empty:
