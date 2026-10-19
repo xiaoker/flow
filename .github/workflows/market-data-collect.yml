@@ -885,6 +885,17 @@ jobs:
           echo "phase0_gate=$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
           echo "pending_domains=$(jq -c '.pending_domains // []' reports/phase0/latest-quality-summary.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Preserve collected source checkpoints before downstream computation
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python scripts/build_history_bundle.py --sources-only --output source-checkpoint-bundle.json --run-key "$INPUT_RUN_KEY"
+          python scripts/publish_history_artifacts.py --checkpoint-only \
+            --bundle source-checkpoint-bundle.json \
+            --url "https://flow.xiaoker.com/api/v1/admin/history-import"
+
       - name: Run opt-in PCF shadow parity (never published)
         id: pcf-shadow
         # Recovery runs consume only the approved PCF evidence in their plan.
@@ -1021,13 +1032,15 @@ jobs:
       - name: Build full-source history archive bundle
         run: python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json --output history-bundle.json --run-key "$INPUT_RUN_KEY"
 
-      - name: Archive all official raw and normalized sources
+      - name: Finalize previously archived official sources after computation
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           python scripts/publish_history_artifacts.py \
+            --finalize-only \
+            --checkpoint-bundle source-checkpoint-bundle.json \
             --bundle history-bundle.json \
             --url "https://flow.xiaoker.com/api/v1/admin/history-import"
 

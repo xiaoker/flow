@@ -61,7 +61,7 @@ def test_default_manifest_does_not_read_archive(tmp_path):
 def test_workflow_hydrates_before_both_producers():
     root=Path(__file__).resolve().parents[2]
     text=(root/".github/workflows/market-data-collect.yml").read_text()
-    assert text.index("python -m trading_desk.etf_archive_adjacent") < text.index("python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json") < text.index("python scripts/build_history_bundle.py")
+    assert text.index("python -m trading_desk.etf_archive_adjacent") < text.index("python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json") < text.index("python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json")
 
 def test_pending_source_does_not_hydrate_or_change_manifest(tmp_path, monkeypatch):
     import json

@@ -7,12 +7,98 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_desk.history_bundle import (
     HISTORY_RETENTION_DAYS,
     build_history_bundle_from_files,
     serialize_history_artifact,
 )
+
+
+def test_sources_only_bundle_survives_missing_snapshot_and_adjacent_failure(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from trading_desk.history_bundle import build_source_history_bundle_from_files
+    test_history_bundle_preserves_raw_and_normalized_hashes(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    value = json.loads(manifest.read_bytes()); value["requested_dates"] = ["2026-07-21"]
+    manifest.write_text(json.dumps(value))
+    for path in (tmp_path / "data/normalized").rglob("*.csv"):
+        frame = pd.read_csv(path)
+        frame["source_id"] = "hkex"; frame["observed_at"] = "2026-07-22T09:15:20+08:00"
+        if "hkex_summary" in str(path):
+            frame["currency"] = "RMB"; frame["total_turnover"] = 100; frame["etf_turnover"] = 10
+        frame.to_csv(path, index=False)
+    (tmp_path / "snapshot.json").unlink()
+    def forbidden(*args, **kwargs):
+        pytest.fail("source preservation must not calculate adjacent changes")
+    monkeypatch.setattr("trading_desk.history_bundle._build_official_etf_daily_changes_from_artifacts", forbidden)
+    bundle = build_source_history_bundle_from_files(manifest_path=manifest, workspace_root=tmp_path)
+    assert bundle["history"]["finalize"] is False
+    assert "snapshot" not in bundle["history"] and "officialEtfDailyChanges" not in bundle["history"]
+    assert bundle["history"]["asOf"] == "2026-07-21" and len(bundle["history"]["artifacts"]) == 1
+    root = Path(__file__).resolve().parents[2]; output = tmp_path / "source-bundle.json"
+    child = subprocess.run([sys.executable, str(root / "scripts/build_history_bundle.py"), "--sources-only",
+        "--manifest", str(manifest), "--output", str(output)], cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(root / "src")}, capture_output=True, text=True)
+    assert child.returncode == 0, child.stderr
+    assert json.loads(output.read_bytes()) == bundle
+    # Built production endpoint with local storage bindings, not production proof.
+    endpoint_check = r'''
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const {default: worker} = await import(pathToFileURL(process.argv[1]).href);
+const bundle = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const objects = new Map(), statements = [];
+const db = {prepare(sql) {return {values: [], bind(...values) {this.values=values; return this;},
+  async run() {statements.push(sql); return {success:true};},
+  async all() {statements.push(sql); return {results:[]};},
+  async first() {statements.push(sql); return null;}};}};
+const bucket = {async put(key,value) {objects.set(key,value); return {};},
+  async head(key) {return objects.has(key) ? {customMetadata:{}} : null;},
+  async get(key) {if (!objects.has(key)) return null; const value=objects.get(key);
+    return {body:value, async text(){return Buffer.from(value).toString();},
+      async json(){return JSON.parse(Buffer.from(value).toString());}};}};
+const env = {DB:db, RAW_BUCKET:bucket, INGEST_API_KEY:"local-fixture",
+  ASSETS:{fetch:async()=>new Response("not found",{status:404})}};
+const ctx = {waitUntil(){},passThroughOnException(){}};
+const response = await worker.fetch(new Request("http://localhost/api/v1/admin/history-import", {
+  method:"POST", headers:{Authorization:"Bearer local-fixture","Content-Type":"application/json"},
+  body:JSON.stringify(bundle)}),env,ctx);
+const receipt = await response.json();
+assert.equal(response.status,200,JSON.stringify(receipt));
+assert.equal(receipt.status,"chunk_archived");
+assert.equal(receipt.asOf,bundle.history.asOf);
+assert.ok([...objects.keys()].some(key=>key.includes("/raw/hkex/")));
+assert.ok([...objects.keys()].some(key=>key.includes("/normalized/hkex/")));
+assert.ok(![...objects.keys()].some(key=>key.includes("/snapshots/") || key.includes("active")));
+assert.ok(!statements.some(sql=>sql.includes("INSERT INTO daily_snapshot")));
+'''
+    endpoint = subprocess.run(["node", "--input-type=module", "-e", endpoint_check,
+        str(root / "web/dist/server/index.js"), str(output)], cwd=root, capture_output=True, text=True)
+    assert endpoint.returncode == 0, endpoint.stderr
+    value["requested_dates"] = ["2026-02-30"]; manifest.write_text(json.dumps(value))
+    with pytest.raises(ValueError):
+        build_source_history_bundle_from_files(manifest_path=manifest, workspace_root=tmp_path)
+
+
+def test_split_pcf_builds_have_stable_wire_identity_across_time(tmp_path, monkeypatch):
+    from trading_desk.history_bundle import build_source_history_bundle_from_files
+    test_history_bundle_compresses_wide_pcf_in_transit(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes()); manifest["requested_dates"] = ["2026-07-21"]
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr("time.time", lambda: 1000)
+    checkpoint = build_source_history_bundle_from_files(manifest_path=manifest_path, workspace_root=tmp_path)
+    monkeypatch.setattr("time.time", lambda: 2000)
+    final = build_history_bundle_from_files(snapshot_path=tmp_path / "snapshot.json",
+        manifest_path=manifest_path, workspace_root=tmp_path)
+    assert checkpoint["history"]["artifacts"] == final["history"]["artifacts"]
+    wire = base64.b64decode(final["history"]["artifacts"][0]["normalized"][0]["contentBase64"])
+    assert wire[4:8] == b"\0\0\0\0"
 
 
 def test_history_bundle_preserves_raw_and_normalized_hashes(tmp_path: Path) -> None:

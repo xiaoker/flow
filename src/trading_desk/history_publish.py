@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from typing import Any
 
 import requests
@@ -95,6 +96,9 @@ def publish_history_bundle(
     access_client_secret: str,
     session: Any | None = None,
     max_attempts: int = 8,
+    checkpoint_only: bool = False,
+    finalize_only: bool = False,
+    checkpoint_bundle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Upload one history artifact at a time and publish only after all pass.
 
@@ -104,9 +108,39 @@ def publish_history_bundle(
     artifact asks the Worker to verify the expected set and atomically publish
     the date.
     """
+    if checkpoint_only and finalize_only:
+        raise ValueError("checkpoint_only and finalize_only are mutually exclusive")
     if not isinstance(max_attempts, int) or max_attempts <= 0 or max_attempts > 8:
         raise ValueError("max_attempts must be between 1 and 8")
     history = bundle.get("history")
+    if (checkpoint_only or finalize_only) and not isinstance(history, dict):
+        raise ValueError("split history operation requires a real history bundle")
+    if finalize_only and not isinstance(history.get("snapshot"), dict):
+        raise ValueError("history finalization requires a snapshot")
+    if finalize_only:
+        checkpoint = checkpoint_bundle.get("history") if isinstance(checkpoint_bundle, dict) else None
+        if not isinstance(checkpoint, dict) or checkpoint.get("finalize") is not False:
+            raise ValueError("source checkpoint bundle invalid")
+        for field in ("runId", "runKey", "artifacts"):
+            if checkpoint.get(field) != history.get(field):
+                raise ValueError(f"source checkpoint identity mismatch: {field}")
+        if checkpoint.get("asOf") != history.get("asOf"):
+            # Existing completeness receipts are keyed by asOf. A pending
+            # dashboard retains an older complete day: replay identical facts
+            # under that final envelope, without relabelling any source dates.
+            snapshot = history["snapshot"]
+            publication = snapshot.get("publication")
+            source_anchor, final_anchor = checkpoint.get("asOf"), history.get("asOf")
+            try:
+                valid_dates = all(isinstance(value, str) and date.fromisoformat(value).isoformat() == value
+                                  for value in (source_anchor, final_anchor))
+            except ValueError:
+                valid_dates = False
+            if not (valid_dates and final_anchor < source_anchor and snapshot.get("asOf") == final_anchor
+                    and isinstance(publication, dict) and publication.get("status") == "pending"
+                    and publication.get("targetAsOf") == source_anchor):
+                raise ValueError("source checkpoint identity mismatch: asOf")
+            finalize_only = False
     if not isinstance(history, dict):
         # Keep the lower-level helper backwards compatible for callers/tests
         # that only exercise the transport retry contract with a placeholder
@@ -153,8 +187,9 @@ def publish_history_bundle(
         # avoids repeating the same ETF universe in each resumable request.
         if key not in {"artifacts", "snapshot", "officialEtfDailyChanges"}
     }
-    for artifact in artifacts:
-        _post_chunk(
+    last_receipt = None
+    for artifact in ([] if finalize_only else artifacts):
+        last_receipt = _post_chunk(
             url=url,
             payload={
                 "version": bundle.get("version", 1),
@@ -170,6 +205,14 @@ def publish_history_bundle(
             max_attempts=max_attempts,
             session=session,
         )
+
+        if checkpoint_only and last_receipt.get("status") != "chunk_archived":
+            raise RuntimeError("source archive checkpoint receipt invalid")
+
+    if checkpoint_only:
+        if not isinstance(last_receipt, dict) or last_receipt.get("status") != "chunk_archived":
+            raise RuntimeError("source archive checkpoint receipt invalid")
+        return last_receipt
 
     # The last artifact is intentionally idempotent.  It lets the server use
     # one stable endpoint to perform the completeness check and publication.

@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -76,7 +77,7 @@ def _normalized_files(
         # the Worker 12 MB body cap while the archived normalized R2 object
         # remains the ordinary, human-readable CSV after server-side decode.
         if dataset == "etf_pcf" and content:
-            encoded_content = gzip.compress(content, compresslevel=6)
+            encoded_content = gzip.compress(content, compresslevel=6, mtime=0)
             content_encoding = "gzip"
         item = {
             "name": name,
@@ -298,6 +299,7 @@ def build_history_bundle(
     workspace_root: Path,
     run_key: str | None = None,
     archived: list[tuple[dict, pd.DataFrame]] | None = None,
+    sources_only: bool = False,
 ) -> dict[str, Any]:
     artifact_list = list(artifacts)
     serialized = [
@@ -319,6 +321,11 @@ def build_history_bundle(
         if not PIPELINE_RUN_KEY.fullmatch(run_key):
             raise ValueError(f"Invalid pipeline run key: {run_key!r}")
         history["runKey"] = run_key
+    if sources_only:
+        # Non-final source retention has no snapshot or derived calculations.
+        history.pop("snapshot")
+        history["finalize"] = False
+        return {"version": 1, "history": history}
     as_of = str(snapshot.get("asOf") or "")
     if as_of:
         adjacent = _build_official_etf_daily_changes_from_artifacts(
@@ -337,6 +344,27 @@ def build_history_bundle(
         "version": 1,
         "history": history,
     }
+
+
+def build_source_history_bundle_from_files(
+    *, manifest_path: Path, workspace_root: Path, run_key: str | None = None
+) -> dict[str, Any]:
+    """Retain exact fetched inputs; asOf is a requested-range anchor, not a release."""
+    manifest = _read_json(manifest_path)
+    dates = manifest.get("requested_dates")
+    if (not isinstance(dates, list) or not dates
+            or any(not isinstance(value, str) for value in dates)
+            or dates != sorted(set(dates))):
+        raise ValueError("source_archive_requested_dates_invalid")
+    for value in dates:
+        if date.fromisoformat(value).isoformat() != value:
+            raise ValueError("source_archive_requested_dates_invalid")
+    return build_history_bundle(
+        snapshot={"asOf": dates[-1]}, artifacts=manifest.get("artifacts") or [],
+        run_id=str(manifest.get("run_id") or ""), started_at=str(manifest.get("started_at") or ""),
+        finished_at=str(manifest.get("finished_at") or ""), workspace_root=workspace_root,
+        run_key=run_key, sources_only=True,
+    )
 
 
 def build_history_bundle_from_files(
