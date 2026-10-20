@@ -88,15 +88,20 @@ def _paths(value: str | None) -> list[str]:
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(
-        path,
-        dtype={
-            "instrument_code": str,
-            "etf_code": str,
-            "stock_code": str,
-            "listing_market": str,
-        },
-    )
+    try:
+        return pd.read_csv(
+            path,
+            dtype={
+                "instrument_code": str,
+                "etf_code": str,
+                "stock_code": str,
+                "listing_market": str,
+            },
+        )
+    except pd.errors.EmptyDataError:
+        # Legacy closed-day partitions contain no header. Retain zero rows;
+        # required coverage/schema checks still fail unless raw proof allows it.
+        return pd.DataFrame()
 
 
 def _number(value: Any, multiplier: float = 1.0) -> float | None:
@@ -706,32 +711,31 @@ def validate_raw_to_normalized_mapping(
             elif (source_id, dataset) == ("hkex", "stock_connect_daily"):
                 expected_summary, expected_top = _expected_hkex(content, requested_date)
                 actual_frames = [_read_csv(path) for path in normalized_paths]
-                actual_summary = next(frame for frame in actual_frames if "rank" not in frame.columns)
-                actual_top = next(frame for frame in actual_frames if "rank" in frame.columns)
-                summary_result = _compare_frames(
-                    expected_summary,
-                    actual_summary,
-                    keys=["trade_date", "market", "direction"],
-                    text_columns=["currency"],
-                    numeric_columns=["total_turnover", "buy_turnover", "sell_turnover", "net_buy", "total_trade_count", "etf_turnover"],
-                )
-                top_result = _compare_frames(
-                    expected_top,
-                    actual_top,
-                    keys=["trade_date", "market", "direction", "rank"],
-                    text_columns=[
-                        "instrument_code",
-                        "instrument_name",
-                        "instrument_name_raw",
-                        "instrument_name_source",
-                    ],
-                    numeric_columns=["buy_turnover", "sell_turnover", "total_turnover"],
-                )
-                result = {
-                    "matched": summary_result["matched"] and top_result["matched"],
-                    "summary": summary_result,
-                    "top10": top_result,
-                }
+                from .adapters.official import verified_hkex_closures
+                closed = verified_hkex_closures(
+                    {"requested_dates": [requested_date], "artifacts": [artifact]}, workspace_root)
+                if requested_date in closed:
+                    result = {"matched": len(actual_frames) == 2 and all(frame.empty for frame in actual_frames),
+                              "official_closed": True, "raw_sha256": closed[requested_date]}
+                else:
+                    actual_summary = next(frame for frame in actual_frames if "rank" not in frame.columns)
+                    actual_top = next(frame for frame in actual_frames if "rank" in frame.columns)
+                    summary_result = _compare_frames(
+                        expected_summary,
+                        actual_summary,
+                        keys=["trade_date", "market", "direction"],
+                        text_columns=["currency"],
+                        numeric_columns=["total_turnover", "buy_turnover", "sell_turnover", "net_buy", "total_trade_count", "etf_turnover"],
+                    )
+                    top_result = _compare_frames(
+                        expected_top,
+                        actual_top,
+                        keys=["trade_date", "market", "direction", "rank"],
+                        text_columns=["instrument_code", "instrument_name", "instrument_name_raw", "instrument_name_source"],
+                        numeric_columns=["buy_turnover", "sell_turnover", "total_turnover"],
+                    )
+                    result = {"matched": summary_result["matched"] and top_result["matched"],
+                              "summary": summary_result, "top10": top_result}
             else:
                 result = {"matched": False, "error": "unsupported source dataset"}
         except (OSError, ValueError, KeyError, IndexError, StopIteration, TypeError) as exc:
@@ -933,10 +937,13 @@ def _load_combined_frames(
 
 
 def validate_combined_data(
-    manifest: dict[str, Any], frames: dict[str, pd.DataFrame]
+    manifest: dict[str, Any], frames: dict[str, pd.DataFrame], *,
+    connect_closed_dates: dict[str, str] | None = None,
 ) -> list[QualityFinding]:
     findings: list[QualityFinding] = []
     requested_dates = sorted(str(value) for value in manifest.get("requested_dates", []))
+    closed = set(connect_closed_dates or {}) & set(requested_dates)
+    all_connect_closed = bool(requested_dates) and set(requested_dates).issubset(closed)
 
     artifact_counts: dict[tuple[str, str], int] = {}
     for artifact in manifest.get("artifacts") or []:
@@ -950,7 +957,7 @@ def validate_combined_data(
             _finding(
                 "lineage.combined_row_count",
                 ".".join(source_key),
-                expected == observed and expected > 0,
+                expected == observed and (expected > 0 or (source_key == ("hkex", "stock_connect_daily") and all_connect_closed)),
                 message="合并明细未丢行" if expected == observed and expected > 0 else "合并明细行数与单源解析不一致",
                 evidence={
                     "expected_rows": expected,
@@ -990,6 +997,10 @@ def validate_combined_data(
         expected_context["bse_margin"] = ("bse", {"BSE"})
     for name, (source_id, markets) in expected_context.items():
         frame = frames.get(name, pd.DataFrame())
+        if name in {"stock_connect_summary", "stock_connect_top"} and all_connect_closed and frame.empty:
+            findings.append(_finding("mapping.official_closed", name, True,
+                message="官方原件确认四通道休市；无数值行", evidence={"closed_dates": sorted(closed)}))
+            continue
         missing_columns = sorted(set(required_columns[name]) - set(frame.columns))
         null_rows = 0 if missing_columns else int(frame[required_values[name]].isna().any(axis=1).sum())
         invalid_context = len(frame)
@@ -1075,7 +1086,8 @@ def validate_combined_data(
             )
             if channels != expected_channels or not currency_ok:
                 invalid_channel_dates[str(trade_date)] = [f"{market}:{direction}" for market, direction in sorted(channels)]
-    channels_ok = set(connect.get("trade_date", pd.Series(dtype=str)).astype(str).unique()) == set(requested_dates) and not invalid_channel_dates
+    observed_connect_dates = set(connect.get("trade_date", pd.Series(dtype=str)).astype(str).unique())
+    channels_ok = (observed_connect_dates | closed) == set(requested_dates) and not invalid_channel_dates and not (observed_connect_dates & closed)
     findings.append(
         _finding(
             "mapping.connect_channels",
@@ -1536,7 +1548,12 @@ def _with_archived_etf_inputs(manifest, frames, workspace_root, as_of):
     """
     from .etf_archive_adjacent import archived_inputs
     derived = dict(frames)
-    for _reference, frame in archived_inputs(manifest, workspace_root, as_of):
+    # Identity is pinned to the original collection window even when the
+    # selected snapshot is an older complete-day fallback. Projection to the
+    # selected date never changes that reference or pulls future facts back.
+    anchor = max(manifest.get("requested_dates") or [as_of])
+    for _reference, frame in archived_inputs(manifest, workspace_root, anchor):
+        frame = frame[frame["trade_date"].astype(str).le(as_of)]
         derived["szse_etf"] = pd.concat([derived.get("szse_etf", pd.DataFrame()), frame], ignore_index=True, sort=False)
     return derived
 
@@ -1626,14 +1643,25 @@ def validate_snapshot_values(
         margin = pd.concat(margin_frames, ignore_index=True)
         margin_expected = round(float(margin[margin["trade_date"].astype(str).eq(as_of)]["financing_balance_yuan"].sum()) / 1_000_000_000_000, 4)
         connect = frames["stock_connect_summary"]
+        if connect.empty:
+            connect = connect.reindex(columns=["trade_date", "direction", "net_buy", "total_turnover"])
         current = connect[connect["trade_date"].astype(str).eq(as_of)]
-        south_expected = round(float(current[current["direction"].eq("southbound")]["net_buy"].sum()) / 100_000_000, 2)
-        north_expected = round(float(current[current["direction"].eq("northbound")]["total_turnover"].sum()) / 100_000_000, 2)
+        from .adapters.official import verified_hkex_closures
+        connect_closed = as_of in verified_hkex_closures(manifest, workspace_root)
+        south_expected = None if connect_closed else round(float(current[current["direction"].eq("southbound")]["net_buy"].sum()) / 100_000_000, 2)
+        north_expected = None if connect_closed else round(float(current[current["direction"].eq("northbound")]["total_turnover"].sum()) / 100_000_000, 2)
+        def connect_metric(metric_id):
+            if connect_closed:
+                metric = next(item for item in snapshot.get("metrics", []) if item.get("id") == metric_id)
+                if metric.get("value") != "—" or not current.empty:
+                    raise ValueError("closed_connect_has_numeric_value")
+                return None
+            return _metric_value(snapshot, metric_id)
         actual = {
             "etf": _metric_value(snapshot, "etf"),
-            "southbound": _metric_value(snapshot, "southbound"),
+            "southbound": connect_metric("southbound"),
             "margin": _metric_value(snapshot, "margin"),
-            "northbound": _metric_value(snapshot, "northbound"),
+            "northbound": connect_metric("northbound"),
         }
         expected = {
             "etf": etf_expected,
@@ -1642,7 +1670,9 @@ def validate_snapshot_values(
             "northbound": north_expected,
         }
         tolerances = {"etf": 0.01, "southbound": 0.01, "margin": 0.0001, "northbound": 0.01}
-        headline_ok = all(abs(actual[key] - expected[key]) <= tolerances[key] for key in expected)
+        headline_ok = all(actual[key] is None if expected[key] is None else
+                          actual[key] is not None and abs(actual[key] - expected[key]) <= tolerances[key]
+                          for key in expected)
         evidence = {
             "expected": expected,
             "actual": actual,
@@ -1710,7 +1740,9 @@ def run_release_qa(
             remediation="不发布缺失任一数据域的快照。",
         )
     )
-    findings.extend(validate_combined_data(manifest, frames))
+    from .adapters.official import verified_hkex_closures
+    findings.extend(validate_combined_data(manifest, frames,
+        connect_closed_dates=verified_hkex_closures(manifest, workspace_root)))
     if not missing:
         findings.extend(
             validate_snapshot_values(

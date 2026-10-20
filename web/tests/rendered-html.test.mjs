@@ -1773,6 +1773,61 @@ test("archive-only history accepts a pending snapshot without an ETF delta contr
   assert.ok([...objects.keys()].some((key) => key.includes("history-pending-manifests/")));
 });
 
+for (const fault of [null, "stale", "missing_channel", "boolean", "bad_hash", "numeric_conflict"]) {
+  test(`history importer proves closed HKEX from raw bytes, not empty rows (${fault ?? "valid"})`, async () => {
+    const worker = await loadWorker();
+    const day = "2026-07-16";
+    const rows = ["SSE Northbound", "SZSE Northbound", "SSE Southbound", "SZSE Southbound"]
+      .map((market) => ({ market, date: day, tradingDay: 0 }));
+    if (fault === "stale") rows[0].date = "2026-07-15";
+    if (fault === "missing_channel") rows.pop();
+    if (fault === "boolean") rows[0].tradingDay = false;
+    const raw = Buffer.from(`\uFEFFtabData = ${JSON.stringify(rows)};`);
+    const sha = createHash("sha256").update(raw).digest("hex");
+    const digest = fault === "bad_hash" ? "0".repeat(64) : sha;
+    const releaseId = `stock_connect_daily:hkex:${day}:${digest.slice(0, 16)}`;
+    const artifact = {
+      releaseId, sourceId: "hkex", dataset: "stock_connect_daily", requestedDate: day,
+      tradeDates: [], observedAt: "2026-07-17T01:00:00Z", sourceUrl: "https://www.hkex.com.hk/chi/csm/DailyStat/data_tab_daily_20260716c.js",
+      dateBasis: "source_published", sha256: digest, contentType: "application/javascript", extension: "js",
+      rawContentBase64: raw.toString("base64"), metadata: { sha256: digest, status_code: 200 },
+      normalized: ["summary", "top"].map((name) => {
+        const content = Buffer.from("trade_date,market,direction\n");
+        return { name, format: "csv", rowCount: 0, tradeDates: [],
+          sha256: createHash("sha256").update(content).digest("hex"), contentBase64: content.toString("base64") };
+      }),
+    };
+    if (fault === "numeric_conflict") artifact.normalized[0].rowCount = 1;
+    const objects = new Map();
+    const statements = [];
+    const db = { prepare(sql) { return { bind() { return this; },
+      async run() { statements.push(sql); return { success: true }; }, async all() { return { results: [] }; },
+      async first() { return null; } }; } };
+    const bucket = { async head(key) { return objects.has(key) ? { customMetadata: {} } : null; },
+      async put(key, value) { objects.set(key, value); return {}; } };
+    const response = await worker.fetch(new Request("http://localhost/api/v1/admin/history-import", {
+      method: "POST", headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      body: JSON.stringify({ version: 1, history: { runId: "closed-fixture", asOf: day,
+        startedAt: "2026-07-17T01:00:00Z", finishedAt: "2026-07-17T01:01:00Z", retentionDays: 0,
+        finalize: false, expectedArtifacts: [releaseId], artifacts: [artifact] } }),
+    }), { ...env, DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key", HISTORY_IMPORT_ARCHIVE_ONLY: "1" }, context);
+    const states = [...objects.entries()].filter(([key]) => key.startsWith("market-data/collection/"))
+      .map(([, value]) => JSON.parse(value));
+    assert.equal(states.length, 1);
+    if (fault === "bad_hash" || fault === "numeric_conflict") {
+      assert.notEqual(response.status, 200);
+      assert.equal(states[0].status, "FAILED");
+    } else {
+      assert.equal(response.status, 200);
+      assert.equal(states[0].status, fault ? "PENDING" : "VERIFIED");
+      assert.equal(states[0].availability, fault ? undefined : "CLOSED");
+      assert.equal(states[0].closureRawSha256, fault ? undefined : sha);
+    }
+    assert.equal(statements.some((sql) => sql.includes("INSERT INTO connect_daily")), false);
+    assert.equal(statements.some((sql) => sql.includes("active_release")), false);
+  });
+}
+
 test("archives verified ETF evidence before publishing a snapshot", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(

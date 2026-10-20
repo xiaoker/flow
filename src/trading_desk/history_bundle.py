@@ -301,6 +301,7 @@ def build_history_bundle(
     run_key: str | None = None,
     archived: list[tuple[dict, pd.DataFrame]] | None = None,
     sources_only: bool = False,
+    derive_daily_changes: bool = True,
 ) -> dict[str, Any]:
     artifact_list = list(artifacts)
     serialized = [
@@ -328,7 +329,7 @@ def build_history_bundle(
         history["finalize"] = False
         return {"version": 1, "history": history}
     as_of = str(snapshot.get("asOf") or "")
-    if as_of:
+    if as_of and derive_daily_changes:
         adjacent = _build_official_etf_daily_changes_from_artifacts(
             artifacts=artifact_list,
             serialized=serialized,
@@ -374,6 +375,16 @@ def build_history_bundle_from_files(
     snapshot = _read_json(snapshot_path)
     manifest = _read_json(manifest_path)
     from .etf_archive_adjacent import archived_inputs
+    publication = snapshot.get("publication") or {}
+    dates = sorted(manifest.get("requested_dates") or [])
+    fallback = (publication.get("status") == "pending" and dates
+        and publication.get("targetAsOf") == dates[-1] and snapshot.get("asOf") in dates
+        and snapshot["asOf"] < dates[-1])
+    # The archive reference belongs to the collection window, not the older
+    # fallback snapshot. Validate that original identity and bytes, but never
+    # relabel its date as the fallback's predecessor or derive a publishable
+    # change contract from a pending snapshot.
+    archived = archived_inputs(manifest, workspace_root, dates[-1] if fallback else snapshot["asOf"])
     return build_history_bundle(
         snapshot=snapshot,
         artifacts=manifest.get("artifacts") or [],
@@ -382,5 +393,6 @@ def build_history_bundle_from_files(
         finished_at=str(manifest.get("finished_at") or ""),
         workspace_root=workspace_root,
         run_key=run_key,
-        archived=archived_inputs(manifest, workspace_root, snapshot["asOf"]),
+        archived=archived,
+        derive_daily_changes=not fallback,
     )

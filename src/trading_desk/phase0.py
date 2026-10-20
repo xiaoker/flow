@@ -490,12 +490,24 @@ def collect_phase0(
         "stock_connect_summary": lambda frame, _: validate_connect_summary(frame),
         "stock_connect_top": lambda frame, _: validate_connect_top(frame),
     }
+    from .adapters.official import verified_hkex_closures
+    closure_evidence = verified_hkex_closures(
+        {"requested_dates": dates, "artifacts": [artifact.to_dict() for artifact in artifacts]}, workspace_root
+    )
+    all_connect_closed = bool(dates) and set(dates).issubset(closure_evidence)
     findings: list[QualityFinding] = []
     profiles: dict[str, dict[str, Any]] = {}
     for dataset in validators:
         frame = combined.get(dataset, pd.DataFrame())
         profiles[dataset] = profile(frame)
-        findings.extend(validators[dataset](frame, dataset))
+        if dataset in {"stock_connect_summary", "stock_connect_top"} and all_connect_closed and frame.empty:
+            findings.append(QualityFinding(
+                check_id="availability.official_closed", dataset=dataset, status="pass", severity="info",
+                message="官方原件确认四通道休市；数值保持缺省", evidence={"closed_dates": closure_evidence},
+            ))
+        else:
+            findings.extend(validators[dataset](frame, dataset))
+    profiles["stock_connect_summary"]["official_closed_dates"] = closure_evidence
 
     for error in optional_errors:
         findings.append(
@@ -516,6 +528,8 @@ def collect_phase0(
 
     for dataset in ("sse_etf", "sse_margin", "szse_margin", "bse_margin", "stock_connect_summary"):
         observed_dates = profiles.get(dataset, {}).get("distinct_trade_dates", [])
+        if dataset == "stock_connect_summary":
+            observed_dates = sorted(set(observed_dates) | set(closure_evidence))
         findings.append(
             _coverage_finding(
                 dataset,

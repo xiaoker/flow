@@ -148,6 +148,43 @@ def _is_live_recovery_control_error(exc: BaseException) -> bool:
     }
 
 
+def verified_hkex_closures(manifest: dict[str, Any], workspace_root: Path) -> dict[str, str]:
+    """Prove whole-day closure from exact, hashed official four-channel bytes.
+
+    Absence is not closure. No normalized zero rows or calendar guesses are
+    introduced. Conflicting observations for the same day fail closed.
+    """
+    expected = {"SSE Northbound", "SZSE Northbound", "SSE Southbound", "SZSE Southbound"}
+    requested = set(manifest.get("requested_dates") or [])
+    observations: dict[str, list[tuple[bool, str]]] = {}
+    root = workspace_root.resolve()
+    for artifact in manifest.get("artifacts") or []:
+        source = artifact.get("source") or {}
+        if (source.get("source_id"), source.get("dataset")) != ("hkex", "stock_connect_daily"):
+            continue
+        day = str(artifact.get("requested_date") or "")
+        if day not in requested or artifact.get("status_code") != 200:
+            continue
+        raw = Path(str(artifact.get("raw_path") or ""))
+        path = raw if raw.is_absolute() else root / raw
+        path = path.resolve()
+        if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 2_000_000:
+            raise ValueError("hkex_closure_raw_path_invalid")
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != artifact.get("sha256"):
+            raise ValueError("hkex_closure_raw_hash_mismatch")
+        payloads = parse_hkex_tab_data(content.decode("utf-8"))
+        closed = (
+            len(payloads) == 4
+            and {item.get("market") for item in payloads} == expected
+            and all(item.get("date") == day and type(item.get("tradingDay")) is int
+                    and item["tradingDay"] == 0 for item in payloads)
+        )
+        observations.setdefault(day, []).append((closed, digest))
+    return {day: rows[0][1] for day, rows in observations.items() if all(closed for closed, _ in rows)}
+
+
 def parse_hkex_tab_data(text: str) -> list[dict[str, Any]]:
     r"""Parse HKEX's JavaScript assignment while retaining the original raw bytes.
 

@@ -23,7 +23,7 @@ from trading_desk import release_qa as qa
 DATES = ["2026-07-14", "2026-07-15", "2026-07-16"]
 
 
-def fixture_recipe():
+def fixture_recipe(*, closed_days=()):
     bodies, refs, artifacts = {}, [], []
 
     def add(source, day, content, frames, extension="json"):
@@ -78,7 +78,15 @@ def fixture_recipe():
                     "tr":[{"td":[[v]]} for v in ["100","60","40","10","5"]]}
             payload.append(block)
         raw = ("tabData = "+json.dumps(payload)+";").encode()
-        add(HKEX_CONNECT,day,raw,list(qa._expected_hkex(raw,day)),"js")
+        normalized = list(qa._expected_hkex(raw,day))
+        if day in closed_days:
+            for block in payload:
+                block["tradingDay"] = 0
+                block["content"] = []
+            raw = ("tabData = "+json.dumps(payload)+";").encode()
+            # Match the live adapter's legacy empty, headerless partitions.
+            normalized = [pd.DataFrame(), pd.DataFrame()]
+        add(HKEX_CONNECT,day,raw,normalized,"js")
     raw = json.dumps({"result":[{"opDate":d.replace("-",""),"rzye":100,"rzmre":10,"rqylje":5,"rzrqjyzl":105} for d in DATES]}).encode()
     add(SSE_MARGIN,f"{DATES[0]}_{DATES[-1]}",raw,[qa._expected_sse_margin(raw)])
     stream = io.BytesIO()

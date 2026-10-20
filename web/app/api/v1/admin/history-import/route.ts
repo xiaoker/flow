@@ -875,6 +875,26 @@ async function loadOfficialEtfDailyChanges(
   });
 }
 
+function officialConnectClosed(artifact: HistoryArtifact, raw: Uint8Array): boolean {
+  // Called only after the raw SHA check. Empty normalized data alone never
+  // proves closure; the exact requested day and all four channels must agree.
+  if (artifact.sourceId !== "hkex" || artifact.dataset !== "stock_connect_daily"
+    || artifact.metadata.status_code !== 200 || raw.byteLength > 2_000_000) return false;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(raw).replace(/^\uFEFF/, "").trim();
+  const match = /^tabData\s*=\s*(\[[\s\S]*\])\s*;?$/.exec(text);
+  if (!match) return false;
+  try {
+    const rows: unknown = JSON.parse(match[1]);
+    const expected = new Set(["SSE Northbound", "SZSE Northbound", "SSE Southbound", "SZSE Southbound"]);
+    if (!Array.isArray(rows) || rows.length !== 4) return false;
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || row.date !== artifact.requestedDate
+        || row.tradingDay !== 0 || !expected.delete(row.market)) return false;
+    }
+    return expected.size === 0;
+  } catch { return false; }
+}
+
 async function persistStandardRows(
   db: D1Database,
   artifact: HistoryArtifact,
@@ -1165,6 +1185,8 @@ async function writeCollectionState(
     normalizedKeys?: string[];
     rowCount?: number;
     error?: string;
+    availability?: "CLOSED";
+    closureRawSha256?: string;
   },
 ): Promise<string> {
   const key = collectionStateKey(input.runId, input.asOf, input.releaseId);
@@ -1452,11 +1474,19 @@ export async function POST(request: Request) {
           (sum, item) => sum + item.file.rowCount,
           0,
         );
+        const connectClosed = officialConnectClosed(artifact, raw);
+        if (connectClosed && (normalizedRowCount !== 0 || artifact.tradeDates.length !== 0
+          || normalizedFiles.length !== 2
+          || new Set(normalizedFiles.map(({ file }) => file.name)).size !== 2
+          || !normalizedFiles.every(({ file, content }) => ["summary", "top"].includes(file.name)
+            && file.rowCount === 0 && file.tradeDates.length === 0 && parseCsv(content).length === 0))) {
+          throw new Error("closed_connect_normalized_conflict");
+        }
         // NAV and PCF are optional enrichment feeds.  An exchange may return
         // an empty exact-date list because its public page only retains the
         // latest bulletin; archive that evidence as VERIFIED so an empty
         // enrichment feed cannot block the complete ETF share publication.
-        if (normalizedRowCount === 0 && artifact.dataset !== "etf_nav" && artifact.dataset !== "etf_pcf") {
+        if (normalizedRowCount === 0 && artifact.dataset !== "etf_nav" && artifact.dataset !== "etf_pcf" && !connectClosed) {
           const stateKey = await writeCollectionState(runtime.RAW_BUCKET, {
             runId: history.runId,
             asOf: history.asOf,
@@ -1513,6 +1543,7 @@ export async function POST(request: Request) {
           rawKey,
           normalizedKeys,
           rowCount: normalizedRowCount,
+          ...(connectClosed ? { availability: "CLOSED" as const, closureRawSha256: artifact.sha256 } : {}),
         });
         collectionStateKeys.push(stateKey);
         const evidenceCounts = await persistArchivedArtifactEvidence(
