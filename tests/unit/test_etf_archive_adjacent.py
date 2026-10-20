@@ -90,6 +90,23 @@ def test_workflow_hydrates_before_both_producers():
     text=(root/".github/workflows/market-data-collect.yml").read_text()
     assert text.index("python -m trading_desk.etf_archive_adjacent") < text.index("python scripts/build_dashboard_snapshot.py --output dashboard-snapshot-base.json") < text.index("python scripts/build_history_bundle.py --snapshot dashboard-snapshot-base.json")
 
+
+@pytest.mark.parametrize("as_of,expected_rows", [("2026-10-12",2),("2026-10-09",1)])
+def test_qa_fallback_projects_verified_window_input_without_relabeling(tmp_path,as_of,expected_rows):
+    from trading_desk.release_qa import _with_archived_etf_inputs
+    ref = reference(tmp_path)
+    current = pd.read_csv(tmp_path/"previous.csv",dtype={"instrument_code":str})
+    current["trade_date"] = "2026-10-13"
+    manifest = {"requested_dates":["2026-10-09","2026-10-12","2026-10-13"],"archivedEtfInputs":[ref]}
+    derived = _with_archived_etf_inputs(manifest,{"szse_etf":current},tmp_path,as_of)
+    assert len(derived["szse_etf"]) == expected_rows
+    assert current.trade_date.tolist() == ["2026-10-13"]
+    if expected_rows == 2:
+        assert derived["szse_etf"].trade_date.tolist() == ["2026-10-13","2026-10-12"]
+    ref["sha256"] = "0"*64
+    with pytest.raises(ValueError,match="adjacent_archive_hash_mismatch"):
+        _with_archived_etf_inputs(manifest,{"szse_etf":current},tmp_path,as_of)
+
 def test_pending_source_does_not_hydrate_or_change_manifest(tmp_path, monkeypatch):
     import json
     import trading_desk.etf_archive_adjacent as adjacent

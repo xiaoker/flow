@@ -428,6 +428,7 @@ def _pending_publication_domains(
     szse_margin: pd.DataFrame,
     connect: pd.DataFrame,
     bse_margin: pd.DataFrame | None = None,
+    connect_closed_dates: dict[str, str] | None = None,
 ) -> list[str]:
     """Return domains that have not supplied the target trading day yet.
 
@@ -463,7 +464,10 @@ def _pending_publication_domains(
         ("SSE", "northbound"),
         ("SZSE", "northbound"),
     }
-    if connect.empty or not {"trade_date", "market", "direction"}.issubset(connect.columns):
+    if target_date in (connect_closed_dates or {}):
+        if not connect.empty and connect["trade_date"].astype(str).eq(target_date).any():
+            pending.append("港交所互联互通")  # contradictory normalized facts
+    elif connect.empty or not {"trade_date", "market", "direction"}.issubset(connect.columns):
         pending.append("港交所互联互通")
     else:
         available_channels = {
@@ -486,6 +490,7 @@ def _latest_complete_snapshot_date(
     szse_margin: pd.DataFrame,
     connect: pd.DataFrame,
     bse_margin: pd.DataFrame | None = None,
+    connect_closed_dates: dict[str, str] | None = None,
 ) -> tuple[str | None, list[str]]:
     """Select the newest fully reconcilable day, not merely the newest request.
 
@@ -506,6 +511,7 @@ def _latest_complete_snapshot_date(
             szse_margin=szse_margin,
             connect=connect,
             bse_margin=bse_margin,
+            connect_closed_dates=connect_closed_dates,
         )
         if index == len(requested_dates) - 1:
             target_pending = pending
@@ -626,6 +632,10 @@ def build_dashboard_snapshot(
         else pd.DataFrame()
     )
     connect = _read_csv(workspace_root, paths["stock_connect_summary"])
+    if connect.empty:
+        connect = connect.reindex(columns=["trade_date", "market", "direction", "net_buy", "total_turnover"])
+    from .adapters.official import verified_hkex_closures
+    connect_closed_dates = verified_hkex_closures(manifest, workspace_root)
     pcf = (
         _read_csv(workspace_root, paths["sse_etf_pcf"])
         if paths.get("sse_etf_pcf")
@@ -640,7 +650,8 @@ def build_dashboard_snapshot(
     }
     if bse_margin is not None:
         required_frames["北交所融资融券"] = bse_margin
-    missing_frames = [name for name, frame in required_frames.items() if frame.empty]
+    missing_frames = [name for name, frame in required_frames.items() if frame.empty
+                      and not (name == "港交所互联互通" and set(requested_dates).issubset(connect_closed_dates))]
     if missing_frames:
         return _pending_snapshot(
             requested_dates=requested_dates,
@@ -657,6 +668,7 @@ def build_dashboard_snapshot(
         szse_margin=szse_margin,
         connect=connect,
         bse_margin=bse_margin,
+        connect_closed_dates=connect_closed_dates,
     )
     as_of = complete_as_of or target_as_of
     dates = [trade_date for trade_date in requested_dates if trade_date <= as_of]
@@ -851,7 +863,7 @@ def build_dashboard_snapshot(
                         "name": market_labels[(market, direction)],
                         "value": "—",
                         "unit": "亿港元" if direction == "southbound" else "亿元",
-                        "description": "当日互联互通休市或无披露",
+                        "description": "官方原件确认当日休市" if as_of in connect_closed_dates else "当日互联互通无披露",
                         "tone": "neutral",
                     }
                 )
@@ -967,7 +979,7 @@ def build_dashboard_snapshot(
                     else ("positive" if southbound_net >= 0 else "negative")
                 ),
                 "note": (
-                    "当日互联互通休市或无披露"
+                    ("官方原件确认当日休市" if as_of in connect_closed_dates else "当日互联互通无披露")
                     if southbound_net is None
                     else "官方买入额 − 卖出额"
                 ),
@@ -1002,7 +1014,7 @@ def build_dashboard_snapshot(
                 "unit": "亿元",
                 "delta": f"沪股通 {north_market_values.get('沪股通北向', '—')} · 深股通 {north_market_values.get('深股通北向', '—')}",
                 "tone": "neutral",
-                "note": "当前官方不披露北向净流入",
+                "note": "官方原件确认当日休市" if as_of in connect_closed_dates else "当前官方不披露北向净流入",
                 "basis": {
                     "kind": "official",
                     "label": "官方汇总",
@@ -1038,10 +1050,10 @@ def build_dashboard_snapshot(
             },
             {
                 "name": "互联互通",
-                "status": "warning" if connect_latest.empty else "ready",
+                "status": "ready" if as_of in connect_closed_dates else ("warning" if connect_latest.empty else "ready"),
                 "asOf": as_of[5:],
                 "detail": (
-                    "当日互联互通休市或无披露"
+                    ("官方原件确认当日休市；数值不适用" if as_of in connect_closed_dates else "当日互联互通无披露")
                     if connect_latest.empty
                     else "南向复算 · 北向官方成交"
                 ),

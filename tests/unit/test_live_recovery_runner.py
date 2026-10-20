@@ -85,7 +85,8 @@ def test_archive_download_budget_alone_cannot_admit_history_writes(tmp_path, mon
             producer_build_sha="a" * 64, workspace_root=tmp_path, base_url="https://flow.xiaoker.com")
 
 
-def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_fallback(tmp_path, monkeypatch, preflight_only):
     from test_phase0_archive import fixture_recipe, DATES
     from urllib.parse import urlparse
     recipe, bodies = fixture_recipe()
@@ -99,6 +100,8 @@ def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_f
         def __init__(self):
             self.calls, self.finalized = [], False
         def request(self, method, url, **kwargs):
+            if preflight_only:
+                assert method == "GET", "preflight must never issue any control/history write"
             assert urlparse(url).hostname == "flow.xiaoker.com"
             path = urlparse(url).path
             self.calls.append((method, path))
@@ -134,9 +137,18 @@ def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_f
         required_stages=["dashboard","publish"],artifact_root=".recovery/archive",state_dir=".recovery/archive/state",
         max_dates=1,max_requests=300,deadline="2026-12-31T00:00:00.000Z",budget_manifest={"archivePhase0Source":recipe})
     evidence = run_live_recovery(plan=plan,expected_plan_hash=plan["planHash"],attempt=1,
-        producer_build_sha="a"*64,workspace_root=tmp_path,base_url="https://flow.xiaoker.com")
-    assert evidence["targetDate"] == DATES[-1] and evidence["status"] == "READY"
+        producer_build_sha="a"*64,workspace_root=tmp_path,base_url="https://flow.xiaoker.com",preflight_only=preflight_only)
+    assert evidence["targetDate"] == DATES[-1]
     assert evidence["requestCount"] == len(transport.calls) < 300
+    if preflight_only:
+        assert evidence["status"] == "LOCAL_SOURCE_CHECKED"
+        assert evidence["liveExecutionAllowed"] is False and evidence["remoteWrites"] == 0
+        assert evidence["providerUsage"] == "UNKNOWN" and evidence["rollingHistoryVerified"] is False
+        assert evidence["historyRequestsPerPass"] == 18
+        assert evidence["maximumHistoryRequestBytes"] <= 12_000_000
+        assert all(path.endswith("/history-artifact") for _,path in transport.calls)
+        return
+    assert evidence["status"] == "READY"
     assert sum(path.endswith("/history-import") for _,path in transport.calls) == 2 * (17+1)
     assert all(method == "GET" or path.endswith("/history-import") for method,path in transport.calls)
 

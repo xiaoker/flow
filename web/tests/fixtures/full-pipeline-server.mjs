@@ -3,7 +3,7 @@
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { webcrypto, createHash } from "node:crypto";
 import { canonicalJson } from "../../app/lib/pipeline-recovery-plan.ts";
 import { DIMENSIONS, BUDGET_SCOPE, createSharedBudgetState, sharedBudgetRequest } from "../../app/lib/pipeline-shared-budget.ts";
@@ -30,9 +30,22 @@ globalThis.fetch = (url, options) => String(url) === `${issuer}/cdn-cgi/access/c
   ? Promise.resolve(Response.json({ keys: [jwk] })) : originalFetch(url, options);
 const { default: worker } = await import("../../dist/server/index.js");
 const db = new DatabaseSync(":memory:");
-for (const migration of ["0005_release_manifest.sql", "0010_fair_jasper_sitwell.sql", "0011_futuristic_namora.sql", "0015_shared_budget_account.sql"])
+const historyInputs = process.env.FLOW_FULL_FIXTURE_HISTORY_INPUTS;
+const migrations = historyInputs ? readdirSync(new URL("../../drizzle/",import.meta.url)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort()
+  : ["0005_release_manifest.sql", "0010_fair_jasper_sitwell.sql", "0011_futuristic_namora.sql", "0015_shared_budget_account.sql"];
+for (const migration of migrations)
   db.exec(readFileSync(new URL(`../../drizzle/${migration}`, import.meta.url), "utf8"));
-db.exec("ALTER TABLE release_manifest ADD observed_at TEXT");
+if (!historyInputs) db.exec("ALTER TABLE release_manifest ADD observed_at TEXT");
+if (process.env.FLOW_FULL_FIXTURE_ACTIVE_MANIFEST) {
+  if (!historyInputs) throw new Error("active seed requires isolated history fixture");
+  const data = readFileSync(process.env.FLOW_FULL_FIXTURE_ACTIVE_MANIFEST);
+  if (data.length > 65_536) throw new Error("active seed too large");
+  const manifest = JSON.parse(data);
+  db.prepare("INSERT INTO release_manifest (release_id,as_of,schema_version,manifest_sha256,manifest_json,status,created_at) VALUES (?,?,?,?,?,'ACTIVE',?)")
+    .run(manifest.releaseId,manifest.asOf,manifest.schemaVersion,manifest.manifestSha256,JSON.stringify(manifest),NOW);
+  db.prepare("INSERT INTO active_release (slot,release_id,as_of,manifest_sha256,activated_at) VALUES ('dashboard',?,?,?,?)")
+    .run(manifest.releaseId,manifest.asOf,manifest.manifestSha256,NOW);
+}
 const runKey = process.env.FLOW_FULL_FIXTURE_RUN_KEY;
 const target = process.env.FLOW_FULL_FIXTURE_TARGET;
 const owner = process.env.FLOW_FULL_FIXTURE_OWNER;
@@ -79,6 +92,19 @@ const adapter = { withSession() { return this; }, async batch(statements) {
     }, async run() { return this.runSync(); } };
 } }; } };
 const objects = new Map();
+if (historyInputs) {
+  const seedBytes = readFileSync(historyInputs);
+  if (seedBytes.length > 45_000_000) throw new Error("fixture seed size exceeded");
+  const seeds = JSON.parse(seedBytes);
+  if (!Array.isArray(seeds) || seeds.length > 96) throw new Error("fixture seed graph exceeded");
+  let total = 0;
+  for (const item of seeds) {
+    const bytes = Buffer.from(item.base64,"base64"); total += bytes.length;
+    if (!/^market-data\/(raw|normalized)\//.test(item.key) || bytes.length > 2_000_000 || total > 32_000_000
+        || createHash("sha256").update(bytes).digest("hex") !== item.sha256 || objects.has(item.key)) throw new Error("fixture seed invalid");
+    objects.set(item.key,{bytes,customMetadata:{sha256:item.sha256}});
+  }
+}
 if (plan && !preparation) {
   const bytes = Buffer.from(canonicalJson(plan) + "\n");
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -97,7 +123,7 @@ const bucket = {
     counters.r2Put++;
     if (objects.has(key) && options.onlyIf) return null;
     const bytes = typeof content === "string" ? Buffer.from(content) : Buffer.from(content);
-    if (objects.size >= 80 || bytes.length > 2_000_000 || counters.bytesStored + bytes.length > 20_000_000)
+    if (objects.size >= (historyInputs ? 160 : 80) || bytes.length > 2_000_000 || counters.bytesStored + bytes.length > 20_000_000)
       throw new Error("bounded fixture bucket limit");
     counters.bytesStored += bytes.length;
     objects.set(key, { bytes, customMetadata: options.customMetadata });
@@ -108,11 +134,15 @@ const bucket = {
     const item = objects.get(key);
     if (!item) return null;
     return { size: item.bytes.length, customMetadata: item.customMetadata,
-      body: new Response(item.bytes).body, arrayBuffer: async () => item.bytes };
+      body: new Response(item.bytes).body, arrayBuffer: async () => item.bytes,
+      text: async () => item.bytes.toString(), json: async () => JSON.parse(item.bytes.toString()) };
   },
   async head(key) { counters.r2Head++; const item = objects.get(key); return item ? { size: item.bytes.length, customMetadata: item.customMetadata } : null; },
 };
 const env = { DB: adapter, RAW_BUCKET: bucket, INGEST_API_KEY: "fixture-only",
+  // Match the deployed history contract for archive recovery, not the legacy
+  // D1-derived branch. Other executor fixture scenarios remain unchanged.
+  HISTORY_IMPORT_ARCHIVE_ONLY: historyInputs ? "1" : "0",
   PIPELINE_RECOVERY_ENABLED: plan ? "1" : "0",
   CANDIDATE_ACCESS_ISSUER: issuer, CANDIDATE_ACCESS_AUD: audience,
   ASSETS: { fetch: async () => new Response("missing", { status: 404 }) } };
@@ -126,10 +156,15 @@ const server = createServer(async (req, res) => {
   try {
     const request = new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers,
       ...(req.method === "POST" ? { body: Readable.toWeb(req), duplex: "half" } : {}) });
-    if (request.headers.get("authorization") !== "Bearer fixture-only") { res.writeHead(401); res.end(); return; }
-    if (request.headers.get("cf-access-client-id") === "fixture-id" && request.headers.get("cf-access-client-secret") === "fixture-secret")
-      request.headers.set("cf-access-jwt-assertion", jwt);
     const path = new URL(request.url).pathname;
+    const accessAuthenticated = request.headers.get("cf-access-client-id") === "fixture-id"
+      && request.headers.get("cf-access-client-secret") === "fixture-secret";
+    // Public read APIs use Access service authentication, not the admin
+    // ingest key. Keep admin/fixture routes on their existing bearer guard.
+    if (request.headers.get("authorization") !== "Bearer fixture-only"
+        && !(path.startsWith("/api/v2/") && request.method === "GET" && accessAuthenticated)) { res.writeHead(401); res.end(); return; }
+    if (accessAuthenticated)
+      request.headers.set("cf-access-jwt-assertion", jwt);
     counters.http[path] = (counters.http[path] ?? 0) + 1;
     if (path === "/fixture/expire-lease" && request.method === "POST") {
       // Fault injection only: expiry is followed by the real claim endpoint.
@@ -152,6 +187,7 @@ const server = createServer(async (req, res) => {
     }
     const result = path === "/fixture/stats"
       ? Response.json({ ...counters, queryPlans: [...queryPlans.values()], active: db.prepare("SELECT count(*) AS n FROM active_release").get().n,
+          activeIdentity: db.prepare("SELECT release_id,as_of,manifest_sha256 FROM active_release WHERE slot='dashboard'").get() ?? null,
           releases: db.prepare("SELECT status FROM release_manifest LIMIT 10").all(),
           budgetReservations: JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").get(BUDGET_SCOPE)?.state_json ?? '{"reservations":{}}').reservations })
       : path.endsWith("/budget")

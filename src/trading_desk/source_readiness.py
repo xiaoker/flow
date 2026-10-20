@@ -212,9 +212,14 @@ def build_source_readiness(
         required = bool(definition["required"])
         error = _source_error(quality, dataset)
         missing = _missing_target(quality, dataset, target_date)
+        closure = ((quality.get("profiles") or {}).get(dataset) or {}).get("official_closed_dates") or {}
+        closed_sha = closure.get(target_date) if dataset == "stock_connect_summary" and isinstance(closure, dict) else None
         if error:
             status = "error"
             reason = error
+        elif isinstance(closed_sha, str) and len(closed_sha) == 64 and all(c in "0123456789abcdef" for c in closed_sha):
+            status = "ready"
+            reason = "official_source_target_date_closed"
         elif missing:
             status = "pending"
             reason = "official_source_business_date_not_ready"
@@ -249,6 +254,7 @@ def build_source_readiness(
                 "evidence": {
                     "qualityPath": str(manifest.get("quality_summary_path") or ""),
                     "combinedPath": (manifest.get("combined_paths") or {}).get(dataset),
+                    **({"closureRawSha256": closed_sha} if reason == "official_source_target_date_closed" else {}),
                 },
             }
         )

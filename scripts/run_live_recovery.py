@@ -938,6 +938,8 @@ def run_live_recovery(
     producer_build_sha: str,
     workspace_root: Path,
     base_url: str,
+    preflight_only: bool = False,
+    allow_loopback_fixture: bool = False,
 ) -> dict[str, Any]:
     """Run the approved live recovery and return isolated evidence metadata."""
 
@@ -957,6 +959,9 @@ def run_live_recovery(
             status="BLOCKED_QUALITY",
         )
     target = scope.data_dates[0]
+    if preflight_only and (plan.get("budgetManifest", {}).get("archivePhase0Source") is None
+            or set(scope.required_stages) != {"dashboard", "publish"}):
+        raise LiveRecoveryError("archive_preflight_requires_single_core_archive")
     # The plan hash binds this single output date to the original window.
     # Rewriting a September reconcile runKey to an August dataDate would
     # bypass the original window's lease and recovery audit trail.
@@ -1006,7 +1011,11 @@ def run_live_recovery(
             raise LiveRecoveryError("live_recovery_request_budget_exceeded",
                 f"archive_and_history_floor={archive_request_floor}, maximum={scope.max_requests}")
         context_dates = archive_manifest["requested_dates"]
-        if base_url.rstrip("/") != "https://flow.xiaoker.com":
+        parsed_origin = urlparse(base_url)
+        loopback_fixture = (allow_loopback_fixture is True and parsed_origin.scheme == "http"
+            and parsed_origin.hostname in {"127.0.0.1", "localhost"} and parsed_origin.path in {"", "/"}
+            and not any((parsed_origin.username,parsed_origin.password,parsed_origin.query,parsed_origin.fragment)))
+        if base_url.rstrip("/") != "https://flow.xiaoker.com" and not loopback_fixture:
             raise LiveRecoveryError("live_recovery_archive_origin_invalid")
         exchange = BoundedHTTPExchange(source_session)
 
@@ -1111,6 +1120,42 @@ def run_live_recovery(
     )
     _assert_confirmed_snapshot(base_snapshot, target)
     _write_json(base_snapshot_path, base_snapshot)
+
+    if preflight_only:
+        # Explicit read-only preparation. Use the real QA and publisher wire
+        # serializer; the transport below never creates a network connection.
+        # This is source/capacity evidence, not a lease, budget grant, local
+        # service acceptance or proof of final rolling-history materialization.
+        from trading_desk.release_qa import run_release_qa
+        qa = run_release_qa(manifest_path=manifest_path, quality_path=quality_path,
+            snapshot_path=base_snapshot_path, output_path=artifact_root/"archive-preflight-qa.json",
+            workspace_root=workspace_root)
+        if qa["counts"]["fail"]:
+            raise LiveRecoveryError("archive_preflight_release_qa_failed")
+        bundle = build_history_bundle_from_files(snapshot_path=base_snapshot_path,
+            manifest_path=manifest_path, workspace_root=workspace_root)
+        sizes = []
+        class CapacityOnlyTransport:
+            def post(self, url, *, data, **kwargs):
+                if not isinstance(data, bytes) or len(data) > 12_000_000:
+                    raise LiveRecoveryError("archive_preflight_history_body_limit")
+                sizes.append(len(data))
+                class LocalReceipt:
+                    ok = True
+                    def json(self):
+                        return {"status": "archived"}
+                return LocalReceipt()
+        publish_history_bundle(url="https://offline.invalid/capacity-only", bundle=bundle,
+            ingest_key="capacity-only", access_client_id="capacity-only", access_client_secret="capacity-only",
+            session=CapacityOnlyTransport(), max_attempts=1)
+        evidence = {"status":"LOCAL_SOURCE_CHECKED", "targetDate":target,"planHash":scope.plan_hash,
+            "producerBuildSha":producer_build_sha,"requestCount":source_session.request_count,
+            "historyRequestsPerPass":len(sizes),"maximumHistoryRequestBytes":max(sizes),
+            "historyWireBytesPerPass":sum(sizes),"sourceQaCounts":qa["counts"],
+            "providerUsage":"UNKNOWN","liveExecutionAllowed":False,"remoteWrites":0,
+            "rollingHistoryVerified":False}
+        _write_json(artifact_root/"archive-source-preflight.json",evidence)
+        return evidence
 
     state_url = urljoin(base_url.rstrip("/") + "/", "api/v1/admin/etf-state")
     # Use the same bounded transport for source reads and history-import POSTs
@@ -1396,6 +1441,8 @@ def main() -> None:
     parser.add_argument("--workspace-root", type=Path, default=Path.cwd())
     parser.add_argument("--base-url", default=os.environ.get("FLOW_PUBLIC_URL", "https://flow.xiaoker.com"))
     parser.add_argument("--failure-output", type=Path)
+    parser.add_argument("--archive-source-preflight-only", action="store_true",
+        help="Read exact approved archive inputs and validate source/QA/wire sizes; never claim or publish")
     args = parser.parse_args()
     plan = _read_json(args.plan)
     try:
@@ -1406,6 +1453,7 @@ def main() -> None:
             producer_build_sha=args.producer_build_sha,
             workspace_root=args.workspace_root.resolve(),
             base_url=args.base_url,
+            preflight_only=args.archive_source_preflight_only,
         )
     except (LiveRecoveryError, RecoveryContractError, ValueError) as exc:
         code = exc.code if isinstance(exc, (LiveRecoveryError, RecoveryContractError)) else "live_recovery_failed"

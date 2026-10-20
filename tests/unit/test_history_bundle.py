@@ -16,6 +16,28 @@ from trading_desk.history_bundle import (
 )
 
 
+def test_pending_fallback_validates_window_baseline_without_relabeling_it(tmp_path):
+    from test_etf_archive_adjacent import reference
+    test_history_bundle_preserves_raw_and_normalized_hashes(tmp_path)
+    ref = reference(tmp_path)
+    path = tmp_path/"manifest.json"
+    manifest = json.loads(path.read_bytes())
+    manifest.update(requested_dates=["2026-10-09","2026-10-12","2026-10-13"],archivedEtfInputs=[ref])
+    path.write_text(json.dumps(manifest))
+    snapshot_path = tmp_path/"snapshot.json"
+    snapshot = {"asOf":"2026-10-12","publication":{"status":"pending","targetAsOf":"2026-10-13"}}
+    snapshot_path.write_text(json.dumps(snapshot))
+    bundle = build_history_bundle_from_files(snapshot_path=snapshot_path,manifest_path=path,workspace_root=tmp_path)
+    assert bundle["history"]["snapshot"] == snapshot
+    assert "officialEtfDailyChanges" not in bundle["history"]
+    assert bundle["history"]["artifacts"][0]["requestedDate"] == manifest["artifacts"][0]["requested_date"]
+    # A fallback is not a free pass for bad original source identities.
+    ref["sha256"] = "0"*64
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError,match="adjacent_archive_hash_mismatch"):
+        build_history_bundle_from_files(snapshot_path=snapshot_path,manifest_path=path,workspace_root=tmp_path)
+
+
 def test_sources_only_bundle_survives_missing_snapshot_and_adjacent_failure(tmp_path, monkeypatch):
     import os
     import subprocess
