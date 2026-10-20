@@ -1527,6 +1527,20 @@ def _quality_allows_published_snapshot(quality: dict[str, Any], published_as_of:
     )
 
 
+def _with_archived_etf_inputs(manifest, frames, workspace_root, as_of):
+    """Derived QA consumes the builder's verified adjacent input, not just current CSVs.
+
+    Keep collected frames unchanged for their own row-count/raw reconciliation.
+    The archived baseline is separately hash/date/market checked by the shared
+    reader, and is used only for derived ETF identity and delta comparisons.
+    """
+    from .etf_archive_adjacent import archived_inputs
+    derived = dict(frames)
+    for _reference, frame in archived_inputs(manifest, workspace_root, as_of):
+        derived["szse_etf"] = pd.concat([derived.get("szse_etf", pd.DataFrame()), frame], ignore_index=True, sort=False)
+    return derived
+
+
 def validate_snapshot_values(
     manifest: dict[str, Any],
     quality: dict[str, Any],
@@ -1541,6 +1555,7 @@ def validate_snapshot_values(
     findings: list[QualityFinding] = []
     dates = sorted(str(value) for value in manifest.get("requested_dates", []))
     as_of = str(snapshot.get("asOf") or (dates[-1] if dates else ""))
+    frames = _with_archived_etf_inputs(manifest, frames, workspace_root, as_of)
     published_dates = [trade_date for trade_date in dates if trade_date <= as_of]
     expected_snapshot = build_dashboard_snapshot(
         manifest_path=manifest_path,

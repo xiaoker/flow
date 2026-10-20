@@ -190,6 +190,7 @@ def collect_phase0(
     pcf_max_workers: int = 4,
     szse_etf_history_root: Path | None = None,
     application_context: Mapping[str, Any] | None = None,
+    archived_adapters: Any | None = None,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -223,7 +224,11 @@ def collect_phase0(
     run_id = new_run_id()
     started_at = now_iso()
     collection_session = session or build_session()
-    adapters = OfficialMarketAdapters(session=collection_session, data_root=data_root, run_id=run_id)
+    # An approved archive replay supplies the same adapter protocol. All
+    # combination, NAV enrichment, QA and application checkpoints below stay
+    # identical; this is not permission to fall back to live collection.
+    adapters = archived_adapters if archived_adapters is not None else OfficialMarketAdapters(
+        session=collection_session, data_root=data_root, run_id=run_id)
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
     artifacts: list[FetchArtifact] = []
     errors: list[dict[str, Any]] = []
