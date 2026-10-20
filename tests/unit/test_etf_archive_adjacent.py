@@ -65,6 +65,26 @@ def test_invalid_archived_reference_is_rejected(tmp_path, fault):
 def test_default_manifest_does_not_read_archive(tmp_path):
     assert archived_inputs({"requested_dates":["2026-10-12","2026-10-13"]},tmp_path,"2026-10-13")==[]
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_derived_qa_uses_same_verified_baseline_without_mutating_collected_rows(tmp_path, legacy):
+    from trading_desk.release_qa import _with_archived_etf_inputs, _canonical_etf_delta
+    ref = reference(tmp_path)
+    if legacy:
+        ref["revisionId"] = "etf_scale:szse:2026-10-12:" + "a"*16
+    current = pd.read_csv(tmp_path / "previous.csv", dtype={"instrument_code": str})
+    current["trade_date"] = "2026-10-13"
+    current["shares"] = current["shares"] - 1000000
+    collected = {"szse_etf": current}
+    manifest = {"requested_dates":["2026-10-12","2026-10-13"],"archivedEtfInputs":[ref]}
+    derived = _with_archived_etf_inputs(manifest, collected, tmp_path, "2026-10-13")
+    total, evidence = _canonical_etf_delta(derived, dates=manifest["requested_dates"], current_date="2026-10-13")
+    assert total == pytest.approx(-0.01)
+    assert evidence["comparable_count"] == 1
+    assert len(collected["szse_etf"]) == 1 and len(derived["szse_etf"]) == 2
+    ref["sha256"] = "0"*64
+    with pytest.raises(ValueError, match="adjacent_archive_hash_mismatch"):
+        _with_archived_etf_inputs(manifest, collected, tmp_path, "2026-10-13")
+
 def test_workflow_hydrates_before_both_producers():
     root=Path(__file__).resolve().parents[2]
     text=(root/".github/workflows/market-data-collect.yml").read_text()

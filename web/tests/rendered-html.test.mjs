@@ -76,6 +76,48 @@ test("serves a static dashboard shell", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
+test("pinned official recovery reads are authenticated, bounded and never list or write", async () => {
+  const worker = await loadWorker();
+  const bytes = new TextEncoder().encode('{"result":[]}');
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  let size = bytes.length;
+  let missing = false;
+  const gets = [];
+  const runtime = {...env, INGEST_API_KEY:"test-key",
+    DB:{prepare(){throw new Error("exact reads must not query D1");}},
+    RAW_BUCKET:{async get(key){ gets.push(key); return missing ? null : {body:bytes,size}; },
+      list(){throw new Error("no list");},put(){throw new Error("no write");}}};
+  const request = (key, expected=sha, auth=true, extra="") => worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?archive_key=${encodeURIComponent(key)}&archive_sha256=${expected}${extra}`,
+    {headers:auth?{authorization:"Bearer test-key"}:{}}),runtime,context);
+  const root = `market-data/raw/sse/margin_market_daily/2026-10-14_2026-10-16/${sha}`;
+  for (const key of [root+".json",root+".metadata.json",
+    `market-data/normalized/hkex/stock_connect_daily/2026-10-16/${sha}/summary.csv`,
+    `market-data/normalized/sse/etf_pcf/2026-10-16/${sha}/data.csv.gz`]) {
+    const response = await request(key);
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get("x-flow-archive-key"),key);
+    assert.equal(response.headers.get("x-flow-archive-sha256"),sha);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()),bytes);
+  }
+  assert.equal((await request(root+".json","b".repeat(64))).status,409);
+  size=2_000_001;
+  assert.equal((await request(root+".json")).status,413);
+  size=bytes.length;missing=true;
+  assert.equal((await request(root+".json")).status,404);
+  missing=false;
+  const before=gets.length;
+  for (const key of ["market-data/private/secrets.json",root+".json/../secret",root+".json\n",
+    `market-data/raw/hkex/etf_scale/2026-10-16/${sha}.json`,
+    `market-data/normalized/szse/etf_scale/2026-10-16/${sha}/top.csv`,
+    `market-data/raw/szse/margin_market_daily/2026-10-14_2026-10-16/${sha}.json`]) {
+    assert.equal((await request(key)).status,400,key);
+  }
+  assert.equal((await request(root+".json",sha,true,"&date=2026-10-16")).status,400);
+  assert.equal((await request(root+".json",sha,false)).status,401);
+  assert.equal(gets.length,before,"invalid inputs and authentication stop before R2");
+});
+
 test("keeps the margin history preview inside its dashboard card", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.compact-panel\s*\{[^}]*overflow:\s*hidden/);

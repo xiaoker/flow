@@ -135,6 +135,10 @@ class BudgetedRateLimitedSession:
         self._reserve_request(url)
         return self.session.request(method, url, **kwargs)
 
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """BoundedHTTPExchange uses the same cumulative request counter."""
+        return self._request(method, url, **kwargs)
+
     @staticmethod
     def _szse_hosts() -> tuple[str, ...]:
         """Return a validated, deterministic order of official SZSE hosts."""
@@ -972,7 +976,8 @@ def run_live_recovery(
         "FLOW_CF_ACCESS_CLIENT_ID": os.environ["FLOW_CF_ACCESS_CLIENT_ID"],
         "FLOW_CF_ACCESS_CLIENT_SECRET": os.environ["FLOW_CF_ACCESS_CLIENT_SECRET"],
     }
-    szse_history_budget = _szse_history_request_budget(scope)
+    archive_recipe = plan.get("budgetManifest", {}).get("archivePhase0Source")
+    szse_history_budget = 0 if archive_recipe is not None else _szse_history_request_budget(scope)
     min_interval = float(os.environ.get("FLOW_RECOVERY_MIN_INTERVAL_SECONDS", "2"))
     if min_interval < 2:
         raise LiveRecoveryError("live_recovery_source_interval_too_short", "minimum is 2 seconds")
@@ -985,11 +990,40 @@ def run_live_recovery(
         min_interval_seconds=min_interval,
         szse_curl=True,
     )
-    context_dates = discover_recent_trading_dates(
-        end_date=date.fromisoformat(target),
-        count=3,
-        session=source_session,
-    )
+    archived_adapters = None
+    if archive_recipe is not None:
+        from trading_desk.phase0_archive import validate_recipe, ArchivedOfficialMarketAdapters, MAX_OBJECT_BYTES
+        from trading_desk.bounded_http import BoundedHTTPExchange
+        archive_manifest = validate_recipe(archive_recipe, target)
+        # Reserve both history-import passes (each artifact + finalize,
+        # three bounded attempts), two state reads and two history reads.
+        # A warm cache is an optimization, never permission to admit a plan
+        # whose cold execution cannot finish within its approved allocation.
+        archive_request_floor = len(archive_recipe["files"]) + 2 * _post_child_request_reserve(archive_manifest)
+        if set(scope.required_stages).intersection({"etf_penetration", "stock_flow"}):
+            archive_request_floor += 1  # child still needs its separate, measured allowance
+        if archive_request_floor > scope.max_requests:
+            raise LiveRecoveryError("live_recovery_request_budget_exceeded",
+                f"archive_and_history_floor={archive_request_floor}, maximum={scope.max_requests}")
+        context_dates = archive_manifest["requested_dates"]
+        if base_url.rstrip("/") != "https://flow.xiaoker.com":
+            raise LiveRecoveryError("live_recovery_archive_origin_invalid")
+        exchange = BoundedHTTPExchange(source_session)
+
+        def read_archive(ref):
+            reply = exchange.request("GET", base_url.rstrip("/") + "/api/v1/admin/history-artifact",
+                max_bytes=MAX_OBJECT_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+                headers=auth, params={"archive_key": ref["objectKey"], "archive_sha256": ref["sha256"]})
+            if (reply.status != 200 or reply.headers.get("x-flow-archive-key") != ref["objectKey"]
+                    or reply.headers.get("x-flow-archive-sha256") != ref["sha256"]):
+                raise LiveRecoveryError("live_recovery_archive_read_invalid")
+            return reply.content
+
+        archived_adapters = ArchivedOfficialMarketAdapters(archive_recipe, target=target,
+            root=artifact_root/"archived-source", fetch=read_archive)
+    else:
+        context_dates = discover_recent_trading_dates(
+            end_date=date.fromisoformat(target), count=3, session=source_session)
     if context_dates[-1] != target or not set(scope.data_dates).issubset(context_dates):
         raise LiveRecoveryError(
             "live_recovery_official_calendar_mismatch",
@@ -998,9 +1032,8 @@ def run_live_recovery(
 
     required = set(scope.required_stages)
     stock_flow_required = bool(required.intersection({"etf_penetration", "stock_flow"}))
-    current_szse_matches = _current_szse_etf_matches_target(
-        session=source_session, target=target, context_dates=context_dates
-    )
+    current_szse_matches = archived_adapters is not None or _current_szse_etf_matches_target(
+        session=source_session, target=target, context_dates=context_dates)
     allocated_szse_budget = 0
     szse_history_root: Path | None = None
     szse_history_request_count = 0
@@ -1041,9 +1074,18 @@ def run_live_recovery(
             "targetDate": target,
             "producerBuildSha": producer_build_sha,
         },
+        **({"archived_adapters": archived_adapters} if archived_adapters is not None else {}),
     )
     manifest = collection["manifest"]
     quality = collection["quality"]
+    if archived_adapters is not None and archived_adapters.manifest.get("archivedEtfInputs"):
+        # Reuse the existing exact-pointer contract, not a synthetic baseline
+        # artifact or an endpoint-to-endpoint share difference across a gap.
+        manifest["archivedEtfInputs"] = [dict(ref,
+            normalizedPath=str((archived_adapters.root/ref["normalizedPath"]).relative_to(workspace_root.resolve())))
+            for ref in archived_adapters.manifest["archivedEtfInputs"]]
+        _write_json(report_root / manifest["run_id"] / "manifest.json", manifest)
+        _write_json(report_root / "latest-manifest.json", manifest)
     if current_szse_matches:
         if manifest.get("szse_etf_trade_date") != target:
             raise LiveRecoveryError(
@@ -1051,9 +1093,9 @@ def run_live_recovery(
                 f"expected={target}, observed={manifest.get('szse_etf_trade_date')}",
                 status="BLOCKED_QUALITY",
             )
-        _assert_szse_current_snapshot_is_adjacent(
-            manifest=manifest, target=target, session=source_session
-        )
+        if archived_adapters is None:
+            _assert_szse_current_snapshot_is_adjacent(
+                manifest=manifest, target=target, session=source_session)
     run_id = str(manifest.get("run_id") or "")
     manifest_path = report_root / run_id / "manifest.json"
     quality_path = report_root / run_id / "quality-summary.json"

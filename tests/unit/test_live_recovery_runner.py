@@ -54,6 +54,93 @@ def test_live_runner_fails_closed_instead_of_silently_using_last_date(tmp_path: 
     assert caught.value.status == "BLOCKED_QUALITY"
 
 
+def test_archive_recipe_rejected_before_network_or_downstream_work(tmp_path, monkeypatch):
+    for key in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.setenv(key, "offline-fixture-only")
+    class NoNetwork:
+        def request(self, *args, **kwargs):
+            pytest.fail("invalid archive graph must not reach HTTP")
+    monkeypatch.setattr(runner, "build_session", lambda settings: NoNetwork())
+    monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **kwargs: pytest.fail("no live calendar fallback"))
+    monkeypatch.setattr(runner, "collect_phase0", lambda **kwargs: pytest.fail("no collector on invalid recipe"))
+    plan = _plan(["2026-08-28"], budget_manifest={"archivePhase0Source": {"contract": "invalid"}})
+    with pytest.raises(ValueError, match="archive_phase0_recipe_invalid"):
+        run_live_recovery(plan=plan, expected_plan_hash=plan["planHash"], attempt=1,
+            producer_build_sha="a" * 64, workspace_root=tmp_path, base_url="https://flow.xiaoker.com")
+
+
+def test_archive_download_budget_alone_cannot_admit_history_writes(tmp_path, monkeypatch):
+    from test_phase0_archive import fixture_recipe, DATES
+    recipe, _ = fixture_recipe()
+    assert len(recipe["files"]) < 100  # downloading fits; the complete task does not
+    for key in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.setenv(key, "offline-fixture-only")
+    class NoNetwork:
+        def request(self, *args, **kwargs):
+            pytest.fail("reject an insufficient whole-task budget before first request")
+    monkeypatch.setattr(runner, "build_session", lambda settings: NoNetwork())
+    plan = _plan([DATES[-1]], budget_manifest={"archivePhase0Source": recipe})
+    with pytest.raises(LiveRecoveryError, match="live_recovery_request_budget_exceeded"):
+        run_live_recovery(plan=plan, expected_plan_hash=plan["planHash"], attempt=1,
+            producer_build_sha="a" * 64, workspace_root=tmp_path, base_url="https://flow.xiaoker.com")
+
+
+def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_fallback(tmp_path, monkeypatch):
+    from test_phase0_archive import fixture_recipe, DATES
+    from urllib.parse import urlparse
+    recipe, bodies = fixture_recipe()
+    for key in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.setenv(key, "offline-fixture-only")
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(runner, "discover_recent_trading_dates", lambda **kw: pytest.fail("no live calendar"))
+    monkeypatch.setattr(runner, "_current_szse_etf_matches_target", lambda **kw: pytest.fail("no moving page"))
+    monkeypatch.setattr(runner, "_invoke_szse_etf_history", lambda **kw: pytest.fail("no per-fund requests"))
+    class Transport:
+        def __init__(self):
+            self.calls, self.finalized = [], False
+        def request(self, method, url, **kwargs):
+            assert urlparse(url).hostname == "flow.xiaoker.com"
+            path = urlparse(url).path
+            self.calls.append((method, path))
+            if path.endswith("/history-artifact"):
+                key = kwargs["params"]["archive_key"]
+                body = bodies[key]
+                response = _JsonResponse({})
+                response.headers = {"x-flow-archive-key":key,"x-flow-archive-sha256":kwargs["params"]["archive_sha256"]}
+                response.iter_content = lambda chunk_size: (body[i:i+chunk_size] for i in range(0,len(body),chunk_size))
+                response.close = lambda: None
+            else:
+                if path.endswith("/etf-state"):
+                    value = {"version":1,"dates":DATES if self.finalized else [],"instruments":[]}
+                elif path.endswith("/history-import"):
+                    payload = json.loads(kwargs["data"])
+                    self.finalized |= payload["history"]["finalize"]
+                    value = {"status":"archived" if payload["history"]["finalize"] else "chunk_archived","asOf":DATES[-1]}
+                elif path.endswith("/market-history"):
+                    assert self.finalized
+                    value = {"rows":[{"trade_date":d} for d in DATES]}
+                elif path.endswith("/releases/latest"):
+                    assert method == "GET"  # no activation write is permitted
+                    value = {"releaseId":"existing","asOf":DATES[-2]}
+                else:
+                    pytest.fail(f"unexpected route {path}")
+                response = _JsonResponse(value)
+            response.ok, response.status_code = True, 200
+            return response
+    transport = Transport()
+    monkeypatch.setattr(runner, "build_session", lambda settings: transport)
+    plan = build_recovery_plan(campaign_id="fixture",recovery_id="fixture-archive",
+        run_key=f"daily-market-data:{DATES[-1]}:reconcile:v1",data_dates=[DATES[-1]],
+        required_stages=["dashboard","publish"],artifact_root=".recovery/archive",state_dir=".recovery/archive/state",
+        max_dates=1,max_requests=300,deadline="2026-12-31T00:00:00.000Z",budget_manifest={"archivePhase0Source":recipe})
+    evidence = run_live_recovery(plan=plan,expected_plan_hash=plan["planHash"],attempt=1,
+        producer_build_sha="a"*64,workspace_root=tmp_path,base_url="https://flow.xiaoker.com")
+    assert evidence["targetDate"] == DATES[-1] and evidence["status"] == "READY"
+    assert evidence["requestCount"] == len(transport.calls) < 300
+    assert sum(path.endswith("/history-import") for _,path in transport.calls) == 2 * (17+1)
+    assert all(method == "GET" or path.endswith("/history-import") for method,path in transport.calls)
+
+
 class _Transport:
     def __init__(self) -> None:
         self.headers = {}
