@@ -18,6 +18,7 @@ MAX_SOURCE_ARCHIVE_BYTES = 6 * 1024 * 1024
 CANDIDATE_PREPARATION_CONTRACT = "flow-candidate-preparation-v1"
 MAX_CANDIDATE_PREPARATION_REQUESTS = 8
 ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-archive-replay-source-v1"
+SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v2"
 # One bounded recent-window batch (a baseline plus up to seven sessions in
 # both markets). Larger histories use a later bounded batch, not more calls.
 MAX_ARCHIVE_REPLAY_REQUESTS = 16
@@ -230,9 +231,10 @@ def archive_replay_source_binding(recipe):
     """Public non-secret scope, bound by both request and immutable approval."""
     if recipe is None:
         return None
-    if (not isinstance(recipe, dict) or set(recipe) != {"contract", "baseSnapshotSha256",
-            "calendarGzipBase64", "calendarSha256", "partitions"}
-            or recipe.get("contract") != ARCHIVE_REPLAY_SOURCE_CONTRACT
+    scoped = isinstance(recipe, dict) and recipe.get('contract') == SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT
+    keys = {'contract', 'baseSnapshotSha256', 'calendarGzipBase64', 'calendarSha256', 'partitions'} | ({'scope'} if scoped else set())
+    if (not isinstance(recipe, dict) or set(recipe) != keys
+            or recipe.get("contract") not in {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT}
             or any(not isinstance(recipe.get(k), str) or not re.fullmatch(r"[a-f0-9]{64}", recipe[k])
                 for k in ("baseSnapshotSha256", "calendarSha256"))
             or not isinstance(recipe["calendarGzipBase64"], str)
@@ -240,7 +242,13 @@ def archive_replay_source_binding(recipe):
             or not isinstance(recipe["partitions"], list)
             or not 1 <= len(recipe["partitions"]) <= MAX_ARCHIVE_REPLAY_REQUESTS):
         raise PipelineRunnerError("entry_replay_recipe_invalid")
-    return {"contract": ARCHIVE_REPLAY_SOURCE_CONTRACT, "recipeSha256":
+    if scoped:
+        from .etf_replay import validate_replay_scope
+        try:
+            validate_replay_scope(recipe['scope'])
+        except ValueError:
+            raise PipelineRunnerError('entry_replay_recipe_invalid') from None
+    return {"contract": recipe['contract'], "recipeSha256":
         hashlib.sha256(json.dumps(recipe, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "requestCount": len(recipe["partitions"])}
 
@@ -250,7 +258,7 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
     import base64
     import gzip
     import io
-    from .etf_replay import REPLAY_CONTRACT, MAX_SOURCE_BYTES, validated_replay_inputs
+    from .etf_replay import REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT, MAX_SOURCE_BYTES, validated_replay_inputs
     from .etf_period_dependencies import validate_official_calendar
     from .read_models import canonical_json_bytes
     recipe = request["archiveReplaySource"]
@@ -299,7 +307,10 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
                 or reply.headers.get("x-flow-normalized-sha256") != ref["sha256"]):
             raise PipelineRunnerError("entry_replay_archive_mismatch")
         parts.append({**ref, "contentBase64":base64.b64encode(reply.content).decode()})
-    value = {**base, "etfReplayInput":{"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}}
+    profile = {"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}
+    if recipe['contract'] == SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+        profile.update(contractVersion=SCOPED_REPLAY_CONTRACT, scope=recipe['scope'])
+    value = {**base, "etfReplayInput":profile}
     try:
         validated_replay_inputs(value["etfReplayInput"], target)
     except (ValueError, TypeError):
@@ -503,7 +514,7 @@ def load_candidate_cost_policy(project_root, *, profile=None, approved_recovery_
             count = 0
             if source is not None:
                 if (not isinstance(source,dict) or set(source) != {"contract","recipeSha256","requestCount"}
-                    or source["contract"] != ARCHIVE_REPLAY_SOURCE_CONTRACT
+                    or source["contract"] not in {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT}
                     or not isinstance(source["recipeSha256"],str) or not re.fullmatch(r"[a-f0-9]{64}",source["recipeSha256"])
                     or type(source["requestCount"]) is not int or not 1 <= source["requestCount"] <= MAX_ARCHIVE_REPLAY_REQUESTS):
                     raise ValueError()

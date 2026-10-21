@@ -84,10 +84,20 @@ def _is_date(value: Any) -> bool:
     return True
 
 
-def _expected_period_days(period: str, terminal: dict[str, Any], as_of: str) -> int | None:
+def _period_evidence(terminal: dict[str, Any], period: str, metric: str):
     evidence = terminal.get("windowEvidence")
     if isinstance(evidence, dict):
-        window = evidence.get("periods", {}).get(period, {})
+        scoped = evidence.get('scopedWindows', {}).get(period, {}).get(metric)
+        if isinstance(scoped, dict):
+            return scoped
+        if evidence.get('legacyFallback') is not True:
+            return evidence.get('periods', {}).get(period, {})
+    return None
+
+
+def _expected_period_days(period: str, terminal: dict[str, Any], as_of: str, metric: str = 'shares') -> int | None:
+    window = _period_evidence(terminal, period, metric)
+    if window is not None:
         count = window.get("expectedChanges")
         return count if isinstance(count,int) and not isinstance(count,bool) and count>0 else None
     fixed = PERIOD_DAY_WINDOWS.get(period)
@@ -199,7 +209,7 @@ def _period_states(terminal: dict[str, Any], as_of: str) -> tuple[str, dict[str,
             available_samples = 0
             evidence_invalid = False
             if period in available_periods:
-                expected_days = _expected_period_days(period, terminal, as_of)
+                expected_days = _expected_period_days(period, terminal, as_of, metric)
                 for item in items:
                     if not isinstance(item, dict):
                         evidence_invalid = True
@@ -216,7 +226,7 @@ def _period_states(terminal: dict[str, Any], as_of: str) -> tuple[str, dict[str,
                         or isinstance(count, bool)
                         or count < 0
                         or (expected_days is not None and count > expected_days)
-                        or (expected_days is None and (period == "ytd" or isinstance(terminal.get("windowEvidence"),dict)))
+                        or (expected_days is None and (period == "ytd" or _period_evidence(terminal, period, metric) is not None))
                         or (_is_finite_number(value) and (count == 0 or (expected_days is not None and count != expected_days)))
                         or (value is None and expected_days is not None and count == expected_days)
                         or (value is not None and not _is_finite_number(value))
