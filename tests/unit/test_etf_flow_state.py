@@ -84,6 +84,22 @@ def test_builds_compact_versioned_daily_flow_state(tmp_path: Path) -> None:
     assert len(state["sourceSnapshots"][0]["sha256"]) == 64
 
 
+def test_current_etf_without_baseline_remains_visible_with_unknown_changes():
+    state = {"version": 1, "dates": ["2026-10-16", "2026-10-19"],
+        "instruments": [{"code": "159001", "market": "SZSE", "name": "旧ETF",
+            "values": [1., None]}]}
+    current = {"code": "158072", "market": "SZSE", "name": "创业板软件ETF南方",
+        "shares": 2.20187008, "periods": {"1d": None}}
+    result = materialize_etf_terminal(state, base_terminal={"instruments": [current]})
+    assert [row["code"] for row in result["instruments"]] == ["158072"]
+    row = result["instruments"][0]
+    assert row["shares"] == current["shares"]
+    assert row["periods"]["1d"] is None
+    assert row["estimatedCashPeriods"]["1d"] is None
+    assert row["periodCoverage"]["1d"] == 0
+    assert result["universe"]["periodComparable"] == 0
+
+
 def test_carries_daily_cash_values_without_revaluing_old_share_changes(tmp_path: Path) -> None:
     snapshots = [
         _snapshot(tmp_path / "2026-07-21.json", "2026-07-21", 1.2, cash=2.4),
