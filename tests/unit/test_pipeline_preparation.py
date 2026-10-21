@@ -196,7 +196,9 @@ def test_invalid_package_has_no_http_or_state(tmp_path, fault):
     if fault == "expiry": package["expiresAt"] = STAMP
     if fault == "generation": package["registration"]["expectedAttemptCount"] = 9
     if fault == "unknown_budget": package["accountReconciliation"]["evidence"]["r2Bytes"]["value"] = None
-    if fault == "over_budget": package["accountReconciliation"]["evidence"]["actionsMinutes"]["value"] = 1500
+    if fault == "over_budget":
+        config = json.loads((ROOT / "config/resource-budget.json").read_bytes())
+        package["accountReconciliation"]["evidence"]["actionsMinutes"]["value"] = config["hardLimits"]["githubActionsMinutesPerMonth"]
     if fault == "secret": package["token"] = "fixture-secret-only"
     transport = Sequence(package, request)
     with pytest.raises(PipelineRunnerError):

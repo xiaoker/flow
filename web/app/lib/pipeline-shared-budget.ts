@@ -245,6 +245,7 @@ type AccountReconciliation = {
   operation: "account_reconcile"; operationId: string; expectedRevision: number | null;
   dryRun: boolean; evidence: Vector; evidenceReference: string;
   evidenceContract?: EvidenceContract;
+  policyUpdate?: string;
 };
 async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now: Date, limits: Caps,
   count: (meta?: { rows_read?: number; rows_written?: number }) => void,
@@ -253,9 +254,9 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
   // cannot supply caps, counters, reservations, epochs, TTLs or arbitrary state.
   const bounded = input.evidenceContract === "flow-account-evidence-v3";
   const periodAware = bounded || input.evidenceContract === "flow-account-evidence-v2";
-  if (Object.keys(input).sort().join(",") !== (periodAware
-    ? "dryRun,evidence,evidenceContract,evidenceReference,expectedRevision,operation,operationId"
-    : "dryRun,evidence,evidenceReference,expectedRevision,operation,operationId")
+  const expectedKeys = ["dryRun", "evidence", "evidenceReference", "expectedRevision", "operation", "operationId",
+    ...(periodAware ? ["evidenceContract"] : []), ...(input.policyUpdate !== undefined ? ["policyUpdate"] : [])];
+  if (Object.keys(input).sort().join(",") !== expectedKeys.sort().join(",")
       || typeof input.dryRun !== "boolean" || !/^[a-f0-9]{64}$/.test(input.operationId)
       || !(input.expectedRevision === null || integer(input.expectedRevision))
       || typeof input.evidenceReference !== "string" || !/^official-usage-sha256:[a-f0-9]{64}$/.test(input.evidenceReference)) fail("invalid_budget_reconciliation");
@@ -288,6 +289,14 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
   if (priorState?.evidenceContract && !periodAware) fail("budget_evidence_contract_downgrade", 409);
   if (priorState?.evidenceContract === "flow-account-evidence-v3" && !bounded) fail("budget_evidence_contract_downgrade", 409);
   const epochDay = now.toISOString().slice(0, 10), epochMonth = epochDay.slice(0, 7);
+  // Explicit administrative adoption of one code-reviewed cap. Ordinary
+  // telemetry reconciliation never raises stored caps or releases occupancy.
+  const update = resourceConfig.resourceAccounting.authorizedPolicyUpdate;
+  if (input.policyUpdate !== undefined && (!periodAware || input.policyUpdate !== update.id
+      || now.getTime() < Date.parse(update.notBefore)
+      || epochMonth !== update.epochMonth || !priorState || priorState.epochMonth !== epochMonth
+      || priorState.caps.actionsMinutes !== update.previousCap || limits.actionsMinutes !== update.nextCap
+      || update.dimension !== "actionsMinutes")) fail("budget_policy_update_conflict", 409);
   const next = priorState ? structuredClone(priorState) : createSharedBudgetState({
     epochDay, epochMonth, evidence: input.evidence, caps: limits, targets: {},
     measurementTtlSeconds: resourceConfig.resourceAccounting.measurementTtlSeconds,
@@ -317,6 +326,7 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
       next.caps[d] = priorState.caps[d] === null ? limits[d] : Math.min(priorState.caps[d]!, limits[d]!);
     }
   }
+  if (input.policyUpdate !== undefined) next.caps.actionsMinutes = update.nextCap;
   next.epochDay = epochDay; next.epochMonth = epochMonth;
   next.evidence = refreshed;
   if (periodAware) next.evidenceContract = input.evidenceContract;
@@ -324,6 +334,7 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
   if (!evidenceReady(next, now)) fail("budget_evidence_not_ready", 409);
   if (Object.keys(next.receipts).length >= MAX_RECEIPTS) fail("budget_receipt_capacity", 409);
   const result = { decision: "account_reconciled", scope: BUDGET_SCOPE, epochDay, epochMonth,
+    ...(input.policyUpdate !== undefined ? { policyUpdate: input.policyUpdate, actionsCap: next.caps.actionsMinutes } : {}),
     ...(periodAware ? { evidenceContract: next.evidenceContract } : {}),
     evidenceReference: input.evidenceReference, evidenceSha256: await digest(input.evidence), executionAllowed: false };
   next.receipts[input.operationId] = { hash, result };
