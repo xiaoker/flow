@@ -19,6 +19,13 @@ CANDIDATE_PREPARATION_CONTRACT = "flow-candidate-preparation-v1"
 MAX_CANDIDATE_PREPARATION_REQUESTS = 8
 ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-archive-replay-source-v1"
 SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v2"
+HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v3"
+ARCHIVE_REPLAY_CONTRACTS = {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+                           HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+HISTORICAL_SOURCE_FILES = {
+    'marketHistorySha256': ('market-history.json', 'input-market-history.json', 'market_history_path'),
+    'previousManifestSha256': ('previous-release.json', 'input-previous-manifest.json', 'previous_manifest_path'),
+}
 # One bounded recent-window batch (a baseline plus up to seven sessions in
 # both markets). Larger histories use a later bounded batch, not more calls.
 MAX_ARCHIVE_REPLAY_REQUESTS = 16
@@ -151,6 +158,7 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
     session.trust_env = False  # No ambient netrc authentication on the signed host.
     session.auth = None
     exchange = BoundedHTTPExchange(session)
+    historical_inputs = {}
     def get(url, *, auth=False, maximum=16384):
         reply = exchange.request("GET", url, max_bytes=maximum, chunk_size=65536,
             max_chunks=max(2, maximum // 65536 + 1), deadline_seconds=20,
@@ -201,6 +209,19 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
                 snapshot = stream.read(4 * 1024 * 1024 + 1)
             if len(snapshot) != matches[0].file_size:
                 raise PipelineRunnerError("entry_source_snapshot_size_mismatch")
+            recipe = request.get('archiveReplaySource') or {}
+            if recipe.get('contract') == HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+                for key, (source_name, saved_name, _) in HISTORICAL_SOURCE_FILES.items():
+                    siblings = [entry for entry in entries if entry.filename in {
+                        source_name, matches[0].filename.removesuffix('dashboard-snapshot.json') + source_name}]
+                    if len(siblings) != 1 or not 0 < siblings[0].file_size <= 4 * 1024 * 1024:
+                        raise PipelineRunnerError('entry_source_sidecar_unavailable')
+                    with archive.open(siblings[0]) as stream:
+                        content = stream.read(4 * 1024 * 1024 + 1)
+                    if (len(content) != siblings[0].file_size
+                            or hashlib.sha256(content).hexdigest() != recipe['sidecars'][key]):
+                        raise PipelineRunnerError('entry_source_sidecar_hash_mismatch')
+                    historical_inputs[saved_name] = content
         value = json.loads(snapshot)
         reject_inline_credentials(value)
         expected_source = (request["archiveReplaySource"]["baseSnapshotSha256"] if replay is not None
@@ -218,6 +239,7 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
         session.close()
     root.mkdir(parents=True, mode=0o700)
     for name, data in {"request.json": json.dumps(request).encode(), "dashboard-snapshot.json": snapshot,
+                       **historical_inputs,
                        **({"approved-plan.json": json.dumps(plan).encode()} if plan else {})}.items():
         with (root / name).open("xb") as stream:
             os.chmod(root / name, 0o600)
@@ -231,10 +253,12 @@ def archive_replay_source_binding(recipe):
     """Public non-secret scope, bound by both request and immutable approval."""
     if recipe is None:
         return None
-    scoped = isinstance(recipe, dict) and recipe.get('contract') == SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT
-    keys = {'contract', 'baseSnapshotSha256', 'calendarGzipBase64', 'calendarSha256', 'partitions'} | ({'scope'} if scoped else set())
+    historical = isinstance(recipe, dict) and recipe.get('contract') == HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT
+    scoped = isinstance(recipe, dict) and recipe.get('contract') in {SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+    keys = ({'contract', 'baseSnapshotSha256', 'calendarGzipBase64', 'calendarSha256', 'partitions'}
+            | ({'scope'} if scoped else set()) | ({'sidecars'} if historical else set()))
     if (not isinstance(recipe, dict) or set(recipe) != keys
-            or recipe.get("contract") not in {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+            or recipe.get("contract") not in ARCHIVE_REPLAY_CONTRACTS
             or any(not isinstance(recipe.get(k), str) or not re.fullmatch(r"[a-f0-9]{64}", recipe[k])
                 for k in ("baseSnapshotSha256", "calendarSha256"))
             or not isinstance(recipe["calendarGzipBase64"], str)
@@ -248,6 +272,11 @@ def archive_replay_source_binding(recipe):
             validate_replay_scope(recipe['scope'])
         except ValueError:
             raise PipelineRunnerError('entry_replay_recipe_invalid') from None
+    if historical and (not isinstance(recipe['sidecars'], dict)
+            or set(recipe['sidecars']) != set(HISTORICAL_SOURCE_FILES)
+            or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
+                   for value in recipe['sidecars'].values())):
+        raise PipelineRunnerError('entry_replay_sidecars_invalid')
     return {"contract": recipe['contract'], "recipeSha256":
         hashlib.sha256(json.dumps(recipe, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "requestCount": len(recipe["partitions"])}
@@ -308,7 +337,7 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
             raise PipelineRunnerError("entry_replay_archive_mismatch")
         parts.append({**ref, "contentBase64":base64.b64encode(reply.content).decode()})
     profile = {"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}
-    if recipe['contract'] == SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+    if recipe['contract'] in {SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}:
         profile.update(contractVersion=SCOPED_REPLAY_CONTRACT, scope=recipe['scope'])
     value = {**base, "etfReplayInput":profile}
     try:
@@ -371,6 +400,26 @@ def dry_run_entry(payload, *, producer_build_sha, dependency_lock_paths, project
                         "activeReleaseChanged": False, "filesystemWrites": False}}
 
 
+def candidate_build_inputs(snapshot_path, payload):
+    """Use only explicitly bound same-artifact sidecars; legacy stays unchanged."""
+    from .pipeline_build_adapter import CoreReadModelBuildAdapter, _read, MAX_INPUT_BYTES
+    recipe = payload.get('archiveReplaySource') or {}
+    if recipe.get('contract') != HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+        return CoreReadModelBuildAdapter(Path(snapshot_path)), {}, {}
+    archive_replay_source_binding(recipe)
+    paths, content = {}, {}
+    root = Path(snapshot_path).parent
+    for key, (_, name, argument) in HISTORICAL_SOURCE_FILES.items():
+        path = root/name
+        if any(part.is_symlink() for part in (path, *path.parents)):
+            raise PipelineRunnerError('entry_source_path_invalid')
+        data = _read(path, MAX_INPUT_BYTES)
+        if hashlib.sha256(data).hexdigest() != recipe['sidecars'][key]:
+            raise PipelineRunnerError('entry_source_sidecar_hash_mismatch')
+        paths[argument], content[key] = path, data
+    return CoreReadModelBuildAdapter(Path(snapshot_path), **paths), dict(recipe['sidecars']), content
+
+
 def prepare_core_candidate(payload, *, snapshot_path, producer_build_sha,
                            dependency_lock_paths, project_root, now=None):
     """Derive the fixed core graph using existing builders, without effects.
@@ -380,7 +429,7 @@ def prepare_core_candidate(payload, *, snapshot_path, producer_build_sha,
     The caller still needs live server authorization and whole-task admission.
     """
     from .pipeline_application import canonical_sha256
-    from .pipeline_build_adapter import CoreReadModelBuildAdapter, _read, _result, MAX_INPUT_BYTES
+    from .pipeline_build_adapter import _read, _result, MAX_INPUT_BYTES
     from .pipeline_adapters import PipelineAdapterError
     reject_inline_credentials(payload)
     verify_checkout_sha(Path(project_root).resolve(), producer_build_sha)
@@ -404,10 +453,10 @@ def prepare_core_candidate(payload, *, snapshot_path, producer_build_sha,
     pinned = supplied.get("build", {}).get("snapshotSha256")
     if not isinstance(pinned, str) or pinned != hashlib.sha256(data).hexdigest():
         raise PipelineRunnerError("entry_source_hash_mismatch")
-    build_config = {"snapshotSha256": pinned}
+    builder, hashes, sidecars = candidate_build_inputs(path, payload)
+    build_config = {"snapshotSha256": pinned, **hashes}
     build_input = canonical_sha256(build_config)
-    builder = CoreReadModelBuildAdapter(path)
-    encoded, manifest = builder._expected(context.identity, build_config, build_input, data)
+    encoded, manifest = builder._expected(context.identity, build_config, build_input, data, sidecars=sidecars)
     if manifest.get("publication", {}).get("status") != "confirmed":
         raise PipelineAdapterError("verify_publication_not_confirmed")
     built = _result(encoded, manifest)
@@ -514,7 +563,7 @@ def load_candidate_cost_policy(project_root, *, profile=None, approved_recovery_
             count = 0
             if source is not None:
                 if (not isinstance(source,dict) or set(source) != {"contract","recipeSha256","requestCount"}
-                    or source["contract"] not in {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+                    or source["contract"] not in ARCHIVE_REPLAY_CONTRACTS
                     or not isinstance(source["recipeSha256"],str) or not re.fullmatch(r"[a-f0-9]{64}",source["recipeSha256"])
                     or type(source["requestCount"]) is not int or not 1 <= source["requestCount"] <= MAX_ARCHIVE_REPLAY_REQUESTS):
                     raise ValueError()
@@ -600,7 +649,6 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
     from .pipeline_candidate_transport import CandidatePublicationTransport, RecoveryCandidatePublicationTransport
     from .pipeline_checkpoint_transport import CheckpointObjectTransport, RecoveryCheckpointObjectTransport
     from .pipeline_publication_intent import PublicationIntentStore
-    from .pipeline_build_adapter import CoreReadModelBuildAdapter
     from .pipeline_verify_adapter import CoreReadModelVerifyAdapter
     from .pipeline_publish_adapter import CoreCandidatePublishAdapter
     from .pipeline_checkpoint_preflight import (FreshCandidateRequestProfile, FreshRecoveryCandidateRequestProfile,
@@ -695,7 +743,7 @@ def run_candidate_entry(payload, *, snapshot_path, producer_build_sha, dependenc
     checkpoints = RecoveryCheckpointObjectTransport(**checkpoint_args, approved_plan=approved_recovery_plan,
         stages=request["stages"], now=clock) if recovery else CheckpointObjectTransport(**checkpoint_args)
     workspaces = {stage: state_dir / "stages" / stage / request["stageInputs"][stage] for stage in request["stages"]}
-    adapters = {"build": CoreReadModelBuildAdapter(Path(snapshot_path)),
+    adapters = {"build": candidate_build_inputs(snapshot_path, request)[0],
         "verify": CoreReadModelVerifyAdapter(workspaces["build"]),
         "publish": CoreCandidatePublishAdapter(workspaces["verify"], candidate, context, restore_completed_intents=resume)}
     return run_pipeline_request(request, state_dir=state_dir, output_path=output_path,

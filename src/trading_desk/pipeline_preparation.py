@@ -56,7 +56,7 @@ def preflight_candidate_checkpoints(request, context, snapshot_path):
     Temporary workspaces are removed on success or failure. No transport,
     credential, lease or production state is consumed by this capacity check.
     """
-    from .pipeline_build_adapter import CoreReadModelBuildAdapter, _read
+    from .pipeline_build_adapter import _read
     from .pipeline_adapters import PipelineAdapterError
     from .pipeline_verify_adapter import CoreReadModelVerifyAdapter
     from .pipeline_publication import build_candidate_upload_body
@@ -68,7 +68,8 @@ def preflight_candidate_checkpoints(request, context, snapshot_path):
     with tempfile.TemporaryDirectory(prefix="flow-candidate-checkpoint-preflight-",
                                      dir=Path(tempfile.gettempdir()).resolve()) as folder:
         root = Path(folder)
-        adapters = {"build": CoreReadModelBuildAdapter(Path(snapshot_path)),
+        from .pipeline_entry import candidate_build_inputs
+        adapters = {"build": candidate_build_inputs(snapshot_path, request)[0],
                     "verify": CoreReadModelVerifyAdapter(root / "build")}
         for stage, adapter in adapters.items():
             result = adapter.run(context=local, input_sha256=request["stageInputs"][stage],
