@@ -380,6 +380,7 @@ def test_deploy_canary_waits_for_the_exact_worker_build_after_rollout() -> None:
     assert "pull_request:" in workflow
     assert "types: [closed]" in workflow
     assert '"web/**"' in workflow
+    assert '"config/resource-budget.json"' in workflow
     assert "github.event.pull_request.merged == true" in workflow
     assert "FLOW_SOURCE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}" in workflow
     assert "ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}" in workflow

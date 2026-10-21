@@ -11,6 +11,7 @@ on:
     types: [closed]
     paths:
       - "web/**"
+      - "config/resource-budget.json"
       - ".github/workflows/deploy-worker.yml"
   workflow_dispatch:
 

@@ -24,7 +24,7 @@ function fixture(options = {}) {
   } };
   return { db, sqls, call: (p, token = "test-key", limits = caps) => sharedBudgetRequest(new Request("https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget", {
     method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(p) }),
-    { DB: adapter, INGEST_API_KEY: "test-key" }, () => options.clock?.() ?? now, limits),
+    { DB: adapter, INGEST_API_KEY: "test-key" }, () => options.clock?.() ?? now, limits ?? undefined),
     row: () => db.prepare("SELECT * FROM pipeline_budget_account WHERE scope=?").get(BUDGET_SCOPE) };
 }
 test("reconciliation dry-run authenticates, stays read-only, and rejects unknown/stale evidence", async () => {
@@ -312,6 +312,51 @@ test("existing account dry-run preserves row, prior lower caps and newly lowered
   const next = JSON.parse(f.row().state_json);
   assert.equal(next.caps.r2ClassA, 100); assert.equal(next.caps.r2ClassB, 200);
   f.db.close();
+});
+
+test("reviewed Actions policy adoption is explicit, month-scoped, CAS-protected and retains UNKNOWN", async () => {
+  const at = new Date("2026-10-22T02:00:00Z");
+  const f = fixture({ clock: () => at });
+  await f.call({ ...periodPayload(at, "2026-10-16T00:00:00.000Z", "2026-11-16T00:00:00.000Z"), dryRun: false }, "test-key", { ...caps, actionsMinutes: 1500 });
+  const old = JSON.parse(f.row().state_json);
+  const nums = n => Object.fromEntries(DIMENSIONS.map(d => [d, n]));
+  old.reservations.uncertain = { cost: nums(20), consumed: nums(2), authorized: nums(3), status: "UNKNOWN", expiresAt: now.toISOString() };
+  old.settled = nums(4);
+  f.db.prepare("UPDATE pipeline_budget_account SET state_json=? WHERE scope=?").run(JSON.stringify(old), BUDGET_SCOPE);
+  const p = { ...periodPayload(at, "2026-10-16T00:00:00.000Z", "2026-11-16T00:00:00.000Z"), expectedRevision: 0, operationId: "b".repeat(64), policyUpdate: "actions-1850-20261022" };
+  const before = f.row();
+  assert.equal((await f.call(p, "wrong", null)).status, 401);
+  assert.equal((await f.call({ ...p, policyUpdate: "arbitrary" }, "test-key", null)).status, 409);
+  assert.equal((await f.call({ ...p, expectedRevision: 9 }, "test-key", null)).status, 409);
+  assert.equal((await f.call(p, "test-key", null)).status, 200);
+  assert.deepEqual(f.row(), before);
+  const applied = await (await f.call({ ...p, dryRun: false }, "test-key", null)).json();
+  assert.equal(applied.actionsCap, 1850);
+  const next = JSON.parse(f.row().state_json);
+  assert.deepEqual(next.reservations, old.reservations);
+  assert.deepEqual(next.settled, old.settled);
+  for (const d of DIMENSIONS.filter(d => d !== "actionsMinutes")) assert.equal(next.caps[d], old.caps[d]);
+  const after = f.row();
+  assert.equal((await (await f.call({ ...p, dryRun: false }, "test-key", null)).json()).replayed, true);
+  assert.deepEqual(f.row(), after);
+  assert.equal((await f.call({ ...p, dryRun: false, expectedRevision: 1, operationId: "c".repeat(64) }, "test-key", null)).status, 409);
+  f.db.close();
+});
+
+test("policy adoption expires and ordinary reconciliation never raises the stored cap", async () => {
+  const f = fixture();
+  await f.call({ ...periodPayload(), dryRun: false }, "test-key", { ...caps, actionsMinutes: 1500 });
+  const p = { ...periodPayload(), expectedRevision: 0, operationId: "b".repeat(64), dryRun: false };
+  assert.equal((await f.call(p, "test-key", null)).status, 200);
+  assert.equal(JSON.parse(f.row().state_json).caps.actionsMinutes, 1500);
+  f.db.close();
+  const later = new Date("2026-11-01T02:00:00Z");
+  const expired = fixture({ clock: () => later });
+  const q = periodPayload(later, "2026-10-16T00:00:00.000Z", "2026-11-16T00:00:00.000Z");
+  await expired.call({ ...q, dryRun: false }, "test-key", { ...caps, actionsMinutes: 1500 });
+  const before = expired.row();
+  assert.equal((await expired.call({ ...q, dryRun: false, expectedRevision: 0, operationId: "b".repeat(64), policyUpdate: "actions-1850-20261022" }, "test-key", null)).status, 409);
+  assert.deepEqual(expired.row(), before); expired.db.close();
 });
 
 test("true month rollover preserves holds and charges; storage may decrease", async () => {

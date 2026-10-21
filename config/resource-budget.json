@@ -24,12 +24,20 @@
     "d1RowsReadPerDay": 2500000,
     "d1RowsWrittenPerDay": 50000,
     "workersRequestsPerDay": 50000,
-    "githubActionsMinutesPerMonth": 1500,
+    "githubActionsMinutesPerMonth": 1850,
     "r2ClassA": 500000,
     "r2ClassB": 5000000
   },
   "resourceAccounting": {
     "schemaVersion": 1,
+    "authorizedPolicyUpdate": {
+      "id": "actions-1850-20261022",
+      "notBefore": "2026-10-22T00:00:00+08:00",
+      "epochMonth": "2026-10",
+      "dimension": "actionsMinutes",
+      "previousCap": 1500,
+      "nextCap": 1850
+    },
     "measurementTtlSeconds": 3600,
     "reservationTtlSeconds": 1800,
     "conservativeLimitBasis": "min(official,hard)",
