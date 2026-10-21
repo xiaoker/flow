@@ -239,6 +239,14 @@ def materialize_etf_terminal(
     def key_for(item: dict[str, Any]) -> str:
         return f"{item.get('market', 'SSE')}:{str(item.get('code', '')).zfill(6)}"
 
+    # Current official membership and availability of a daily difference are
+    # separate facts. A newly listed ETF has no baseline, but must not vanish.
+    state_keys = {key_for(item) for item in state_rows}
+    for key, item in base_by_key.items():
+        if key not in state_keys:
+            state_rows.append({**item, "values": [None] * len(dates),
+                "cashValues": [None] * len(dates)})
+
     def value_at(item: dict[str, Any], field: str, index: int) -> float | None:
         values = item.get(field) or []
         if index >= len(values) or values[index] is None:
@@ -271,9 +279,9 @@ def materialize_etf_terminal(
         # Excluding these inactive rows prevents stale metadata from failing
         # raw-to-terminal identity QA and avoids showing obsolete ETFs as if
         # they still traded.
-        if value_at(state_item, "values", latest_index) is None:
-            continue
         key = key_for(state_item)
+        if value_at(state_item, "values", latest_index) is None and key not in base_by_key:
+            continue
         original = base_by_key.get(key, {})
         merged = {**original, **{
             "code": str(state_item.get("code") or original.get("code") or "").zfill(6),
