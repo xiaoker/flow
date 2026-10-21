@@ -29,6 +29,124 @@ def source():
     return snapshot
 
 
+def scoped_source():
+    value = source()
+    profile = value['etfReplayInput']
+    profile['contractVersion'] = 'flow-etf-scoped-replay-v0.8.1'
+    profile['scope'] = {'periods': ['3d'], 'metrics': ['shares']}
+    terminal = value['etfTerminal']
+    terminal['historyCoverage']['tradingDays'] = 260
+    terminal['availablePeriods'].append('1w')
+    for row in terminal['instruments']:
+        row['periods']['1w'] = 7.0
+        row['periodCoverage']['1w'] = 5
+        row['estimatedCashPeriods']['1w'] = None
+        row['cashPeriodCoverage']['1w'] = 0
+    for row in terminal['groupPeriods']:
+        row['periods']['1w'] = 14.0
+        row['comparableCount']['1w'] = 2
+        row['estimatedCashPeriods']['1w'] = None
+        row['estimatedCashCoverage']['1w'] = 0
+    return value
+
+
+def test_scoped_replay_preserves_unselected_history_and_domains():
+    value = scoped_source()
+    before = deepcopy(value)
+    result = replay_snapshot(value)
+    assert value == before
+    for key in before.keys() - {'etfReplayInput', 'etfTerminal'}:
+        assert result[key] == before[key]
+    terminal = result['etfTerminal']
+    assert terminal['historyCoverage'] == before['etfTerminal']['historyCoverage']
+    assert terminal['dailySeries'] == before['etfTerminal']['dailySeries']
+    for old, new in zip(before['etfTerminal']['instruments'], terminal['instruments'], strict=True):
+        assert new['periods']['3d'] == .03
+        for field in ('periods', 'periodCoverage'):
+            assert {k:v for k,v in new[field].items() if k != '3d'} == {k:v for k,v in old[field].items() if k != '3d'}
+        assert new['estimatedCashPeriods'] == old['estimatedCashPeriods']
+        assert new['cashPeriodCoverage'] == old['cashPeriodCoverage']
+    base = deepcopy(before); base.pop('etfReplayInput')
+    _, previous = build_market_read_models(base, capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    _, manifest = build_market_read_models(value, previous_manifest=previous,
+        require_materialized=True, capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    old_periods = previous['capabilityContract']['capabilities']['etf_periods']['periods']
+    new_periods = manifest['capabilityContract']['capabilities']['etf_periods']['periods']
+    for period in old_periods:
+        for metric in old_periods[period]:
+            if (period, metric) != ('3d', 'shares'):
+                assert new_periods[period][metric] == old_periods[period][metric]
+
+
+def test_scoped_replay_uses_pinned_base_classification():
+    value = scoped_source()
+    for row in value['etfTerminal']['instruments']:
+        row['category'] = '未归类'
+        row['groupType'] = 'unclassified'
+    # Use the materializer itself to produce a coherent base grouping.
+    from trading_desk.etf_flow_state import materialize_etf_terminal
+    from test_read_model_capabilities import _state
+    state = _state()
+    for row in state['instruments']:
+        row['category'] = '未归类'
+        row['groupType'] = 'unclassified'
+    terminal = materialize_etf_terminal(state, base_terminal=value['etfTerminal'])
+    value['etfTerminal'] = terminal
+    result = replay_snapshot(value)['etfTerminal']
+    assert {r['category'] for r in result['instruments']} == {'未归类'}
+    assert [r['name'] for r in result['groupPeriods']] == ['未归类']
+    assert result['groupPeriods'][0]['periods']['3d'] == .06
+
+
+@pytest.mark.parametrize('fault', ['scope', 'daily', 'metric', 'pending', 'market', 'sample', 'universe'])
+def test_scoped_replay_rejects_unsafe_repair(fault):
+    value = scoped_source(); profile = value['etfReplayInput']
+    if fault == 'scope': profile['scope']['periods'] = ['3d', '3d']
+    elif fault == 'daily': profile['scope']['periods'] = ['1d']
+    elif fault == 'metric': profile['scope']['metrics'] = ['unknown']
+    elif fault == 'pending': value['publication']['status'] = 'pending'
+    elif fault == 'market': profile['partitions'] = [p for p in profile['partitions'] if p['sourceId'] != 'szse']
+    elif fault == 'sample': profile['partitions'] = [p for p in profile['partitions'] if p['tradeDate'] != '2026-08-04']
+    else: value['etfTerminal']['instruments'].pop()
+    with pytest.raises(ValueError): replay_snapshot(value)
+
+
+@pytest.mark.parametrize('tamper', [False, True])
+def test_scoped_recipe_hydrates_through_existing_approved_entry(tmp_path, monkeypatch, tamper):
+    from datetime import datetime, timedelta, timezone
+    from test_pipeline_archive_source import replay_inputs, rebind, ArchiveSession, source_env
+    from trading_desk.pipeline_entry import archive_replay_source_binding, prepare_workflow_inputs
+    from trading_desk.pipeline_runner import PipelineRunnerError
+    package, request, path, plan, _, rows = replay_inputs(tmp_path)
+    value = scoped_source()
+    profile = value.pop('etfReplayInput')
+    base = canonical_json_bytes(value)
+    recipe = request['archiveReplaySource']
+    recipe.update(contract='flow-scoped-archive-replay-source-v2',
+                  baseSnapshotSha256=hashlib.sha256(base).hexdigest(), scope=profile['scope'])
+    final = canonical_json_bytes({**value, 'etfReplayInput': profile})
+    request['stageConfigs']['build']['snapshotSha256'] = hashlib.sha256(final).hexdigest()
+    plan['budgetManifest']['archiveReplaySource'] = archive_replay_source_binding(recipe)
+    rebind(package, request, plan)
+    package['expiresAt'] = (datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+    transport = ArchiveSession(base, rows)
+    monkeypatch.setattr('trading_desk.http.build_session', lambda settings: transport)
+    if tamper:
+        recipe['scope']['metrics'] = ['estimatedAmount']
+        package['requestSha256'] = canonical_sha256(request)
+        with pytest.raises(PipelineRunnerError):
+            prepare_workflow_inputs(tmp_path/'prepared', artifact_id='17', source_run_id='9',
+                environment=source_env(package, request, plan))
+        assert not transport.calls
+    else:
+        prepare_workflow_inputs(tmp_path/'prepared', artifact_id='17', source_run_id='9',
+            environment=source_env(package, request, plan))
+        hydrated = json.loads((tmp_path/'prepared/dashboard-snapshot.json').read_bytes())
+        assert hydrated == json.loads(final)
+        assert replay_snapshot(hydrated)['etfTerminal']['historyCoverage']['tradingDays'] == 260
+        assert len(transport.calls) == 3 + len(rows)
+
+
 def test_real_builder_consumes_replay_and_preserves_legacy_no_profile():
     value=source()
     result=replay_snapshot(value)
