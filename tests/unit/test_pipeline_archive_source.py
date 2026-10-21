@@ -105,6 +105,121 @@ def source_env(package,request,plan):
         "FLOW_ENTRY_PREPARATION_SHA256":canonical_sha256(package)}
 
 
+def historical_replay_inputs(tmp_path):
+    from test_etf_replay import scoped_source
+    from test_read_models import _market_history
+    from trading_desk.read_models import build_market_read_models
+    from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
+    package, request, path, plan, _, rows = replay_inputs(tmp_path)
+    value = scoped_source()
+    profile = value.pop('etfReplayInput')
+    base = canonical_json_bytes(value)
+    history = _market_history(start='2026-08-05', count=2)
+    _, previous = build_market_read_models(value, market_history=history,
+        capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    sidecars = {'marketHistorySha256': canonical_json_bytes(history),
+                'previousManifestSha256': canonical_json_bytes({'manifest': previous})}
+    hashes = {key: hashlib.sha256(data).hexdigest() for key, data in sidecars.items()}
+    recipe = request['archiveReplaySource']
+    recipe.update(contract='flow-scoped-archive-replay-source-v3', scope=profile['scope'],
+        sidecars=hashes, baseSnapshotSha256=hashlib.sha256(base).hexdigest())
+    final = canonical_json_bytes({**value, 'etfReplayInput': profile})
+    request['stageConfigs'] = {'build': {'snapshotSha256': hashlib.sha256(final).hexdigest(), **hashes}}
+    plan['budgetManifest']['archiveReplaySource'] = archive_replay_source_binding(recipe)
+    rebind(package, request, plan)
+    package['expiresAt'] = (datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+    transport = ArchiveSession(base, rows)
+    out = io.BytesIO(transport.archive)
+    with zipfile.ZipFile(out, 'a') as archive:
+        archive.writestr('market-history.json', sidecars['marketHistorySha256'])
+        archive.writestr('previous-release.json', sidecars['previousManifestSha256'])
+    transport.archive = out.getvalue()
+    return package, request, plan, transport, sidecars
+
+
+def test_historical_inputs_survive_formal_source_graph_and_checkpoint_preflight(tmp_path, monkeypatch):
+    from trading_desk.pipeline_preparation import preflight_candidate_checkpoints
+    package, request, plan, transport, sidecars = historical_replay_inputs(tmp_path)
+    monkeypatch.setattr('trading_desk.http.build_session', lambda settings: transport)
+    destination = tmp_path/'prepared'
+    report = prepare_workflow_inputs(destination, artifact_id='17', source_run_id='9',
+        environment=source_env(package, request, plan))
+    assert report['sourceReadRequests'] == {'github': 3, 'archive': 8}
+    for key, name in (('marketHistorySha256', 'input-market-history.json'),
+                      ('previousManifestSha256', 'input-previous-manifest.json')):
+        assert (destination/name).read_bytes() == sidecars[key]
+    graph, context, manifest = prepare_core_candidate(request,
+        snapshot_path=destination/'dashboard-snapshot.json', producer_build_sha=sha(),
+        dependency_lock_paths=[LOCK, RUNTIME_LOCK], project_root=ROOT, now=NOW)
+    assert manifest['marketHistory']['margin']['points'] == 2
+    assert manifest['coverage']['etf']['tradingDays'] == 260
+    sizes = preflight_candidate_checkpoints(graph, context, destination/'dashboard-snapshot.json')
+    assert set(sizes) == {'build', 'verify'}
+    assert all(0 < size <= 1048576 for size in sizes.values())
+    assert len(transport.calls) == 11
+
+
+@pytest.mark.parametrize('fault', ['missing', 'hash', 'duplicate', 'oversize', 'unapproved', 'schema'])
+def test_historical_source_faults_fail_closed(tmp_path, monkeypatch, fault):
+    package, request, plan, transport, _ = historical_replay_inputs(tmp_path)
+    if fault == 'unapproved':
+        request['archiveReplaySource']['sidecars']['marketHistorySha256'] = '0'*64
+        package['requestSha256'] = canonical_sha256(request)
+    elif fault == 'schema':
+        request['archiveReplaySource']['sidecars']['unexpected'] = '0'*64
+        package['requestSha256'] = canonical_sha256(request)
+    else:
+        source = zipfile.ZipFile(io.BytesIO(transport.archive))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w') as archive:
+            for member in source.infolist():
+                if member.filename == 'market-history.json':
+                    if fault == 'missing':
+                        continue
+                    data = b'{}' if fault == 'hash' else b'x'*(4*1024*1024+1) if fault == 'oversize' else source.read(member)
+                    archive.writestr(member.filename, data)
+                    if fault == 'duplicate':
+                        archive.writestr(member.filename, data)
+                else:
+                    archive.writestr(member.filename, source.read(member))
+        source.close()
+        transport.archive = out.getvalue()
+    monkeypatch.setattr('trading_desk.http.build_session', lambda settings: transport)
+    with pytest.raises(PipelineRunnerError):
+        prepare_workflow_inputs(tmp_path/'prepared', artifact_id='17', source_run_id='9',
+            environment=source_env(package, request, plan))
+    assert not (tmp_path/'prepared').exists()
+    assert len(transport.calls) == (0 if fault in {'unapproved', 'schema'} else 3)
+
+
+@pytest.mark.parametrize('fault', ['missing', 'hash', 'config', 'regression'])
+def test_historical_graph_rejects_drift_before_control(tmp_path, monkeypatch, fault):
+    package, request, plan, transport, _ = historical_replay_inputs(tmp_path)
+    monkeypatch.setattr('trading_desk.http.build_session', lambda settings: transport)
+    destination = tmp_path/'prepared'
+    prepare_workflow_inputs(destination, artifact_id='17', source_run_id='9',
+        environment=source_env(package, request, plan))
+    path = destination/'input-market-history.json'
+    if fault == 'missing':
+        path.unlink()
+    elif fault == 'hash':
+        path.write_bytes(b'{}')
+    elif fault == 'config':
+        request['stageConfigs']['build'].pop('marketHistorySha256')
+    else:
+        from test_read_models import _market_history
+        data = canonical_json_bytes(_market_history(start='2026-08-06', count=1))
+        path.write_bytes(data)
+        request['archiveReplaySource']['sidecars']['marketHistorySha256'] = hashlib.sha256(data).hexdigest()
+        request['stageConfigs']['build']['marketHistorySha256'] = hashlib.sha256(data).hexdigest()
+    from trading_desk.pipeline_adapters import PipelineAdapterError
+    from trading_desk.read_models import ReadModelError
+    with pytest.raises((PipelineRunnerError, PipelineAdapterError, ReadModelError)):
+        prepare_core_candidate(request, snapshot_path=destination/'dashboard-snapshot.json',
+            producer_build_sha=sha(), dependency_lock_paths=[LOCK, RUNTIME_LOCK], project_root=ROOT, now=NOW)
+    assert len(transport.calls) == 11
+
+
 def test_formal_source_entry_hydrates_and_actual_candidate_graph_is_bound(tmp_path,monkeypatch):
     package,request,path,plan,base,rows=replay_inputs(tmp_path)
     package["expiresAt"]=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
