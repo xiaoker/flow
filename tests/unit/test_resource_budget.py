@@ -30,6 +30,49 @@ def _limits() -> ResourceLimits:
     return ResourceLimits.from_mapping(config)
 
 
+def test_actions_platform_policy_is_shared_by_preparation_recovery_and_account_admission(tmp_path):
+    from trading_desk.resource_budget import actions_monthly_cap
+    from trading_desk.recovery_execution import _limits_from_config
+    from trading_desk.pipeline_preparation import validate_preparation_budget
+    from trading_desk.pipeline_runner import PipelineRunnerError
+    from trading_desk.resource_budget import BudgetVector, RESOURCE_DIMENSIONS
+    config = json.loads((Path(__file__).resolve().parents[2] / "config/resource-budget.json").read_bytes())
+    assert actions_monthly_cap(config) == 2000
+    assert ResourceLimits.from_mapping(config).conservative_cap("actionsMinutes") == 2000
+    assert _limits_from_config(config).actions_minutes == 2000
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/resource-budget.json").write_text(json.dumps(config))
+    cost = BudgetVector.estimated({d: 20 if d == "actionsMinutes" else 0 for d in RESOURCE_DIMENSIONS})
+    approved = {"budgetManifest": {"taskCostUpperBound": cost.as_dict()}}
+    evidence = {d: {"value": 1860 if d == "actionsMinutes" else 0} for d in RESOURCE_DIMENSIONS}
+    reconcile = {"evidence": evidence}
+    validate_preparation_budget(approved, reconcile, cost, tmp_path)
+    report = evaluate_budget(limits=ResourceLimits.from_mapping(config),
+        measured=BudgetVector.measured({d: m["value"] for d, m in evidence.items()}, measured_at="2026-10-22T00:00:00Z"),
+        reserved=BudgetVector.estimated(dict.fromkeys(RESOURCE_DIMENSIONS, 0)), task_cost=cost,
+        now=datetime(2026, 10, 22, tzinfo=timezone.utc))
+    assert report["decision"] == "warn"
+    evidence["actionsMinutes"]["value"] = 1981
+    with pytest.raises(PipelineRunnerError, match="exceeds_policy"):
+        validate_preparation_budget(approved, reconcile, cost, tmp_path)
+    evidence["actionsMinutes"]["value"] = 1860
+    internal = config["hardLimits"].pop("githubActionsMinutesPerMonth")
+    (tmp_path / "config/resource-budget.json").write_text(json.dumps(config))
+    validate_preparation_budget(approved, reconcile, cost, tmp_path)
+    assert ResourceLimits.from_mapping(config).conservative_cap("actionsMinutes") == 2000
+    config["hardLimits"]["githubActionsMinutesPerMonth"] = internal
+    del config["resourceAccounting"]["actionsAdmissionPolicy"]
+    assert actions_monthly_cap(config) == 1850
+    assert ResourceLimits.from_mapping(config).conservative_cap("actionsMinutes") == 1850
+    assert _limits_from_config(config).actions_minutes == 1850
+    config["resourceAccounting"]["actionsAdmissionPolicy"] = "unrecognized"
+    with pytest.raises(ValueError, match="invalid_actions_admission_policy"):
+        actions_monthly_cap(config)
+    config["resourceAccounting"]["actionsAdmissionPolicy"] = "platform-limit-v2"
+    del config["limits"]["githubActionsMinutesPerMonth"]
+    assert actions_monthly_cap(config) is None
+
+
 def test_index_write_estimate_is_explicit() -> None:
     estimate = estimate_stage(logical_rows=100, index_count=2)
     assert estimate.rows_read == 100

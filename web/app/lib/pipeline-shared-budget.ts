@@ -26,6 +26,7 @@ export type SharedBudgetState = {
   settled: Numbers; reservations: Record<string, Reservation>;
   receipts: Record<string, { hash: string; result: Record<string, unknown> }>;
   evidenceContract?: EvidenceContract;
+  actionsAdmissionPolicy?: "platform-limit-v2";
 };
 type Statement = { bind(...values: unknown[]): Statement; all<T>(): Promise<{ results: T[]; meta?: { rows_read?: number; rows_written?: number; changes?: number } }> };
 type DB = { prepare(sql: string): Statement; withSession?(constraint: string): DB };
@@ -40,6 +41,15 @@ const add = (a: Numbers, b: Numbers): Numbers => Object.fromEntries(DIMENSIONS.m
 })) as Numbers;
 const exceeds = (a: Numbers, b: Numbers) => DIMENSIONS.some(d => a[d] > b[d]);
 const size = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).byteLength;
+function actionsPolicyCap(): number | null {
+  const mode = resourceConfig.resourceAccounting.actionsAdmissionPolicy;
+  const official = resourceConfig.limits.githubActionsMinutesPerMonth;
+  const hard = resourceConfig.hardLimits.githubActionsMinutesPerMonth;
+  if (!integer(official)) return null;
+  if (mode === "platform-limit-v2") return official;
+  if (mode !== undefined && mode !== "internal-hard-v1") return null;
+  return integer(hard) ? Math.min(official, hard) : null;
+}
 function r2PolicyCap(name: "r2ClassA" | "r2ClassB"): number | null {
   const official = (resourceConfig.limits as Record<string, unknown>)[name];
   const hard = (resourceConfig.hardLimits as Record<string, unknown>)[name];
@@ -51,7 +61,7 @@ const policyCaps: Caps = {
   d1RowsRead: Math.min(resourceConfig.limits.d1RowsReadPerDay, resourceConfig.hardLimits.d1RowsReadPerDay),
   d1RowsWritten: Math.min(resourceConfig.limits.d1RowsWrittenPerDay, resourceConfig.hardLimits.d1RowsWrittenPerDay),
   workerRequests: Math.min(resourceConfig.limits.workersRequestsPerDay, resourceConfig.hardLimits.workersRequestsPerDay),
-  actionsMinutes: Math.min(resourceConfig.limits.githubActionsMinutesPerMonth, resourceConfig.hardLimits.githubActionsMinutesPerMonth),
+  actionsMinutes: actionsPolicyCap(),
   r2Bytes: resourceConfig.storage.r2SoftBytes,
   r2ClassA: r2PolicyCap("r2ClassA"),
   r2ClassB: r2PolicyCap("r2ClassB"),
@@ -112,6 +122,7 @@ function validateState(s: SharedBudgetState) {
       || Object.keys(s.reservations).length > MAX_RESERVATIONS || Object.keys(s.receipts).length > MAX_RECEIPTS
       || size(s) > MAX_STATE_BYTES) fail("budget_state_corrupt", 503);
   validNumbers(s.settled);
+  if (s.actionsAdmissionPolicy !== undefined && s.actionsAdmissionPolicy !== "platform-limit-v2") fail("budget_state_corrupt", 503);
   if (s.evidenceContract !== undefined) {
     if (!["flow-account-evidence-v2", "flow-account-evidence-v3"].includes(s.evidenceContract)) fail("budget_state_corrupt", 503);
     try { validatePeriodEvidence(s.evidence, s.evidenceContract === "flow-account-evidence-v3"); } catch { fail("budget_state_corrupt", 503); }
@@ -292,10 +303,15 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
   // Explicit administrative adoption of one code-reviewed cap. Ordinary
   // telemetry reconciliation never raises stored caps or releases occupancy.
   const update = resourceConfig.resourceAccounting.authorizedPolicyUpdate;
-  if (input.policyUpdate !== undefined && (!periodAware || input.policyUpdate !== update.id
+  const platformUpdate = input.policyUpdate === "platform-limit-v2";
+  if (platformUpdate) {
+    if (!periodAware || resourceConfig.resourceAccounting.actionsAdmissionPolicy !== "platform-limit-v2"
+        || !priorState || ![update.previousCap, update.nextCap].includes(priorState.caps.actionsMinutes!)
+        || limits.actionsMinutes !== resourceConfig.limits.githubActionsMinutesPerMonth) fail("budget_policy_update_conflict", 409);
+  } else if (input.policyUpdate !== undefined && (!periodAware || input.policyUpdate !== update.id
       || now.getTime() < Date.parse(update.notBefore)
       || epochMonth !== update.epochMonth || !priorState || priorState.epochMonth !== epochMonth
-      || priorState.caps.actionsMinutes !== update.previousCap || limits.actionsMinutes !== update.nextCap
+      || priorState.caps.actionsMinutes !== update.previousCap || limits.actionsMinutes === null || limits.actionsMinutes < update.nextCap
       || update.dimension !== "actionsMinutes")) fail("budget_policy_update_conflict", 409);
   const next = priorState ? structuredClone(priorState) : createSharedBudgetState({
     epochDay, epochMonth, evidence: input.evidence, caps: limits, targets: {},
@@ -326,7 +342,12 @@ async function reconcileBudgetAccount(input: AccountReconciliation, db: DB, now:
       next.caps[d] = priorState.caps[d] === null ? limits[d] : Math.min(priorState.caps[d]!, limits[d]!);
     }
   }
-  if (input.policyUpdate !== undefined) next.caps.actionsMinutes = update.nextCap;
+  if (platformUpdate || (!priorState && resourceConfig.resourceAccounting.actionsAdmissionPolicy === "platform-limit-v2")) {
+    next.caps.actionsMinutes = limits.actionsMinutes;
+    next.actionsAdmissionPolicy = "platform-limit-v2";
+    next.targets.actionsMinutes = Math.min(resourceConfig.targets.githubActionsMinutesPerMonth,
+      resourceConfig.hardLimits.githubActionsMinutesPerMonth);
+  } else if (input.policyUpdate !== undefined) next.caps.actionsMinutes = update.nextCap;
   next.epochDay = epochDay; next.epochMonth = epochMonth;
   next.evidence = refreshed;
   if (periodAware) next.evidenceContract = input.evidenceContract;

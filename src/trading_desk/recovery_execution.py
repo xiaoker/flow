@@ -23,6 +23,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .pipeline_application import checkpoint_is_reusable
+from .resource_budget import actions_monthly_cap
 
 
 RECOVERY_SCHEMA_VERSION = 1
@@ -967,6 +968,11 @@ def _limits_from_config(config: Mapping[str, Any]) -> RecoveryBudgetLimits:
     storage = _require_mapping(config.get("storage", {}), "invalid_budget_config")
 
     def pick(name: str, fallback: str | None = None) -> int:
+        if name == "githubActionsMinutesPerMonth":
+            value = actions_monthly_cap(config)
+            if value is None:
+                raise RecoveryContractError(f"budget_limit_missing:{name}")
+            return value
         value = limits.get(name)
         if value is None and fallback:
             value = hard.get(fallback)

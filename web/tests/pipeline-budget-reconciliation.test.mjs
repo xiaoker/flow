@@ -82,7 +82,8 @@ test("proved usage upper bounds admit only costs fitting the remaining lower bou
   for (const d of DIMENSIONS) {
     const cost = evidence(); for (const k of DIMENSIONS) cost[k].value = 0;
     cost[d].value = caps[d] - p.evidence[d].value;
-    assert.equal(transitionSharedBudget(state, `fit-${d}`, { operation: "reserve", vector: cost }, now).result.decision, "allow");
+    assert.equal(transitionSharedBudget(state, `fit-${d}`, { operation: "reserve", vector: cost }, now).result.decision,
+      d === "actionsMinutes" ? "warn" : "allow");
     cost[d].value++;
     assert.equal(transitionSharedBudget(state, `over-${d}`, { operation: "reserve", vector: cost }, now).result.decision, "over_budget");
   }
@@ -357,6 +358,58 @@ test("policy adoption expires and ordinary reconciliation never raises the store
   const before = expired.row();
   assert.equal((await expired.call({ ...q, dryRun: false, expectedRevision: 0, operationId: "b".repeat(64), policyUpdate: "actions-1850-20261022" }, "test-key", null)).status, 409);
   assert.deepEqual(expired.row(), before); expired.db.close();
+});
+
+test("platform policy adoption retains UNKNOWN and permits needed work above internal thresholds only below platform cap", async () => {
+  const f = fixture();
+  const p = periodPayload(); p.evidence.actionsMinutes.value = 1860;
+  await f.call({ ...p, dryRun: false }, "test-key", { ...caps, actionsMinutes: 1850 });
+  const old = JSON.parse(f.row().state_json);
+  delete old.actionsAdmissionPolicy;
+  const nums = n => Object.fromEntries(DIMENSIONS.map(d => [d, d === "actionsMinutes" ? n : 0]));
+  old.reservations.uncertain = { cost: nums(20), consumed: nums(2), authorized: nums(3), status: "UNKNOWN", expiresAt: now.toISOString() };
+  old.settled = nums(5);
+  f.db.prepare("UPDATE pipeline_budget_account SET state_json=? WHERE scope=?").run(JSON.stringify(old), BUDGET_SCOPE);
+  const q = { ...p, expectedRevision: 0, operationId: "b".repeat(64), policyUpdate: "platform-limit-v2" };
+  const before = f.row();
+  assert.equal((await f.call(q, "wrong", null)).status, 401);
+  assert.equal((await f.call({ ...q, expectedRevision: 9 }, "test-key", null)).status, 409);
+  assert.equal((await f.call(q, "test-key", null)).status, 200);
+  assert.deepEqual(f.row(), before);
+  assert.equal((await f.call({ ...q, dryRun: false }, "test-key", null)).status, 200);
+  const next = JSON.parse(f.row().state_json);
+  assert.equal(next.caps.actionsMinutes, 2000);
+  assert.equal(next.actionsAdmissionPolicy, "platform-limit-v2");
+  assert.deepEqual(next.reservations, old.reservations); assert.deepEqual(next.settled, old.settled);
+  for (const d of DIMENSIONS.filter(d => d !== "actionsMinutes")) assert.equal(next.caps[d], old.caps[d]);
+  const vector = n => Object.fromEntries(DIMENSIONS.map((d, i) => [d, { value: d === "actionsMinutes" ? n : 0, unit: units[i], basis: "estimated" }]));
+  const allowed = transitionSharedBudget(next, "needed", { operation: "reserve", vector: vector(20) }, now);
+  assert.equal(allowed.result.decision, "warn");
+  const repeated = transitionSharedBudget(allowed.state, "needed", { operation: "reserve", vector: vector(20) }, now);
+  assert.equal(repeated.result.decision, "idempotent");
+  assert.deepEqual(repeated.state.reservations, allowed.state.reservations);
+  assert.equal(transitionSharedBudget(next, "boundary", { operation: "reserve", vector: vector(115) }, now).result.decision, "warn");
+  assert.equal(transitionSharedBudget(next, "overflow", { operation: "reserve", vector: vector(116) }, now).result.decision, "over_budget");
+  const step = transitionSharedBudget(allowed.state, "needed", { operation: "authorize_step", vector: vector(21) }, now);
+  assert.equal(step.result.decision, "step_over_budget");
+  const missing = structuredClone(next); missing.evidence.actionsMinutes = { ...missing.evidence.actionsMinutes, value: null, basis: "unknown" };
+  assert.equal(transitionSharedBudget(missing, "unknown", { operation: "reserve", vector: vector(1) }, now).result.decision, "unknown_metrics");
+  const row = f.row();
+  assert.equal((await (await f.call({ ...q, dryRun: false }, "test-key", null)).json()).replayed, true);
+  assert.deepEqual(f.row(), row); f.db.close();
+});
+
+test("platform adoption has one CAS winner and cannot reinterpret a custom lower ceiling", async () => {
+  for (const prior of [1500, 1850, 1575]) {
+    const f = fixture();
+    const p = periodPayload();
+    await f.call({ ...p, dryRun: false }, "test-key", { ...caps, actionsMinutes: prior });
+    const update = { ...p, dryRun: false, expectedRevision: 0, policyUpdate: "platform-limit-v2" };
+    const replies = await Promise.all(["b", "c"].map(id => f.call({ ...update, operationId: id.repeat(64) }, "test-key", null)));
+    assert.deepEqual(replies.map(r => r.status).sort(), prior === 1575 ? [409, 409] : [200, 409]);
+    assert.equal(JSON.parse(f.row().state_json).caps.actionsMinutes, prior === 1575 ? 1575 : 2000);
+    f.db.close();
+  }
 });
 
 test("true month rollover preserves holds and charges; storage may decrease", async () => {

@@ -26,7 +26,7 @@ from .pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile
 from .pipeline_recovery_scope import bind_recovery_runner_scope
 from .pipeline_runner import PipelineRunnerError, _assert_safe_output, _write_json_atomic, runner_budget_input_sha256
 from .recovery_execution import plan_bytes
-from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS
+from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS, actions_monthly_cap
 
 CONTRACT = CANDIDATE_PREPARATION_CONTRACT
 # Exact sequence: status, approval absence, budget preview, budget commit,
@@ -184,10 +184,13 @@ def validate_preparation_budget(approved_plan, reconcile, total, root):
         evidence = reconcile["evidence"]
         for d in RESOURCE_DIMENSIONS:
             used = evidence[d]["value"]
-            cap = config["storage"]["r2SoftBytes"] if d == "r2Bytes" else min(config["limits"][names[d]], config["hardLimits"][names[d]])
+            if d == "actionsMinutes":
+                cap = actions_monthly_cap(config)
+            else:
+                cap = config["storage"]["r2SoftBytes"] if d == "r2Bytes" else min(config["limits"][names[d]], config["hardLimits"][names[d]])
             _require(type(used) is int and used >= 0 and approved.metrics[d].value is not None
                 and approved.metrics[d].value >= total.metrics[d].value, "preparation_budget_unknown_or_understated")
-            _require(used + total.metrics[d].value <= cap, "preparation_budget_exceeds_policy")
+            _require(type(cap) is int and used + total.metrics[d].value <= cap, "preparation_budget_exceeds_policy")
     except PipelineRunnerError:
         raise
     except (KeyError, TypeError, ValueError, AttributeError):

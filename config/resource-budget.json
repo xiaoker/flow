@@ -30,6 +30,7 @@
   },
   "resourceAccounting": {
     "schemaVersion": 1,
+    "actionsAdmissionPolicy": "platform-limit-v2",
     "authorizedPolicyUpdate": {
       "id": "actions-1850-20261022",
       "notBefore": "2026-10-22T00:00:00+08:00",
@@ -40,7 +41,7 @@
     },
     "measurementTtlSeconds": 3600,
     "reservationTtlSeconds": 1800,
-    "conservativeLimitBasis": "min(official,hard)",
+    "conservativeLimitBasis": "actions:platform-limit-v2;others:min(official,hard)",
     "unknownOutcomePolicy": "retain_reservation",
     "candidateEntryPolicy": {
       "schemaVersion": 1,
