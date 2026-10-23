@@ -522,10 +522,11 @@ def _assert_read_model_coverage_not_regressed(
     old = previous.get("coverage")
     if not isinstance(old, dict):
         return
+    # history20StockCount is a current-stock cohort, not historical coverage:
+    # ETF basket rebalances can legitimately remove a stock from that cohort.
     for section, field in (
         ("etf", "tradingDays"),
         ("pressure", "availableDateCount"),
-        ("pressure", "history20StockCount"),
     ):
         old_section = old.get(section)
         new_section = current.get(section)

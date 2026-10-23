@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-23: active pressure date continuity and changing ETF constituents
+
+- PR #203 merged as `fb5245ab672aacdb983ebcdcd3eda73050e75e3b`; main CI `39883430047` and automatic Worker deployment `39883431591` passed, with no pending migration. No production budget-policy adoption or candidate was run.
+- The 2026-10-22 Collector `39883002994` produced an official snapshot, but Publisher `39883567692` failed before candidate staging: `history20StockCount` fell from 122 to 121. Exact offline comparison attributes the changed current cohort to SSE stock 600487 leaving the current ETF basket; current 20-day-eligible stock count is not monotonic coverage and must not be a hard gate.
+- A separate real gap was found: 2026-10-19 disappeared from the Collector's 22-date stock-flow input list when the three-day source manifest rotated, although it existed in the previous published penetration model. Only removing the count gate would mask this gap. This isolated PR carries forward verified dates from the active immutable pressure artifact, then re-verifies each selected day's official share/PCF archive and lineage. It preserves the trading-day count and source/date checks, without changing the formula, active pointer, flags or production state.
+- Isolated worktree `/private/tmp/flow-pressure-date-continuity-20261023`, branch `codex/pressure-date-continuity-20261023`, based on the PR #203 merge. Local exact-artifact replay includes 2026-10-19 and 2026-10-22 in the bounded list. Focused Python/Web regression, complete Python (localhost-enabled), Web lint/build and 258 Web tests pass. This is local evidence, not production publication proof.
+- Next: deliver this single repair PR and necessary CI; report automatic Worker deployment/migration-check side effects and wait for explicit merge/deployment authorization. After deployment, use a separately authorized bounded recovery for 2026-10-22, then verify release/UI. The existing `FAILED_RETRYABLE` state and any UNKNOWN budget hold are not altered by this code PR. Protected original-worktree files remain untouched.
+
+## Historical implementation notes
+
 ### 2026-10-22: one-PR Actions budget convergence / local implementation
 
 - User requests one coherent PR to remove the arbitrary monthly Actions stop, then resume r6 product-first recovery. PR202 is merged at `98f9dda` and deployed via39636751986, exact build verified; D1 had no migrations. Main CI39636751549 passed. Existing 080-FLOW/ENTRY/DATA components are reused, not restarted. Product multi-period restoration and live candidate remain NOT COMPLETE; no production budget adoption or recovery task was executed.
