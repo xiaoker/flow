@@ -634,6 +634,49 @@ def _state_dates(state: dict[str, Any], target: str) -> list[str]:
     return values
 
 
+def _stock_flow_dates_from_official_evidence(
+    state: dict[str, Any], manifest: dict[str, Any], previous: dict[str, Any], target: str,
+) -> list[str]:
+    """Select PCF/share candidates, not the broader ETF state calendar.
+
+    A date may enter the global ETF state without a verified PCF/share pair.
+    Preserve the dates of the active immutable penetration model across the
+    rolling three-day manifest, then let the archive fetcher prove every pair.
+    """
+    status = previous.get("status")
+    old_dates = previous.get("availableDates")
+    if status not in {"found", "no_active_release"} or not isinstance(old_dates, list):
+        raise LiveRecoveryError("live_recovery_pressure_date_evidence_invalid")
+    if status == "no_active_release" and old_dates:
+        raise LiveRecoveryError("live_recovery_pressure_date_evidence_invalid")
+    if status == "found" and (not 1 <= len(old_dates) <= 21
+                               or old_dates != sorted(set(old_dates))
+                               or previous.get("asOf") != old_dates[-1]):
+        raise LiveRecoveryError("live_recovery_pressure_date_evidence_invalid")
+    sources = state.get("sourceSnapshots", [])
+    if not isinstance(sources, list):
+        raise LiveRecoveryError("live_recovery_stock_flow_source_dates_missing")
+    current = [item.get("date") for item in sources if isinstance(item, dict)]
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise LiveRecoveryError("live_recovery_stock_flow_manifest_invalid")
+    current += [item.get("requested_date") for item in artifacts if isinstance(item, dict)
+                and isinstance(item.get("source"), dict)
+                and item["source"].get("source_id") == "sse"
+                and item["source"].get("dataset") == "etf_scale"]
+    if target not in current:
+        raise LiveRecoveryError("live_recovery_stock_flow_current_anchor_missing", target)
+    all_dates = old_dates + current
+    for value in all_dates:
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise LiveRecoveryError("live_recovery_pressure_date_evidence_invalid")
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise LiveRecoveryError("live_recovery_pressure_date_evidence_invalid") from exc
+    return sorted({value for value in all_dates if value <= target})[-22:]
+
+
 def _assert_confirmed_snapshot(snapshot: dict[str, Any], target: str) -> None:
     publication = snapshot.get("publication")
     if not isinstance(publication, dict) or publication.get("status") != "confirmed":
@@ -777,16 +820,15 @@ def _assert_history_checkpoint(response: dict[str, Any], target: str) -> None:
 def _invoke_stock_flow_history(
     *,
     scope: RecoveryScope,
-    state: dict[str, Any],
+    dates: list[str],
     target: str,
     artifact_root: Path,
     workspace_root: Path,
     remaining_requests: int,
     auth_env: dict[str, str],
 ) -> tuple[Path, Path, Path, int]:
-    dates = [value for value in _state_dates(state, target) if value <= target]
-    # The builder needs one previous share date for every published partition.
-    dates = dates[-22:]
+    # The caller supplies the bounded official-share/PCF candidate calendar.
+    # The builder needs one previous share date for each published partition.
     if len(dates) < 2:
         raise LiveRecoveryError("live_recovery_stock_flow_anchor_missing", target)
     dates_path = artifact_root / "stock-flow-dates.txt"
@@ -1006,7 +1048,7 @@ def run_live_recovery(
         # whose cold execution cannot finish within its approved allocation.
         archive_request_floor = len(archive_recipe["files"]) + 2 * _post_child_request_reserve(archive_manifest)
         if set(scope.required_stages).intersection({"etf_penetration", "stock_flow"}):
-            archive_request_floor += 1  # child still needs its separate, measured allowance
+            archive_request_floor += 2  # prior-date proof and child each need an allowance
         if archive_request_floor > scope.max_requests:
             raise LiveRecoveryError("live_recovery_request_budget_exceeded",
                 f"archive_and_history_floor={archive_request_floor}, maximum={scope.max_requests}")
@@ -1170,6 +1212,17 @@ def run_live_recovery(
         if exc.code != "live_recovery_remote_not_found":
             raise
         state = {"dates": []}
+    previous_dates: dict[str, Any] | None = None
+    if stock_flow_required:
+        # Fail before any history-import write if the active penetration date
+        # proof is unavailable or malformed. This read is counted by the same
+        # bounded source session and reused after the state refresh below.
+        previous_dates, _ = _get_json(
+            source_session,
+            urljoin(base_url.rstrip("/") + "/", "api/v1/admin/stock-flow-history/available-dates"),
+            headers=auth,
+        )
+        _stock_flow_dates_from_official_evidence(state, manifest, previous_dates, target)
     _write_json(state_before_path, state)
     before_dates = state.get("dates") if isinstance(state.get("dates"), list) else []
     history_publications: list[dict[str, Any]] = []
@@ -1202,6 +1255,8 @@ def run_live_recovery(
     stock_flow_request_count = 0
     post_child_request_reserve = 0
     if stock_flow_required:
+        assert previous_dates is not None
+        dates = _stock_flow_dates_from_official_evidence(state, manifest, previous_dates, target)
         post_child_request_reserve = _post_child_request_reserve(manifest)
         remaining_for_child = (
             scope.max_requests
@@ -1217,7 +1272,7 @@ def run_live_recovery(
             )
         history_path, history_status_path, dates_path, stock_flow_request_count = _invoke_stock_flow_history(
             scope=scope,
-            state=state,
+            dates=dates,
             target=target,
             artifact_root=artifact_root,
             workspace_root=workspace_root,

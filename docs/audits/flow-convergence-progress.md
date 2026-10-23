@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-23: archive-first Oct 22 recovery date continuity
+
+- PR #204 merged as `8d89a0a676840ed5bc7d781a7cece6323fbe3129`; main CI `39916319483` and Worker deployment `39916320011` succeeded. Deployment found no pending D1 migration and verified the exact served build. No data-recovery run was authorized or performed.
+- Latest ordinary Collector `39913722002` has a confirmed 2026-10-22 snapshot and immutable source artifact, but Publisher `39914107688` failed at the old `history20StockCount` gate before candidate activation. Its ordinary stock-flow date list omitted 2026-10-19; PR #204 corrects future ordinary selection, not that old artifact.
+- Read-only comparison found the formal recovery runner selected `state.dates` (a broader ETF calendar), which contains dates without a verified stock-flow/PCF pair. For Oct 22 it would drop early published penetration dates and include unproven global dates. This worktree reuses the authenticated, hash-verified active pressure date endpoint from PR #204 plus the current official SSE manifest/source snapshots; the archive fetcher still verifies every selected day. Exact Oct 22 artifacts yield 22 bounded candidates including Oct 19 and excluding Oct 14/Sep 29/Sep 14. One additional read is counted in the same bounded source session and recovery floor. Bad prior evidence fails before history-import writes.
+- Isolated branch `codex/recovery-pressure-dates-20261023`, based on the PR #204 merge. Focused runner tests, complete Python/localhost HTTP/SQLite regression, Web lint/build and 258 Web tests passed after building the required local Worker. The first full Python attempt failed because that compiled fixture was absent; the unchanged suite passed after the build. No production writes, schedule/flag/active-pointer change, formula change, paid-limit change or original protected-file edit. No live recovery success is claimed.
+- Next: deliver this single recovery compatibility PR with necessary CI, then wait for merge authorization. The platform approval reviewer currently reports a usage-limit failure for network/Git operations, so no push or PR has been attempted through a bypass. Only after merge evidence and a separately approved bounded resource/source package may one Oct 22 recovery execute; do not rerun the old Publisher or duplicate ordinary Collectors.
+
+## Historical implementation notes
+
 ### 2026-10-23: active pressure date continuity and changing ETF constituents
 
 - PR #203 merged as `fb5245ab672aacdb983ebcdcd3eda73050e75e3b`; main CI `39883430047` and automatic Worker deployment `39883431591` passed, with no pending migration. No production budget-policy adoption or candidate was run.
