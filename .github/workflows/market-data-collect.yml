@@ -1213,10 +1213,24 @@ jobs:
           # market-history date can be absent even when the official SSE ETF
           # anchor exists, so using the global calendar can silently skip the
           # actual previous trading day and reverse the calculated flow.
+          # Carry forward the *dates* of the active immutable penetration model.
+          # They are candidates only: the fetcher below must still verify the
+          # exact official shares and PCF lineage for every selected date.
+          curl --fail-with-body --retry 3 --retry-all-errors \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            "https://flow.xiaoker.com/api/v1/admin/stock-flow-history/available-dates" \
+            --output previous-stock-flow-dates.json
+          jq -e '(.status == "found" and (.availableDates | type == "array")) or
+                 (.status == "no_active_release" and .availableDates == [])' \
+            previous-stock-flow-dates.json >/dev/null
           jq -r --arg asOf "$AS_OF" \
-            --slurpfile manifest reports/phase0/latest-manifest.json '
+            --slurpfile manifest reports/phase0/latest-manifest.json \
+            --slurpfile previous previous-stock-flow-dates.json '
             (
               [.sourceSnapshots[]?.date] +
+              $previous[0].availableDates +
               [
                 $manifest[0].artifacts[]?
                 | select(

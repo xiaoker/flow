@@ -557,6 +557,10 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
 def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
 
+    assert "stock-flow-history/available-dates" in workflow
+    assert "--slurpfile previous previous-stock-flow-dates.json" in workflow
+    assert "$previous[0].availableDates" in workflow
+    assert "stock-flow-dates.txt" in workflow
     assert "| .[-22:][]" in workflow
     assert "--require-current" in workflow
     assert "stock-flow-history.json" in workflow

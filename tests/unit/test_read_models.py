@@ -335,6 +335,25 @@ def test_read_model_rejects_shorter_pressure_history() -> None:
         )
 
 
+def test_rolling_pressure_stock_cohort_may_shrink_when_etf_constituents_change() -> None:
+    snapshot = _snapshot()
+    catalog = _stock_catalog()
+    _, baseline = build_read_models(snapshot, require_materialized=True, stock_catalog=catalog)
+    previous = dict(baseline)
+    previous["coverage"] = {
+        **baseline["coverage"],
+        "pressure": {
+            **baseline["coverage"]["pressure"],
+            "history20StockCount": baseline["coverage"]["pressure"]["history20StockCount"] + 1,
+        },
+    }
+    _, current = build_read_models(
+        snapshot, require_materialized=True, stock_catalog=catalog, previous_manifest=previous,
+    )
+    assert current["coverage"]["pressure"]["history20StockCount"] < previous["coverage"]["pressure"]["history20StockCount"]
+    assert current["coverage"]["pressure"]["availableDateCount"] == previous["coverage"]["pressure"]["availableDateCount"]
+
+
 def test_release_identity_includes_observed_at_and_source_dates() -> None:
     first = _snapshot()
     second = _snapshot()
