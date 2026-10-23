@@ -14,6 +14,7 @@ from scripts.run_live_recovery import (
     _current_szse_etf_matches_target,
     _szse_history_request_budget,
     _fetch_market_history,
+    _stock_flow_dates_from_official_evidence,
     run_live_recovery,
 )
 from trading_desk.recovery_execution import build_recovery_plan
@@ -39,6 +40,53 @@ def _plan(
         budget_manifest=budget_manifest
         or {"source": "test", "measured": True, "szseHistoryMaxRequests": 20},
     )
+
+
+def test_recovery_stock_flow_dates_preserve_prior_official_day_without_global_calendar_noise() -> None:
+    # The wider ETF state includes dates lacking a matching archived PCF/share
+    # pair; the rotating manifest alone loses 10/19 after the third day.
+    state = {"sourceSnapshots": [{"date": day} for day in
+        ["2026-10-15", "2026-10-20", "2026-10-21", "2026-10-22"]],
+        "dates": ["2026-10-14", "2026-10-15", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"]}
+    manifest = {"artifacts": [{"source": {"source_id": "sse", "dataset": "etf_scale"},
+                                "requested_date": day} for day in ["2026-10-20", "2026-10-21", "2026-10-22"]]}
+    previous = {"status": "found", "asOf": "2026-10-21",
+                "availableDates": ["2026-10-15", "2026-10-19", "2026-10-20", "2026-10-21"]}
+    result = _stock_flow_dates_from_official_evidence(state, manifest, previous, "2026-10-22")
+    assert result == ["2026-10-15", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"]
+    assert "2026-10-14" not in result
+
+
+@pytest.mark.parametrize("previous", [
+    {"status": "found", "asOf": "2026-10-21", "availableDates": ["2026-10-21", "2026-10-19"]},
+    {"status": "found", "asOf": "2026-10-21", "availableDates": ["2026-10-19"]},
+    {"status": "no_active_release", "availableDates": ["2026-10-19"]},
+    {"status": "found", "asOf": "2026-10-21", "availableDates": ["invalid-date"]},
+])
+def test_recovery_stock_flow_date_evidence_fails_closed(previous: dict) -> None:
+    state = {"sourceSnapshots": [{"date": "2026-10-22"}]}
+    manifest = {"artifacts": [{"source": {"source_id": "sse", "dataset": "etf_scale"},
+                                "requested_date": "2026-10-22"}]}
+    with pytest.raises(LiveRecoveryError, match="live_recovery_pressure_date_evidence_invalid"):
+        _stock_flow_dates_from_official_evidence(state, manifest, previous, "2026-10-22")
+
+
+def test_recovery_stock_flow_requires_current_official_anchor() -> None:
+    with pytest.raises(LiveRecoveryError, match="live_recovery_stock_flow_current_anchor_missing"):
+        _stock_flow_dates_from_official_evidence(
+            {"sourceSnapshots": [{"date": "2026-10-21"}]}, {"artifacts": []},
+            {"status": "found", "asOf": "2026-10-21", "availableDates": ["2026-10-21"]},
+            "2026-10-22",
+        )
+
+
+def test_recovery_stock_flow_allows_initial_state_after_current_manifest_is_verified() -> None:
+    assert _stock_flow_dates_from_official_evidence(
+        {"dates": []},
+        {"artifacts": [{"source": {"source_id": "sse", "dataset": "etf_scale"},
+                        "requested_date": day} for day in ["2026-10-21", "2026-10-22"]]},
+        {"status": "no_active_release", "availableDates": []}, "2026-10-22",
+    ) == ["2026-10-21", "2026-10-22"]
 
 
 def test_live_runner_fails_closed_instead_of_silently_using_last_date(tmp_path: Path) -> None:
