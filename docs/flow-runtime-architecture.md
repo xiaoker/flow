@@ -4,6 +4,33 @@
 
 交易所原始文件只在采集任务中获取和校验；用户请求只读取已经通过质量门禁的发布对象。Worker 不在请求期间加载 ETF 全量状态、不做板块聚合、不计算长周期。
 
+## Actions 月度预算准入（platform-limit-v2）
+
+`config/resource-budget.json` 的 `resourceAccounting.actionsAdmissionPolicy`
+显式选择新语义：Actions 的账户硬边界来自 `limits.githubActionsMinutesPerMonth`；
+`targets` / `hardLimits` 中的内部月阈值仅用于告警，不再因为超过 1500/1850
+就停止必要任务。这个配置不是平台余额证明，也不会更改 GitHub 套餐、spending limit
+或付费授权。缺少/过期用量、超出平台边界、单任务预算超额仍拒绝。
+
+同一配置由离线总预算、恢复计划、正式准备入口及 Worker 账本消费。
+没有这个版本字段的旧配置仍采用原来的严格阈值；D1、R2、请求限额不变。
+新账户采用新策略；旧账本不会在部署或普通遥测刷新时被悄悄提额。
+通过既有管理员 `account_reconcile` 操作显式传
+`policyUpdate=platform-limit-v2`，可将已知旧 Actions 上限 1500/1850
+更新为当前配置的平台上限。需要新鲜完整证据、expectedRevision 和 CAS；
+先 dry-run，再以同一 operationId 提交/核对回执。自定义较低上限不能被该更新覆盖。
+其他维度、历史消耗、pending、UNKNOWN 占用均保留；版本化业务身份、租约和恢复审批不变。
+
+告警不阻止 `allow/warn` 任务继续，但不是无限执行许可。重复任务必须复用
+业务身份/operationId；确定性失败不重复采集；任务累计准入、有限重试、检查点、
+超时、步骤超额熔断继续生效。某任务 UNKNOWN 的保留量纳入账户剩余量，不能清零；
+它本身不禁止另一个有充分剩余量且无冲突的任务。实际出现 OVER_BUDGET 时仍须停止
+并核实异常责任，不能因去掉月度人为阈值而忽略无法界定的超额消耗。
+
+这次收敛不授权生产预算写入、候选、历史登记、最新激活或补采。
+代码合并/部署后，回到总路线图 r6 的 080-DATA 产品恢复动作包，优先复用归档，
+分别验收短周期、长周期和真实候选；不是重新从 051 开始，也不把上线当作页面已修复。
+
 ## 数据路径
 
 ```text

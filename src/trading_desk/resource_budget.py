@@ -35,6 +35,24 @@ RESOURCE_DIMENSIONS = (
     "r2ClassA",
     "r2ClassB",
 )
+
+
+def actions_monthly_cap(config: Mapping[str, Any]) -> int | None:
+    """Versioned account admission; internal monthly thresholds are warnings in v2.
+
+    This is a configured ceiling, never evidence of remaining provider quota.
+    Missing provider limits remain unknown. Legacy config keeps stricter caps.
+    """
+    mode = config.get("resourceAccounting", {}).get("actionsAdmissionPolicy", "internal-hard-v1")
+    if mode not in {"internal-hard-v1", "platform-limit-v2"}:
+        raise ValueError("invalid_actions_admission_policy")
+    official = _optional_int(config.get("limits", {}), "githubActionsMinutesPerMonth")
+    if official is None or mode == "platform-limit-v2":
+        return official
+    hard = _optional_int(config.get("hardLimits", {}), "githubActionsMinutesPerMonth")
+    return min(official, hard) if hard is not None else official
+
+
 METRIC_BASIS = {"measured", "estimated", "unknown"}
 DECISIONS = {
     "allow",
@@ -312,6 +330,8 @@ class ResourceLimits:
     target_actions_minutes_per_month: int | None = None
     hard_workers_requests_per_day: int | None = None
     hard_actions_minutes_per_month: int | None = None
+    actions_admission_cap: int | None = None
+    platform_actions_policy: bool = False
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "ResourceLimits":
@@ -337,9 +357,13 @@ class ResourceLimits:
             target_actions_minutes_per_month=_optional_int(targets, "githubActionsMinutesPerMonth"),
             hard_workers_requests_per_day=_optional_int(hard, "workersRequestsPerDay", "workerRequestsPerDay"),
             hard_actions_minutes_per_month=_optional_int(hard, "githubActionsMinutesPerMonth"),
+            actions_admission_cap=actions_monthly_cap(payload),
+            platform_actions_policy=payload.get("resourceAccounting", {}).get("actionsAdmissionPolicy") == "platform-limit-v2",
         )
 
     def conservative_cap(self, dimension: str) -> int | None:
+        if dimension == "actionsMinutes" and self.platform_actions_policy:
+            return self.actions_admission_cap
         official: dict[str, int | None] = {
             "d1RowsRead": self.d1_rows_read_per_day,
             "d1RowsWritten": self.d1_rows_written_per_day,
