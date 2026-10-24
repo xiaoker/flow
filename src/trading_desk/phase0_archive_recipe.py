@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from .phase0_archive import CONTRACT, MAX_OBJECT_BYTES, MAX_TOTAL_BYTES, validate_recipe
+from .etf_period_dependencies import OFFICIAL_MARGIN_DATES_SOURCE, validate_official_calendar
 
 
 def _sha(data: bytes) -> str:
@@ -33,6 +34,104 @@ def _content(value: Any) -> bytes:
         return base64.b64decode(value, validate=True)
     except (ValueError, base64.binascii.Error) as exc:
         raise ValueError("archive_recipe_content_invalid") from exc
+
+
+def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: dict[str, Any]) -> dict[str, Any]:
+    """Prove the three requested business dates from the bundled official SSE response."""
+    requested = manifest.get("requested_dates")
+    history = history_bundle.get("history") if history_bundle.get("version") == 1 else None
+    if (not isinstance(requested, list) or len(requested) != 3
+            or not all(isinstance(day, str) for day in requested)
+            or requested != sorted(set(requested)) or not isinstance(history, dict)
+            or history.get("runId") != manifest.get("run_id")
+            or history.get("asOf") != requested[-1]
+            or not isinstance(history.get("artifacts"), list) or len(history["artifacts"]) > 24):
+        raise ValueError("archive_recipe_calendar_identity_invalid")
+    source_rows = [part for part in history["artifacts"] if isinstance(part, dict)
+                   and part.get("sourceId") == "sse" and part.get("dataset") == "margin_market_daily"
+                   and part.get("requestedDate") == f"{requested[0]}_{requested[-1]}"]
+    items = manifest.get("artifacts")
+    if not isinstance(items, list) or len(items) > 24:
+        raise ValueError("archive_recipe_calendar_source_missing")
+    manifest_rows = [item for item in items if isinstance(item, dict)
+                     and isinstance(item.get("source"), dict)
+                     and item["source"].get("source_id") == "sse"
+                     and item["source"].get("dataset") == "margin_market_daily"
+                     and item.get("requested_date") == f"{requested[0]}_{requested[-1]}"]
+    if len(source_rows) != 1 or len(manifest_rows) != 1:
+        raise ValueError("archive_recipe_calendar_source_missing")
+    source, item = source_rows[0], manifest_rows[0]
+    raw = _content(source.get("rawContentBase64"))
+    if (len(raw) > MAX_OBJECT_BYTES or _sha(raw) != source.get("sha256")
+            or source.get("sha256") != item.get("sha256")):
+        raise ValueError("archive_recipe_calendar_source_hash_mismatch")
+    try:
+        response = json.loads(raw)
+        rows = response["result"]
+        dates = sorted(f"{str(row['opDate'])[:4]}-{str(row['opDate'])[4:6]}-{str(row['opDate'])[6:]}" for row in rows)
+        begin, end = response["beginDate"], response["endDate"]
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise ValueError("archive_recipe_calendar_source_invalid") from exc
+    if (dates != requested or begin != requested[0].replace("-", "")
+            or end != requested[-1].replace("-", "")):
+        raise ValueError("archive_recipe_calendar_dates_mismatch")
+    calendar = {"sourceId": OFFICIAL_MARGIN_DATES_SOURCE, "sha256": _sha(raw),
+                "dates": dates, "datesSha256": _sha(_json_bytes(dates)),
+                "evidence": {"contentBase64": base64.b64encode(raw).decode(),
+                             "rangeStart": requested[0], "rangeEnd": requested[-1]}}
+    validate_official_calendar(calendar)
+    return calendar
+
+
+def adjacent_object_from_bundle(*, manifest: dict[str, Any], previous_bundle: dict[str, Any]) -> dict[str, bytes]:
+    """Recover an exact adjacent ETF object from a prior immutable Collector bundle."""
+    adjacent = manifest.get("archivedEtfInputs", [])
+    if not isinstance(adjacent, list) or len(adjacent) != 1 or not isinstance(adjacent[0], dict):
+        raise ValueError("archive_recipe_adjacent_invalid")
+    ref = adjacent[0]
+    history = previous_bundle.get("history") if previous_bundle.get("version") == 1 else None
+    if (not isinstance(history, dict) or not isinstance(history.get("artifacts"), list)
+            or len(history["artifacts"]) > 24 or history.get("asOf") != ref.get("tradeDate")):
+        raise ValueError("archive_recipe_previous_history_invalid")
+    rows = [part for part in history["artifacts"] if isinstance(part, dict)
+            and part.get("sourceId") == "szse" and part.get("dataset") == "etf_scale"
+            and part.get("requestedDate") == ref.get("tradeDate")]
+    if len(rows) != 1 or ref.get("sourceId") != "szse":
+        raise ValueError("archive_recipe_adjacent_source_missing")
+    source = rows[0]
+    raw = _content(source.get("rawContentBase64"))
+    raw_sha = source.get("sha256")
+    metadata = source.get("metadata")
+    if (len(raw) > MAX_OBJECT_BYTES or _sha(raw) != raw_sha
+            or not isinstance(metadata, dict) or metadata.get("sha256") != raw_sha):
+        raise ValueError("archive_recipe_adjacent_source_hash_mismatch")
+    parts = source.get("normalized")
+    if not isinstance(parts, list) or len(parts) != 1 or not isinstance(parts[0], dict) or parts[0].get("name") != "data":
+        raise ValueError("archive_recipe_adjacent_normalized_invalid")
+    part = parts[0]
+    wire = _content(part.get("contentBase64"))
+    if len(wire) > MAX_OBJECT_BYTES:
+        raise ValueError("archive_recipe_adjacent_normalized_invalid")
+    if part.get("contentEncoding") == "gzip":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(wire)) as stream:
+                decoded = stream.read(MAX_OBJECT_BYTES + 1)
+        except (OSError, EOFError) as exc:
+            raise ValueError("archive_recipe_adjacent_normalized_invalid") from exc
+        suffix = ".csv.gz"
+    elif part.get("contentEncoding") is None:
+        decoded = wire
+        suffix = ".csv"
+    else:
+        raise ValueError("archive_recipe_adjacent_normalized_invalid")
+    if len(decoded) > MAX_OBJECT_BYTES or _sha(decoded) != part.get("sha256"):
+        raise ValueError("archive_recipe_adjacent_normalized_hash_mismatch")
+    revision = _sha(f"{raw_sha}:{_sha(wire)}".encode())
+    key = f"market-data/normalized/szse/etf_scale/{ref.get('tradeDate')}/{revision}/data{suffix}"
+    if (ref.get("revisionId") != revision or ref.get("objectKey") != key
+            or ref.get("sha256") != _sha(wire)):
+        raise ValueError("archive_recipe_adjacent_identity_mismatch")
+    return {key: wire}
 
 
 def build_archive_recipe(

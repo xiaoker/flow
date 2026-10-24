@@ -108,7 +108,11 @@ def validate_recipe(recipe, target):
             and ref["tradeDate"] == requested[-2])
         archived_source_release_id(ref)
         path = str(_safe_path(ref["normalizedPath"]))
-        _require(path.startswith("data/normalized/") and path not in expected and isinstance(ref["sha256"], str) and _SHA.fullmatch(ref["sha256"]))
+        # The ordinary Collector stores this one verified prior-day ETF input
+        # under reports/phase0; older archive fixtures used data/normalized.
+        # Accept only that exact production path, not an arbitrary report file.
+        _require((path.startswith("data/normalized/") or path == "reports/phase0/adjacent-szse.csv")
+            and path not in expected and isinstance(ref["sha256"], str) and _SHA.fullmatch(ref["sha256"]))
         expected[path] = (ref["objectKey"], "adjacent", ref["sha256"], "etf_scale")
     files = recipe["files"]
     _require(isinstance(files, list) and len(files) == len(expected) <= MAX_FILES)
