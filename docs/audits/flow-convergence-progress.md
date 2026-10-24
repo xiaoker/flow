@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-24: archive verification blocked at Cloudflare edge; client fix
+
+- PR #208 merged as `3c34c6c218cd3e01d593e1ccb3d451099a08635b`; main CI `40073853230` passed. No Worker deploy or D1 migration was triggered.
+- Corrected exact input: Collector `39913722002`, artifact `12483848660` / `market-data-39913722002`, plus previous Collector `39707514669`, artifact `12395617549`. Downloading these exact GitHub artifacts reproduces the prior 67-object / 5,510,215-byte offline recipe byte-for-byte (SHA-256 `c9dc04b5d0b53eb24b5692d1e6aff9ca5b182c022f2a0e8be2da05387fc62fa9`); snapshot is `2026-10-22 / confirmed`. Earlier notes incorrectly associated this recipe with partial Collector `39978516406`; run `40094461718` rejected that partial bundle before any R2 request.
+- User explicitly authorized corrected read-only run `40094723407` on the reviewed main SHA. It stopped on the first remote GET with HTTP 403; candidate preparation/execution and publication were skipped. Cloudflare security analytics records the matching `2026-10-24T12:38:12Z`, host `flow.xiaoker.com`, path `/api/v1/admin/history-artifact`, UA `Python-urllib/3.12`, action **Block**, service **Browser Integrity Check**. The request was rejected at the edge before Worker/R2, so this does not prove missing or invalid archive bytes. Existing UNKNOWN hold remains unchanged.
+- The isolated fix identifies the legitimate archive verifier with an explicit User-Agent and Accept header, retains Bearer/Access auth and redirect refusal, and persists bounded safe failure evidence (status, attempts, verified reads, object key, HTTP status and sanitized CF-Ray). It does not persist response HTML or credentials. No Cloudflare security policy is changed. Focused HTTP/recipe/workflow tests, full Python regression, Web lint/build/258 tests and exact-artifact offline recipe comparison all pass. Edge acceptance remains unverified until a separately authorized run after merge. Merge triggers PR/main CI only, no Worker deploy or D1 migration.
+- Product multi-period recovery, live archive verification, runner canary and production takeover remain incomplete. Next: validate and deliver this single client/failure-evidence fix, wait for merge authorization, then prepare the necessary bounded readback; do not repeat the consumed run automatically.
+
+## Historical implementation notes
+
 ### 2026-10-24: bounded read-only archive verification entry, local implementation
 
 - PR #207 merged as `6d2de8117b5f5970ff7d89f94cb957940d0b4aee`; main CI `40072414532` passed. No Worker deployment or D1 migration occurred, and no production archive readback or recovery was run.

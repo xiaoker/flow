@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -143,7 +145,10 @@ def test_cli_live_verification_is_exact_bounded_read_only(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "_archive_get", lambda key, digest: b"wrong")
     with pytest.raises(ValueError, match="archive_recipe_remote_content_mismatch"):
         cli.main()
-    assert not output.exists()
+    failure = json.loads(output.read_text())
+    assert failure["status"] == "ARCHIVE_VERIFICATION_FAILED"
+    assert failure["errorCode"] == "archive_recipe_remote_content_mismatch"
+    assert "recipe" not in failure
 
 
 def test_official_calendar_and_prior_adjacent_close_real_collector_shape(tmp_path, monkeypatch):
@@ -225,3 +230,69 @@ def test_two_bundle_proof_rejects_missing_or_modified_evidence(tamper):
         adjacent = adjacent_object_from_bundle(manifest=manifest, previous_bundle=previous)
         build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
                              target=DATES[-1], adjacent_objects=adjacent)
+
+
+@pytest.mark.parametrize("status", [200, 302, 403])
+def test_archive_http_client_identifies_itself_and_never_follows_redirects(monkeypatch, status):
+    requests = []
+    content = b"official archive bytes"
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append({"path": self.path, "headers": dict(self.headers)})
+            self.send_response(status)
+            self.send_header("x-flow-archive-key", "exact-key")
+            self.send_header("x-flow-archive-sha256", _sha(content))
+            self.send_header("cf-ray", "abc123-DFW")
+            self.send_header("Location", "/must-not-follow")
+            self.end_headers()
+            self.wfile.write(content)
+        def log_message(self, *_):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(cli, "ARCHIVE_ORIGIN", f"http://127.0.0.1:{server.server_port}")
+    for name in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.setenv(name, f"fixture-{name}")
+    try:
+        if status == 200:
+            assert cli._archive_get("exact-key", _sha(content)) == content
+        else:
+            with pytest.raises(cli.ArchiveReadError) as raised:
+                cli._archive_get("exact-key", _sha(content))
+            assert raised.value.status == status and raised.value.ray == "abc123-DFW"
+            assert str(raised.value) == "archive_recipe_remote_http_error"
+        assert len(requests) == 1
+        headers = {key.lower(): value for key, value in requests[0]["headers"].items()}
+        assert headers["user-agent"] == cli.ARCHIVE_USER_AGENT
+        assert headers["accept"] == "application/octet-stream"
+        assert headers["authorization"] == "Bearer fixture-FLOW_INGEST_API_KEY"
+        assert headers["cf-access-client-id"] == "fixture-FLOW_CF_ACCESS_CLIENT_ID"
+        assert headers["cf-access-client-secret"] == "fixture-FLOW_CF_ACCESS_CLIENT_SECRET"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_cli_preserves_safe_failure_evidence_and_stops_at_first_http_error(tmp_path, monkeypatch):
+    manifest, bundle, calendar = _inputs()
+    paths = [tmp_path / name for name in ("manifest.json", "bundle.json", "calendar.json")]
+    for path, value in zip(paths, (manifest, bundle, calendar), strict=True):
+        path.write_text(json.dumps(value))
+    output = tmp_path / "result.json"
+    calls = []
+    def denied(key, digest):
+        calls.append((key, digest))
+        raise cli.ArchiveReadError("archive_recipe_remote_http_error", status=403, ray="abc123-DFW")
+    monkeypatch.setattr(cli, "_archive_get", denied)
+    monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(paths[0]),
+        "--history-bundle", str(paths[1]), "--official-calendar", str(paths[2]),
+        "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
+    with pytest.raises(cli.ArchiveReadError):
+        cli.main()
+    failure = json.loads(output.read_text())
+    assert failure == {"status": "ARCHIVE_VERIFICATION_FAILED", "targetDate": DATES[-1],
+        "archiveReadAttempts": 1, "archiveReadCount": 0, "failedObjectKey": calls[0][0],
+        "errorCode": "archive_recipe_remote_http_error", "httpStatus": 403, "cfRay": "abc123-DFW"}
+    assert len(calls) == 1 and "recipe" not in failure
