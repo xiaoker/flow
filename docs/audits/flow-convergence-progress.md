@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-25: bind real first-observation metadata in archive recipes
+
+- PR #209 merged as `060a938c6f3fde5d8658f9222fa6535ed2ba7261`; main CI `40098106949` passed. Explicitly authorized read-only run `40098560088` used that SHA, completed in 25 seconds and retained its failure report. It passed Cloudflare and verified one raw object, then stopped at the metadata object with HTTP 409 (2 attempted reads, 1 verified). Candidate execution/publication were skipped; no production writes or UNKNOWN settlement occurred.
+- One bounded diagnostic R2 GET retrieved that exact metadata object through the existing authenticated Wrangler session. Actual immutable metadata is the first observation `2026-10-21T09:16:39+08:00` with body SHA `b08976ffdd0e69f7f14564f3b45f7a1a09ed096d452828ef345b5cd49ee04e86`; the retained Collector bundle reobserved the same raw SHA on `2026-10-23T14:48:46+08:00`. The archive writer deliberately retains the first metadata object at its raw-SHA key, so reconstructing later metadata cannot prove those stored bytes.
+- This isolated six-file fix adds an authenticated, exact-key metadata discovery variant to the existing GET route, bound to source/dataset/date/raw SHA and release/raw-key identity. It returns actual metadata bytes and their body hash. The verifier validates them against the source bundle and rebinds the final recipe to those exact bytes. Existing exact-byte GET semantics, official raw/normalized hashes, date/lineage QA and recipe v1 remain unchanged. Each object is still read once, with 67 reads for the current candidate and the existing 96 cap; discovery is pre-approval input preparation, not recovery authority.
+- Focused Python/HTTP tests (54), full Python regression and Web lint/build/259 tests pass. Offline replay with the actual one-object R2 evidence accepts its original metadata hash and preserves the other official bytes; this is not a full production archive-verification success. Merge will trigger automatic Worker deployment and the existing pending-migration check/apply path; this PR adds no migration. A bounded read-only `wrangler d1 migrations list flow --remote` check on 2026-10-25 reports no pending migration. No new verification run, data recovery, flag or active-pointer change has been executed.
+- Next: finish full validation, deliver one PR/CI, disclose deploy/migration effects and wait for merge/deployment authorization. Product multi-period recovery and runner canary remain incomplete; existing UNKNOWN occupancy is preserved.
+
+## Historical implementation notes
+
 ### 2026-10-24: archive verification blocked at Cloudflare edge; client fix
 
 - PR #208 merged as `3c34c6c218cd3e01d593e1ccb3d451099a08635b`; main CI `40073853230` passed. No Worker deploy or D1 migration was triggered.

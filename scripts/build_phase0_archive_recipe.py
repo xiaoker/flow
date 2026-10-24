@@ -46,11 +46,12 @@ def _read_json(path: Path) -> dict:
     return value
 
 
-def _archive_get(key: str, digest: str) -> bytes:
+def _archive_get(key: str, digest: str, *, metadata_raw: bool = False) -> bytes:
     required = ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET")
     if any(not os.environ.get(name) for name in required):
         raise ValueError("archive_recipe_auth_missing")
-    query = urlencode({"archive_key": key, "archive_sha256": digest})
+    query = urlencode({"archive_key": key,
+                       "archive_metadata_raw_sha256" if metadata_raw else "archive_sha256": digest})
     request = Request(f"{ARCHIVE_ORIGIN}/api/v1/admin/history-artifact?{query}", headers={
         "Authorization": f"Bearer {os.environ['FLOW_INGEST_API_KEY']}",
         "CF-Access-Client-Id": os.environ["FLOW_CF_ACCESS_CLIENT_ID"],
@@ -60,8 +61,10 @@ def _archive_get(key: str, digest: str) -> bytes:
     })
     try:
         with build_opener(_NoRedirect).open(request, timeout=20) as response:
+            actual = response.headers.get("x-flow-archive-sha256", "")
             if (response.status != 200 or response.headers.get("x-flow-archive-key") != key
-                    or response.headers.get("x-flow-archive-sha256") != digest):
+                    or not re.fullmatch(r"[a-f0-9]{64}", actual)
+                    or (response.headers.get("x-flow-archive-raw-sha256") != digest if metadata_raw else actual != digest)):
                 raise ValueError("archive_recipe_remote_identity_mismatch")
             content = response.read(MAX_OBJECT_BYTES + 1)
     except HTTPError as error:
@@ -71,16 +74,20 @@ def _archive_get(key: str, digest: str) -> bytes:
         raise ArchiveReadError("archive_recipe_remote_http_error", status=error.code, ray=ray) from None
     except (URLError, TimeoutError):
         raise ArchiveReadError("archive_recipe_remote_transport_error") from None
-    if len(content) > MAX_OBJECT_BYTES or hashlib.sha256(content).hexdigest() != digest:
+    if len(content) > MAX_OBJECT_BYTES or hashlib.sha256(content).hexdigest() != actual:
         raise ValueError("archive_recipe_remote_hash_mismatch")
     return content
 
 
+def _archive_metadata_get(key: str, raw_digest: str) -> bytes:
+    return _archive_get(key, raw_digest, metadata_raw=True)
+
+
 def _build(args: argparse.Namespace, progress: dict) -> int:
-    def read_remote(key: str, digest: str) -> bytes:
+    def read_remote(key: str, digest: str, *, metadata_raw: bool = False) -> bytes:
         progress["archiveReadAttempts"] += 1
         progress["failedObjectKey"] = key
-        content = _archive_get(key, digest)
+        content = _archive_metadata_get(key, digest) if metadata_raw else _archive_get(key, digest)
         progress["archiveReadCount"] += 1
         progress["failedObjectKey"] = None
         return content
@@ -115,10 +122,22 @@ def _build(args: argparse.Namespace, progress: dict) -> int:
     if args.verify_live_archive:
         if len(recipe["files"]) > MAX_FILES:
             raise ValueError("archive_recipe_file_limit_exceeded")
+        # An unchanged raw response may already have older first-observation
+        # metadata in R2. Resolve it by its exact raw identity, validate it,
+        # then bind the actual bytes/hash before this recipe can be approved.
+        metadata_objects = {}
+        for ref in recipe["files"]:
+            if ref["objectKey"].endswith(".metadata.json"):
+                raw_digest = ref["objectKey"].rsplit("/", 1)[-1].split(".", 1)[0]
+                metadata_objects[ref["objectKey"]] = read_remote(ref["objectKey"], raw_digest, metadata_raw=True)
+        recipe, objects = build_archive_recipe(
+            manifest=manifest, history_bundle=bundle, calendar=calendar, target=args.target_date,
+            adjacent_objects=adjacent_objects, metadata_objects=metadata_objects)
         for ref in recipe["files"]:
             # Local adjacent bundle/file content is not proof that R2 holds it.
             # Only reuse bytes already read through the authenticated endpoint.
-            remote = (adjacent_objects[ref["objectKey"]] if ref["objectKey"] in live_verified_keys
+            remote = (metadata_objects[ref["objectKey"]] if ref["objectKey"] in metadata_objects
+                      else adjacent_objects[ref["objectKey"]] if ref["objectKey"] in live_verified_keys
                       else read_remote(ref["objectKey"], ref["sha256"]))
             if remote != objects[ref["objectKey"]]:
                 raise ValueError("archive_recipe_remote_content_mismatch")
