@@ -61,9 +61,32 @@ def test_manual_entry_shell_blocks_parse_and_do_not_interpolate_inputs() -> None
     blocks = re.findall(r"(?m)^        run: \|\n((?:          [^\n]*\n|\n)+)", workflow)
     # Include the explicit preparation guard and the one-shot authority entry;
     # every shell block still receives syntax and input-boundary validation.
-    assert len(blocks) == 5
+    assert len(blocks) == 6
     for block in blocks:
         script = textwrap.dedent(block)
         assert "${{" not in script  # Untrusted declarations cross environment only.
         result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
         assert result.returncode == 0, result.stderr
+
+
+def test_archive_verification_mode_is_main_only_exact_bounded_and_cannot_execute_candidate() -> None:
+    workflow = (ROOT / ".github/workflows/pipeline-executor-candidate.yml").read_text()
+    assert "- archive-verify" in workflow
+    assert "inputs.execution_mode != 'archive-verify') || github.ref == 'refs/heads/main'" in workflow
+    assert "if: ${{ inputs.execution_mode == 'archive-verify' }}" in workflow
+    assert "inputs.preparation_json == '' && inputs.execution_mode != 'archive-verify'" in workflow
+    assert "if: ${{ inputs.execution_mode == 'candidate' }}" in workflow
+    assert "if: ${{ inputs.execution_mode == 'candidate' && inputs.preparation_json != '' }}" in workflow
+    start = workflow.index("- name: Verify exact Phase 0 archive objects without execution authority")
+    end = workflow.index("- name: Prepare one exact archived source", start)
+    block = workflow[start:end]
+    assert "[[ \"$ARCHIVE_CURRENT_RUN_ID\" =~ ^[0-9]{1,12}$ ]]" in block
+    assert "[[ \"$ARCHIVE_PREVIOUS_RUN_ID\" =~ ^[0-9]{1,12}$ ]]" in block
+    assert "test \"$ARCHIVE_CURRENT_RUN_ID\" != \"$ARCHIVE_PREVIOUS_RUN_ID\"" in block
+    assert ".size_in_bytes <= 40000000" in block
+    assert "--previous-history-bundle" in block and "--verify-live-archive" in block
+    assert ".archiveReadCount > 0 and .archiveReadCount <= 96" in block
+    assert "gh run download" in block and "gh api" in block
+    assert "wrangler" not in block and "workflow_dispatch" not in block
+    assert "pipeline-window" not in block and "candidate-release" not in block
+    assert "archive-verified-recipe.json" in workflow

@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-24: bounded read-only archive verification entry, local implementation
+
+- PR #207 merged as `6d2de8117b5f5970ff7d89f94cb957940d0b4aee`; main CI `40072414532` passed. No Worker deployment or D1 migration occurred, and no production archive readback or recovery was run.
+- Exact retained Collector artifacts remain available: current run `39978516406` / artifact `12512701365` (expires 2026-11-06 UTC), previous run `39707514669` / artifact `12395617549` (expires 2026-11-05 UTC). The 2026-10-22 local recipe is still `UNVERIFIED_CANDIDATE`, 67 objects / 5,510,215 bytes; existing `UNKNOWN` reservation remains held.
+- This isolated follow-up adds `archive-verify` to the existing manual pipeline entry. Main-branch only, exact run/artifact name and bounded size, existing GitHub secrets only in the readback step, exact-key authenticated R2 GET plus hash verification, and a seven-day recipe evidence artifact. Candidate source preparation, approval, budget claim, runner, publication and active activation are skipped in this mode. No new scheduler, D1 table, Worker endpoint or recovery control plane.
+- Local focused workflow/recipe tests, full Python regression, and Web lint/build/258 tests pass. The mode has **not** run against production. Merge side effects are limited to adding a manually selectable GitHub Actions mode; no Worker deploy or D1 migration. After one PR/CI and merge authorization, separately admit one exact 2026-10-22 read-only execution (at most 96 R2 GETs, no D1 query on pinned-object path) under fresh resource evidence. Only a verified archive can feed a later separately authorized recovery package. Product multi-period UI and runner canary remain unverified.
+
+## Historical implementation notes
+
 ### 2026-10-24: exact two-bundle archive candidate, local verification
 
 - PR #206 merged as `d023c71718566b1d6ee668247302ceb33a087efe`; main CI `39993638277` passed. Only Python/tool/test/docs paths changed, so no Worker deployment or D1 migration was triggered. No production recovery was run.
@@ -15,8 +24,6 @@ R2, D1, release, or receipt evidence.
 - The real offline replay now produces a 67-object, 5,510,215-byte recipe for 2026-10-22. Its status remains `UNVERIFIED_CANDIDATE`: zero production R2 reads and writes, no plan registration, no recovery claim, no publication. The actual archive still requires authenticated exact-key readback and full budget/authorization before execution. The previous `UNKNOWN` reservation remains held.
 - Worktree `/private/tmp/flow-budget-evidence-20261024`, branch `codex/budget-evidence-20261024`, starts from the PR #206 merge. Focused tests, complete Python regression, and Web lint/build/258 tests passed. Review caught and closed a false-verification edge: when a prior local bundle is supplied, `--verify-live-archive` still must read that adjacent object from authenticated R2; local bytes alone cannot earn `ARCHIVE_OBJECTS_VERIFIED`.
 - The GitHub account billing UI showed 1,748 Actions Linux minutes and $0 billed in the current October cycle at the 2026-10-24 check; repository visibility was private. A conservative one-PR/CI envelope including the existing 20-minute `UNKNOWN` hold remained below the configured 2,000-minute cap, subject to billing lag and concurrent usage. This is CI admission evidence, not a production recovery budget admission. Next: deliver this one compatibility PR/CI; wait for merge authorization. Product multi-period recovery and new runner canary remain unverified.
-
-## Historical implementation notes
 
 ### 2026-10-23: archive-first Oct 22 recovery date continuity
 

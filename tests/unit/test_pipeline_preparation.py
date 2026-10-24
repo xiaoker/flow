@@ -216,7 +216,8 @@ def test_existing_manual_workflow_is_optional_and_keeps_preparation_evidence():
     assert "${{ inputs.preparation_json }}" in text and "${{ secrets.FLOW_INGEST_API_KEY }}" in text
     assert "${{ runner.temp }}/flow-pipeline-candidate/preparation.json" in text
     assert "timeout-minutes: 10" in text and "PIPELINE_RECOVERY_ENABLED" not in text
-    assert "if: ${{ inputs.preparation_json == '' }}" in text and "--run-candidate" in text
+    assert "if: ${{ inputs.preparation_json == '' && inputs.execution_mode != 'archive-verify' }}" in text
+    assert "--run-candidate" in text
 
 
 def test_preparation_cost_stays_in_same_hold_across_owner_attempts(tmp_path):
