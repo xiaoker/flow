@@ -8,7 +8,9 @@ import sys
 import pytest
 
 from trading_desk.phase0_archive import validate_recipe
-from trading_desk.phase0_archive_recipe import build_archive_recipe
+from trading_desk.phase0_archive_recipe import (
+    adjacent_object_from_bundle, build_archive_recipe, official_calendar_from_bundle,
+)
 from test_phase0_archive import DATES, fixture_recipe
 from scripts import build_phase0_archive_recipe as cli
 
@@ -37,6 +39,37 @@ def _inputs():
                         "extension": extension, "rawContentBase64": base64.b64encode(stored[f"{prefix}.{extension}"]).decode(),
                         "metadata": {"sha256": sha}, "normalized": normalized})
     return manifest, {"version": 1, "history": {"runId": "fixture", "asOf": DATES[-1], "artifacts": history}}, fixture["calendar"]
+
+
+def _official_inputs():
+    manifest, bundle, _ = _inputs()
+    rows = [{"opDate": day.replace("-", "")} for day in reversed(DATES)]
+    response = {"beginDate": DATES[0].replace("-", ""), "endDate": DATES[-1].replace("-", ""),
+                "result": rows, "pageHelp": {"pageCount": 1, "total": len(rows)}}
+    raw = json.dumps(response, separators=(",", ":")).encode()
+    source = next(part for part in bundle["history"]["artifacts"]
+                  if part["sourceId"] == "sse" and part["dataset"] == "margin_market_daily")
+    source["rawContentBase64"] = base64.b64encode(raw).decode()
+    source["sha256"] = source["metadata"]["sha256"] = _sha(raw)
+    item = next(item for item in manifest["artifacts"]
+                if item["source"]["source_id"] == "sse" and item["source"]["dataset"] == "margin_market_daily")
+    item["sha256"] = _sha(raw)
+    return manifest, bundle
+
+
+def _previous_adjacent(manifest, bundle):
+    source = next(part for part in bundle["history"]["artifacts"]
+                  if part["sourceId"] == "szse" and part["dataset"] == "etf_scale")
+    prior = json.loads(json.dumps(source))
+    prior["requestedDate"] = DATES[-2]
+    wire = base64.b64decode(prior["normalized"][0]["contentBase64"])
+    revision = _sha(f"{prior['sha256']}:{_sha(wire)}".encode())
+    key = f"market-data/normalized/szse/etf_scale/{DATES[-2]}/{revision}/data.csv"
+    manifest["archivedEtfInputs"] = [{"sourceId": "szse", "tradeDate": DATES[-2], "objectKey": key,
+        "sha256": _sha(wire), "revisionId": revision,
+        "normalizedPath": "reports/phase0/adjacent-szse.csv"}]
+    previous = {"version": 1, "history": {"runId": "prior", "asOf": DATES[-2], "artifacts": [prior]}}
+    return previous, key, wire
 
 
 def test_recipe_from_bundle_has_exact_hashes_and_is_deterministic():
@@ -111,3 +144,84 @@ def test_cli_live_verification_is_exact_bounded_read_only(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="archive_recipe_remote_content_mismatch"):
         cli.main()
     assert not output.exists()
+
+
+def test_official_calendar_and_prior_adjacent_close_real_collector_shape(tmp_path, monkeypatch):
+    manifest, bundle = _official_inputs()
+    previous, key, wire = _previous_adjacent(manifest, bundle)
+    calendar = official_calendar_from_bundle(manifest=manifest, history_bundle=bundle)
+    assert calendar["dates"] == DATES
+    assert adjacent_object_from_bundle(manifest=manifest, previous_bundle=previous) == {key: wire}
+    recipe, _ = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+                                     target=DATES[-1], adjacent_objects={key: wire})
+    assert validate_recipe(recipe, DATES[-1]) == manifest
+    inputs = [tmp_path / name for name in ("manifest.json", "bundle.json", "previous.json")]
+    for path, value in zip(inputs, (manifest, bundle, previous), strict=True):
+        path.write_text(json.dumps(value))
+    monkeypatch.setattr(cli, "_archive_get", lambda *_: pytest.fail("offline construction fetched R2"))
+    output = tmp_path / "candidate.json"
+    monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(inputs[0]),
+        "--history-bundle", str(inputs[1]), "--previous-history-bundle", str(inputs[2]),
+        "--target-date", DATES[-1], "--output", str(output)])
+    assert cli.main() == 0
+    candidate = json.loads(output.read_text())
+    assert candidate["status"] == "UNVERIFIED_CANDIDATE" and candidate["archiveReadCount"] == 0
+    assert candidate["recipe"] == recipe
+
+
+def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_supplied(tmp_path, monkeypatch):
+    manifest, bundle = _official_inputs()
+    previous, key, wire = _previous_adjacent(manifest, bundle)
+    calendar = official_calendar_from_bundle(manifest=manifest, history_bundle=bundle)
+    recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+                                           target=DATES[-1], adjacent_objects={key: wire})
+    inputs = [tmp_path / name for name in ("manifest.json", "bundle.json", "previous.json")]
+    for path, value in zip(inputs, (manifest, bundle, previous), strict=True):
+        path.write_text(json.dumps(value))
+    calls = []
+    def exact_read(object_key, digest):
+        calls.append(object_key)
+        content = objects[object_key]
+        assert _sha(content) == digest
+        return content
+    monkeypatch.setattr(cli, "_archive_get", exact_read)
+    output = tmp_path / "verified.json"
+    monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(inputs[0]),
+        "--history-bundle", str(inputs[1]), "--previous-history-bundle", str(inputs[2]),
+        "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
+    assert cli.main() == 0
+    result = json.loads(output.read_text())
+    assert result["status"] == "ARCHIVE_OBJECTS_VERIFIED"
+    assert result["archiveReadCount"] == len(recipe["files"])
+    assert sorted(calls) == sorted(objects)
+
+
+@pytest.mark.parametrize("tamper", ["calendar_raw_hash", "calendar_date", "calendar_page",
+                                    "adjacent_raw_hash", "adjacent_wire", "adjacent_revision", "adjacent_path",
+                                    "adjacent_prior_date"])
+def test_two_bundle_proof_rejects_missing_or_modified_evidence(tamper):
+    manifest, bundle = _official_inputs()
+    previous, _, _ = _previous_adjacent(manifest, bundle)
+    official = next(part for part in bundle["history"]["artifacts"]
+                    if part["sourceId"] == "sse" and part["dataset"] == "margin_market_daily")
+    if tamper == "calendar_raw_hash": official["sha256"] = "0" * 64
+    if tamper in {"calendar_date", "calendar_page"}:
+        raw = json.loads(base64.b64decode(official["rawContentBase64"]))
+        if tamper == "calendar_date": raw["result"].pop()
+        else: raw["pageHelp"]["pageCount"] = 2
+        encoded = json.dumps(raw, separators=(",", ":")).encode()
+        official["rawContentBase64"] = base64.b64encode(encoded).decode()
+        official["sha256"] = _sha(encoded)
+        manifest_item = next(item for item in manifest["artifacts"]
+                             if item["source"]["source_id"] == "sse" and item["source"]["dataset"] == "margin_market_daily")
+        manifest_item["sha256"] = _sha(encoded)
+    if tamper == "adjacent_raw_hash": previous["history"]["artifacts"][0]["sha256"] = "0" * 64
+    if tamper == "adjacent_wire": previous["history"]["artifacts"][0]["normalized"][0]["contentBase64"] = base64.b64encode(b"wrong").decode()
+    if tamper == "adjacent_revision": manifest["archivedEtfInputs"][0]["revisionId"] = "0" * 64
+    if tamper == "adjacent_path": manifest["archivedEtfInputs"][0]["normalizedPath"] = "reports/phase0/other.csv"
+    if tamper == "adjacent_prior_date": previous["history"]["asOf"] = DATES[-1]
+    with pytest.raises(ValueError):
+        calendar = official_calendar_from_bundle(manifest=manifest, history_bundle=bundle)
+        adjacent = adjacent_object_from_bundle(manifest=manifest, previous_bundle=previous)
+        build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+                             target=DATES[-1], adjacent_objects=adjacent)

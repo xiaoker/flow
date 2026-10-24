@@ -14,7 +14,9 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from trading_desk.phase0_archive import MAX_FILES, MAX_OBJECT_BYTES
-from trading_desk.phase0_archive_recipe import build_archive_recipe
+from trading_desk.phase0_archive_recipe import (
+    adjacent_object_from_bundle, build_archive_recipe, official_calendar_from_bundle,
+)
 
 ARCHIVE_ORIGIN = "https://flow.xiaoker.com"
 MAX_BUNDLE_BYTES = 40_000_000
@@ -58,36 +60,48 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--history-bundle", type=Path, required=True)
-    parser.add_argument("--official-calendar", type=Path, required=True)
+    parser.add_argument("--official-calendar", type=Path)
+    parser.add_argument("--previous-history-bundle", type=Path)
     parser.add_argument("--target-date", required=True)
     parser.add_argument("--verify-live-archive", action="store_true")
     parser.add_argument("--adjacent-file", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     manifest = _read_json(args.manifest)
+    bundle = _read_json(args.history_bundle)
+    if args.previous_history_bundle and args.adjacent_file:
+        raise ValueError("archive_recipe_adjacent_inputs_ambiguous")
+    calendar = (_read_json(args.official_calendar) if args.official_calendar
+                else official_calendar_from_bundle(manifest=manifest, history_bundle=bundle))
     adjacent_objects = {}
+    live_verified_keys = set()
     adjacent = manifest.get("archivedEtfInputs", [])
     if adjacent:
         if len(adjacent) != 1 or not isinstance(adjacent[0], dict):
             raise ValueError("archive_recipe_adjacent_invalid")
         ref = adjacent[0]
-        if args.verify_live_archive:
+        if args.previous_history_bundle:
+            adjacent_objects = adjacent_object_from_bundle(
+                manifest=manifest, previous_bundle=_read_json(args.previous_history_bundle))
+        elif args.verify_live_archive:
             adjacent_objects[ref["objectKey"]] = _archive_get(ref["objectKey"], ref["sha256"])
+            live_verified_keys.add(ref["objectKey"])
         elif args.adjacent_file is not None:
             adjacent_objects[ref["objectKey"]] = args.adjacent_file.read_bytes()
         else:
             raise ValueError("archive_recipe_adjacent_object_required")
     recipe, objects = build_archive_recipe(
-        manifest=manifest, history_bundle=_read_json(args.history_bundle),
-        calendar=_read_json(args.official_calendar), target=args.target_date,
+        manifest=manifest, history_bundle=bundle,
+        calendar=calendar, target=args.target_date,
         adjacent_objects=adjacent_objects)
     if args.verify_live_archive:
         if len(recipe["files"]) > MAX_FILES:
             raise ValueError("archive_recipe_file_limit_exceeded")
         for ref in recipe["files"]:
-            remote = adjacent_objects.get(ref["objectKey"])
-            if remote is None:
-                remote = _archive_get(ref["objectKey"], ref["sha256"])
+            # Local adjacent bundle/file content is not proof that R2 holds it.
+            # Only reuse bytes already read through the authenticated endpoint.
+            remote = (adjacent_objects[ref["objectKey"]] if ref["objectKey"] in live_verified_keys
+                      else _archive_get(ref["objectKey"], ref["sha256"]))
             if remote != objects[ref["objectKey"]]:
                 raise ValueError("archive_recipe_remote_content_mismatch")
     args.output.write_text(json.dumps({

@@ -7,6 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-24: exact two-bundle archive candidate, local verification
+
+- PR #206 merged as `d023c71718566b1d6ee668247302ceb33a087efe`; main CI `39993638277` passed. Only Python/tool/test/docs paths changed, so no Worker deployment or D1 migration was triggered. No production recovery was run.
+- The merged read-only recipe tool exposed a real compatibility gap in the retained 2026-10-22 Collector artifact: its authenticated prior-day SZSE reference uses `reports/phase0/adjacent-szse.csv`, while the archive validator accepted only `data/normalized/`. The exact content is present in the previous 2026-10-21 Collector history bundle; decoded SHA-256 equals the current reference (`015e24d11a669909b19827540dabb3d3928a61395d9e11cf8b755e73f95436ae`). The current bundle's separately identified official SSE margin response proves the requested 2026-10-20/21/22 business-date window.
+- This isolated follow-up derives both inputs from those two immutable Collector bundles, checks their source hashes, date range, normalized revision and exact object key, and accepts only the Collector's one literal adjacent path in addition to the older archive path. No date, hash, QA, budget, lease or active-pointer gate is weakened.
+- The real offline replay now produces a 67-object, 5,510,215-byte recipe for 2026-10-22. Its status remains `UNVERIFIED_CANDIDATE`: zero production R2 reads and writes, no plan registration, no recovery claim, no publication. The actual archive still requires authenticated exact-key readback and full budget/authorization before execution. The previous `UNKNOWN` reservation remains held.
+- Worktree `/private/tmp/flow-budget-evidence-20261024`, branch `codex/budget-evidence-20261024`, starts from the PR #206 merge. Focused tests, complete Python regression, and Web lint/build/258 tests passed. Review caught and closed a false-verification edge: when a prior local bundle is supplied, `--verify-live-archive` still must read that adjacent object from authenticated R2; local bytes alone cannot earn `ARCHIVE_OBJECTS_VERIFIED`.
+- The GitHub account billing UI showed 1,748 Actions Linux minutes and $0 billed in the current October cycle at the 2026-10-24 check; repository visibility was private. A conservative one-PR/CI envelope including the existing 20-minute `UNKNOWN` hold remained below the configured 2,000-minute cap, subject to billing lag and concurrent usage. This is CI admission evidence, not a production recovery budget admission. Next: deliver this one compatibility PR/CI; wait for merge authorization. Product multi-period recovery and new runner canary remain unverified.
+
+## Historical implementation notes
+
 ### 2026-10-23: archive-first Oct 22 recovery date continuity
 
 - PR #204 merged as `8d89a0a676840ed5bc7d781a7cece6323fbe3129`; main CI `39916319483` and Worker deployment `39916320011` succeeded. Deployment found no pending D1 migration and verified the exact served build. No data-recovery run was authorized or performed.
@@ -14,8 +25,6 @@ R2, D1, release, or receipt evidence.
 - Read-only comparison found the formal recovery runner selected `state.dates` (a broader ETF calendar), which contains dates without a verified stock-flow/PCF pair. For Oct 22 it would drop early published penetration dates and include unproven global dates. This worktree reuses the authenticated, hash-verified active pressure date endpoint from PR #204 plus the current official SSE manifest/source snapshots; the archive fetcher still verifies every selected day. Exact Oct 22 artifacts yield 22 bounded candidates including Oct 19 and excluding Oct 14/Sep 29/Sep 14. One additional read is counted in the same bounded source session and recovery floor. Bad prior evidence fails before history-import writes.
 - Isolated branch `codex/recovery-pressure-dates-20261023`, based on the PR #204 merge. Focused runner tests, complete Python/localhost HTTP/SQLite regression, Web lint/build and 258 Web tests passed after building the required local Worker. The first full Python attempt failed because that compiled fixture was absent; the unchanged suite passed after the build. No production writes, schedule/flag/active-pointer change, formula change, paid-limit change or original protected-file edit. No live recovery success is claimed.
 - Next: deliver this single recovery compatibility PR with necessary CI, then wait for merge authorization. The platform approval reviewer currently reports a usage-limit failure for network/Git operations, so no push or PR has been attempted through a bypass. Only after merge evidence and a separately approved bounded resource/source package may one Oct 22 recovery execute; do not rerun the old Publisher or duplicate ordinary Collectors.
-
-## Historical implementation notes
 
 ### 2026-10-23: active pressure date continuity and changing ETF constituents
 
