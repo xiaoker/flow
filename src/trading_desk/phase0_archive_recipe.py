@@ -21,9 +21,8 @@ def _sha(data: bytes) -> str:
 
 
 def _json_bytes(value: Any) -> bytes:
-    # Match JSON.stringify's ordinary object layout used by history-import.
-    # A remote byte read remains authoritative if an exotic metadata value is
-    # serialized differently by JavaScript.
+    # Offline candidates can reconstruct current observation metadata only.
+    # Live recipes must bind the actual first-observation bytes retained in R2.
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -138,6 +137,7 @@ def build_archive_recipe(
     *, manifest: dict[str, Any], history_bundle: dict[str, Any],
     calendar: dict[str, Any], target: str,
     adjacent_objects: dict[str, bytes] | None = None,
+    metadata_objects: dict[str, bytes] | None = None,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     """Return the exact-key recipe and locally reconstructed stored bytes.
 
@@ -155,6 +155,7 @@ def build_archive_recipe(
 
     refs: list[dict[str, Any]] = []
     objects: dict[str, bytes] = {}
+    used_metadata: set[str] = set()
 
     def add(path: str, key: str, content: bytes) -> None:
         if key in objects or len(content) > MAX_OBJECT_BYTES:
@@ -183,8 +184,25 @@ def build_archive_recipe(
         metadata = artifact.get("metadata")
         if not isinstance(metadata, dict) or metadata.get("sha256") != raw_sha:
             raise ValueError("archive_recipe_metadata_mismatch")
-        add(item["metadata_path"], f"{prefix}.metadata.json", _json_bytes({
-            **metadata, "release_id": artifact.get("releaseId"), "archived_raw_key": raw_key}))
+        metadata_key = f"{prefix}.metadata.json"
+        metadata_bytes = _json_bytes({**metadata, "release_id": artifact.get("releaseId"), "archived_raw_key": raw_key})
+        if metadata_objects is not None:
+            metadata_bytes = metadata_objects.get(metadata_key)
+            if not isinstance(metadata_bytes, bytes) or len(metadata_bytes) > MAX_OBJECT_BYTES:
+                raise ValueError("archive_recipe_stored_metadata_missing")
+            try:
+                stored = json.loads(metadata_bytes)
+            except (ValueError, UnicodeError) as exc:
+                raise ValueError("archive_recipe_stored_metadata_invalid") from exc
+            if (not isinstance(stored, dict) or stored.get("sha256") != raw_sha
+                    or stored.get("requested_date") != day or stored.get("release_id") != artifact.get("releaseId")
+                    or stored.get("archived_raw_key") != raw_key or stored.get("status_code") != item.get("status_code")
+                    or stored.get("bytes") != len(raw) or not isinstance(stored.get("observed_at"), str)
+                    or not stored["observed_at"] or not isinstance(stored.get("source"), dict)
+                    or stored["source"].get("source_id") != source_id or stored["source"].get("dataset") != dataset):
+                raise ValueError("archive_recipe_stored_metadata_invalid")
+            used_metadata.add(metadata_key)
+        add(item["metadata_path"], metadata_key, metadata_bytes)
         parts = item.get("normalized_path", "").split(";")
         normalized = artifact.get("normalized")
         names = ["summary", "top"] if len(parts) == 2 else ["data"]
@@ -212,6 +230,8 @@ def build_archive_recipe(
             key = f"market-data/normalized/{source_id}/{dataset}/{day}/{revision}/{name}{suffix}"
             add(path, key, wire)
 
+    if metadata_objects is not None and set(metadata_objects) != used_metadata:
+        raise ValueError("archive_recipe_stored_metadata_unexpected")
     adjacent = manifest.get("archivedEtfInputs", [])
     if not isinstance(adjacent, list):
         raise ValueError("archive_recipe_adjacent_invalid")

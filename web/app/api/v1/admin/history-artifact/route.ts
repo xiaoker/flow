@@ -25,16 +25,22 @@ function badRequest(error: string, status = 400): Response {
 async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): Promise<Response> {
   const key = query.get("archive_key") ?? "";
   const expected = query.get("archive_sha256") ?? "";
+  const metadataRaw = query.get("archive_metadata_raw_sha256");
+  const digest = metadataRaw ?? expected;
   const match = /^market-data\/(raw|normalized)\/(sse|szse|bse|hkex)\/([a-z_]+)\/(\d{4}-\d{2}-\d{2}(?:_\d{4}-\d{2}-\d{2})?)\/([a-f0-9]{64})(.*)$/.exec(key);
   const pairs: Record<string, string[]> = {
     sse: ["etf_scale", "etf_nav", "etf_pcf", "margin_market_daily", "margin_security_daily"],
     szse: ["etf_scale", "margin_market_daily"], bse: ["margin_market_daily"], hkex: ["stock_connect_daily"],
   };
-  if (!match || match[0] !== key || key.length > 500 || expected.length !== 64 || !/^[a-f0-9]{64}$/.test(expected)
-      || !pairs[match[2]]?.includes(match[3]) || [...query.keys()].some(k => !["archive_key", "archive_sha256"].includes(k))) {
+  const allowed = metadataRaw === null ? ["archive_key", "archive_sha256"] : ["archive_key", "archive_metadata_raw_sha256"];
+  if (!match || match[0] !== key || key.length > 500 || !/^[a-f0-9]{64}$/.test(digest)
+      || !pairs[match[2]]?.includes(match[3]) || [...query.keys()].some(k => !allowed.includes(k))) {
     return badRequest("invalid_pinned_official_object");
   }
-  const [, kind, source, dataset, partition, , suffix] = match;
+  const [, kind, source, dataset, partition, rawSha, suffix] = match;
+  if (metadataRaw !== null && (kind !== "raw" || suffix !== ".metadata.json" || metadataRaw !== rawSha)) {
+    return badRequest("invalid_pinned_official_metadata");
+  }
   if ((partition.includes("_") && (source !== "sse" || dataset !== "margin_market_daily"))
       || (kind === "raw" ? !/^\.(json|js|jsonp|xlsx|gz|metadata\.json)$/.test(suffix)
         : dataset === "stock_connect_daily" ? !/^\/(summary|top)\.csv$/.test(suffix)
@@ -48,10 +54,25 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
   const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
   if (bytes.byteLength > 2_000_000) return badRequest("artifact_too_large", 413);
   const actual = await sha256Hex(bytes);
-  if (actual !== expected) return badRequest("archive_object_hash_mismatch", 409);
+  if (metadataRaw !== null) {
+    // Metadata is first-observation evidence: recollecting unchanged raw bytes
+    // must not substitute a later observation's JSON for this immutable object.
+    let metadata: Record<string, unknown>;
+    try { metadata = JSON.parse(new TextDecoder().decode(bytes)); }
+    catch { return badRequest("archive_metadata_identity_mismatch", 409); }
+    const identity = metadata?.source as Record<string, unknown> | undefined;
+    const rawKey = metadata?.archived_raw_key;
+    if (metadata?.sha256 !== rawSha || metadata?.requested_date !== partition
+        || identity?.source_id !== source || identity?.dataset !== dataset
+        || metadata?.release_id !== `${dataset}:${source}:${partition}:${rawSha.slice(0, 16)}`
+        || typeof rawKey !== "string" || !new RegExp(`^market-data/raw/${source}/${dataset}/${partition}/${rawSha}\\.(json|js|jsonp|xlsx|gz)$`).test(rawKey)) {
+      return badRequest("archive_metadata_identity_mismatch", 409);
+    }
+  } else if (actual !== expected) return badRequest("archive_object_hash_mismatch", 409);
   return new Response(bytes, { headers: { "Cache-Control": "private, no-store",
     "Content-Type": key.endsWith(".csv.gz") ? "application/gzip" : "application/octet-stream",
-    "X-Flow-Archive-Key": key, "X-Flow-Archive-Sha256": actual } });
+    "X-Flow-Archive-Key": key, "X-Flow-Archive-Sha256": actual,
+    ...(metadataRaw !== null ? { "X-Flow-Archive-Raw-Sha256": rawSha } : {}) } });
 }
 
 function expectedPair(source: string, dataset: string): boolean {
@@ -89,7 +110,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!runtime.RAW_BUCKET) return badRequest("raw_bucket_unavailable", 503);
 
   const query = new URL(request.url).searchParams;
-  if (query.has("archive_key") || query.has("archive_sha256")) {
+  if (query.has("archive_key") || query.has("archive_sha256") || query.has("archive_metadata_raw_sha256")) {
     try { return await pinnedOfficialObject(query, runtime.RAW_BUCKET); }
     catch { return badRequest("archive_object_unavailable", 503); }
   }

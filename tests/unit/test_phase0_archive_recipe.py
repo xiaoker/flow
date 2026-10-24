@@ -39,7 +39,9 @@ def _inputs():
         history.append({"releaseId": f"{dataset}:{source}:{day}:{sha[:16]}",
                         "sourceId": source, "dataset": dataset, "requestedDate": day, "sha256": sha,
                         "extension": extension, "rawContentBase64": base64.b64encode(stored[f"{prefix}.{extension}"]).decode(),
-                        "metadata": {"sha256": sha}, "normalized": normalized})
+                        "metadata": {"sha256": sha, "source": item["source"], "requested_date": day,
+                            "observed_at": item["observed_at"], "status_code": item["status_code"],
+                            "bytes": len(stored[f"{prefix}.{extension}"])}, "normalized": normalized})
     return manifest, {"version": 1, "history": {"runId": "fixture", "asOf": DATES[-1], "artifacts": history}}, fixture["calendar"]
 
 
@@ -53,6 +55,7 @@ def _official_inputs():
                   if part["sourceId"] == "sse" and part["dataset"] == "margin_market_daily")
     source["rawContentBase64"] = base64.b64encode(raw).decode()
     source["sha256"] = source["metadata"]["sha256"] = _sha(raw)
+    source["metadata"]["bytes"] = len(raw)
     item = next(item for item in manifest["artifacts"]
                 if item["source"]["source_id"] == "sse" and item["source"]["dataset"] == "margin_market_daily")
     item["sha256"] = _sha(raw)
@@ -133,6 +136,11 @@ def test_cli_live_verification_is_exact_bounded_read_only(tmp_path, monkeypatch)
         assert _sha(objects[key]) == digest
         return objects[key]
     monkeypatch.setattr(cli, "_archive_get", exact_get)
+    def metadata_get(key, digest):
+        reads.append(key)
+        assert json.loads(objects[key])["sha256"] == digest
+        return objects[key]
+    monkeypatch.setattr(cli, "_archive_metadata_get", metadata_get)
     monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(paths[0]),
         "--history-bundle", str(paths[1]), "--official-calendar", str(paths[2]),
         "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
@@ -180,6 +188,10 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
     calendar = official_calendar_from_bundle(manifest=manifest, history_bundle=bundle)
     recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
                                            target=DATES[-1], adjacent_objects={key: wire})
+    first_metadata = next(k for k in objects if k.endswith(".metadata.json"))
+    original_metadata = json.loads(objects[first_metadata])
+    original_metadata["observed_at"] = "2026-07-16T01:00:00Z"
+    objects[first_metadata] = json.dumps(original_metadata).encode()
     inputs = [tmp_path / name for name in ("manifest.json", "bundle.json", "previous.json")]
     for path, value in zip(inputs, (manifest, bundle, previous), strict=True):
         path.write_text(json.dumps(value))
@@ -190,6 +202,11 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
         assert _sha(content) == digest
         return content
     monkeypatch.setattr(cli, "_archive_get", exact_read)
+    def metadata_read(object_key, digest):
+        calls.append(object_key)
+        assert json.loads(objects[object_key])["sha256"] == digest
+        return objects[object_key]
+    monkeypatch.setattr(cli, "_archive_metadata_get", metadata_read)
     output = tmp_path / "verified.json"
     monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(inputs[0]),
         "--history-bundle", str(inputs[1]), "--previous-history-bundle", str(inputs[2]),
@@ -199,6 +216,8 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
     assert result["status"] == "ARCHIVE_OBJECTS_VERIFIED"
     assert result["archiveReadCount"] == len(recipe["files"])
     assert sorted(calls) == sorted(objects)
+    assert result["archiveReadAttempts"] == len(objects)
+    assert next(ref for ref in result["recipe"]["files"] if ref["objectKey"] == first_metadata)["sha256"] == _sha(objects[first_metadata])
 
 
 @pytest.mark.parametrize("tamper", ["calendar_raw_hash", "calendar_date", "calendar_page",
@@ -233,7 +252,8 @@ def test_two_bundle_proof_rejects_missing_or_modified_evidence(tamper):
 
 
 @pytest.mark.parametrize("status", [200, 302, 403])
-def test_archive_http_client_identifies_itself_and_never_follows_redirects(monkeypatch, status):
+@pytest.mark.parametrize("metadata_raw", [False, True])
+def test_archive_http_client_identifies_itself_and_never_follows_redirects(monkeypatch, status, metadata_raw):
     requests = []
     content = b"official archive bytes"
     class Handler(BaseHTTPRequestHandler):
@@ -242,6 +262,7 @@ def test_archive_http_client_identifies_itself_and_never_follows_redirects(monke
             self.send_response(status)
             self.send_header("x-flow-archive-key", "exact-key")
             self.send_header("x-flow-archive-sha256", _sha(content))
+            self.send_header("x-flow-archive-raw-sha256", "a" * 64)
             self.send_header("cf-ray", "abc123-DFW")
             self.send_header("Location", "/must-not-follow")
             self.end_headers()
@@ -255,14 +276,16 @@ def test_archive_http_client_identifies_itself_and_never_follows_redirects(monke
     for name in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
         monkeypatch.setenv(name, f"fixture-{name}")
     try:
+        digest = "a" * 64 if metadata_raw else _sha(content)
         if status == 200:
-            assert cli._archive_get("exact-key", _sha(content)) == content
+            assert cli._archive_get("exact-key", digest, metadata_raw=metadata_raw) == content
         else:
             with pytest.raises(cli.ArchiveReadError) as raised:
-                cli._archive_get("exact-key", _sha(content))
+                cli._archive_get("exact-key", digest, metadata_raw=metadata_raw)
             assert raised.value.status == status and raised.value.ray == "abc123-DFW"
             assert str(raised.value) == "archive_recipe_remote_http_error"
         assert len(requests) == 1
+        assert ("archive_metadata_raw_sha256=" in requests[0]["path"]) == metadata_raw
         headers = {key.lower(): value for key, value in requests[0]["headers"].items()}
         assert headers["user-agent"] == cli.ARCHIVE_USER_AGENT
         assert headers["accept"] == "application/octet-stream"
@@ -286,6 +309,7 @@ def test_cli_preserves_safe_failure_evidence_and_stops_at_first_http_error(tmp_p
         calls.append((key, digest))
         raise cli.ArchiveReadError("archive_recipe_remote_http_error", status=403, ray="abc123-DFW")
     monkeypatch.setattr(cli, "_archive_get", denied)
+    monkeypatch.setattr(cli, "_archive_metadata_get", denied)
     monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(paths[0]),
         "--history-bundle", str(paths[1]), "--official-calendar", str(paths[2]),
         "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
@@ -296,3 +320,42 @@ def test_cli_preserves_safe_failure_evidence_and_stops_at_first_http_error(tmp_p
         "archiveReadAttempts": 1, "archiveReadCount": 0, "failedObjectKey": calls[0][0],
         "errorCode": "archive_recipe_remote_http_error", "httpStatus": 403, "cfRay": "abc123-DFW"}
     assert len(calls) == 1 and "recipe" not in failure
+
+
+def test_recipe_binds_actual_first_observation_metadata_without_changing_official_bytes():
+    manifest, bundle, calendar = _inputs()
+    candidate, original = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1])
+    stored = {ref["objectKey"]: original[ref["objectKey"]] for ref in candidate["files"]
+              if ref["objectKey"].endswith(".metadata.json")}
+    key = next(iter(stored))
+    earlier = json.loads(stored[key])
+    earlier["observed_at"] = "2026-07-16T01:00:00Z"
+    stored[key] = json.dumps(earlier, ensure_ascii=False).encode()
+    exact, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+        target=DATES[-1], metadata_objects=stored)
+    assert objects[key] == stored[key] != original[key]
+    assert next(ref for ref in exact["files"] if ref["objectKey"] == key)["sha256"] == _sha(stored[key])
+    assert all(objects[k] == value for k, value in original.items() if k not in stored)
+    assert validate_recipe(exact, DATES[-1]) == manifest
+
+
+@pytest.mark.parametrize("fault", ["missing", "raw_sha", "date", "source", "raw_key", "bytes", "malformed", "extra"])
+def test_actual_metadata_must_match_exact_raw_identity(fault):
+    manifest, bundle, calendar = _inputs()
+    recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1])
+    stored = {ref["objectKey"]: objects[ref["objectKey"]] for ref in recipe["files"]
+              if ref["objectKey"].endswith(".metadata.json")}
+    key = next(iter(stored))
+    value = json.loads(stored[key])
+    if fault == "raw_sha": value["sha256"] = "0" * 64
+    if fault == "date": value["requested_date"] = "2026-07-01"
+    if fault == "source": value["source"]["source_id"] = "szse"
+    if fault == "raw_key": value["archived_raw_key"] += "/other"
+    if fault == "bytes": value["bytes"] += 1
+    stored[key] = json.dumps(value).encode()
+    if fault == "missing": del stored[key]
+    if fault == "malformed": stored[key] = b"not JSON"
+    if fault == "extra": stored["other"] = b"{}"
+    with pytest.raises(ValueError, match="archive_recipe_stored_metadata"):
+        build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+            target=DATES[-1], metadata_objects=stored)

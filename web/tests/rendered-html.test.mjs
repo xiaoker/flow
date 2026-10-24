@@ -118,6 +118,42 @@ test("pinned official recovery reads are authenticated, bounded and never list o
   assert.equal(gets.length,before,"invalid inputs and authentication stop before R2");
 });
 
+test("discovers exact first-observation metadata by raw identity without weakening pinned byte reads", async () => {
+  const worker = await loadWorker();
+  const rawSha = "a".repeat(64);
+  const root = `market-data/raw/sse/etf_scale/2026-10-20/${rawSha}`;
+  const key = root + ".metadata.json";
+  const metadata = {source:{source_id:"sse",dataset:"etf_scale"}, requested_date:"2026-10-20",
+    observed_at:"2026-10-21T09:16:39+08:00", sha256:rawSha,
+    release_id:`etf_scale:sse:2026-10-20:${rawSha.slice(0,16)}`, archived_raw_key:root+".json"};
+  let bytes = new TextEncoder().encode(JSON.stringify(metadata));
+  const gets = [];
+  const runtime = {...env, INGEST_API_KEY:"test-key",
+    DB:{prepare(){throw new Error("metadata discovery must not query D1");}},
+    RAW_BUCKET:{async get(k){gets.push(k);return {body:bytes,size:bytes.length};},
+      list(){throw new Error("no list");},put(){throw new Error("no write");}}};
+  const request = (k=key, sha=rawSha, auth=true, extra="") => worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?archive_key=${encodeURIComponent(k)}&archive_metadata_raw_sha256=${sha}${extra}`,
+    {headers:auth?{authorization:"Bearer test-key"}:{}}), runtime, context);
+  const response = await request();
+  assert.equal(response.status,200);
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  assert.equal(response.headers.get("x-flow-archive-sha256"),actual);
+  assert.equal(response.headers.get("x-flow-archive-raw-sha256"),rawSha);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()),bytes);
+  const before = gets.length;
+  assert.equal((await request(root+".json")).status,400);
+  assert.equal((await request(key,"b".repeat(64))).status,400);
+  assert.equal((await request(key,rawSha,false)).status,401);
+  assert.equal((await request(key,rawSha,true,`&archive_sha256=${actual}`)).status,400);
+  assert.equal(gets.length,before);
+  for (const bad of [{...metadata,sha256:"b".repeat(64)}, {...metadata,requested_date:"2026-10-21"},
+    {...metadata,source:{source_id:"szse",dataset:"etf_scale"}}, {...metadata,archived_raw_key:root+".json/other"}, null]) {
+    bytes = new TextEncoder().encode(JSON.stringify(bad));
+    assert.equal((await request()).status,409);
+  }
+});
+
 test("keeps the margin history preview inside its dashboard card", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.compact-panel\s*\{[^}]*overflow:\s*hidden/);
