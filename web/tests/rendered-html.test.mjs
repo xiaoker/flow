@@ -154,6 +154,40 @@ test("discovers exact first-observation metadata by raw identity without weakeni
   }
 });
 
+test("legacy normalized discovery binds an exact raw partition and leaves execution hash checks strict", async () => {
+  const worker = await loadWorker();
+  const rawSha = "b".repeat(64);
+  const key = `market-data/normalized/sse/etf_nav/2026-10-22/${rawSha}/data.csv`;
+  const bytes = new TextEncoder().encode("trade_date,nav,observed_at\n2026-10-22,1.719,new\n");
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  const gets = [];
+  const runtime = {...env, INGEST_API_KEY:"test-key",
+    DB:{prepare(){throw new Error("no D1");}},
+    RAW_BUCKET:{async get(k){gets.push(k);return {body:bytes,size:bytes.length};},
+      list(){throw new Error("no list");},put(){throw new Error("no write");}}};
+  const request = (k=key, digest=rawSha, auth=true, extra="") => worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?archive_key=${encodeURIComponent(k)}&archive_normalized_raw_sha256=${digest}${extra}`,
+    {headers:auth?{authorization:"Bearer test-key"}:{}}),runtime,context);
+  const response = await request();
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get("x-flow-archive-key"),key);
+  assert.equal(response.headers.get("x-flow-archive-sha256"),actual);
+  assert.equal(response.headers.get("x-flow-archive-raw-sha256"),rawSha);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()),bytes);
+  const before = gets.length;
+  for (const invalid of [key.replace("etf_nav","etf_scale"), key.replace("normalized","raw"), key+"/other"]) {
+    assert.equal((await request(invalid)).status,400);
+  }
+  assert.equal((await request(key,"c".repeat(64))).status,400);
+  assert.equal((await request(key,rawSha,false)).status,401);
+  assert.equal((await request(key,rawSha,true,`&archive_metadata_raw_sha256=${rawSha}`)).status,400);
+  assert.equal(gets.length,before);
+  const stale = await worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?archive_key=${encodeURIComponent(key)}&archive_sha256=${rawSha}`,
+    {headers:{authorization:"Bearer test-key"}}),runtime,context);
+  assert.equal(stale.status,409,"execution cannot substitute raw identity for the pinned body hash");
+});
+
 test("keeps the margin history preview inside its dashboard card", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.compact-panel\s*\{[^}]*overflow:\s*hidden/);

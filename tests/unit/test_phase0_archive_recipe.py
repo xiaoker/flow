@@ -1,8 +1,10 @@
 """A collector bundle can supply exact archive refs without a manual key list."""
 import base64
+import csv
 import gzip
 import hashlib
 import json
+import io
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,7 +49,8 @@ def _inputs():
 
 def _official_inputs():
     manifest, bundle, _ = _inputs()
-    rows = [{"opDate": day.replace("-", "")} for day in reversed(DATES)]
+    rows = [{"opDate": day.replace("-", ""), "rzye": 100, "rzmre": 10,
+             "rqylje": 5, "rzrqjyzl": 105} for day in reversed(DATES)]
     response = {"beginDate": DATES[0].replace("-", ""), "endDate": DATES[-1].replace("-", ""),
                 "result": rows, "pageHelp": {"pageCount": 1, "total": len(rows)}}
     raw = json.dumps(response, separators=(",", ":")).encode()
@@ -141,6 +144,11 @@ def test_cli_live_verification_is_exact_bounded_read_only(tmp_path, monkeypatch)
         assert json.loads(objects[key])["sha256"] == digest
         return objects[key]
     monkeypatch.setattr(cli, "_archive_metadata_get", metadata_get)
+    def normalized_get(key, digest):
+        reads.append(key)
+        assert key.split("/")[-2] == digest
+        return objects[key]
+    monkeypatch.setattr(cli, "_archive_normalized_get", normalized_get)
     monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(paths[0]),
         "--history-bundle", str(paths[1]), "--official-calendar", str(paths[2]),
         "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
@@ -192,6 +200,13 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
     original_metadata = json.loads(objects[first_metadata])
     original_metadata["observed_at"] = "2026-07-16T01:00:00Z"
     objects[first_metadata] = json.dumps(original_metadata).encode()
+    legacy_key = next(k for k in objects if k.startswith("market-data/normalized/") and "/etf_scale/" not in k)
+    table = list(csv.reader(io.StringIO(objects[legacy_key].decode())))
+    for row in table[1:]:
+        row[table[0].index("observed_at")] = "2026-07-18T01:00:00Z"
+    stream = io.StringIO()
+    csv.writer(stream).writerows(table)
+    objects[legacy_key] = stream.getvalue().encode()
     inputs = [tmp_path / name for name in ("manifest.json", "bundle.json", "previous.json")]
     for path, value in zip(inputs, (manifest, bundle, previous), strict=True):
         path.write_text(json.dumps(value))
@@ -207,6 +222,11 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
         assert json.loads(objects[object_key])["sha256"] == digest
         return objects[object_key]
     monkeypatch.setattr(cli, "_archive_metadata_get", metadata_read)
+    def normalized_read(object_key, digest):
+        calls.append(object_key)
+        assert object_key.split("/")[-2] == digest
+        return objects[object_key]
+    monkeypatch.setattr(cli, "_archive_normalized_get", normalized_read)
     output = tmp_path / "verified.json"
     monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(inputs[0]),
         "--history-bundle", str(inputs[1]), "--previous-history-bundle", str(inputs[2]),
@@ -217,6 +237,8 @@ def test_live_verification_reads_every_object_even_when_adjacent_bundle_is_suppl
     assert result["archiveReadCount"] == len(recipe["files"])
     assert sorted(calls) == sorted(objects)
     assert result["archiveReadAttempts"] == len(objects)
+    assert result["lineageVerified"] is True
+    assert next(ref for ref in result["recipe"]["files"] if ref["objectKey"] == legacy_key)["sha256"] == _sha(objects[legacy_key])
     assert next(ref for ref in result["recipe"]["files"] if ref["objectKey"] == first_metadata)["sha256"] == _sha(objects[first_metadata])
 
 
@@ -252,8 +274,9 @@ def test_two_bundle_proof_rejects_missing_or_modified_evidence(tamper):
 
 
 @pytest.mark.parametrize("status", [200, 302, 403])
-@pytest.mark.parametrize("metadata_raw", [False, True])
-def test_archive_http_client_identifies_itself_and_never_follows_redirects(monkeypatch, status, metadata_raw):
+@pytest.mark.parametrize("discovery", ["exact", "metadata", "normalized"])
+def test_archive_http_client_identifies_itself_and_never_follows_redirects(monkeypatch, status, discovery):
+    metadata_raw, normalized_raw = discovery == "metadata", discovery == "normalized"
     requests = []
     content = b"official archive bytes"
     class Handler(BaseHTTPRequestHandler):
@@ -276,16 +299,17 @@ def test_archive_http_client_identifies_itself_and_never_follows_redirects(monke
     for name in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
         monkeypatch.setenv(name, f"fixture-{name}")
     try:
-        digest = "a" * 64 if metadata_raw else _sha(content)
+        digest = "a" * 64 if metadata_raw or normalized_raw else _sha(content)
         if status == 200:
-            assert cli._archive_get("exact-key", digest, metadata_raw=metadata_raw) == content
+            assert cli._archive_get("exact-key", digest, metadata_raw=metadata_raw, normalized_raw=normalized_raw) == content
         else:
             with pytest.raises(cli.ArchiveReadError) as raised:
-                cli._archive_get("exact-key", digest, metadata_raw=metadata_raw)
+                cli._archive_get("exact-key", digest, metadata_raw=metadata_raw, normalized_raw=normalized_raw)
             assert raised.value.status == status and raised.value.ray == "abc123-DFW"
             assert str(raised.value) == "archive_recipe_remote_http_error"
         assert len(requests) == 1
         assert ("archive_metadata_raw_sha256=" in requests[0]["path"]) == metadata_raw
+        assert ("archive_normalized_raw_sha256=" in requests[0]["path"]) == normalized_raw
         headers = {key.lower(): value for key, value in requests[0]["headers"].items()}
         assert headers["user-agent"] == cli.ARCHIVE_USER_AGENT
         assert headers["accept"] == "application/octet-stream"
@@ -359,3 +383,65 @@ def test_actual_metadata_must_match_exact_raw_identity(fault):
     with pytest.raises(ValueError, match="archive_recipe_stored_metadata"):
         build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
             target=DATES[-1], metadata_objects=stored)
+
+
+@pytest.mark.parametrize("fault", ["date", "value", "source", "column", "row", "missing", "extra", "oversize"])
+def test_legacy_projection_discovery_never_accepts_changed_business_values(fault):
+    manifest, bundle, calendar = _inputs()
+    recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1])
+    stored = {key: value for key, value in objects.items()
+              if key.startswith("market-data/normalized/") and "/etf_scale/" not in key}
+    key = next(iter(stored))
+    table = list(csv.reader(io.StringIO(stored[key].decode())))
+    if fault == "date": table[1][table[0].index("trade_date")] = "2026-07-01"
+    if fault == "value": table[1][table[0].index("financing_balance_yuan")] = "9999999"
+    if fault == "source": table[1][table[0].index("source_id")] = "szse"
+    if fault == "column": table[0][0] = "other_date"
+    if fault == "row": table.pop()
+    stream = io.StringIO()
+    csv.writer(stream).writerows(table)
+    stored[key] = stream.getvalue().encode()
+    if fault == "missing": del stored[key]
+    if fault == "extra": stored["other"] = b"anything"
+    if fault == "oversize": stored[key] = b"x" * 2_000_001
+    with pytest.raises(ValueError, match="archive_recipe_(stored_normalized|normalized_size)"):
+        build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar,
+            target=DATES[-1], normalized_objects=stored)
+
+
+def test_legacy_gzip_projection_rebinds_wire_hash_but_rejects_expansion_and_values():
+    reference = b"trade_date,nav,observed_at\n2026-10-22,1.719,old\n"
+    stored = b"trade_date,nav,observed_at\n2026-10-22,1.719,new\n"
+    from trading_desk.phase0_archive_recipe import _normalized_content, _same_observation_values
+    assert _same_observation_values(reference, _normalized_content(gzip.compress(stored, mtime=123), "gzip"))
+    assert not _same_observation_values(reference, stored.replace(b"1.719", b"0"))
+    with pytest.raises(ValueError, match="normalized_size"):
+        _normalized_content(gzip.compress(b"x" * 2_000_001), "gzip")
+
+
+def test_live_verification_requires_real_raw_mapping_qa_after_all_byte_checks(tmp_path, monkeypatch):
+    manifest, bundle, calendar = _inputs()
+    part = next(a["normalized"][0] for a in bundle["history"]["artifacts"] if a["dataset"] == "margin_security_daily")
+    table = list(csv.reader(io.StringIO(base64.b64decode(part["contentBase64"]).decode())))
+    table[1][table[0].index("financing_balance_yuan")] = "9999999"
+    stream = io.StringIO()
+    csv.writer(stream).writerows(table)
+    changed = stream.getvalue().encode()
+    part["contentBase64"], part["sha256"] = base64.b64encode(changed).decode(), _sha(changed)
+    _, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1])
+    paths = [tmp_path / name for name in ("manifest.json", "bundle.json", "calendar.json")]
+    for path, value in zip(paths, (manifest, bundle, calendar), strict=True):
+        path.write_text(json.dumps(value))
+    monkeypatch.setattr(cli, "_archive_get", lambda key, digest: objects[key])
+    monkeypatch.setattr(cli, "_archive_metadata_get", lambda key, digest: objects[key])
+    monkeypatch.setattr(cli, "_archive_normalized_get", lambda key, digest: objects[key])
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(sys, "argv", ["archive-recipe", "--manifest", str(paths[0]),
+        "--history-bundle", str(paths[1]), "--official-calendar", str(paths[2]),
+        "--target-date", DATES[-1], "--verify-live-archive", "--output", str(output)])
+    with pytest.raises(ValueError, match="archive_phase0_lineage_invalid"):
+        cli.main()
+    result = json.loads(output.read_text())
+    assert result["status"] == "ARCHIVE_VERIFICATION_FAILED"
+    assert result["errorCode"] == "archive_phase0_lineage_invalid"
+    assert "recipe" not in result
