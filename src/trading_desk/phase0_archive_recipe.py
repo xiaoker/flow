@@ -6,10 +6,12 @@ archive reader still verifies every object against R2 before using it.
 from __future__ import annotations
 
 import base64
+import csv
 import gzip
 import hashlib
 import io
 import json
+import zlib
 from typing import Any
 
 from .phase0_archive import CONTRACT, MAX_OBJECT_BYTES, MAX_TOTAL_BYTES, validate_recipe
@@ -33,6 +35,44 @@ def _content(value: Any) -> bytes:
         return base64.b64decode(value, validate=True)
     except (ValueError, base64.binascii.Error) as exc:
         raise ValueError("archive_recipe_content_invalid") from exc
+
+
+def _normalized_content(wire: bytes, encoding: str | None) -> bytes:
+    if not isinstance(wire, bytes) or len(wire) > MAX_OBJECT_BYTES:
+        raise ValueError("archive_recipe_normalized_size_invalid")
+    if encoding == "gzip":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(wire)) as stream:
+                decoded = stream.read(MAX_OBJECT_BYTES + 1)
+        except (OSError, EOFError, zlib.error) as exc:
+            raise ValueError("archive_recipe_normalized_gzip_invalid") from exc
+    elif encoding is None:
+        decoded = wire
+    else:
+        raise ValueError("archive_recipe_normalized_encoding_invalid")
+    if len(decoded) > MAX_OBJECT_BYTES:
+        raise ValueError("archive_recipe_normalized_size_invalid")
+    return decoded
+
+
+def _same_observation_values(reference: bytes, stored: bytes) -> bool:
+    """Only capture time may vary at legacy raw-SHA normalized keys."""
+    try:
+        rows = [list(csv.reader(io.StringIO(value.decode("utf-8")))) for value in (reference, stored)]
+    except (UnicodeError, csv.Error) as exc:
+        raise ValueError("archive_recipe_stored_normalized_invalid") from exc
+    if rows[0] == rows[1]:
+        return True
+    if not rows[0] or not rows[1] or rows[0][0] != rows[1][0]:
+        return False
+    header = rows[0][0]
+    if not header or len(set(header)) != len(header) or "observed_at" not in header:
+        return False
+    if any(len(row) != len(header) for table in rows for row in table[1:]):
+        return False
+    index = header.index("observed_at")
+    values = [[row[:index] + row[index + 1:] for row in table[1:]] for table in rows]
+    return values[0] == values[1]
 
 
 def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: dict[str, Any]) -> dict[str, Any]:
@@ -138,6 +178,7 @@ def build_archive_recipe(
     calendar: dict[str, Any], target: str,
     adjacent_objects: dict[str, bytes] | None = None,
     metadata_objects: dict[str, bytes] | None = None,
+    normalized_objects: dict[str, bytes] | None = None,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     """Return the exact-key recipe and locally reconstructed stored bytes.
 
@@ -156,6 +197,7 @@ def build_archive_recipe(
     refs: list[dict[str, Any]] = []
     objects: dict[str, bytes] = {}
     used_metadata: set[str] = set()
+    used_normalized: set[str] = set()
 
     def add(path: str, key: str, content: bytes) -> None:
         if key in objects or len(content) > MAX_OBJECT_BYTES:
@@ -213,25 +255,26 @@ def build_archive_recipe(
                 raise ValueError("archive_recipe_normalized_identity_mismatch")
             wire = _content(part.get("contentBase64"))
             encoding = part.get("contentEncoding")
-            if encoding == "gzip":
-                try:
-                    with gzip.GzipFile(fileobj=io.BytesIO(wire)) as stream:
-                        decoded = stream.read(MAX_OBJECT_BYTES + 1)
-                except (OSError, EOFError) as exc:
-                    raise ValueError("archive_recipe_normalized_gzip_invalid") from exc
-            elif encoding is None:
-                decoded = wire
-            else:
-                raise ValueError("archive_recipe_normalized_encoding_invalid")
+            decoded = _normalized_content(wire, encoding)
             if len(decoded) > MAX_OBJECT_BYTES or _sha(decoded) != part.get("sha256"):
                 raise ValueError("archive_recipe_normalized_hash_mismatch")
             revision = _sha(f"{raw_sha}:{_sha(wire)}".encode()) if dataset == "etf_scale" else raw_sha
             suffix = ".csv.gz" if encoding == "gzip" else ".csv"
             key = f"market-data/normalized/{source_id}/{dataset}/{day}/{revision}/{name}{suffix}"
+            if normalized_objects is not None and dataset != "etf_scale":
+                actual = normalized_objects.get(key)
+                if actual is None:
+                    raise ValueError("archive_recipe_stored_normalized_missing")
+                if not _same_observation_values(decoded, _normalized_content(actual, encoding)):
+                    raise ValueError("archive_recipe_stored_normalized_values_mismatch")
+                wire = actual
+                used_normalized.add(key)
             add(path, key, wire)
 
     if metadata_objects is not None and set(metadata_objects) != used_metadata:
         raise ValueError("archive_recipe_stored_metadata_unexpected")
+    if normalized_objects is not None and set(normalized_objects) != used_normalized:
+        raise ValueError("archive_recipe_stored_normalized_unexpected")
     adjacent = manifest.get("archivedEtfInputs", [])
     if not isinstance(adjacent, list):
         raise ValueError("archive_recipe_adjacent_invalid")

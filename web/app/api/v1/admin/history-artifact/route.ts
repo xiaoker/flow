@@ -26,13 +26,16 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
   const key = query.get("archive_key") ?? "";
   const expected = query.get("archive_sha256") ?? "";
   const metadataRaw = query.get("archive_metadata_raw_sha256");
-  const digest = metadataRaw ?? expected;
+  const normalizedRaw = query.get("archive_normalized_raw_sha256");
+  const discoveryRaw = metadataRaw ?? normalizedRaw;
+  const digest = discoveryRaw ?? expected;
   const match = /^market-data\/(raw|normalized)\/(sse|szse|bse|hkex)\/([a-z_]+)\/(\d{4}-\d{2}-\d{2}(?:_\d{4}-\d{2}-\d{2})?)\/([a-f0-9]{64})(.*)$/.exec(key);
   const pairs: Record<string, string[]> = {
     sse: ["etf_scale", "etf_nav", "etf_pcf", "margin_market_daily", "margin_security_daily"],
     szse: ["etf_scale", "margin_market_daily"], bse: ["margin_market_daily"], hkex: ["stock_connect_daily"],
   };
-  const allowed = metadataRaw === null ? ["archive_key", "archive_sha256"] : ["archive_key", "archive_metadata_raw_sha256"];
+  const discoveryField = metadataRaw !== null ? "archive_metadata_raw_sha256" : "archive_normalized_raw_sha256";
+  const allowed = discoveryRaw === null ? ["archive_key", "archive_sha256"] : ["archive_key", discoveryField];
   if (!match || match[0] !== key || key.length > 500 || !/^[a-f0-9]{64}$/.test(digest)
       || !pairs[match[2]]?.includes(match[3]) || [...query.keys()].some(k => !allowed.includes(k))) {
     return badRequest("invalid_pinned_official_object");
@@ -41,13 +44,18 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
   if (metadataRaw !== null && (kind !== "raw" || suffix !== ".metadata.json" || metadataRaw !== rawSha)) {
     return badRequest("invalid_pinned_official_metadata");
   }
+  if (normalizedRaw !== null && (kind !== "normalized" || dataset === "etf_scale" || normalizedRaw !== rawSha)) {
+    return badRequest("invalid_pinned_official_normalized");
+  }
   if ((partition.includes("_") && (source !== "sse" || dataset !== "margin_market_daily"))
       || (kind === "raw" ? !/^\.(json|js|jsonp|xlsx|gz|metadata\.json)$/.test(suffix)
         : dataset === "stock_connect_daily" ? !/^\/(summary|top)\.csv$/.test(suffix)
           : suffix !== `/data.csv${dataset === "etf_pcf" ? ".gz" : ""}`)) {
     return badRequest("invalid_pinned_official_object");
   }
-  // One exact immutable key, no D1/latest-pointer lookup and no bucket list.
+  // One exact key, no D1/latest-pointer lookup and no bucket list. Legacy
+  // normalized keys are mutable projections; discovery binds their actual
+  // bytes before approval, while execution still uses exact hash reads.
   const object = await bucket.get(key);
   if (!object?.body) return badRequest("artifact_not_found", 404);
   if (object.size > 2_000_000) return badRequest("artifact_too_large", 413);
@@ -68,11 +76,11 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
         || typeof rawKey !== "string" || !new RegExp(`^market-data/raw/${source}/${dataset}/${partition}/${rawSha}\\.(json|js|jsonp|xlsx|gz)$`).test(rawKey)) {
       return badRequest("archive_metadata_identity_mismatch", 409);
     }
-  } else if (actual !== expected) return badRequest("archive_object_hash_mismatch", 409);
+  } else if (normalizedRaw === null && actual !== expected) return badRequest("archive_object_hash_mismatch", 409);
   return new Response(bytes, { headers: { "Cache-Control": "private, no-store",
     "Content-Type": key.endsWith(".csv.gz") ? "application/gzip" : "application/octet-stream",
     "X-Flow-Archive-Key": key, "X-Flow-Archive-Sha256": actual,
-    ...(metadataRaw !== null ? { "X-Flow-Archive-Raw-Sha256": rawSha } : {}) } });
+    ...(discoveryRaw !== null ? { "X-Flow-Archive-Raw-Sha256": rawSha } : {}) } });
 }
 
 function expectedPair(source: string, dataset: string): boolean {
@@ -110,7 +118,8 @@ export async function GET(request: Request): Promise<Response> {
   if (!runtime.RAW_BUCKET) return badRequest("raw_bucket_unavailable", 503);
 
   const query = new URL(request.url).searchParams;
-  if (query.has("archive_key") || query.has("archive_sha256") || query.has("archive_metadata_raw_sha256")) {
+  if (query.has("archive_key") || query.has("archive_sha256") || query.has("archive_metadata_raw_sha256")
+      || query.has("archive_normalized_raw_sha256")) {
     try { return await pinnedOfficialObject(query, runtime.RAW_BUCKET); }
     catch { return badRequest("archive_object_unavailable", 503); }
   }

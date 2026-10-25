@@ -7,6 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-25: legacy normalized observation compatibility, strict business-value proof
+
+- PR #210 merged/deployed as `56eb85cd44f484065544c8fc6850d8c628d58613`; main CI `40119032960` and Worker deploy `40119033077` passed, no pending migration, exact served SHA verified. Explicitly authorized read-only verification `40119416370` checked 34 objects and stopped on object 35, SSE NAV normalized CSV, with HTTP 409. No candidate execution, production write, budget settlement or pointer change occurred.
+- The shared identity issue is now traced across the writer: raw metadata preserves the first observation; non-ETF-scale normalized paths use raw SHA and can be overwritten by later observations, unlike the wire-versioned ETF-scale paths. One exact diagnostic R2 GET confirmed the NAV projection differs from the retained Collector only in `observed_at`; its actual wire SHA is `eb73501e5c57037baefc7d8b75d3d97182e467a4fdf9e503a4626d5dc3338c74`. Do not treat a raw SHA as the stored normalized body SHA.
+- This isolated six-file fix discovers the actual legacy normalized object at its exact raw-bound source/date/key, verifies its returned body hash, and permits only `observed_at` CSV value changes from the retained bundle. Dates, codes, names, numeric values, sources, all other columns, row counts and order remain exact. It rebinds actual wire hashes and runs the existing raw-to-normalized/lineage validators locally over every verified object before emitting success. ETF-scale/adjacent inputs keep exact wire reads. Approved/execution reads remain exact-hash reads; a subsequent projection change is still rejected, never silently followed.
+- Each object is fetched once through the existing authenticated bounded endpoint; no listing, D1 query, extra schedule, write, formula or limit change. The current recipe remains 67 objects / at most 96 reads. The existing UNKNOWN reservation is preserved.
+- Focused Python/HTTP/workflow tests (67), full Python regression, and Web lint/build/260 tests pass, including business-value tampering and a checksum-consistent but raw-inconsistent projection. The initial full run had one transient candidate HTTP transport failure; that unchanged test passed alone and the entire unchanged suite passed on the next run. Actual NAV and metadata evidence pass offline recipe binding plus full raw/lineage QA; other objects in that offline proof came from the retained bundle, so no full live verification is claimed. Merge effects: automatic Worker deployment and the existing pending-migration check/apply path; no migration added.
+- Next: finish validation, deliver one PR/CI and wait for merge/deployment authorization; then prepare one bounded readback using the resulting SHA. Product multi-period restoration, live archive completion and runner canary remain incomplete.
+
+## Historical implementation notes
+
 ### 2026-10-25: bind real first-observation metadata in archive recipes
 
 - PR #209 merged as `060a938c6f3fde5d8658f9222fa6535ed2ba7261`; main CI `40098106949` passed. Explicitly authorized read-only run `40098560088` used that SHA, completed in 25 seconds and retained its failure report. It passed Cloudflare and verified one raw object, then stopped at the metadata object with HTTP 409 (2 attempted reads, 1 verified). Candidate execution/publication were skipped; no production writes or UNKNOWN settlement occurred.
