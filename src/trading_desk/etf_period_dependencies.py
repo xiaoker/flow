@@ -23,6 +23,9 @@ from .etf_flow_state import CALCULATION_METHOD, CASH_CALCULATION_METHOD
 PLAN_CONTRACT_VERSION = "flow-etf-period-dependencies-v0.7.0"
 OFFICIAL_CALENDAR_SOURCE = "sse_official_trading_calendar"
 OFFICIAL_MARGIN_DATES_SOURCE = "sse_official_margin_business_dates"
+COMPOSITE_MARGIN_DATES_SOURCE = "sse_official_margin_business_dates_composite_v1"
+MAX_CALENDAR_PARTS = 16
+MAX_COMPOSITE_CALENDAR_BYTES = 2_800_000
 MAX_TARGET_DATES = 280
 MAX_CALENDAR_DATES = 533  # 280 target sessions + 252 lookback sessions + baseline.
 MAX_SOURCE_EVIDENCE = MAX_CALENDAR_DATES * 2
@@ -104,7 +107,7 @@ def _canonical_hash(value: Any) -> str:
 def _calendar(value: Any) -> tuple[list[str], str]:
     if not isinstance(value, dict):
         raise ValueError("official_calendar_missing")
-    if not isinstance(value.get("sourceId"),str) or value.get("sourceId") not in {OFFICIAL_CALENDAR_SOURCE, OFFICIAL_MARGIN_DATES_SOURCE}:
+    if not isinstance(value.get("sourceId"),str) or value.get("sourceId") not in {OFFICIAL_CALENDAR_SOURCE, OFFICIAL_MARGIN_DATES_SOURCE, COMPOSITE_MARGIN_DATES_SOURCE}:
         raise ValueError("official_calendar_source_invalid")
     source_hash = _sha256(value.get("sha256"), field="official_calendar_sha256")
     raw_dates = value.get("dates")
@@ -118,6 +121,15 @@ def _calendar(value: Any) -> tuple[list[str], str]:
     expected_dates_hash = _canonical_hash(dates)
     if value.get("datesSha256") != expected_dates_hash:
         raise ValueError("official_calendar_dates_hash_mismatch")
+    if value["sourceId"] == COMPOSITE_MARGIN_DATES_SOURCE:
+        evidence = value.get("evidence")
+        if not isinstance(evidence, dict) or set(evidence) != {"calendars"}:
+            raise ValueError("official_calendar_composition_invalid")
+        parts = _margin_calendar_parts(evidence["calendars"])
+        if parts != evidence["calendars"] or _canonical_hash(parts) != source_hash:
+            raise ValueError("official_calendar_composition_hash_mismatch")
+        if dates != sorted({day for part in parts for day in part["dates"]}):
+            raise ValueError("official_calendar_composition_dates_mismatch")
     if value.get("sourceId") == OFFICIAL_MARGIN_DATES_SOURCE:
         evidence = value.get("evidence")
         if not isinstance(evidence, dict) or set(evidence) != {"contentBase64", "rangeStart", "rangeEnd"}:
@@ -141,6 +153,44 @@ def _calendar(value: Any) -> tuple[list[str], str]:
             or observed != dates or start > dates[0] or end < dates[-1] or start > end):
             raise ValueError("official_business_dates_evidence_invalid")
     return dates, source_hash
+
+
+def _margin_calendar_parts(values: Iterable[Any]) -> list[dict[str, Any]]:
+    parts = _bounded_values(values, limit=MAX_CALENDAR_PARTS, field="official_calendar_parts")
+    if len(parts) < 2 or len(json.dumps(parts).encode()) > MAX_COMPOSITE_CALENDAR_BYTES:
+        raise ValueError("official_calendar_composition_size_invalid")
+    for part in parts:
+        if not isinstance(part, dict) or part.get("sourceId") != OFFICIAL_MARGIN_DATES_SOURCE:
+            raise ValueError("official_calendar_composition_source_invalid")
+        _calendar(part)
+    if len({_canonical_hash(part) for part in parts}) != len(parts):
+        raise ValueError("official_calendar_composition_duplicate")
+    parts = sorted(parts, key=lambda part: (part["evidence"]["rangeStart"], part["evidence"]["rangeEnd"], _canonical_hash(part)))
+    covered_end = parts[0]["evidence"]["rangeEnd"]
+    for index, part in enumerate(parts[1:], 1):
+        start, end = part["evidence"]["rangeStart"], part["evidence"]["rangeEnd"]
+        if start > covered_end:
+            raise ValueError("official_calendar_composition_gap")
+        for previous in parts[:index]:
+            lo = max(start, previous["evidence"]["rangeStart"])
+            hi = min(end, previous["evidence"]["rangeEnd"])
+            if lo <= hi and [day for day in part["dates"] if lo <= day <= hi] != [day for day in previous["dates"] if lo <= day <= hi]:
+                raise ValueError("official_calendar_composition_overlap_conflict")
+        covered_end = max(covered_end, end)
+    if len({day for part in parts for day in part["dates"]}) > MAX_CALENDAR_DATES:
+        raise ValueError("official_calendar_limit_exceeded")
+    return parts
+
+
+def compose_official_margin_calendars(values: Iterable[Any]) -> dict[str, Any]:
+    """Compose overlapping raw proofs without inventing sessions or rewriting bytes."""
+    import copy
+    parts = copy.deepcopy(_margin_calendar_parts(values))
+    dates = sorted({day for part in parts for day in part["dates"]})
+    value = {"sourceId": COMPOSITE_MARGIN_DATES_SOURCE, "sha256": _canonical_hash(parts),
+             "dates": dates, "datesSha256": _canonical_hash(dates), "evidence": {"calendars": parts}}
+    _calendar(value)
+    return value
 
 
 def validate_official_calendar(value: Any) -> tuple[list[str], str]:

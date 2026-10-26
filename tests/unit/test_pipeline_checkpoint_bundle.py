@@ -87,6 +87,68 @@ def test_incompressible_bundle_still_rejected_at_original_wire_cap(tmp_path):
             identity=IDENTITY, stage="core_collection", input_sha256=INPUT)
 
 
+def nested_archive_stage(tmp_path):
+    import base64
+    import random
+    root, checkpoint = fixture(tmp_path)
+    rng = random.Random(42)
+    csv = '\n'.join(f'{i%1000:06},{rng.randrange(10**10)},{rng.randrange(10**10)}'
+                    for i in range(45000)).encode()
+    content = json.dumps({'contentBase64': base64.b64encode(csv).decode()}, separators=(',', ':')).encode()
+    (root / 'input-snapshot.json').write_bytes(content)
+    return root, checkpoint, content
+
+
+def test_nested_archive_compression_restores_all_bytes_in_new_process_directory(tmp_path):
+    from trading_desk.pipeline_checkpoint_bundle import restore_stage_bundle
+    from trading_desk.pipeline_checkpoint_transport import MAX_OBJECT_BYTES
+    root, checkpoint, content = nested_archive_stage(tmp_path)
+    data, digest = build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage='core_collection', input_sha256=INPUT)
+    assert len(data) <= MAX_OBJECT_BYTES
+    assert json.loads(data)['schemaVersion'] == 3
+    assert (data, digest) == build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage='core_collection', input_sha256=INPUT)
+    restored, files = verify_stage_bundle(data, sha256=digest, identity=IDENTITY,
+        stage='core_collection', input_sha256=INPUT)
+    assert restored == checkpoint
+    assert files['input-snapshot.json'] == content
+    destination = tmp_path / 'new-process'
+    fences = []
+    def verify_restored(**kwargs):
+        return all((kwargs['workspace'] / name).read_bytes() == body for name, body in files.items())
+    assert restore_stage_bundle(data, sha256=digest, identity=IDENTITY,
+        stage='core_collection', input_sha256=INPUT, workspace=destination,
+        confirm_lease=lambda: fences.append('checked'), verify_output=verify_restored) == checkpoint
+    assert len(fences) == len(files) + 2
+
+
+@pytest.mark.parametrize('fault', ['encoding', 'bytes', 'hash', 'truncated', 'expansion', 'path', 'duplicate'])
+def test_file_compression_preserves_integrity_and_expansion_checks(tmp_path, fault):
+    import base64
+    import gzip
+    root, checkpoint, _ = nested_archive_stage(tmp_path)
+    data, _ = build_stage_bundle(workspace=root, checkpoint=checkpoint,
+        identity=IDENTITY, stage='core_collection', input_sha256=INPUT)
+    value = json.loads(data)
+    assert value['schemaVersion'] == 3
+    entry = value['files'][0]
+    if fault == 'encoding': entry['encoding'] = 'unknown'
+    elif fault == 'bytes': entry['bytes'] = 8000001
+    elif fault == 'hash': entry['sha256'] = '0'*64
+    elif fault == 'truncated': entry['data'] = entry['data'][:-8]
+    elif fault == 'expansion':
+        entry['bytes'] = 1
+        entry['data'] = base64.b64encode(gzip.compress(b'x'*100000, mtime=0)).decode()
+    elif fault == 'path': entry['path'] = '../outside'
+    else: value['files'].append(dict(entry))
+    value['bundleManifestSha256'] = canonical_sha256({k:v for k,v in value.items() if k!='bundleManifestSha256'})
+    data = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+    with pytest.raises(CheckpointBundleError):
+        verify_stage_bundle(data, sha256=hashlib.sha256(data).hexdigest(), identity=IDENTITY,
+            stage='core_collection', input_sha256=INPUT)
+
+
 @pytest.mark.parametrize("change", ["digest", "input", "identity", "stage"])
 def test_wrong_contract_rejected(tmp_path, change):
     root, checkpoint = fixture(tmp_path)

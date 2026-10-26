@@ -85,25 +85,49 @@ def build_stage_bundle(*, workspace: Path, checkpoint: Mapping[str, Any], identi
     return encode_stage_bundle(files=files, checkpoint=checkpoint)
 
 
-def encode_stage_bundle(*, files: list[dict[str, Any]], checkpoint: Mapping[str, Any]) -> tuple[bytes, str]:
-    """Shared exact wire encoder for runtime export and pure entry preflight."""
-    value = {"schemaVersion": 1, "checkpoint": dict(checkpoint), "files": sorted(files, key=lambda item: item["path"])}
+def _gzip_bytes(data: bytes) -> bytes:
+    compressed = io.BytesIO()
+    with gzip.GzipFile(fileobj=compressed, mode="wb", filename="", mtime=0) as stream:
+        stream.write(data)
+    return compressed.getvalue()
+
+
+def _bundle_wire(value: dict[str, Any]) -> bytes:
     value["bundleManifestSha256"] = canonical_sha256(value)
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if len(data) > MAX_BUNDLE_BYTES:
         raise CheckpointBundleError("bundle_byte_limit")
     if len(data) > MAX_WIRE_BYTES:
-        compressed = io.BytesIO()
         # GzipFile fixes the OS byte as well as time/name, unlike older
         # gzip.compress(mtime=0) implementations delegated to platform zlib.
-        with gzip.GzipFile(fileobj=compressed, mode="wb", filename="", mtime=0) as stream:
-            stream.write(data)
         envelope = {"schemaVersion": 2, "encoding": "gzip-base64",
                     "decodedBytes": len(data), "decodedSha256": hashlib.sha256(data).hexdigest(),
-                    "data": base64.b64encode(compressed.getvalue()).decode("ascii")}
+                    "data": base64.b64encode(_gzip_bytes(data)).decode("ascii")}
         data = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
-        if len(data) > MAX_WIRE_BYTES:
-            raise CheckpointBundleError("bundle_transport_size_exceeded")
+    return data
+
+
+def encode_stage_bundle(*, files: list[dict[str, Any]], checkpoint: Mapping[str, Any]) -> tuple[bytes, str]:
+    """Keep v1/v2 wire compatibility; v3 compresses exact files before base64.
+
+    Nested archive base64 otherwise inflates compressed checkpoints. No evidence
+    is omitted and wire/expanded limits are unchanged.
+    """
+    files = sorted(files, key=lambda item: item["path"])
+    data = _bundle_wire({"schemaVersion": 1, "checkpoint": dict(checkpoint), "files": files})
+    if len(data) > MAX_WIRE_BYTES:
+        compressed_files = []
+        total = 0
+        for entry in files:
+            content = base64.b64decode(entry["data"], validate=True)
+            total += len(content)
+            if len(content) != entry["bytes"] or len(content) > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+                raise CheckpointBundleError("bundle_byte_limit")
+            compressed_files.append({**entry, "encoding": "gzip-base64",
+                "data": base64.b64encode(_gzip_bytes(content)).decode("ascii")})
+        data = _bundle_wire({"schemaVersion": 3, "checkpoint": dict(checkpoint), "files": compressed_files})
+    if len(data) > MAX_WIRE_BYTES:
+        raise CheckpointBundleError("bundle_transport_size_exceeded")
     return data, hashlib.sha256(data).hexdigest()
 
 
@@ -125,8 +149,11 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
             if len(expanded) != value["decodedBytes"] or hashlib.sha256(expanded).hexdigest() != value["decodedSha256"]:
                 raise CheckpointBundleError("compressed_bundle_digest_or_size_mismatch")
             value = json.loads(expanded)
-        if not isinstance(value, dict) or set(value) != {"schemaVersion", "checkpoint", "files", "bundleManifestSha256"} or value["schemaVersion"] != 1:
+        if not isinstance(value, dict) or set(value) != {"schemaVersion", "checkpoint", "files", "bundleManifestSha256"} or value["schemaVersion"] not in {1, 3}:
             raise CheckpointBundleError("invalid_bundle_schema")
+        file_compressed = value["schemaVersion"] == 3
+        if file_compressed and len(data) > MAX_WIRE_BYTES:
+            raise CheckpointBundleError("bundle_transport_size_exceeded")
         if value["bundleManifestSha256"] != canonical_sha256({k: v for k, v in value.items() if k != "bundleManifestSha256"}):
             raise CheckpointBundleError("bundle_manifest_mismatch")
         checkpoint = value["checkpoint"]
@@ -139,10 +166,18 @@ def verify_stage_bundle(data: bytes, *, sha256: str, identity: ApplicationIdenti
         result: dict[str, bytes] = {}
         total = 0
         for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"path", "bytes", "sha256", "data"}:
+            fields = {"path", "bytes", "sha256", "data"} | ({"encoding"} if file_compressed else set())
+            if not isinstance(entry, dict) or set(entry) != fields:
                 raise CheckpointBundleError("invalid_bundle_file")
             name = _path(entry["path"])
+            if type(entry["bytes"]) is not int or not 0 <= entry["bytes"] <= MAX_FILE_BYTES or total + entry["bytes"] > MAX_TOTAL_BYTES:
+                raise CheckpointBundleError("bundle_file_size_or_duplicate")
             content = base64.b64decode(entry["data"], validate=True)
+            if file_compressed:
+                if entry["encoding"] != "gzip-base64":
+                    raise CheckpointBundleError("invalid_bundle_file_encoding")
+                with gzip.GzipFile(fileobj=io.BytesIO(content)) as stream:
+                    content = stream.read(entry["bytes"] + 1)
             total += len(content)
             if name in result or isinstance(entry["bytes"], bool) or entry["bytes"] != len(content) or len(content) > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
                 raise CheckpointBundleError("bundle_file_size_or_duplicate")
