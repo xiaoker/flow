@@ -379,6 +379,17 @@ export function mergeSnapshotIntoEtfFlowState(
   const officialChanges = new Map(
     (officialDailyChanges ?? []).map((item) => [instrumentKey(item), item.value]),
   );
+  for (const [key, value] of officialChanges) {
+    if (value === null) {
+      // Explicit verified nulls invalidate this date, including removed codes.
+      // Missing map entries remain unknown and are never replaced with zero.
+      const existing = rows.get(key);
+      if (existing) {
+        existing.values[currentIndex] = null;
+        if (existing.cashValues) existing.cashValues[currentIndex] = null;
+      }
+    }
+  }
   for (const item of terminal.instruments) {
     const key = instrumentKey(item);
     // When the D1 raw table was queried, it is the source of truth.  Do not

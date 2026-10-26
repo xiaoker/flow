@@ -634,6 +634,75 @@ def _state_dates(state: dict[str, Any], target: str) -> list[str]:
     return values
 
 
+def _state_matches_daily_snapshot(state: dict[str, Any], snapshot: dict[str, Any], target: str) -> bool:
+    """Date presence is not market/sample completeness or value identity.
+
+    Compare only the verified target daily cells; never demand a monotonic ETF
+    universe, fabricate nulls, or certify any longer observation window.
+    """
+    if snapshot.get("asOf") != target:
+        raise LiveRecoveryError("live_recovery_date_anchor_mismatch")
+    expected = (snapshot.get("etfTerminal") or {}).get("instruments")
+    if not isinstance(expected, list) or not expected:
+        raise LiveRecoveryError("live_recovery_daily_evidence_missing")
+    expected_cells, markets = {}, set()
+    for row in expected:
+        if not isinstance(row, dict):
+            raise LiveRecoveryError("live_recovery_daily_evidence_invalid")
+        key = (row.get("market"), row.get("code"))
+        if any(not isinstance(part, str) for part in key) or key in expected_cells or key[0] not in {"SSE", "SZSE"}:
+            raise LiveRecoveryError("live_recovery_daily_evidence_invalid")
+        cells = []
+        for field in ("periods", "estimatedCashPeriods"):
+            values = row.get(field, {})
+            if not isinstance(values, dict):
+                raise LiveRecoveryError("live_recovery_daily_evidence_invalid")
+            value = values.get("1d")
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+                raise LiveRecoveryError("live_recovery_daily_evidence_invalid")
+            cells.append(value)
+        if cells[0] is None and cells[1] is not None:
+            raise LiveRecoveryError("live_recovery_daily_evidence_invalid")
+        expected_cells[key] = cells
+        # Presence is independent of comparability: a null is never zero.
+        markets.add(key[0])
+    if markets != {"SSE", "SZSE"}:
+        raise LiveRecoveryError("live_recovery_daily_market_evidence_missing")
+    dates = state.get("dates")
+    if not isinstance(dates, list) or any(not isinstance(day, str) for day in dates) or target not in dates or dates != sorted(set(dates)):
+        return False
+    index = dates.index(target)
+    rows = state.get("instruments")
+    if not isinstance(rows, list):
+        return False
+    actual = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        key = (row.get("market"), row.get("code"))
+        if any(not isinstance(part, str) for part in key):
+            return False
+        if key in actual:
+            return False
+        actual[key] = row
+    for key, cells in expected_cells.items():
+        for field, expected_value, precision in zip(("values", "cashValues"), cells, (6, 2)):
+            values = actual.get(key, {}).get(field)
+            value = values[index] if isinstance(values, list) and index < len(values) else None
+            if expected_value is None:
+                if value is not None:
+                    return False
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or round(value, precision) != round(expected_value, precision):
+                return False
+    for key, row in actual.items():
+        if key not in expected_cells:
+            for field in ("values", "cashValues"):
+                values = row.get(field)
+                if isinstance(values, list) and index < len(values) and values[index] is not None:
+                    return False  # Keep history, not stale current-universe cells.
+    return True
+
+
 def _stock_flow_dates_from_official_evidence(
     state: dict[str, Any], manifest: dict[str, Any], previous: dict[str, Any], target: str,
 ) -> list[str]:
@@ -1224,9 +1293,8 @@ def run_live_recovery(
         )
         _stock_flow_dates_from_official_evidence(state, manifest, previous_dates, target)
     _write_json(state_before_path, state)
-    before_dates = state.get("dates") if isinstance(state.get("dates"), list) else []
     history_publications: list[dict[str, Any]] = []
-    if target not in before_dates:
+    if not _state_matches_daily_snapshot(state, base_snapshot, target):
         bundle = build_history_bundle_from_files(
             snapshot_path=base_snapshot_path,
             manifest_path=manifest_path,
@@ -1244,6 +1312,8 @@ def run_live_recovery(
         history_publications.append(response)
         _assert_history_checkpoint(response, target)
         state, _ = _get_json(state_session, state_url, headers=auth)
+        if not _state_matches_daily_snapshot(state, base_snapshot, target):
+            raise LiveRecoveryError("live_recovery_state_daily_mismatch", target, status="BLOCKED_QUALITY")
     _state_dates(state, target)
     _write_json(state_root / "etf-flow-state.json", state)
 
