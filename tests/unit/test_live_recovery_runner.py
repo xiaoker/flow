@@ -102,6 +102,38 @@ def test_live_runner_fails_closed_instead_of_silently_using_last_date(tmp_path: 
     assert caught.value.status == "BLOCKED_QUALITY"
 
 
+def test_existing_date_is_not_proof_of_both_market_daily_cells():
+    from copy import deepcopy
+    snapshot = {'asOf':'2026-10-23','etfTerminal':{'instruments':[
+        {'market':'SSE','code':'510300','periods':{'1d':.1},'estimatedCashPeriods':{'1d':.2}},
+        {'market':'SZSE','code':'159915','periods':{'1d':.3},'estimatedCashPeriods':{'1d':None}},
+        {'market':'SZSE','code':'159001','periods':{'1d':None}},
+    ]}}
+    state = {'dates':['2026-10-22','2026-10-23'],'instruments':[
+        {'market':'SSE','code':'510300','values':[7,.1],'cashValues':[8,.2]},
+        {'market':'SZSE','code':'159915','values':[9,None]},
+        {'market':'SSE','code':'500001','values':[1,None]},  # Keep history after universe shrinkage.
+    ]}
+    assert not runner._state_matches_daily_snapshot(state,snapshot,'2026-10-23')
+    state['instruments'][1]['values'][1]=.3
+    assert runner._state_matches_daily_snapshot(state,snapshot,'2026-10-23')
+    wrong=deepcopy(state);wrong['instruments'][0]['values'][1]=.11
+    assert not runner._state_matches_daily_snapshot(wrong,snapshot,'2026-10-23')
+    wrong=deepcopy(state);wrong['instruments'][0]['cashValues'][1]=None
+    assert not runner._state_matches_daily_snapshot(wrong,snapshot,'2026-10-23')
+    assert not runner._state_matches_daily_snapshot({'dates':state['dates'],'instruments':[]},snapshot,'2026-10-23')
+    assert state['instruments'][0]['values'][0]==7
+    wrong=deepcopy(state);wrong['instruments'][2]['values'][1]=2
+    assert not runner._state_matches_daily_snapshot(wrong,snapshot,'2026-10-23')
+    missing_market=deepcopy(snapshot);missing_market['etfTerminal']['instruments']=missing_market['etfTerminal']['instruments'][:1]
+    with pytest.raises(LiveRecoveryError,match='daily_market_evidence_missing'):
+        runner._state_matches_daily_snapshot(state,missing_market,'2026-10-23')
+    revised=deepcopy(snapshot);revised['etfTerminal']['instruments'][1]['periods']['1d']=None
+    assert not runner._state_matches_daily_snapshot(state,revised,'2026-10-23')
+    revised_state=deepcopy(state);revised_state['instruments'][1]['values'][1]=None
+    assert runner._state_matches_daily_snapshot(revised_state,revised,'2026-10-23')
+
+
 def test_archive_recipe_rejected_before_network_or_downstream_work(tmp_path, monkeypatch):
     for key in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
         monkeypatch.setenv(key, "offline-fixture-only")
@@ -146,7 +178,7 @@ def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_f
     monkeypatch.setattr(runner, "_invoke_szse_etf_history", lambda **kw: pytest.fail("no per-fund requests"))
     class Transport:
         def __init__(self):
-            self.calls, self.finalized = [], False
+            self.calls, self.finalized, self.snapshot = [], False, None
         def request(self, method, url, **kwargs):
             if preflight_only:
                 assert method == "GET", "preflight must never issue any control/history write"
@@ -163,9 +195,15 @@ def test_archive_runner_uses_real_collector_builder_and_publisher_without_live_f
             else:
                 if path.endswith("/etf-state"):
                     value = {"version":1,"dates":DATES if self.finalized else [],"instruments":[]}
+                    if self.finalized:
+                        value['instruments']=[{**row,'values':[None]*(len(DATES)-1)+[row.get('periods',{}).get('1d')],
+                            'cashValues':[None]*(len(DATES)-1)+[row.get('estimatedCashPeriods',{}).get('1d')]}
+                            for row in self.snapshot['etfTerminal']['instruments']]
                 elif path.endswith("/history-import"):
                     payload = json.loads(kwargs["data"])
                     self.finalized |= payload["history"]["finalize"]
+                    if payload['history'].get('snapshot') is not None:
+                        self.snapshot=payload['history']['snapshot']
                     value = {"status":"archived" if payload["history"]["finalize"] else "chunk_archived","asOf":DATES[-1]}
                 elif path.endswith("/market-history"):
                     assert self.finalized
@@ -257,11 +295,13 @@ def test_budgeted_session_paces_same_host_without_delaying_other_hosts(monkeypat
 class _RecoveryTransport(_Transport):
     """Offline boundary fixture, not evidence of a live recovery."""
 
-    def __init__(self, archive_status="archived"):
+    def __init__(self, archive_status="archived", state_complete=True, stale_after_import=False):
         super().__init__()
         self.archive_status = archive_status
         self.checkpoint = False
         self.events = []
+        self.state_complete = state_complete
+        self.stale_after_import = stale_after_import
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url))
@@ -270,7 +310,11 @@ class _RecoveryTransport(_Transport):
             # The target already exists in ETF state but is absent from the
             # independent market-history checkpoint. This was a dead end.
             self.events.append("state")
-            value = {"version": 1, "dates": ["2026-08-27", target], "instruments": []}
+            value = {"version": 1, "dates": ["2026-08-27", target], "instruments": [
+                {'market':'SSE','code':'510300','name':'沪深300ETF','values':[None,.1]},
+                {'market':'SZSE','code':'159915','name':'创业板ETF','values':[None,
+                    .2 if self.state_complete or (self.checkpoint and not self.stale_after_import) else None]},
+            ]}
         elif url.endswith("/history-import"):
             payload = json.loads(kwargs["data"])
             if payload["history"]["finalize"]:
@@ -317,7 +361,11 @@ def offline_runner(monkeypatch):
 
     def snapshot(**kwargs):
         runner._write_json(kwargs["stock_catalog_path"], {"available": False, "stocks": []})
-        return {"asOf": "2026-08-28", "publication": {"status": "confirmed"}, "metrics": [], "dataStatus": []}
+        return {"asOf": "2026-08-28", "publication": {"status": "confirmed"}, "metrics": [], "dataStatus": [],
+            'etfTerminal':{'classificationVersion':'2026-07-v3','instruments':[
+                {'market':'SSE','code':'510300','periods':{'1d':.1}},
+                {'market':'SZSE','code':'159915','periods':{'1d':.2}},
+            ]}}
 
     def bundle(**kwargs):
         snapshot = runner._read_json(kwargs["snapshot_path"])
@@ -333,8 +381,9 @@ def offline_runner(monkeypatch):
     monkeypatch.setattr(runner, "build_dashboard_snapshot", snapshot)
     monkeypatch.setattr(runner, "build_history_bundle_from_files", bundle)
 
-    def execute(tmp_path, *, window_date="2026-08-28", archive_status="archived", current_szse=False):
-        transport = _RecoveryTransport(archive_status)
+    def execute(tmp_path, *, window_date="2026-08-28", archive_status="archived", current_szse=False,
+                state_complete=True, stale_after_import=False):
+        transport = _RecoveryTransport(archive_status,state_complete,stale_after_import)
         monkeypatch.setattr(runner, "build_session", lambda _settings: transport)
         monkeypatch.setattr(runner, "_current_szse_etf_matches_target", lambda **_kwargs: current_szse)
         if current_szse:
@@ -349,6 +398,18 @@ def offline_runner(monkeypatch):
         return result, transport
 
     return execute
+
+
+def test_existing_date_with_missing_szse_is_imported_and_verified_before_materialization(tmp_path, offline_runner):
+    result, transport = offline_runner(tmp_path,state_complete=False)
+    assert result['status']=='READY'
+    assert transport.events==['state','chunk','finalize','state','chunk','finalize','history','latest_readonly']
+
+
+def test_success_response_without_repaired_daily_state_stops_before_publication(tmp_path, offline_runner):
+    with pytest.raises(LiveRecoveryError,match='live_recovery_state_daily_mismatch') as caught:
+        offline_runner(tmp_path,state_complete=False,stale_after_import=True)
+    assert caught.value.status=='BLOCKED_QUALITY'
 
 
 def test_existing_etf_state_does_not_skip_missing_market_checkpoint(tmp_path, offline_runner):
