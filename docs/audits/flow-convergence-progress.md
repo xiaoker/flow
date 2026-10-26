@@ -7,6 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-26: restore bounded weekly replay fix in persistent worktree
+
+- Main remains `05dbcadcc7331feedf63c60f3df7157ee52971f8` (PR #211). Read-only verification `40170097180` previously verified 67 archive objects; no subsequent recovery or active-pointer change is claimed. No open PR was found on October 26.
+- The October 25 `/private/tmp/flow-week-window-20261025` worktree and local replay evidence were removed by the environment before commit. Its branch still points to the main baseline, so those uncommitted files are not recoverable from Git. The historical real-input result (1680/1690 one-week samples) is NOT fresh evidence for the reconstructed code. Recreated worktree: `/Users/xiaoker/.codex/worktrees/flow-week-window-20261026`, branch `codex/week-window-20261026`; original dirty checkout is untouched.
+- Reconstructed the same bounded scene: compose overlapping original official margin-date proofs with explicit version/hash, reject gaps/conflicts/nested proofs, and retain exact original bytes. The planner and real replay/candidate builder use October 15 as the baseline for changes on October 16/19/20/21/22. Missing market dates are not removed from the calendar. This does not restore two-week through twelve-month periods or NAV values.
+- Reconstructed version-3 per-file gzip checkpoint fallback for nested base64 archives. Original wire/expanded limits, byte/hash verification, restore lease fences and v1/v2 compatibility remain. No evidence files are omitted; incompressible inputs still reject. Focused tests include exact restoration in a new process directory and codec/size/hash/truncation/expansion/path/duplicate failures.
+- Web lint/build and all 260 tests passed on October 26. Forty-one targeted tests passed, including the real builder with a coherent synthetic snapshot; initial fixture date inconsistency was corrected without weakening the READY assertion. Complete Python regression passed (exit 0, expected duplicate-ZIP rejection warning); the final added planner/builder tests also passed separately. Fresh real-archive formal preflight remains pending, so this is not a production-ready execution package or a live page repair.
+- Next: finish full regression, checkpoint the explicit five files, re-read the retained exact archives and repeat formal offline preflight before delivery. No production writes, exchange fetches, dispatch, budget settlement, flag change or activation is authorized by this code work. Existing UNKNOWN occupancy is preserved. Python/test/docs-only merge would trigger main CI, not Worker deployment or migration.
+
+## Historical implementation notes
+
 ### 2026-10-25: legacy normalized observation compatibility, strict business-value proof
 
 - PR #210 merged/deployed as `56eb85cd44f484065544c8fc6850d8c628d58613`; main CI `40119032960` and Worker deploy `40119033077` passed, no pending migration, exact served SHA verified. Explicitly authorized read-only verification `40119416370` checked 34 objects and stopped on object 35, SSE NAV normalized CSV, with HTTP 409. No candidate execution, production write, budget settlement or pointer change occurred.
