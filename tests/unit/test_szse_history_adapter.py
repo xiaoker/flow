@@ -112,6 +112,67 @@ def test_szse_history_adapter_accepts_verified_exact_date_archive(tmp_path: Path
     assert artifact.row_count == 1
 
 
+def test_szse_history_adapter_preserves_official_www_source_url(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    url = "https://www.szse.cn/api/report/ShowReport/data"
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"][0]["source"]["url"] = url
+    manifest_path.write_text(json.dumps(manifest))
+    metadata_path = root / "2026-08-28/raw.metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["source"]["url"] = url
+    metadata["source_url"] = url
+    metadata_path.write_text(json.dumps(metadata))
+    adapters = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")  # type: ignore[arg-type]
+
+    frame, artifact = adapters.fetch_szse_etf_history(root, "2026-08-28")
+
+    assert len(frame) == 1
+    assert artifact.source.url == url
+    assert artifact.source.date_semantics == "source_historical_scale_size_date"
+
+
+@pytest.mark.parametrize("url", [
+    "http://www.szse.cn/api/report/ShowReport/data",
+    "https://www.szse.cn.evil.example/api/report/ShowReport/data",
+    "https://www.szse.cn@evil.example/api/report/ShowReport/data",
+    "https://www.szse.cn/api/report/ShowReport/data?other=1",
+    "https://www.szse.cn/api/report/ShowReport",
+])
+def test_szse_history_adapter_rejects_nonexact_historical_url(tmp_path: Path, url: str) -> None:
+    root = _archive(tmp_path)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["artifacts"][0]["source"]["url"] = url
+    path.write_text(json.dumps(manifest))
+    adapters = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="not historical-scale evidence"):
+        adapters.fetch_szse_etf_history(root, "2026-08-28")
+
+
+def test_szse_history_adapter_rejects_disagreeing_official_hosts(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["artifacts"][0]["source"]["url"] = "https://www.szse.cn/api/report/ShowReport/data"
+    path.write_text(json.dumps(manifest))
+    adapters = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="metadata does not match"):
+        adapters.fetch_szse_etf_history(root, "2026-08-28")
+
+
+def test_szse_history_adapter_rejects_conflicting_metadata_source_url(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    path = root / "2026-08-28/raw.metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata["source_url"] = "https://www.szse.cn/api/report/ShowReport/data"
+    path.write_text(json.dumps(metadata))
+    adapters = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="metadata does not match"):
+        adapters.fetch_szse_etf_history(root, "2026-08-28")
+
+
 @pytest.mark.parametrize("target", ["2026-08-27", "2026-08-29"])
 def test_szse_history_adapter_rejects_missing_archive_date(tmp_path: Path, target: str) -> None:
     adapters = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")  # type: ignore[arg-type]
