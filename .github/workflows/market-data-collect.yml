@@ -82,6 +82,10 @@ concurrency:
 jobs:
   pipeline_window_gate:
     runs-on: ubuntu-latest
+    # Bound setup/claim failures too, not just the downstream recovery job.
+    # Missing this value inherits a 360-minute provider timeout and invalidates
+    # the complete date-major resource envelope. Timeout never grants a lease.
+    timeout-minutes: 2
     # This small job runs before checkout, Python setup, dependency install or
     # pytest.  With the flag enabled it is the only place that may acquire a
     # cross-scheduler lease for this workflow invocation.

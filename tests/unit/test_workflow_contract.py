@@ -14,6 +14,32 @@ PCF_WORKFLOW = WORKFLOWS / "pcf-v2-capture.yml"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 
 
+def test_date_major_recovery_chain_has_explicit_configured_timeouts() -> None:
+    import re
+
+    def job(path: Path, name: str) -> tuple[str, int | None]:
+        match = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [A-Za-z_][\w-]*:\n|\Z)", path.read_text())
+        assert match, name
+        body = match.group(1)
+        timeout = re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", body)
+        return body, int(timeout.group(1)) if timeout else None
+
+    gate_body, gate_timeout = job(COLLECT_WORKFLOW, "pipeline_window_gate")
+    # Missing timeout would silently use the provider's 360-minute default.
+    bounds = [
+        job(WORKFLOWS / "register-recovery-plan.yml", "register")[1],
+        gate_timeout,
+        job(COLLECT_WORKFLOW, "recovery_execution_contract")[1],
+        job(PUBLISH_WORKFLOW, "publish_window_gate")[1],
+        job(PUBLISH_WORKFLOW, "publish")[1],
+    ]
+    assert all(type(value) is int and value > 0 for value in bounds)
+    assert bounds == [5, 2, 25, 2, 20]
+    assert sum(bounds) == 54  # Configured timeouts, not exact billed minutes or cleanup cost.
+    assert "- uses:" not in gate_body
+    assert "needs: pipeline_window_gate" in COLLECT_WORKFLOW.read_text()
+
+
 def test_source_checkpoints_precede_downstream_computation_and_finalize_after_qa():
     workflow = COLLECT_WORKFLOW.read_text()
     early = workflow.index("- name: Preserve collected source checkpoints before downstream computation")
