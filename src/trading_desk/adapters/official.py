@@ -6,6 +6,7 @@ import io
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1152,12 +1153,20 @@ class OfficialMarketAdapters:
             )
         payload = matches[0]
         source_payload = payload.get("source") or {}
+        source_url = source_payload.get("url")
+        # The existing recovery producer records the official host actually
+        # queried. Admit only these exact historical endpoints and preserve
+        # that identity; never rewrite www evidence as a fund-host fetch.
+        historical_urls = (
+            SZSE_ETF_HISTORY.url,
+            "https://www.szse.cn/api/report/ShowReport/data",
+        )
         if any(
             (
                 source_payload.get("source_id") != SZSE_ETF_HISTORY.source_id,
                 source_payload.get("publisher") != SZSE_ETF_HISTORY.publisher,
                 source_payload.get("dataset") != SZSE_ETF_HISTORY.dataset,
-                source_payload.get("url") != SZSE_ETF_HISTORY.url,
+                source_url not in historical_urls,
                 source_payload.get("source_grade") != SZSE_ETF_HISTORY.source_grade,
                 source_payload.get("date_semantics") != SZSE_ETF_HISTORY.date_semantics,
             )
@@ -1185,7 +1194,8 @@ class OfficialMarketAdapters:
                 metadata_source.get("source_id") != "szse",
                 metadata_source.get("publisher") != SZSE_ETF_HISTORY.publisher,
                 metadata_source.get("dataset") != "etf_scale",
-                metadata_source.get("url") != SZSE_ETF_HISTORY.url,
+                metadata_source.get("url") != source_url,
+                metadata.get("source_url", source_url) != source_url,
                 metadata_source.get("source_grade") != SZSE_ETF_HISTORY.source_grade,
                 metadata_source.get("date_semantics") != SZSE_ETF_HISTORY.date_semantics,
             )
@@ -1227,7 +1237,7 @@ class OfficialMarketAdapters:
         status_code = int(metadata.get("status_code") or 200)
         content_type = str(payload.get("content_type") or "application/json")
         artifact = FetchArtifact(
-            source=SZSE_ETF_HISTORY,
+            source=replace(SZSE_ETF_HISTORY, url=source_url),
             requested_date=requested_date,
             observed_at=observed_at,
             status_code=status_code,
