@@ -188,7 +188,13 @@ def _build_etf_terminal_from_canonical(
 
     instruments: list[dict[str, Any]] = []
     exclusion_counts: dict[str, int] = {}
+    current_keys = set(selected.loc[selected["trade_date"].eq(latest_date), "key"])
     for key in pivot.index:
+        # The current list must match the target day's official universe.
+        # Keep older rows in the pivots/daily series, but never present an
+        # absent current sample as a current ETF or fabricate a zero holding.
+        if key not in current_keys:
+            continue
         row_metadata = metadata.loc[key]
         market = str(row_metadata.get("market", key.split(":", 1)[0]))
         code = str(row_metadata.get("instrument_code", key.split(":", 1)[-1])).zfill(6)
