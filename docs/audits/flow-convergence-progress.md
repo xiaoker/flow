@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-10-28: optional margin absence must not block core archive replay
+
+- PR217 is merged at052bc1e; exact main CI40687846778 passed. No production data publication occurred. Continuing r6 archive-first product recovery without new collection or state writes.
+- Real local archive adapter -> collect_phase0 -> dashboard -> release QA for October13/14/15/16/19 exposed an existing contract bug: optional security-level margin absence generated a column-schema failure despite empty_warn_only=True. The old test asserted the nonempty summary twice and never checked the empty result's failure count. These are not proven missing required core sources; prior handoff's suggestion to require this optional feed was too broad.
+- Narrow fix mirrors optional NAV handling: absent/empty optional detail keeps completeness/schema warnings; nonempty malformed records and explicit required mode still fail. No fabricated rows, zero/front filling, formula, source/hash/date or core-required QA change. Regression fails before the fix and passes after;39 related tests pass. The same five real-input rehearsals now each pass124 release checks, zero failed checks, zero network attempts and zero production writes. Optional absence remains recorded in base quality, not claimed as available margin/NAV/PCF capability.
+- Persistent worktree flow-optional-margin-20261028, branch codex/optional-margin-20261028. Complete Python regression exits0 (python-test.log); Web lint/build and262 tests pass. Delivery review/PR remains incomplete. Remote first-observation and adjacent bindings, historical registration, production publication/UI and long-period acceptance remain incomplete. No production authorization is implied.
+
+## Historical implementation notes
+
 ### 2026-10-28: latest-day current-universe hotfix before history production execution
 
 - PR #216 merged as `9044fb8c969c2e3e44642357313752162f2e4a22`; main CI `40647350599` passed, no Worker deploy/migration. Its source-only local preflight also round-tripped five real 45-file archive recipes under unchanged size limits; remote first-observation binding, adjacent/full-release/NAV QA and production recovery remain incomplete. Original dirty reports/memory/handoffs remain untouched.

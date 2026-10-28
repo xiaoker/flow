@@ -247,4 +247,20 @@ def test_margin_security_requires_sse_market_and_preserves_empty_as_warning() ->
         item for item in empty["findings"] if item["check_id"] == "completeness.non_empty"
     )
     assert completeness["status"] == "warn"
-    assert summary["counts"]["fail"] == 0
+    assert empty["counts"]["fail"] == 0
+    assert next(item for item in empty["findings"] if item["check_id"] == "schema.required_columns")["status"] == "warn"
+
+    typed_empty = summarize_findings(validate_margin_security(frame.iloc[:0]))
+    assert typed_empty["counts"]["fail"] == 0
+    assert next(item for item in typed_empty["findings"] if item["check_id"] == "schema.required_columns")["status"] == "pass"
+    assert next(item for item in typed_empty["findings"] if item["check_id"] == "completeness.non_empty")["status"] == "warn"
+
+
+def test_missing_optional_margin_detail_does_not_disable_strict_mode() -> None:
+    findings = validate_margin_security(pd.DataFrame(), empty_warn_only=False)
+    assert any(item.status == "fail" for item in findings)
+
+
+def test_nonempty_margin_detail_still_requires_schema() -> None:
+    findings = validate_margin_security(pd.DataFrame([{"trade_date": "2026-10-13"}]))
+    assert any(item.check_id == "schema.required_columns" and item.status == "fail" for item in findings)
