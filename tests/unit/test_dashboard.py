@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_desk.dashboard import (
     _build_etf_terminal_data,
@@ -14,6 +15,41 @@ from trading_desk.etf_classification import (
     CLASSIFICATION_VERSION,
     classify_etf,
 )
+
+
+@pytest.mark.parametrize("market", ["SSE", "SZSE"])
+def test_current_terminal_uses_asof_universe_without_erasing_historical_changes(market):
+    from trading_desk.etf_facts import build_canonical_etf_daily_fact
+    from trading_desk.etf_daily_changes import build_official_etf_daily_changes
+    from trading_desk.release_qa import validate_etf_terminal_identity
+
+    dates = ["2026-10-23", "2026-10-26", "2026-10-27"]
+    code = "512390" if market == "SSE" else "159001"
+    rows = [
+        {"trade_date": day, "instrument_code": "510300", "instrument_name": name,
+         "shares": shares * 100_000_000, "nav": 1, "nav_date": day}
+        for day, name, shares in zip(dates, ["旧名ETF", "旧名ETF", "新名ETF"], [1, 2, 3])
+    ]
+    rows += [{"trade_date": day, "instrument_code": code, "instrument_name": "MSCI低波ETF",
+              "shares": shares * 100_000_000, "nav": 1, "nav_date": day}
+             for day, shares in zip(dates[:2], [1, 2])]
+    rows += [{"trade_date": dates[-1], "instrument_code": "510050", "instrument_name": "新上市ETF", "shares": 0}]
+    frame, empty = pd.DataFrame(rows), pd.DataFrame()
+    sse, szse = (frame, empty) if market == "SSE" else (empty, frame)
+    terminal = _build_etf_terminal_data(sse, szse, dates)
+    actual = {(r["market"], r["code"]): r for r in terminal["instruments"]}
+    assert (market, code) not in actual
+    assert actual[(market, "510300")]["name"] == "新名ETF"
+    assert actual[(market, "510050")]["shares"] == 0
+    assert actual[(market, "510050")]["periods"]["1d"] is None
+    assert terminal["universe"]["marketCounts"] == {market: 2}
+    assert terminal["dailySeries"][0]["value"] == 2  # both historical intervals remain
+    assert terminal["dailySeries"][-1]["value"] == 1  # absent current row is not zero
+    findings = validate_etf_terminal_identity({"etfTerminal": terminal}, {"sse_etf": sse, "szse_etf": szse}, dates[-1])
+    assert all(f.status == "pass" for f in findings)
+    daily = build_official_etf_daily_changes(build_canonical_etf_daily_fact(sse, szse, dates),
+        as_of=dates[-1], expected_previous_date=dates[-2])
+    assert any(row["code"] == code and row["market"] == market for row in daily["rows"])
 
 
 def _write(frame: pd.DataFrame, path: Path) -> str:
