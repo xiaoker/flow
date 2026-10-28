@@ -23,7 +23,9 @@ class FetchArtifact:
     source: SourceSpec
     requested_date: str | None
     observed_at: str
-    status_code: int
+    # Legacy composite archives may not have recorded transport status.
+    # None means unknown, never an inferred successful HTTP response.
+    status_code: int | None
     content_type: str
     raw_path: str
     metadata_path: str

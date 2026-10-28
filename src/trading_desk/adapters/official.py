@@ -1234,7 +1234,17 @@ class OfficialMarketAdapters:
             raise ValueError("recovery archive contains duplicate ETF business keys")
 
         observed_at = str(payload.get("observed_at") or metadata.get("observed_at") or "")
-        status_code = int(metadata.get("status_code") or 200)
+        # A historical composite is not a fresh HTTP response. Preserve absent
+        # transport evidence rather than inventing 200, which also conflicts
+        # with the immutable metadata during generic lineage validation.
+        status_code = metadata.get("status_code")
+        if status_code is not None and (type(status_code) is not int or status_code != 200):
+            raise ValueError("recovery archive historical HTTP status is invalid")
+        declared_status = payload.get("status_code")
+        if declared_status is not None and (type(declared_status) is not int or declared_status != 200):
+            raise ValueError("recovery archive historical HTTP status is invalid")
+        if "status_code" in payload and payload["status_code"] != status_code:
+            raise ValueError("recovery archive historical HTTP status does not match metadata")
         content_type = str(payload.get("content_type") or "application/json")
         artifact = FetchArtifact(
             source=replace(SZSE_ETF_HISTORY, url=source_url),
@@ -1245,6 +1255,7 @@ class OfficialMarketAdapters:
             raw_path=str(raw_path),
             metadata_path=str(metadata_path),
             sha256=digest,
+            warnings=["historical_http_status_unrecorded"] if status_code is None else [],
         )
         normalized = normalized.copy()
         normalized["source_id"] = SZSE_ETF_HISTORY.source_id
