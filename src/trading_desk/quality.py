@@ -433,7 +433,20 @@ def validate_margin_security(
         "securities_lending_repayment_shares",
     ]
     findings = check_empty(frame, dataset, warn_only=empty_warn_only)
-    findings += check_required_columns(frame, dataset, required)
+    if frame.empty and empty_warn_only:
+        # An unavailable optional enrichment has no records to validate. Keep
+        # its missing-schema evidence visible, as with the optional NAV feed;
+        # nonempty malformed records and explicit required mode remain fatal.
+        missing = sorted(set(required) - set(frame.columns))
+        findings.append(_finding(
+            "schema.required_columns", dataset, not missing,
+            message="空个股两融明细保留标准字段" if not missing else "可选个股两融明细不可用，未带标准字段",
+            evidence={"missing": missing, "required": sorted(required), "optional_enrichment": True},
+            severity="high", warn_only=True,
+            remediation="保留缺失证据；个股两融能力保持不可用，不以零或前值补齐。",
+        ))
+    else:
+        findings += check_required_columns(frame, dataset, required)
     findings += check_unique(frame, dataset, ["trade_date", "market", "stock_code"])
     findings += check_nonnegative(frame, dataset, required[4:])
     if not frame.empty and "market" in frame.columns:
