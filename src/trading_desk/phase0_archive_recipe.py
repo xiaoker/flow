@@ -236,10 +236,26 @@ def build_archive_recipe(
                 stored = json.loads(metadata_bytes)
             except (ValueError, UnicodeError) as exc:
                 raise ValueError("archive_recipe_stored_metadata_invalid") from exc
+            # The historical per-fund composite predates generic transport
+            # metadata. Its exact original bytes/hash are already verified;
+            # accept an absent length only for this precise legacy contract,
+            # without rewriting the retained metadata or inventing HTTP 200.
+            legacy_length_unrecorded = (
+                isinstance(stored, dict) and "bytes" not in stored
+                and source_id == "szse" and dataset == "etf_scale"
+                and source.get("date_semantics") == "source_historical_scale_size_date"
+                and source.get("url") in {
+                    "https://fund.szse.cn/api/report/ShowReport/data",
+                    "https://www.szse.cn/api/report/ShowReport/data",
+                }
+                and stored.get("source") == source
+            )
             if (not isinstance(stored, dict) or stored.get("sha256") != raw_sha
                     or stored.get("requested_date") != day or stored.get("release_id") != artifact.get("releaseId")
                     or stored.get("archived_raw_key") != raw_key or stored.get("status_code") != item.get("status_code")
-                    or stored.get("bytes") != len(raw) or not isinstance(stored.get("observed_at"), str)
+                    or (not legacy_length_unrecorded and (
+                        type(stored.get("bytes")) is not int or stored["bytes"] != len(raw)))
+                    or not isinstance(stored.get("observed_at"), str)
                     or not stored["observed_at"] or not isinstance(stored.get("source"), dict)
                     or stored["source"].get("source_id") != source_id or stored["source"].get("dataset") != dataset):
                 raise ValueError("archive_recipe_stored_metadata_invalid")

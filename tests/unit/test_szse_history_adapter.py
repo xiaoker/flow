@@ -8,7 +8,114 @@ import pandas as pd
 import pytest
 
 from trading_desk.adapters.official import OfficialMarketAdapters
-from trading_desk.release_qa import validate_raw_to_normalized_mapping
+from trading_desk.release_qa import validate_artifact_lineage, validate_raw_to_normalized_mapping
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_legacy_history_preserves_unrecorded_http_status_and_lineage(tmp_path, explicit_null):
+    root = _archive(tmp_path)
+    metadata_path = root / "2026-08-28/raw.metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata.pop("status_code")
+    if explicit_null:
+        metadata["status_code"] = None
+    metadata_path.write_text(json.dumps(metadata))
+    manifest_path = root / "manifest.json"
+    original = json.loads(manifest_path.read_text())
+    original["artifacts"][0].pop("status_code")
+    manifest_path.write_text(json.dumps(original))
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    adapter = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")
+    frame, artifact = adapter.fetch_szse_etf_history(root, "2026-08-28")
+    assert artifact.status_code is None
+    assert "historical_http_status_unrecorded" in artifact.warnings
+    assert artifact.row_count == len(frame) == 1
+    assert all(path.read_bytes() == wire for path, wire in before.items())
+    manifest = {"artifacts": [artifact.to_dict()]}
+    findings = validate_artifact_lineage(manifest, tmp_path) + validate_raw_to_normalized_mapping(manifest, tmp_path)
+    # One source cannot satisfy the unchanged full-batch publisher gate.
+    assert {f.check_id for f in findings if f.status == "fail"} == {"provenance.required_publishers"}
+    assert next(f for f in findings if f.check_id == "lineage.metadata_matches_manifest").status == "pass"
+    assert next(f for f in findings if f.check_id == "mapping.raw_to_normalized_values").status == "pass"
+
+
+@pytest.mark.parametrize("status", [0, 201, 403, 429, "200", True])
+def test_history_rejects_invalid_recorded_http_status(tmp_path, status):
+    root = _archive(tmp_path)
+    path = root / "2026-08-28/raw.metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata["status_code"] = status
+    path.write_text(json.dumps(metadata))
+    adapter = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")
+    with pytest.raises(ValueError, match="historical HTTP status"):
+        adapter.fetch_szse_etf_history(root, "2026-08-28")
+
+
+def test_history_cannot_claim_success_when_metadata_status_is_unrecorded(tmp_path):
+    root = _archive(tmp_path)
+    path = root / "2026-08-28/raw.metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata.pop("status_code")
+    path.write_text(json.dumps(metadata))
+    # The manifest still claims 200; absent metadata cannot prove it.
+    adapter = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")
+    with pytest.raises(ValueError, match="historical HTTP status does not match"):
+        adapter.fetch_szse_etf_history(root, "2026-08-28")
+
+
+@pytest.mark.parametrize("status", [200.0, "200", True, 403, None])
+def test_history_rejects_invalid_or_disagreeing_manifest_status(tmp_path, status):
+    root = _archive(tmp_path)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["artifacts"][0]["status_code"] = status
+    path.write_text(json.dumps(manifest))
+    adapter = OfficialMarketAdapters(session=object(), data_root=tmp_path / "data", run_id="run")
+    with pytest.raises(ValueError, match="historical HTTP status"):
+        adapter.fetch_szse_etf_history(root, "2026-08-28")
+
+
+@pytest.mark.parametrize("length", ["absent", None, -1, 1, True,
+    "nonhistorical", "wrong_url", "source_disagreement"])
+def test_legacy_composite_recipe_preserves_metadata_and_proves_raw_length(length):
+    from test_phase0_archive_recipe import _inputs, DATES
+    from trading_desk.phase0_archive_recipe import build_archive_recipe
+
+    manifest, bundle, calendar = _inputs()
+    item = next(a for a in manifest["artifacts"] if a["source"]["source_id"] == "szse" and a["source"]["dataset"] == "etf_scale")
+    source = item["source"]
+    source["url"] = "https://www.szse.cn/api/report/ShowReport/data"
+    source["date_semantics"] = "source_historical_scale_size_date"
+    if length == "nonhistorical":
+        source["date_semantics"] = "source_published"
+    if length == "wrong_url":
+        source["url"] = "https://www.szse.cn/api/report/other"
+    item["status_code"] = None
+    artifact = next(a for a in bundle["history"]["artifacts"] if a["sourceId"] == "szse" and a["dataset"] == "etf_scale")
+    artifact["metadata"]["source"] = dict(source)
+    artifact["metadata"].pop("status_code")
+    artifact["metadata"].pop("bytes")
+    recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1])
+    stored = {ref["objectKey"]: objects[ref["objectKey"]] for ref in recipe["files"] if ref["objectKey"].endswith(".metadata.json")}
+    key = next(k for k in stored if "/raw/szse/etf_scale/" in k)
+    metadata = json.loads(stored[key])
+    if length == "source_disagreement":
+        metadata["source"]["publisher"] = "different source"
+        stored[key] = json.dumps(metadata).encode()
+    elif length not in ("absent", "nonhistorical", "wrong_url"):
+        metadata["bytes"] = length
+        stored[key] = json.dumps(metadata).encode()
+    kwargs = dict(manifest=manifest, history_bundle=bundle, calendar=calendar, target=DATES[-1], metadata_objects=stored)
+    if length != "absent":
+        with pytest.raises(ValueError, match="archive_recipe_stored_metadata_invalid"):
+            build_archive_recipe(**kwargs)
+    else:
+        exact, bound = build_archive_recipe(**kwargs)
+        assert bound[key] == stored[key]
+        assert "bytes" not in json.loads(bound[key])
+        assert "status_code" not in json.loads(bound[key])
+        raw_ref = next(r for r in exact["files"] if r["path"] == item["raw_path"])
+        assert raw_ref["bytes"] == len(bound[raw_ref["objectKey"]])
 
 
 def _archive(tmp_path: Path, *, raw_digest: str | None = None) -> Path:
