@@ -18,7 +18,32 @@ import {
   canonicalJson,
   recoveryPlanObjectKey,
   sha256Hex,
+  verifyArchiveProjectionRebind,
 } from "../app/lib/pipeline-recovery-plan.ts";
+
+test("archive rebind preserves facts, calendar and scope, changing only a legacy projection", async () => {
+  const raw = { path: "raw.csv", objectKey: "market-data/raw/sse/margin_security_daily/2026-09-03/" + "a".repeat(64) + ".csv", sha256: "a".repeat(64), bytes: 10 };
+  const projection = { path: "normalized.csv", objectKey: "market-data/normalized/sse/margin_security_daily/2026-09-03/" + "a".repeat(64) + "/data.csv", sha256: "b".repeat(64), bytes: 20 };
+  const old = { runKey: "daily-market-data:2026-09-03:evening:v1", dataDates: ["2026-09-03"], maxDates: 1, maxRequests: 50, requiredStages: ["dashboard", "publish"], budgetManifest: { archivePhase0Source: { contract: "flow-phase0-archive-source-v1", calendar: { dates: ["2026-09-03"] }, files: [raw, projection] } } };
+  const next = structuredClone(old);
+  next.budgetManifest.archivePhase0Source.files[1].sha256 = "c".repeat(64);
+  const proof = await verifyArchiveProjectionRebind(old, next);
+  assert.notEqual(proof.previousSourceFingerprint, proof.nextSourceFingerprint);
+  await assert.rejects(verifyArchiveProjectionRebind(old, old), /archive_rebind_no_projection_change/);
+  for (const mutate of [
+    p => { p.dataDates = ["2026-09-04"]; },
+    p => { p.requiredStages.push("core_collection"); },
+    p => { p.maxRequests++; },
+    p => { p.budgetManifest.archivePhase0Source.calendar.dates.push("2026-09-04"); },
+    p => { p.budgetManifest.archivePhase0Source.files[0].sha256 = "d".repeat(64); },
+    p => { p.budgetManifest.archivePhase0Source.files.push(projection); },
+    p => { p.budgetManifest.archivePhase0Source.files[1].objectKey = projection.objectKey.replace("margin_security_daily", "etf_daily"); },
+  ]) {
+    const invalid = structuredClone(next);
+    mutate(invalid);
+    await assert.rejects(verifyArchiveProjectionRebind(old, invalid), /archive_rebind_/);
+  }
+});
 
 class D1Statement {
   constructor(database, sql, rowsWritten = 0) {
@@ -770,6 +795,57 @@ test("an expired PAUSED generation is atomically superseded before a replacement
   }
 });
 
+test("expired archive conflicts require a new proof and approval, preserving the BLOCKED generation", async () => {
+  const db = await createDatabase();
+  try {
+    const setup = await registerCompleted(db);
+    const oldId = setup.registration.recovery.recovery_id;
+    const claimed = await claimPipelineWindowRecovery(db, input(setup.runKey, "recovery:owner01"), new Date("2026-09-03T03:00:00Z"));
+    await markPipelineWindowRecovery(db, {
+      recoveryId: oldId, runKey: setup.runKey, leaseOwner: "recovery:owner01",
+      expectedAttemptCount: claimed.attemptCount, status: "BLOCKED_QUALITY",
+      errorCode: "live_recovery_archive_read_invalid",
+    }, new Date("2026-09-03T03:01:00Z"));
+    const before = await getPipelineWindow(db, setup.runKey);
+    const old = await getPipelineWindowRecovery(db, oldId);
+    const replacement = registrationInput(setup.runKey, before, "recovery-archive-rebind", {
+      planSha256: "c".repeat(64), scopeSha256: "d".repeat(64),
+      reasonCode: "archive_projection_rebound", approvalReference: "new-explicit-approval",
+      authorizedAt: "2026-09-05T00:00:00Z", expiresAt: "2026-09-06T00:00:00Z",
+      supersedesRecoveryId: oldId,
+      archiveProjectionRebind: { previousPlanSha256: old.plan_sha256, previousSourceFingerprint: "e".repeat(64), nextSourceFingerprint: "f".repeat(64) },
+    });
+    const now = new Date("2026-09-05T00:01:00Z");
+    await assert.rejects(registerPipelineWindowRecovery(db, {
+      ...replacement, authorizedAt: "2026-09-03T04:00:00Z",
+    }, new Date("2026-09-03T05:00:00Z")), /superseded_recovery_not_expired/);
+    db.prepare("UPDATE pipeline_window SET last_error_code = ? WHERE run_key = ?").bind("qa_failed", setup.runKey).run();
+    await assert.rejects(registerPipelineWindowRecovery(db, replacement, now), /recovery_supersede_state_conflict/);
+    db.prepare("UPDATE pipeline_window SET last_error_code = ? WHERE run_key = ?").bind(before.last_error_code, setup.runKey).run();
+    for (const overrides of [
+      { archiveProjectionRebind: undefined },
+      { approvalReference: old.approval_reference },
+      { expectedAttemptCount: before.attempt_count + 1 },
+      { archiveProjectionRebind: { ...replacement.archiveProjectionRebind, nextSourceFingerprint: "e".repeat(64) } },
+    ]) await assert.rejects(registerPipelineWindowRecovery(db, { ...replacement, ...overrides }, now));
+    db.failAtBatchIndex = 4;
+    await assert.rejects(registerPipelineWindowRecovery(db, replacement, now));
+    db.failAtBatchIndex = undefined;
+    assert.deepEqual(await getPipelineWindow(db, setup.runKey), before);
+    assert.deepEqual(await getPipelineWindowRecovery(db, oldId), old);
+    const result = await registerPipelineWindowRecovery(db, replacement, now);
+    assert.equal(result.decision, "superseded");
+    assert.ok(result.rowsWritten <= 3);
+    assert.deepEqual(await getPipelineWindowRecovery(db, oldId), old);
+    const next = await claimPipelineWindowRecovery(db, input(setup.runKey, "recovery:owner02", { recoveryId: replacement.recoveryId }), now);
+    assert.equal(next.decision, "acquired");
+    await assert.rejects(markPipelineWindowRecovery(db, {
+      recoveryId: oldId, runKey: setup.runKey, leaseOwner: "recovery:owner01",
+      expectedAttemptCount: claimed.attemptCount, status: "FAILED_RETRYABLE",
+    }, now));
+  } finally { db.close(); }
+});
+
 test("supersede CAS conflict and mid-transaction failure leave the old generation intact", async () => {
   const db = await createDatabase();
   try {
@@ -820,6 +896,62 @@ test("supersede CAS conflict and mid-transaction failure leave the old generatio
   } finally {
     db.close();
   }
+});
+
+test("HTTP registration derives archive proof and never trusts a client fingerprint", async () => {
+  const worker = (await import(new URL("../dist/server/index.js", import.meta.url).href)).default;
+  const db = await createDatabase();
+  const bucket = new MemoryR2();
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const env = { DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key", PIPELINE_RECOVERY_ENABLED: "1", ASSETS: { fetch: async () => new Response("", { status: 404 }) } };
+  const post = body => worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", { method: "POST", headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" }, body: JSON.stringify(body) }), env, context);
+  const encode = async base => {
+    delete base.planHash;
+    const planSha256 = await sha256Hex(new TextEncoder().encode(canonicalJson(base)));
+    const planJson = JSON.stringify({ ...base, planHash: planSha256 });
+    return { planJson, planSha256, scopeSha256: await sha256Hex(new TextEncoder().encode(planJson)) };
+  };
+  try {
+    const setup = await completedWindow(db);
+    const base = (await recoveryPlanFixture(setup.runKey)).plan;
+    base.requiredStages = ["dashboard", "publish"];
+    base.budgetManifest.archivePhase0Source = {
+      contract: "flow-phase0-archive-source-v1", calendar: { dates: ["2026-09-03"] },
+      files: [{ path: "normalized.csv", objectKey: `market-data/normalized/sse/margin_security_daily/2026-09-03/${"a".repeat(64)}/data.csv`, sha256: "b".repeat(64), bytes: 20 }],
+    };
+    const oldPlan = await encode(base);
+    const oldInput = registrationInput(setup.runKey, setup.row, base.recoveryId, { ...oldPlan, planKey: undefined });
+    const registered = await post(oldInput);
+    assert.equal(registered.status, 201, JSON.stringify(await registered.json()));
+    const claimed = await claimPipelineWindowRecovery(db, input(setup.runKey, "recovery:owner01"), new Date("2026-09-03T03:00:00Z"));
+    await markPipelineWindowRecovery(db, { recoveryId: base.recoveryId, runKey: setup.runKey, leaseOwner: "recovery:owner01", expectedAttemptCount: claimed.attemptCount, status: "BLOCKED_QUALITY", errorCode: "live_recovery_archive_read_invalid" }, new Date("2026-09-03T03:01:00Z"));
+    const before = await getPipelineWindowRecovery(db, base.recoveryId);
+    const row = await getPipelineWindow(db, setup.runKey);
+    const nextBase = structuredClone(base);
+    nextBase.recoveryId = "recovery-http-rebind";
+    nextBase.artifactRoot = `.recovery/${nextBase.recoveryId}`;
+    nextBase.stateDir = `${nextBase.artifactRoot}/state`;
+    nextBase.budgetManifest.archivePhase0Source.files[0].sha256 = "c".repeat(64);
+    const next = registrationInput(setup.runKey, row, nextBase.recoveryId, {
+      ...await encode(nextBase), planKey: undefined, supersedesRecoveryId: base.recoveryId,
+      reasonCode: "archive_projection_rebound", approvalReference: "new-explicit-approval",
+      authorizedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const forged = await post({ ...next, archiveProjectionRebind: { nextSourceFingerprint: "d".repeat(64) } });
+    assert.equal(forged.status, 422);
+    assert.equal(bucket.putCount, 1);
+    const invalidBase = structuredClone(nextBase);
+    invalidBase.maxRequests++;
+    const invalid = await post({ ...next, ...await encode(invalidBase) });
+    assert.equal(invalid.status, 409);
+    assert.equal(bucket.putCount, 1);
+    const accepted = await post(next);
+    assert.equal(accepted.status, 200, JSON.stringify(await accepted.json()));
+    assert.equal(bucket.putCount, 2);
+    assert.deepEqual(await getPipelineWindowRecovery(db, base.recoveryId), before);
+    assert.equal((await post(next)).status, 200);
+    assert.equal(bucket.putCount, 2);
+  } finally { db.close(); }
 });
 
 test("recovery routes fail closed when disabled and require existing authentication", async () => {
