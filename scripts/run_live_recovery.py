@@ -60,6 +60,40 @@ class LiveRecoveryError(RuntimeError):
         super().__init__(message)
 
 
+def _read_verified_archive_object(exchange: Any, base_url: str,
+                                  auth: dict[str, str], ref: dict[str, Any]) -> bytes:
+    """Preserve exact hash fences and report only bounded, non-secret identity."""
+    from trading_desk.phase0_archive import MAX_OBJECT_BYTES
+    reply = exchange.request("GET", base_url.rstrip("/") + "/api/v1/admin/history-artifact",
+        max_bytes=MAX_OBJECT_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+        headers=auth, params={"archive_key": ref["objectKey"], "archive_sha256": ref["sha256"]})
+    if (reply.status != 200 or reply.headers.get("x-flow-archive-key") != ref["objectKey"]
+            or reply.headers.get("x-flow-archive-sha256") != ref["sha256"]):
+        error = None
+        if len(reply.content) <= 4096:
+            try:
+                payload = json.loads(reply.content)
+                candidate = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(candidate, str) and candidate in {"archive_object_hash_mismatch", "artifact_not_found", "artifact_too_large",
+                                 "archive_object_unavailable", "invalid_pinned_official_object",
+                                 "unauthorized", "raw_bucket_unavailable"}:
+                    error = candidate
+            except (ValueError, UnicodeDecodeError):
+                pass
+        response_sha = reply.headers.get("x-flow-archive-sha256", "")
+        ray = reply.headers.get("cf-ray", "")
+        detail = {"httpStatus": reply.status, "errorCode": error, "objectKey": ref["objectKey"],
+                  "expectedSha256": ref["sha256"],
+                  "responseSha256": response_sha if re.fullmatch(r"[a-f0-9]{64}", response_sha) else None,
+                  "responseKeyMatches": reply.headers.get("x-flow-archive-key") == ref["objectKey"],
+                  "cfRay": ray if re.fullmatch(r"[a-zA-Z0-9-]{1,80}", ray) else None}
+        # Never include arbitrary response bodies, auth headers or a URL/query.
+        # Keep the existing block classification and single-attempt behavior.
+        raise LiveRecoveryError("live_recovery_archive_read_invalid",
+                                json.dumps(detail, separators=(",", ":")))
+    return reply.content
+
+
 # Keep the runner executable both as ``python -m`` and as the workflow's
 # ``python scripts/run_live_recovery.py`` entry point.  Importing the sibling
 # script package is not reliable in the latter mode.  The exchange exposes the
@@ -1108,7 +1142,7 @@ def run_live_recovery(
     )
     archived_adapters = None
     if archive_recipe is not None:
-        from trading_desk.phase0_archive import validate_recipe, ArchivedOfficialMarketAdapters, MAX_OBJECT_BYTES
+        from trading_desk.phase0_archive import validate_recipe, ArchivedOfficialMarketAdapters
         from trading_desk.bounded_http import BoundedHTTPExchange
         archive_manifest = validate_recipe(archive_recipe, target)
         # Reserve both history-import passes (each artifact + finalize,
@@ -1131,13 +1165,7 @@ def run_live_recovery(
         exchange = BoundedHTTPExchange(source_session)
 
         def read_archive(ref):
-            reply = exchange.request("GET", base_url.rstrip("/") + "/api/v1/admin/history-artifact",
-                max_bytes=MAX_OBJECT_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
-                headers=auth, params={"archive_key": ref["objectKey"], "archive_sha256": ref["sha256"]})
-            if (reply.status != 200 or reply.headers.get("x-flow-archive-key") != ref["objectKey"]
-                    or reply.headers.get("x-flow-archive-sha256") != ref["sha256"]):
-                raise LiveRecoveryError("live_recovery_archive_read_invalid")
-            return reply.content
+            return _read_verified_archive_object(exchange, base_url, auth, ref)
 
         archived_adapters = ArchivedOfficialMarketAdapters(archive_recipe, target=target,
             root=artifact_root/"archived-source", fetch=read_archive)

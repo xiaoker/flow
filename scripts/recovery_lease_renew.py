@@ -67,6 +67,7 @@ def main() -> None:
         "renewalCount": 0,
         "measuredAt": None,
     }
+    next_renewal = time.monotonic()
     try:
         while True:
             if args.stop_file and args.stop_file.exists():
@@ -78,6 +79,12 @@ def main() -> None:
                 evidence["errorCode"] = "live_recovery_deadline_expired"
                 _write(args.evidence, evidence)
                 return
+            until_renewal = next_renewal - time.monotonic()
+            if until_renewal > 0:
+                # A short local stop-file poll is not a network renewal.
+                remaining = (deadline - now).total_seconds()
+                time.sleep(min(until_renewal, remaining, 5.0))
+                continue
             payload = {
                 "recoveryId": args.recovery_id,
                 "runKey": args.run_key,
@@ -146,14 +153,7 @@ def main() -> None:
                         evidence[key] = body[key]
             evidence["measuredAt"] = now.isoformat(timespec="seconds").replace("+00:00", "Z")
             _write(args.evidence, evidence)
-            remaining = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
-            if remaining <= 0:
-                continue
-            # Poll the stop marker in short slices so a completed/failed
-            # runner does not keep the Actions job open for the full renewal
-            # interval.  This is local filesystem polling and issues no extra
-            # control-plane request.
-            time.sleep(min(args.interval_seconds, remaining, 5.0))
+            next_renewal = time.monotonic() + args.interval_seconds
     except Exception as exc:
         # Do not include response bodies or request headers in logs; they may
         # contain deployment metadata or accidentally echoed credentials.

@@ -20,6 +20,42 @@ from scripts.run_live_recovery import (
 from trading_desk.recovery_execution import build_recovery_plan
 
 
+def test_archive_read_conflict_has_safe_identity_evidence_without_retry():
+    from trading_desk.bounded_http import HTTPReply
+    key = "market-data/normalized/sse/margin_security_daily/2026-10-26/" + "a" * 64 + "/data.csv"
+    class Exchange:
+        calls = 0
+        def request(self, method, url, **kwargs):
+            self.calls += 1
+            assert method == "GET" and kwargs["params"]["archive_key"] == key
+            return HTTPReply(409, b'{"error":"archive_object_hash_mismatch","token":"fixture-secret"}',
+                             {"cf-ray": "example-SJC", "x-flow-archive-sha256": "fixture-secret"})
+    exchange = Exchange()
+    with pytest.raises(LiveRecoveryError) as caught:
+        runner._read_verified_archive_object(exchange, "https://flow.xiaoker.com", {},
+            {"objectKey": key, "sha256": "b" * 64})
+    assert caught.value.code == "live_recovery_archive_read_invalid"
+    assert caught.value.status == "BLOCKED_QUALITY"
+    detail = json.loads(str(caught.value).split(": ", 1)[1])
+    assert detail["httpStatus"] == 409 and detail["objectKey"] == key
+    assert detail["errorCode"] == "archive_object_hash_mismatch"
+    assert detail["expectedSha256"] == "b" * 64 and detail["responseSha256"] is None
+    assert exchange.calls == 1 and "fixture-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("content", [b'{"error":{"secret":"fixture-secret"}}', b'fixture-secret'])
+def test_archive_failure_does_not_echo_arbitrary_response_content(content):
+    from trading_desk.bounded_http import HTTPReply
+    class Exchange:
+        def request(self, *_args, **_kwargs):
+            return HTTPReply(503, content, {})
+    with pytest.raises(LiveRecoveryError) as caught:
+        runner._read_verified_archive_object(Exchange(), "https://flow.xiaoker.com", {},
+            {"objectKey": "approved-key", "sha256": "a" * 64})
+    assert "fixture-secret" not in str(caught.value)
+    assert json.loads(str(caught.value).split(": ", 1)[1])["errorCode"] is None
+
+
 def _plan(
     dates: list[str],
     *,
