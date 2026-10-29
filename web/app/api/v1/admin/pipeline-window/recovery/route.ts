@@ -4,11 +4,15 @@ import {
   PipelineWindowError,
   registerPipelineWindowRecovery,
   validatePipelineRecoveryRegistrationInput,
+  type PipelineRecoveryRegistrationInput,
 } from "@/app/lib/pipeline-window-recovery";
 import { getPipelineWindow } from "@/app/lib/pipeline-window";
 import {
   recoveryPlanObjectKey,
   storeImmutableRecoveryPlan,
+  readRecoveryPlanObject,
+  validateRecoveryPlanBytes,
+  verifyArchiveProjectionRebind,
 } from "@/app/lib/pipeline-recovery-plan";
 
 export const dynamic = "force-dynamic";
@@ -152,7 +156,11 @@ export async function POST(request: Request): Promise<Response> {
     if (body.planKey !== undefined && body.planKey !== planKey) {
       throw new PipelineWindowError("invalid_plan_key", 422);
     }
-    const registration = {
+    // Proof is never accepted from the request; derive it from immutable plans.
+    if (body.archiveProjectionRebind !== undefined) {
+      throw new PipelineWindowError("archive_rebind_client_proof_forbidden", 422);
+    }
+    const registration: PipelineRecoveryRegistrationInput = {
       recoveryId,
       runKey,
       planKey,
@@ -172,6 +180,24 @@ export async function POST(request: Request): Promise<Response> {
     validatePipelineRecoveryRegistrationInput(registration);
     if (!(await getPipelineWindow(runtime.DB, runKey))) {
       throw new PipelineWindowError("pipeline_window_not_found", 404);
+    }
+    if (registration.reasonCode === "archive_projection_rebound") {
+      if (!registration.supersedesRecoveryId) throw new PipelineWindowError("archive_rebind_previous_required", 422);
+      const previous = await getPipelineWindowRecovery(runtime.DB, registration.supersedesRecoveryId);
+      if (!previous || previous.run_key !== runKey || previous.status !== "BLOCKED") {
+        throw new PipelineWindowError("archive_rebind_previous_invalid", 409);
+      }
+      const oldPlan = await readRecoveryPlanObject(runtime.RAW_BUCKET, previous.plan_key, {
+        recoveryId: previous.recovery_id, runKey, planSha256: previous.plan_sha256,
+        scopeSha256: previous.scope_sha256,
+      });
+      const newPlan = await validateRecoveryPlanBytes(new TextEncoder().encode(planJson), {
+        recoveryId, runKey, planSha256, scopeSha256,
+      }, 422);
+      registration.archiveProjectionRebind = {
+        previousPlanSha256: previous.plan_sha256,
+        ...await verifyArchiveProjectionRebind(oldPlan, newPlan),
+      };
     }
     const stored = await storeImmutableRecoveryPlan(
       runtime.RAW_BUCKET,

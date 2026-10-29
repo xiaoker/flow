@@ -3,6 +3,63 @@ import { PipelineWindowError } from "./pipeline-window-recovery.ts";
 
 export const MAX_RECOVERY_PLAN_BYTES = 300_000;
 
+/** Compare verified immutable plans, not caller-supplied fingerprints.
+ * Only legacy mutable non-ETF projections may be rebound; raw facts and
+ * official calendar evidence remain byte-identical. Execution QA is unchanged.
+ */
+export async function verifyArchiveProjectionRebind(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Promise<{ previousSourceFingerprint: string; nextSourceFingerprint: string }> {
+  const reject = (code: string): never => { throw new PipelineWindowError(`archive_rebind_${code}`, 409); };
+  for (const key of ["runKey", "dataDates", "maxDates", "maxRequests", "requiredStages"]) {
+    if (canonicalJson(previous[key]) !== canonicalJson(next[key])) reject("scope_changed");
+  }
+  if (!Array.isArray(next.dataDates) || next.dataDates.length !== 1 ||
+      canonicalJson(next.requiredStages) !== canonicalJson(["dashboard", "publish"])) reject("scope_unsupported");
+  const recipe = (plan: Record<string, unknown>): Record<string, unknown> => {
+    const budget = plan.budgetManifest;
+    if (!budget || typeof budget !== "object" || Array.isArray(budget)) return reject("recipe_missing");
+    const value = (budget as Record<string, unknown>).archivePhase0Source;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return reject("recipe_missing");
+    return value as Record<string, unknown>;
+  };
+  const left = recipe(previous), right = recipe(next);
+  if (left.contract !== "flow-phase0-archive-source-v1" || right.contract !== left.contract ||
+      canonicalJson(left.calendar) !== canonicalJson(right.calendar)) reject("calendar_or_contract_changed");
+  const files = (value: unknown): Record<string, unknown>[] => {
+    if (!Array.isArray(value) || !value.length || value.length > 80) return reject("files_invalid");
+    const seen = new Set<string>();
+    return value.map(file => {
+      if (!file || typeof file !== "object" || Array.isArray(file) ||
+          typeof file.objectKey !== "string" || typeof file.path !== "string" ||
+          !SHA256.test(file.sha256) || !Number.isSafeInteger(file.bytes) || file.bytes < 0 ||
+          file.bytes > 2_000_000 || seen.has(file.objectKey)) return reject("files_invalid");
+      seen.add(file.objectKey);
+      return file as Record<string, unknown>;
+    }).sort((a, b) => String(a.objectKey).localeCompare(String(b.objectKey), "en"));
+  };
+  const oldFiles = files(left.files), newFiles = files(right.files);
+  if (oldFiles.length !== newFiles.length) reject("files_changed");
+  let changed = false;
+  for (let index = 0; index < oldFiles.length; index++) {
+    const old = oldFiles[index], current = newFiles[index];
+    if (old.objectKey !== current.objectKey || old.path !== current.path) reject("identity_changed");
+    if (canonicalJson(old) === canonicalJson(current)) continue;
+    if (!/^market-data\/normalized\/(?:sse|szse|bse|hkex)\/(?:margin_market_daily|margin_security_daily|stock_connect_daily)\/\d{4}-\d{2}-\d{2}\/[0-9a-f]{64}\/(?:data|summary|top)\.csv(?:\.gz)?$/.test(String(old.objectKey))) reject("immutable_fact_changed");
+    const { sha256: oldHash, bytes: oldBytes, ...oldIdentity } = old;
+    const { sha256: newHash, bytes: newBytes, ...newIdentity } = current;
+    if (canonicalJson(oldIdentity) !== canonicalJson(newIdentity) || oldHash === newHash ||
+        typeof oldBytes !== "number" || typeof newBytes !== "number") reject("projection_invalid");
+    changed = true;
+  }
+  if (!changed) reject("no_projection_change");
+  return {
+    previousSourceFingerprint: await sha256Hex(new TextEncoder().encode(canonicalJson(oldFiles))),
+    nextSourceFingerprint: await sha256Hex(new TextEncoder().encode(canonicalJson(newFiles))),
+  };
+}
+
 const SHA256 = /^[0-9a-f]{64}$/;
 const PLAN_KEY = /^market-data\/recovery\/plans\/[A-Za-z0-9._:-]{1,300}\.json$/;
 const RECOVERY_ID = /^[A-Za-z0-9:_-]{1,120}$/;
