@@ -10,6 +10,7 @@ import pytest
 
 from scripts.run_live_recovery import run_live_recovery
 from trading_desk.recovery_execution import build_recovery_plan
+from trading_desk.read_models import build_market_read_models
 from test_phase0_archive import fixture_recipe, DATES
 from test_pipeline_verify_adapter import setup
 
@@ -66,6 +67,25 @@ def test_archive_recovery_against_real_worker(tmp_path, monkeypatch, read_only, 
             assert "/api/v1/admin/history-import" in stats["http"]
             assert "/api/v2/market-history" in stats["http"]
             assert not any("activate" in path or "claim" in path for path in stats["http"])
+            # The real publisher passes the downloaded active manifest, which
+            # can belong to a later day than this historical recovery. Source
+            # preflight alone never exercises this production comparison.
+            source = tmp_path / ".recovery/archive/source-bundle"
+            snapshot = json.loads((source / "dashboard-snapshot.json").read_bytes())
+            previous = json.loads((source / "previous-release.json").read_bytes())
+            baseline = previous.get("manifest", previous)
+            assert baseline["asOf"] > snapshot["asOf"]
+            history_path = source / "market-history.json"
+            history = json.loads(history_path.read_bytes()) if history_path.is_file() else None
+            _, candidate = build_market_read_models(
+                snapshot, require_materialized=True, market_history=history,
+                previous_manifest=previous,
+            )
+            assert candidate["asOf"] == DATES[-1]
+            assert candidate["slot"] == "dashboard"
+            assert candidate["coverage"]["etf"]["tradingDays"] < baseline["coverage"]["etf"]["tradingDays"]
+            after = requests.get(origin+"/fixture/stats",headers={"Authorization":"Bearer fixture-only"},timeout=10).json()
+            assert after["activeIdentity"] == stats["activeIdentity"]
     finally:
         process.terminate()
         try: process.communicate(timeout=10)
