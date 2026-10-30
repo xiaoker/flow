@@ -375,6 +375,7 @@ export function mergeSnapshotIntoEtfFlowState(
 
   const currentIndex = dateIndex.get(snapshot.asOf);
   if (currentIndex === undefined) return previous;
+  const isHistoricalRepair = snapshot.asOf < (previous?.dates.at(-1) ?? snapshot.asOf);
   const hasOfficialChanges = officialDailyChanges !== undefined;
   const officialChanges = new Map(
     (officialDailyChanges ?? []).map((item) => [instrumentKey(item), item.value]),
@@ -401,17 +402,22 @@ export function mergeSnapshotIntoEtfFlowState(
       : item.periods["1d"];
     if (value === null || value === undefined || !Number.isFinite(value)) continue;
     const existing = rows.get(key);
+    // Historical replay owns this date's values, not the latest instrument
+    // metadata. In particular, an old XD name or classification must not leak
+    // into today's materialized dashboard. Same-day/current revisions still
+    // update metadata; a historical-only instrument keeps its source identity.
+    const metadata = isHistoricalRepair && existing ? existing : item;
     const row: StateInstrument = {
       code: item.code,
-      name: item.name,
+      name: metadata.name,
       market: item.market ?? "SSE",
-      category: item.category,
-      groupType: item.groupType,
-      assetClass: item.assetClass,
-      classificationSource: item.classificationSource,
-      classificationConfidence: item.classificationConfidence,
-      classificationRule: item.classificationRule,
-      includeInGroup: item.includeInGroup,
+      category: metadata.category,
+      groupType: metadata.groupType,
+      assetClass: metadata.assetClass,
+      classificationSource: metadata.classificationSource,
+      classificationConfidence: metadata.classificationConfidence,
+      classificationRule: metadata.classificationRule,
+      includeInGroup: metadata.includeInGroup,
       values: existing?.values ?? Array<number | null>(dates.length).fill(null),
       cashValues: existing?.cashValues ?? Array<number | null>(dates.length).fill(null),
     };
