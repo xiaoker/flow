@@ -179,6 +179,7 @@ def build_archive_recipe(
     adjacent_objects: dict[str, bytes] | None = None,
     metadata_objects: dict[str, bytes] | None = None,
     normalized_objects: dict[str, bytes] | None = None,
+    legacy_etf_objects: dict[str, bytes] | None = None,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     """Return the exact-key recipe and locally reconstructed stored bytes.
 
@@ -198,6 +199,7 @@ def build_archive_recipe(
     objects: dict[str, bytes] = {}
     used_metadata: set[str] = set()
     used_normalized: set[str] = set()
+    used_legacy_etf: set[str] = set()
 
     def add(path: str, key: str, content: bytes) -> None:
         if key in objects or len(content) > MAX_OBJECT_BYTES:
@@ -277,6 +279,15 @@ def build_archive_recipe(
             revision = _sha(f"{raw_sha}:{_sha(wire)}".encode()) if dataset == "etf_scale" else raw_sha
             suffix = ".csv.gz" if encoding == "gzip" else ".csv"
             key = f"market-data/normalized/{source_id}/{dataset}/{day}/{revision}/{name}{suffix}"
+            legacy_key = f"market-data/normalized/{source_id}/{dataset}/{day}/{raw_sha}/{name}.csv"
+            if dataset == "etf_scale" and legacy_key in (legacy_etf_objects or {}):
+                # Explicit, hash-read legacy bytes only. Never silently fall
+                # back after a failed new-key read or fabricate a new object.
+                actual = legacy_etf_objects[legacy_key]
+                if encoding is not None or not _same_observation_values(decoded, _normalized_content(actual, None)):
+                    raise ValueError("archive_recipe_legacy_etf_values_mismatch")
+                key, wire = legacy_key, actual
+                used_legacy_etf.add(key)
             if normalized_objects is not None and dataset != "etf_scale":
                 actual = normalized_objects.get(key)
                 if actual is None:
@@ -291,6 +302,8 @@ def build_archive_recipe(
         raise ValueError("archive_recipe_stored_metadata_unexpected")
     if normalized_objects is not None and set(normalized_objects) != used_normalized:
         raise ValueError("archive_recipe_stored_normalized_unexpected")
+    if legacy_etf_objects is not None and set(legacy_etf_objects) != used_legacy_etf:
+        raise ValueError("archive_recipe_legacy_etf_unexpected")
     adjacent = manifest.get("archivedEtfInputs", [])
     if not isinstance(adjacent, list):
         raise ValueError("archive_recipe_adjacent_invalid")

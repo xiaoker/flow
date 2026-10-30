@@ -93,6 +93,83 @@ def test_recipe_from_bundle_has_exact_hashes_and_is_deterministic():
     assert repeated == recipe
 
 
+def _legacy_etf(manifest, bundle):
+    item=next(a for a in bundle['history']['artifacts'] if a['dataset']=='etf_scale')
+    key=f"market-data/normalized/{item['sourceId']}/etf_scale/{item['requestedDate']}/{item['sha256']}/data.csv"
+    table=list(csv.reader(io.StringIO(base64.b64decode(item['normalized'][0]['contentBase64']).decode())))
+    for row in table[1:]:row[table[0].index('observed_at')]='2026-07-18T01:00:00Z'
+    stream=io.StringIO();csv.writer(stream).writerows(table)
+    return key,stream.getvalue().encode()
+
+
+def test_explicit_legacy_etf_key_pins_real_bytes_without_rewriting_facts():
+    manifest,bundle,calendar=_inputs();key,wire=_legacy_etf(manifest,bundle)
+    recipe,objects=build_archive_recipe(manifest=manifest,history_bundle=bundle,calendar=calendar,
+        target=DATES[-1],legacy_etf_objects={key:wire})
+    assert validate_recipe(recipe,DATES[-1])==manifest
+    assert objects[key]==wire
+    assert next(r for r in recipe['files'] if r['objectKey']==key)['sha256']==_sha(wire)
+    assert build_archive_recipe(manifest=manifest,history_bundle=bundle,calendar=calendar,
+        target=DATES[-1],legacy_etf_objects={key:wire})[0]==recipe
+
+
+@pytest.mark.parametrize('tamper',['shares','trade_date','instrument_code','nav','wrong_key','extra'])
+def test_legacy_etf_binding_cannot_change_business_values_or_expand_scope(tamper):
+    manifest,bundle,calendar=_inputs();key,wire=_legacy_etf(manifest,bundle)
+    table=list(csv.reader(io.StringIO(wire.decode())))
+    if tamper in table[0]:
+        table[1][table[0].index(tamper)]='999'
+        stream=io.StringIO();csv.writer(stream).writerows(table);wire=stream.getvalue().encode()
+    elif tamper=='nav':
+        table[0].append('nav')
+        for row in table[1:]:row.append('999')
+        stream=io.StringIO();csv.writer(stream).writerows(table);wire=stream.getvalue().encode()
+    bindings={key:wire}
+    if tamper=='wrong_key':bindings={key.replace('/etf_scale/','/etf_pcf/'):wire}
+    if tamper=='extra':bindings['market-data/normalized/unknown/data.csv']=wire
+    with pytest.raises(ValueError,match='archive_recipe_legacy_etf'):
+        build_archive_recipe(manifest=manifest,history_bundle=bundle,calendar=calendar,
+            target=DATES[-1],legacy_etf_objects=bindings)
+
+
+@pytest.mark.parametrize('tamper',[None,'hash','duplicate','scope','offline','contract','oversized'])
+def test_cli_explicit_legacy_binding_is_verified_bounded_and_read_once(tmp_path,monkeypatch,tamper):
+    manifest,bundle,calendar=_inputs();key,wire=_legacy_etf(manifest,bundle)
+    _,objects=build_archive_recipe(manifest=manifest,history_bundle=bundle,calendar=calendar,target=DATES[-1])
+    objects[key]=wire
+    refs={'contract':'flow-legacy-etf-bindings-v1','objects':[{'objectKey':key,'sha256':_sha(wire)}]}
+    if tamper=='hash':refs['objects'][0]['sha256']='0'*64
+    if tamper=='duplicate':refs['objects']*=2
+    if tamper=='scope':refs['objects'][0]['objectKey']=key.replace('/etf_scale/','/etf_pcf/')
+    if tamper=='contract':refs['contract']='unknown'
+    paths=[tmp_path/n for n in ['manifest.json','bundle.json','calendar.json','legacy.json']]
+    for path,value in zip(paths,[manifest,bundle,calendar,refs],strict=True):path.write_text(json.dumps(value))
+    if tamper=='oversized':paths[3].write_text(' '*16001)
+    reads=[]
+    def exact_get(k,sha):
+        reads.append(k)
+        return objects[k]  # CLI must independently reject a mismatched hash.
+    monkeypatch.setattr(cli,'_archive_get',exact_get)
+    monkeypatch.setattr(cli,'_archive_metadata_get',lambda k,sha:objects[k])
+    monkeypatch.setattr(cli,'_archive_normalized_get',lambda k,sha:objects[k])
+    args=['archive-recipe','--manifest',str(paths[0]),'--history-bundle',str(paths[1]),
+        '--official-calendar',str(paths[2]),'--target-date',DATES[-1],
+        '--legacy-etf-bindings',str(paths[3]),'--output',str(tmp_path/'out.json')]
+    if tamper!='offline':args.append('--verify-live-archive')
+    monkeypatch.setattr(sys,'argv',args)
+    if tamper is not None:
+        with pytest.raises(ValueError,match='archive_recipe_legacy_etf'):cli.main()
+        assert reads==([key] if tamper=='hash' else [])
+        assert 'recipe' not in json.loads((tmp_path/'out.json').read_text())
+    else:
+        assert cli.main()==0
+        result=json.loads((tmp_path/'out.json').read_text())
+        assert result['status']=='ARCHIVE_OBJECTS_VERIFIED'
+        assert reads.count(key)==1
+        pinned=next(r for r in result['recipe']['files'] if r['objectKey']==key)
+        assert pinned['sha256']==_sha(wire)
+
+
 @pytest.mark.parametrize("tamper", ["identity", "raw", "normalized", "missing", "calendar", "gzip_bomb"])
 def test_recipe_rejects_inconsistent_or_incomplete_bundle(tamper):
     manifest, bundle, calendar = _inputs()
