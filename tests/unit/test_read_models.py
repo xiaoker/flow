@@ -228,6 +228,55 @@ def test_dashboard_slot_builds_without_pcf_or_stock_catalog() -> None:
     assert manifest["marketHistory"]["archiveDates"] == 61
 
 
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_historical_candidate_does_not_compare_coverage_with_future_active(full, wrapped) -> None:
+    latest = _snapshot()
+    history = _market_history(start="2026-05-14", count=61)
+    builder = build_read_models if full else build_market_read_models
+    kwargs = {"stock_catalog": _stock_catalog()} if full else {}
+    _, baseline = builder(latest, require_materialized=True, market_history=history, **kwargs)
+    state = _state()
+    state["dates"] = state["dates"][:-1]
+    for row in state["instruments"]:
+        row["values"] = row["values"][:-1]
+        row["cashValues"] = row["cashValues"][:-1]
+    historical = {**latest, "asOf": "2026-08-05", "observedAt": "2026-08-05T09:00:00+08:00",
+                  "etfTerminal": materialize_etf_terminal(state, base_terminal={})}
+    if full:
+        catalog = _stock_catalog()
+        catalog["asOf"] = "2026-08-05"
+        catalog["basis"].update(shareDate="2026-08-05", previousShareDate="2026-08-04", pcfDate="2026-08-05")
+        kwargs = {"stock_catalog": catalog}
+    previous = {"manifest": baseline} if wrapped else baseline
+    _, candidate = builder(historical, require_materialized=True, market_history={**history, "asOf": "2026-08-05"},
+                           previous_manifest=previous, **kwargs)
+    assert candidate["asOf"] == "2026-08-05"
+    assert candidate["coverage"]["etf"]["tradingDays"] == 3
+    assert candidate["marketHistory"]["margin"]["points"] == 60
+    assert baseline["asOf"] == "2026-08-06"
+    assert baseline["coverage"]["etf"]["tradingDays"] == 4
+
+
+@pytest.mark.parametrize("baseline_date", [None, "not-a-date", "2026-02-30", "2026-08-06", "2026-08-05"])
+def test_coverage_regression_remains_closed_without_a_verified_future_baseline(baseline_date) -> None:
+    snapshot = _snapshot()
+    _, previous = build_market_read_models(snapshot, require_materialized=True)
+    previous["asOf"] = baseline_date
+    previous["coverage"]["etf"]["tradingDays"] += 1
+    with pytest.raises(ReadModelError, match="read_model_coverage_etf_tradingDays_regressed"):
+        build_market_read_models(snapshot, require_materialized=True, previous_manifest=previous)
+
+
+def test_historical_candidate_still_requires_own_valid_coverage() -> None:
+    snapshot = _snapshot()
+    _, previous = build_market_read_models(snapshot, require_materialized=True)
+    previous["asOf"] = "2026-08-07"
+    snapshot["etfTerminal"]["historyCoverage"]["tradingDays"] = 1
+    with pytest.raises(ReadModelError, match="etf_history_coverage_incomplete"):
+        build_market_read_models(snapshot, require_materialized=True, previous_manifest=previous)
+
+
 def test_market_history_is_materialized_and_hashed() -> None:
     history = _market_history(start="2026-05-14", count=61)
     snapshot = _snapshot()

@@ -437,16 +437,36 @@ def _market_history_contract(compact: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _comparable_coverage_baseline(
+    previous_manifest: dict[str, Any] | None, *, as_of: str,
+) -> dict[str, Any] | None:
+    """A future active release is not a coverage baseline for a historical one.
+
+    Counts are bounded to each release's asOf, so fewer dates in an older
+    candidate do not prove lost facts. Unknown/invalid baseline dates retain
+    the existing strict comparison. Snapshot QA and activation's no-rollback
+    checks are independent and must still run.
+    """
+    if not isinstance(previous_manifest, dict):
+        return None
+    nested = previous_manifest.get("manifest")
+    previous = nested if isinstance(nested, dict) else previous_manifest
+    old_as_of = previous.get("asOf")
+    if _is_valid_iso_date(old_as_of) and _is_valid_iso_date(as_of) and old_as_of > as_of:
+        return None
+    return previous
+
+
 def _assert_history_not_regressed(
     current: dict[str, Any],
     previous_manifest: dict[str, Any] | None,
+    *, as_of: str,
 ) -> None:
     """Fail closed when a new release loses confirmed compact history."""
 
-    if not isinstance(previous_manifest, dict):
+    previous = _comparable_coverage_baseline(previous_manifest, as_of=as_of)
+    if previous is None:
         return
-    nested = previous_manifest.get("manifest")
-    previous = nested if isinstance(nested, dict) else previous_manifest
     previous_history = previous.get("marketHistory")
     if not isinstance(previous_history, dict):
         return
@@ -512,13 +532,13 @@ def _read_model_coverage(
 def _assert_read_model_coverage_not_regressed(
     current: dict[str, Any],
     previous_manifest: dict[str, Any] | None,
+    *, as_of: str,
 ) -> None:
     """Reject a candidate that silently loses historical coverage."""
 
-    if not isinstance(previous_manifest, dict):
+    previous = _comparable_coverage_baseline(previous_manifest, as_of=as_of)
+    if previous is None:
         return
-    nested = previous_manifest.get("manifest")
-    previous = nested if isinstance(nested, dict) else previous_manifest
     old = previous.get("coverage")
     if not isinstance(old, dict):
         return
@@ -1024,7 +1044,7 @@ def build_read_models(
         effective_snapshot["connectSeries"] = connect_series
         effective_snapshot["marketHistoryCoverage"] = coverage
     market_history_contract = _market_history_contract(compact_history)
-    _assert_history_not_regressed(market_history_contract, previous_manifest)
+    _assert_history_not_regressed(market_history_contract, previous_manifest, as_of=snapshot["asOf"])
     payloads = build_view_payloads(effective_snapshot)
     payloads.update(_build_stock_artifacts(stock_catalog, as_of=snapshot["asOf"]))
     # Keep the pressure page as a compact projection. Full contributor lists
@@ -1037,7 +1057,7 @@ def build_read_models(
     )
     payloads["pressure"] = _with_release_meta(effective_snapshot, {"pressure": pressure})
     coverage_contract = _read_model_coverage(effective_snapshot, payloads)
-    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest)
+    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest, as_of=snapshot["asOf"])
     encoded = {name: canonical_json_bytes(payload) for name, payload in payloads.items()}
     artifact_names = list(REQUIRED_ARTIFACT_NAMES)
     if set(encoded) != set(artifact_names):
@@ -1162,7 +1182,7 @@ def build_market_read_models(
         effective_snapshot["marginSeries"] = margin_series
         effective_snapshot["connectSeries"] = connect_series
         effective_snapshot["marketHistoryCoverage"] = coverage
-    _assert_history_not_regressed(_market_history_contract(compact_history), previous_manifest)
+    _assert_history_not_regressed(_market_history_contract(compact_history), previous_manifest, as_of=snapshot["asOf"])
 
     all_payloads = build_view_payloads(effective_snapshot)
     payloads = {name: all_payloads[name] for name in MARKET_READ_MODEL_NAMES}
@@ -1193,7 +1213,7 @@ def build_market_read_models(
     # The independent core slot still carries the ETF history contract. Do
     # not let a PCF-independent rebuild silently shrink the periods already
     # visible in the dashboard.
-    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest)
+    _assert_read_model_coverage_not_regressed(coverage_contract, previous_manifest, as_of=snapshot["asOf"])
     market_history_contract = _market_history_contract(compact_history)
     observed_at = _observed_at_utc(effective_snapshot)
     source_dates = _source_dates(effective_snapshot)
