@@ -92,6 +92,28 @@ def _archive_normalized_get(key: str, raw_digest: str) -> bytes:
     return _archive_get(key, raw_digest, normalized_raw=True)
 
 
+def _legacy_etf_refs(path: Path, bundle: dict, *, verify: bool) -> list[dict]:
+    if not verify or path.stat().st_size > 16_000:
+        raise ValueError("archive_recipe_legacy_etf_verification_required")
+    bindings = _read_json(path)
+    rows = bindings.get("objects")
+    if (set(bindings) != {"contract", "objects"} or bindings["contract"] != "flow-legacy-etf-bindings-v1"
+            or not isinstance(rows, list) or not 1 <= len(rows) <= 24):
+        raise ValueError("archive_recipe_legacy_etf_bindings_invalid")
+    # The caller has already validated manifest, raw hashes, calendar and scope.
+    allowed = {f"market-data/normalized/{a['sourceId']}/etf_scale/{a['requestedDate']}/{a['sha256']}/data.csv"
+               for a in bundle["history"]["artifacts"] if a["dataset"] == "etf_scale"}
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"objectKey", "sha256"}
+                or not isinstance(row["objectKey"], str) or row["objectKey"] not in allowed
+                or row["objectKey"] in seen or not isinstance(row["sha256"], str)
+                or not re.fullmatch(r"[a-f0-9]{64}", row["sha256"])):
+            raise ValueError("archive_recipe_legacy_etf_bindings_invalid")
+        seen.add(row["objectKey"])
+    return rows
+
+
 def _build(args: argparse.Namespace, progress: dict) -> int:
     def read_remote(key: str, digest: str, *, metadata_raw: bool = False, normalized_raw: bool = False) -> bytes:
         progress["archiveReadAttempts"] += 1
@@ -104,6 +126,8 @@ def _build(args: argparse.Namespace, progress: dict) -> int:
 
     manifest = _read_json(args.manifest)
     bundle = _read_json(args.history_bundle)
+    legacy_bindings = getattr(args, "legacy_etf_bindings", None)
+    legacy_etf_objects = {}
     if args.previous_history_bundle and args.adjacent_file:
         raise ValueError("archive_recipe_adjacent_inputs_ambiguous")
     calendar = (_read_json(args.official_calendar) if args.official_calendar
@@ -128,7 +152,17 @@ def _build(args: argparse.Namespace, progress: dict) -> int:
     recipe, objects = build_archive_recipe(
         manifest=manifest, history_bundle=bundle,
         calendar=calendar, target=args.target_date,
-        adjacent_objects=adjacent_objects)
+        adjacent_objects=adjacent_objects, legacy_etf_objects=legacy_etf_objects)
+    if legacy_bindings is not None:
+        refs = _legacy_etf_refs(legacy_bindings, bundle, verify=args.verify_live_archive)
+        for ref in refs:
+            wire = read_remote(ref["objectKey"], ref["sha256"])
+            if hashlib.sha256(wire).hexdigest() != ref["sha256"]:
+                raise ValueError("archive_recipe_legacy_etf_hash_mismatch")
+            legacy_etf_objects[ref["objectKey"]] = wire
+        recipe, objects = build_archive_recipe(manifest=manifest, history_bundle=bundle,
+            calendar=calendar, target=args.target_date, adjacent_objects=adjacent_objects,
+            legacy_etf_objects=legacy_etf_objects)
     if args.verify_live_archive:
         if len(recipe["files"]) > MAX_FILES:
             raise ValueError("archive_recipe_file_limit_exceeded")
@@ -148,11 +182,12 @@ def _build(args: argparse.Namespace, progress: dict) -> int:
         recipe, objects = build_archive_recipe(
             manifest=manifest, history_bundle=bundle, calendar=calendar, target=args.target_date,
             adjacent_objects=adjacent_objects, metadata_objects=metadata_objects,
-            normalized_objects=normalized_objects)
+            normalized_objects=normalized_objects, legacy_etf_objects=legacy_etf_objects)
         for ref in recipe["files"]:
             # Local adjacent bundle/file content is not proof that R2 holds it.
             # Only reuse bytes already read through the authenticated endpoint.
-            remote = (metadata_objects[ref["objectKey"]] if ref["objectKey"] in metadata_objects
+            remote = (legacy_etf_objects[ref["objectKey"]] if ref["objectKey"] in legacy_etf_objects
+                      else metadata_objects[ref["objectKey"]] if ref["objectKey"] in metadata_objects
                       else normalized_objects[ref["objectKey"]] if ref["objectKey"] in normalized_objects
                       else adjacent_objects[ref["objectKey"]] if ref["objectKey"] in live_verified_keys
                       else read_remote(ref["objectKey"], ref["sha256"]))
@@ -183,6 +218,8 @@ def main() -> int:
     parser.add_argument("--target-date", required=True)
     parser.add_argument("--verify-live-archive", action="store_true")
     parser.add_argument("--adjacent-file", type=Path)
+    parser.add_argument("--legacy-etf-bindings", type=Path,
+                        help="Explicit versioned legacy ETF key/hash list; requires --verify-live-archive")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     progress = {"archiveReadAttempts": 0, "archiveReadCount": 0, "failedObjectKey": None}
