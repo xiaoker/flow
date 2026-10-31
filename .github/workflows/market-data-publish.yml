@@ -312,7 +312,9 @@ jobs:
             (.plan.dataDates | index($dataDate) != null) and
             (.plan.requiredStages | index($stage) != null)
           ' recovery-plan.json >/dev/null
-          cp recovery-plan.json recovery-execution.json
+          # Keep the verified API envelope for audit, but receipt creation
+          # consumes the canonical inner plan, not the transport response.
+          jq -e '.plan | select(type == "object")' recovery-plan.json > recovery-execution.json
           echo "Recovery publish scope is fixed to one approved date/stage."
 
       - name: Mark recovery publish running and renew lease
