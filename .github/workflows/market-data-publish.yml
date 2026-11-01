@@ -22,6 +22,11 @@ on:
         description: "Pipeline-window lease owner"
         required: true
         type: string
+      resume_existing_source:
+        description: "Explicit approved publish-only resume; claim without Collector"
+        required: false
+        default: false
+        type: boolean
       recovery_id:
         description: "Approved recovery authorization id (optional)"
         required: false
@@ -79,8 +84,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      should_run: ${{ steps.gate.outputs.should_run }}
+      should_run: ${{ steps.gate.outputs.should_run || steps.resume.outputs.should_run }}
       gate_enabled: ${{ steps.gate.outputs.gate_enabled }}
+      lease_owner: ${{ steps.resume.outputs.lease_owner || inputs.lease_owner }}
+      attempt_count: ${{ steps.resume.outputs.attempt_count || inputs.recovery_attempt_count }}
     env:
       PIPELINE_WINDOW_GATE_ENABLED: ${{ inputs.gate_enabled || 'false' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
@@ -95,8 +102,26 @@ jobs:
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
     steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+        if: ${{ inputs.resume_existing_source }}
+        with:
+          persist-credentials: false
+      - name: Claim approved retained source for publish-only resume
+        id: resume
+        if: ${{ inputs.resume_existing_source }}
+        env:
+          INPUT_RUN_KEY: ${{ inputs.run_key }}
+          INPUT_TARGET_DATE: ${{ inputs.target_date }}
+          INPUT_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          INPUT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/resume_publish_source.py
       - name: Verify publish lease before installing dependencies
         id: gate
+        if: ${{ !inputs.resume_existing_source || steps.resume.outputs.should_run == 'true' }}
+        env:
+          INPUT_LEASE_OWNER: ${{ steps.resume.outputs.lease_owner || inputs.lease_owner }}
+          INPUT_RECOVERY_ATTEMPT_COUNT: ${{ steps.resume.outputs.attempt_count || inputs.recovery_attempt_count }}
         shell: bash
         run: |
           set -euo pipefail
@@ -254,10 +279,11 @@ jobs:
       INPUT_RUN_KEY: ${{ inputs.run_key }}
       INPUT_WINDOW_NAME: ${{ inputs.window_name }}
       INPUT_TARGET_DATE: ${{ inputs.target_date }}
-      INPUT_LEASE_OWNER: ${{ inputs.lease_owner }}
+      INPUT_RESUME_EXISTING_SOURCE: ${{ inputs.resume_existing_source && 'true' || 'false' }}
+      INPUT_LEASE_OWNER: ${{ needs.publish_window_gate.outputs.lease_owner }}
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
-      INPUT_RECOVERY_ATTEMPT_COUNT: ${{ inputs.recovery_attempt_count || '' }}
+      INPUT_RECOVERY_ATTEMPT_COUNT: ${{ needs.publish_window_gate.outputs.attempt_count || '' }}
       INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
       INPUT_RECOVERY_DATA_DATE: ${{ inputs.recovery_data_date || '' }}
       INPUT_RECOVERY_STAGE: ${{ inputs.recovery_stage || 'publish' }}
@@ -394,6 +420,12 @@ jobs:
               (.asOf == $targetDate) and
               (.publication.status == "confirmed")
             ' .collection-source/dashboard-snapshot.json >/dev/null
+            if [[ "${INPUT_RESUME_EXISTING_SOURCE:-false}" == "true" ]]; then
+              SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json)"
+              jq -e --arg fingerprint "$SOURCE_FINGERPRINT" '
+                .plan.budgetManifest.publishSource.sourceFingerprint == $fingerprint
+              ' recovery-plan.json >/dev/null
+            fi
           else
             if ! jq -e --arg targetDate "$INPUT_TARGET_DATE" '
               (.asOf | type == "string") and
