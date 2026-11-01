@@ -540,13 +540,18 @@ jobs:
             --slot dashboard \
             --candidate \
             --metrics-output dashboard-canary-metrics.json > dashboard-release-canary.json
+          HISTORY_ARGS=()
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            HISTORY_ARGS=(--publish-history --read-model-manifest read-models-dashboard/manifest.json --readback-output dashboard-published-date.json)
+          fi
           python scripts/activate_read_models.py \
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
             --slot dashboard \
+            "${HISTORY_ARGS[@]}" \
             --metrics-output dashboard-activation-metrics.json > dashboard-read-model-activation.json
           jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
-            '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+            '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "published_historical" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
             dashboard-read-model-activation.json >/dev/null
 
       - name: Check and stage ETF penetration candidate
@@ -583,13 +588,18 @@ jobs:
             --slot etf_penetration \
             --candidate \
             --metrics-output penetration-canary-metrics.json > penetration-release-canary.json
+          HISTORY_ARGS=()
+          if [[ -n "$INPUT_RECOVERY_ID" ]]; then
+            HISTORY_ARGS=(--publish-history --read-model-manifest read-models-penetration/manifest.json --readback-output penetration-published-date.json)
+          fi
           python scripts/activate_read_models.py \
             --release-id "$RELEASE_ID" \
             --as-of "$AS_OF" \
             --slot etf_penetration \
+            "${HISTORY_ARGS[@]}" \
             --metrics-output penetration-activation-metrics.json > penetration-read-model-activation.json
           jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
-            '.releaseId == $releaseId and .asOf == $asOf and .slot == "etf_penetration" and (.status == "activated" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
+            '.releaseId == $releaseId and .asOf == $asOf and .slot == "etf_penetration" and (.status == "activated" or .status == "published_historical" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
             penetration-read-model-activation.json >/dev/null
 
       - name: Record measured recovery resource metrics
@@ -858,9 +868,11 @@ jobs:
             dashboard-publish-metrics.json
             dashboard-canary-metrics.json
             dashboard-activation-metrics.json
+            dashboard-published-date.json
             penetration-publish-metrics.json
             penetration-canary-metrics.json
             penetration-activation-metrics.json
+            penetration-published-date.json
             .recovery/recovery-resource/
             .recovery/recovery-receipts/
             read-models-dashboard/

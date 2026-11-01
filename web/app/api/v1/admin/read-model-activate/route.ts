@@ -26,6 +26,7 @@ type CandidateRow = {
   manifest_sha256: string;
   manifest_json: string;
   status: string;
+  created_at: string;
 };
 
 async function candidateArtifactsAreIntact(
@@ -74,6 +75,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid_activation_request" }, { status: 422 });
   }
   const value = body as Record<string, unknown>;
+  if (value.publishHistory !== undefined && typeof value.publishHistory !== "boolean") {
+    return NextResponse.json({ error: "invalid_history_publication_intent" }, { status: 422 });
+  }
+  const publishHistory = value.publishHistory === true;
   const releaseId = typeof value.releaseId === "string" ? value.releaseId : "";
   const expectedAsOf = typeof value.asOf === "string" ? value.asOf : null;
   const expectedSlot = value.slot === undefined ? null : value.slot;
@@ -87,12 +92,12 @@ export async function POST(request: Request) {
   try {
     const row = await runtime.DB
       .prepare(
-        `SELECT release_id, as_of, manifest_sha256, manifest_json, status
+        `SELECT release_id, as_of, manifest_sha256, manifest_json, status, created_at
            FROM release_manifest
-          WHERE release_id = ? AND status = 'STAGED'
+          WHERE release_id = ? AND (status = 'STAGED' OR (? = 1 AND status IN ('SUPERSEDED','ACTIVE')))
           LIMIT 1`,
       )
-      .bind(releaseId)
+      .bind(releaseId, publishHistory ? 1 : 0)
       .first<CandidateRow>();
     if (!row) return NextResponse.json({ error: "staged_release_not_found" }, { status: 404 });
     if (expectedAsOf && expectedAsOf !== row.as_of) {
@@ -118,6 +123,50 @@ export async function POST(request: Request) {
     }
 
     const activatedAt = new Date().toISOString();
+    type Active = { release_id: string; as_of: string };
+    const readActive = () => runtime.DB!.prepare(
+      "SELECT release_id,as_of FROM active_release WHERE slot=? LIMIT 1",
+    ).bind(parsedSlot).first<Active>();
+    const activeBefore = publishHistory ? await readActive() : null;
+    if (publishHistory && row.status === "ACTIVE" && activeBefore?.release_id === row.release_id
+        && activeBefore.as_of === row.as_of) {
+      return NextResponse.json({ status: "activated", releaseId: row.release_id, asOf: row.as_of,
+        slot: parsedSlot, activeBeforeReleaseId: activeBefore.release_id,
+        activeReleaseId: activeBefore.release_id, activeAsOf: activeBefore.as_of });
+    }
+    if (publishHistory && activeBefore && row.as_of < activeBefore.as_of) {
+      // SUPERSEDED is the existing formally-readable historical state. This
+      // explicit operation never writes active_release or activates v4.
+      // Fence the one-row transition against the current pointer and newer
+      // published revisions of this date. A concurrent change fails closed.
+      const observedAt = parsed.observedAt ?? "";
+      await runtime.DB.prepare(`UPDATE release_manifest SET status='SUPERSEDED'
+        WHERE release_id=? AND as_of=? AND manifest_sha256=? AND status='STAGED'
+          AND EXISTS (SELECT 1 FROM active_release WHERE slot=? AND release_id=? AND as_of>?)
+          AND NOT EXISTS (SELECT 1 FROM release_manifest h
+            WHERE h.as_of=? AND h.status IN ('ACTIVE','SUPERSEDED') AND h.release_id<>?
+              AND (json_extract(h.manifest_json,'$.slot')=? OR (?='dashboard' AND json_extract(h.manifest_json,'$.slot') IS NULL))
+              AND (COALESCE(h.observed_at,json_extract(h.manifest_json,'$.observedAt'),'')>?
+                OR (COALESCE(h.observed_at,json_extract(h.manifest_json,'$.observedAt'),'')=? AND h.created_at>=?)))`)
+        .bind(row.release_id, row.as_of, row.manifest_sha256, parsedSlot, activeBefore.release_id, row.as_of,
+          row.as_of, row.release_id, parsedSlot, parsedSlot, observedAt, observedAt, row.created_at).run();
+      const selected = await runtime.DB.prepare(`SELECT release_id FROM release_manifest
+        WHERE as_of=? AND status IN ('ACTIVE','SUPERSEDED')
+          AND (json_extract(manifest_json,'$.slot')=? OR (?='dashboard' AND json_extract(manifest_json,'$.slot') IS NULL))
+        ORDER BY COALESCE(observed_at,json_extract(manifest_json,'$.observedAt'),'') DESC,created_at DESC LIMIT 1`)
+        .bind(row.as_of, parsedSlot, parsedSlot).first<{ release_id: string }>();
+      const activeAfter = await readActive();
+      if (selected?.release_id !== row.release_id || activeAfter?.release_id !== activeBefore.release_id
+          || activeAfter?.as_of !== activeBefore.as_of) {
+        return NextResponse.json({ error: "historical_publication_conflict" }, { status: 409 });
+      }
+      return NextResponse.json({ status: "published_historical", releaseId: row.release_id, asOf: row.as_of,
+        slot: parsedSlot, historyReadable: true, activeBeforeReleaseId: activeBefore.release_id,
+        activeReleaseId: activeAfter.release_id, activeAsOf: activeAfter.as_of });
+    }
+    if (row.status !== "STAGED") {
+      return NextResponse.json({ error: "historical_publication_requires_older_date" }, { status: 409 });
+    }
     const status = await activateReadModels(
       runtime.DB,
       {
@@ -129,7 +178,10 @@ export async function POST(request: Request) {
       parsed,
       activatedAt,
     );
-    return NextResponse.json({ status, releaseId: row.release_id, asOf: row.as_of, slot: parsed.slot ?? "dashboard" });
+    const activeAfter = publishHistory ? await readActive() : null;
+    return NextResponse.json({ status, releaseId: row.release_id, asOf: row.as_of, slot: parsed.slot ?? "dashboard",
+      ...(publishHistory ? { activeBeforeReleaseId: activeBefore?.release_id ?? null,
+        activeReleaseId: activeAfter?.release_id ?? null, activeAsOf: activeAfter?.as_of ?? null } : {}) });
   } catch (error) {
     console.error("read model candidate activation failed", error);
     return NextResponse.json(

@@ -36,6 +36,14 @@ const migrations = historyInputs ? readdirSync(new URL("../../drizzle/",import.m
 for (const migration of migrations)
   db.exec(readFileSync(new URL(`../../drizzle/${migration}`, import.meta.url), "utf8"));
 if (!historyInputs) db.exec("ALTER TABLE release_manifest ADD observed_at TEXT");
+if (process.env.FLOW_FULL_FIXTURE_EXTRA_RELEASE) {
+  const bytes = readFileSync(process.env.FLOW_FULL_FIXTURE_EXTRA_RELEASE);
+  if (bytes.length > 65_536) throw new Error("extra release seed too large");
+  const { manifest, status } = JSON.parse(bytes);
+  if (!["STAGED", "SUPERSEDED"].includes(status)) throw new Error("extra release seed status invalid");
+  db.prepare("INSERT INTO release_manifest (release_id,as_of,schema_version,manifest_sha256,manifest_json,status,created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(manifest.releaseId,manifest.asOf,manifest.schemaVersion,manifest.manifestSha256,JSON.stringify(manifest),status,NOW);
+}
 if (process.env.FLOW_FULL_FIXTURE_ACTIVE_MANIFEST) {
   if (!historyInputs) throw new Error("active seed requires isolated history fixture");
   const data = readFileSync(process.env.FLOW_FULL_FIXTURE_ACTIVE_MANIFEST);
@@ -67,6 +75,7 @@ const state = createSharedBudgetState({ epochDay: "2026-10-03", epochMonth: "202
 if (!preparation) db.prepare("INSERT INTO pipeline_budget_account VALUES (?,0,?,?)").run(BUDGET_SCOPE, JSON.stringify(state), NOW);
 const counters = { http: {}, sql: 0, r2Put: 0, r2Get: 0, r2Head: 0, bytesStored: 0 };
 const queryPlans = new Map();
+let historyPointerRaceInjected = false;
 const adapter = { withSession() { return this; }, async batch(statements) {
   if (!Array.isArray(statements) || statements.length > 8) throw new Error("fixture batch limit");
   db.exec("BEGIN IMMEDIATE");
@@ -75,7 +84,10 @@ const adapter = { withSession() { return this; }, async batch(statements) {
     db.exec("COMMIT");
     return result;
   } catch (error) { db.exec("ROLLBACK"); throw error; }
-}, prepare(sql) { return { bind(...args) {
+}, prepare(sql) { return {
+  first() { return this.bind().first(); },
+  all() { return this.bind().all(); },
+  bind(...args) {
   if (process.env.FLOW_FULL_FIXTURE_QUERY_PLANS === "1" && !queryPlans.has(sql)) {
     if (queryPlans.size >= 128) throw new Error("fixture query-plan envelope exceeded");
     queryPlans.set(sql, db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => row.detail));
@@ -84,6 +96,18 @@ const adapter = { withSession() { return this; }, async batch(statements) {
     async first() { counters.sql++; return db.prepare(sql).get(...args) ?? null; },
     runSync() {
       counters.sql++;
+      if (process.env.FLOW_FULL_FIXTURE_HISTORY_POINTER_RACE === "1" && !historyPointerRaceInjected
+          && sql.startsWith("UPDATE release_manifest SET status='SUPERSEDED'")) {
+        // Simulate a distinct publisher winning between the route's read and
+        // conditional history write. Never fabricate that write's result.
+        historyPointerRaceInjected = true;
+        const next = db.prepare("SELECT release_id,as_of,manifest_sha256 FROM release_manifest WHERE status='SUPERSEDED' ORDER BY as_of DESC LIMIT 1").get();
+        if (!next) throw new Error("history race seed missing");
+        db.prepare("UPDATE release_manifest SET status='SUPERSEDED' WHERE status='ACTIVE'").run();
+        db.prepare("UPDATE release_manifest SET status='ACTIVE' WHERE release_id=?").run(next.release_id);
+        db.prepare("UPDATE active_release SET release_id=?,as_of=?,manifest_sha256=? WHERE slot='dashboard'")
+          .run(next.release_id,next.as_of,next.manifest_sha256);
+      }
       const info = db.prepare(sql).run(...args);
       // Claim/renew require transport metadata. Emulate it using real SQLite
       // logical changes, NOT Cloudflare physical rows/index writes. Budget
@@ -189,6 +213,7 @@ const server = createServer(async (req, res) => {
       ? Response.json({ ...counters, queryPlans: [...queryPlans.values()], active: db.prepare("SELECT count(*) AS n FROM active_release").get().n,
           activeIdentity: db.prepare("SELECT release_id,as_of,manifest_sha256 FROM active_release WHERE slot='dashboard'").get() ?? null,
           releases: db.prepare("SELECT status FROM release_manifest LIMIT 10").all(),
+          sqlChanges: db.prepare("SELECT total_changes() AS n").get().n,
           budgetReservations: JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1").get(BUDGET_SCOPE)?.state_json ?? '{"reservations":{}}').reservations })
       : path.endsWith("/budget")
         ? await sharedBudgetRequest(request, env, () => new Date(NOW), caps)
