@@ -21,6 +21,33 @@ import {
   verifyArchiveProjectionRebind,
 } from "../app/lib/pipeline-recovery-plan.ts";
 
+test("archive rebind accepts NAV and market-margin range projections without admitting other identities", async () => {
+  const hash = "a".repeat(64);
+  const make = key => ({ runKey: "daily-market-data:2026-10-29:evening:v1", dataDates: ["2026-10-29"], maxDates: 1, maxRequests: 203, requiredStages: ["dashboard", "publish"], budgetManifest: { archivePhase0Source: { contract: "flow-phase0-archive-source-v1", calendar: { dates: ["2026-10-29"] }, files: [{ path: "data.csv", objectKey: key, sha256: "b".repeat(64), bytes: 100 }] } } });
+  for (const [source, dataset, partition] of [
+    ["sse", "etf_nav", "2026-10-29"],
+    ["szse", "etf_nav", "2026-10-29"],
+    ["sse", "margin_market_daily", "2026-10-27_2026-10-29"],
+  ]) {
+    const previous = make(`market-data/normalized/${source}/${dataset}/${partition}/${hash}/data.csv`);
+    const next = structuredClone(previous);
+    next.budgetManifest.archivePhase0Source.files[0].sha256 = "c".repeat(64);
+    assert.notEqual((await verifyArchiveProjectionRebind(previous, next)).previousSourceFingerprint,
+      (await verifyArchiveProjectionRebind(previous, next)).nextSourceFingerprint);
+  }
+  for (const [source, dataset, partition] of [
+    ["sse", "etf_scale", "2026-10-29"],
+    ["sse", "pcf", "2026-10-29"],
+    ["sse", "etf_nav", "2026-10-27_2026-10-29"],
+    ["sse", "margin_security_daily", "2026-10-27_2026-10-29"],
+  ]) {
+    const previous = make(`market-data/normalized/${source}/${dataset}/${partition}/${hash}/data.csv`);
+    const next = structuredClone(previous);
+    next.budgetManifest.archivePhase0Source.files[0].sha256 = "c".repeat(64);
+    await assert.rejects(verifyArchiveProjectionRebind(previous, next), /archive_rebind_immutable_fact_changed/);
+  }
+});
+
 test("archive rebind preserves facts, calendar and scope, changing only a legacy projection", async () => {
   const raw = { path: "raw.csv", objectKey: "market-data/raw/sse/margin_security_daily/2026-09-03/" + "a".repeat(64) + ".csv", sha256: "a".repeat(64), bytes: 10 };
   const projection = { path: "normalized.csv", objectKey: "market-data/normalized/sse/margin_security_daily/2026-09-03/" + "a".repeat(64) + "/data.csv", sha256: "b".repeat(64), bytes: 20 };
@@ -917,7 +944,11 @@ test("HTTP registration derives archive proof and never trusts a client fingerpr
     base.requiredStages = ["dashboard", "publish"];
     base.budgetManifest.archivePhase0Source = {
       contract: "flow-phase0-archive-source-v1", calendar: { dates: ["2026-09-03"] },
-      files: [{ path: "normalized.csv", objectKey: `market-data/normalized/sse/margin_security_daily/2026-09-03/${"a".repeat(64)}/data.csv`, sha256: "b".repeat(64), bytes: 20 }],
+      files: [
+        { path: "normalized.csv", objectKey: `market-data/normalized/sse/margin_security_daily/2026-09-03/${"a".repeat(64)}/data.csv`, sha256: "b".repeat(64), bytes: 20 },
+        { path: "nav.csv", objectKey: `market-data/normalized/sse/etf_nav/2026-09-03/${"a".repeat(64)}/data.csv`, sha256: "b".repeat(64), bytes: 20 },
+        { path: "market.csv", objectKey: `market-data/normalized/sse/margin_market_daily/2026-09-01_2026-09-03/${"a".repeat(64)}/data.csv`, sha256: "b".repeat(64), bytes: 20 },
+      ],
     };
     const oldPlan = await encode(base);
     const oldInput = registrationInput(setup.runKey, setup.row, base.recoveryId, { ...oldPlan, planKey: undefined });
@@ -931,7 +962,7 @@ test("HTTP registration derives archive proof and never trusts a client fingerpr
     nextBase.recoveryId = "recovery-http-rebind";
     nextBase.artifactRoot = `.recovery/${nextBase.recoveryId}`;
     nextBase.stateDir = `${nextBase.artifactRoot}/state`;
-    nextBase.budgetManifest.archivePhase0Source.files[0].sha256 = "c".repeat(64);
+    for (const file of nextBase.budgetManifest.archivePhase0Source.files) file.sha256 = "c".repeat(64);
     const next = registrationInput(setup.runKey, row, nextBase.recoveryId, {
       ...await encode(nextBase), planKey: undefined, supersedesRecoveryId: base.recoveryId,
       reasonCode: "archive_projection_rebound", approvalReference: "new-explicit-approval",

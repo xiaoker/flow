@@ -4,7 +4,7 @@ import { PipelineWindowError } from "./pipeline-window-recovery.ts";
 export const MAX_RECOVERY_PLAN_BYTES = 300_000;
 
 /** Compare verified immutable plans, not caller-supplied fingerprints.
- * Only legacy mutable non-ETF projections may be rebound; raw facts and
+ * Only legacy mutable non-share projections may be rebound; raw facts and
  * official calendar evidence remain byte-identical. Execution QA is unchanged.
  */
 export async function verifyArchiveProjectionRebind(
@@ -46,7 +46,11 @@ export async function verifyArchiveProjectionRebind(
     const old = oldFiles[index], current = newFiles[index];
     if (old.objectKey !== current.objectKey || old.path !== current.path) reject("identity_changed");
     if (canonicalJson(old) === canonicalJson(current)) continue;
-    if (!/^market-data\/normalized\/(?:sse|szse|bse|hkex)\/(?:margin_market_daily|margin_security_daily|stock_connect_daily)\/\d{4}-\d{2}-\d{2}\/[0-9a-f]{64}\/(?:data|summary|top)\.csv(?:\.gz)?$/.test(String(old.objectKey))) reject("immutable_fact_changed");
+    // NAV carries observation metadata too. Market-level margin responses
+    // may cover a requested date range; do not allow ranges for other feeds.
+    // This only permits an explicitly approved new plan. Actual archive hash,
+    // raw-to-normalized business/date QA and immutable ETF shares stay intact.
+    if (!/^market-data\/normalized\/(?:sse|szse|bse|hkex)\/(?:(?:etf_nav|margin_security_daily|stock_connect_daily)\/\d{4}-\d{2}-\d{2}|margin_market_daily\/\d{4}-\d{2}-\d{2}(?:_\d{4}-\d{2}-\d{2})?)\/[0-9a-f]{64}\/(?:data|summary|top)\.csv(?:\.gz)?$/.test(String(old.objectKey))) reject("immutable_fact_changed");
     const { sha256: oldHash, bytes: oldBytes, ...oldIdentity } = old;
     const { sha256: newHash, bytes: newBytes, ...newIdentity } = current;
     if (canonicalJson(oldIdentity) !== canonicalJson(newIdentity) || oldHash === newHash ||
