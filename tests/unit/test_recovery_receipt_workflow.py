@@ -154,6 +154,57 @@ def test_receipt_still_rejects_semantic_plan_tampering(tmp_path: Path, monkeypat
     assert not (tmp_path / ".recovery/receipts").exists()
 
 
+def test_actual_receipt_upload_shell_uses_real_worker_put_contract(tmp_path: Path, monkeypatch):
+    import requests
+
+    plan = _plan()
+    _write(tmp_path / "recovery-execution.json", plan)
+    arguments = _receipt_inputs(tmp_path, plan)
+    arguments[-1] = str(tmp_path / ".recovery/recovery-receipts")
+    monkeypatch.setattr(sys, "argv", arguments)
+    receipts.main()
+    env = {**os.environ, "FLOW_FULL_FIXTURE_PLAN": json.dumps(plan),
+        "FLOW_FULL_FIXTURE_RUN_KEY": plan["runKey"], "FLOW_FULL_FIXTURE_TARGET": "2026-10-16",
+        "FLOW_FULL_FIXTURE_OWNER": "fixture-owner", "FLOW_FULL_FIXTURE_GENERATION": "4",
+        "FLOW_FULL_FIXTURE_REQUEST_LIMIT": "12"}
+    process = subprocess.Popen(["node", "--experimental-strip-types",
+        str(ROOT / "web/tests/fixtures/full-pipeline-server.mjs")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    try:
+        port = process.stdout.readline().strip()
+        assert port.isdigit(), "built Worker fixture failed to start"
+        origin = f"http://127.0.0.1:{port}"
+        text = (ROOT / ".github/workflows/market-data-publish.yml").read_text()
+        step = text.split("      - name: Upload immutable recovery receipts\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        env.update(FLOW_PIPELINE_WINDOW_URL=origin + "/api/v1/admin/pipeline-window",
+            INPUT_RECOVERY_ID=plan["recoveryId"], FLOW_INGEST_API_KEY="fixture-only",
+            FLOW_CF_ACCESS_CLIENT_ID="fixture-id", FLOW_CF_ACCESS_CLIENT_SECRET="fixture-secret")
+        for repeated in (False, True):
+            result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env,
+                                    capture_output=True, text=True, timeout=15)
+            assert result.returncode == 0, result.stderr + result.stdout
+            for stage in ("dashboard", "publish"):
+                directory = tmp_path / ".recovery/recovery-receipts"
+                reply = json.loads((directory / f"upload-{stage}.json").read_text())
+                meta = json.loads((directory / f"{stage}.meta.json").read_text())
+                assert reply["status"] == "stored" and reply["idempotent"] is repeated
+                assert reply["key"] == meta["key"] and reply["sha256"] == meta["sha256"]
+        env["FLOW_INGEST_API_KEY"] = "wrong-fixture-key"
+        denied = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env,
+                                capture_output=True, text=True, timeout=15)
+        assert denied.returncode != 0
+        assert "wrong-fixture-key" not in denied.stderr
+        stats = requests.get(origin + "/fixture/stats", headers={"Authorization": "Bearer fixture-only"}, timeout=5).json()
+        assert stats["http"]["/api/v1/admin/pipeline-window/recovery/receipt"] == 4
+    finally:
+        process.terminate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.communicate(timeout=5)
+
+
 @pytest.mark.parametrize("fault", ["staged", "missing", "date", "release", "hash", "active"])
 def test_completion_requires_normal_date_readback(tmp_path: Path, monkeypatch, fault):
     plan = _plan()

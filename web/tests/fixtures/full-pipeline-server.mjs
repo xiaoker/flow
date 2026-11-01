@@ -179,7 +179,7 @@ const server = createServer(async (req, res) => {
   if (++count > requestLimit) { res.writeHead(429); res.end(); return; }
   try {
     const request = new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers,
-      ...(req.method === "POST" ? { body: Readable.toWeb(req), duplex: "half" } : {}) });
+      ...(["POST", "PUT"].includes(req.method) ? { body: Readable.toWeb(req), duplex: "half" } : {}) });
     const path = new URL(request.url).pathname;
     const accessAuthenticated = request.headers.get("cf-access-client-id") === "fixture-id"
       && request.headers.get("cf-access-client-secret") === "fixture-secret";

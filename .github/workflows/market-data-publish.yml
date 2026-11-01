@@ -708,6 +708,7 @@ jobs:
             fi
             RESPONSE=".recovery/recovery-receipts/upload-${STAGE}.json"
             CODE="$(curl --silent --show-error \
+              --request PUT \
               --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
               --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
               --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
@@ -719,6 +720,7 @@ jobs:
               --write-out '%{http_code}' \
               "$FLOW_PIPELINE_WINDOW_URL/recovery/receipt?recoveryId=$ENCODED_RECOVERY_ID")"
             if [[ "$CODE" != "200" && "$CODE" != "201" ]]; then
+              echo "Recovery receipt upload failed: stage=$STAGE http=$CODE" >&2
               jq '{error,status,key,sha256,idempotent}' "$RESPONSE" >&2 || true
               exit 1
             fi
