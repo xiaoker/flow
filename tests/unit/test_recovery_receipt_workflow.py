@@ -93,9 +93,15 @@ def _receipt_inputs(tmp_path: Path, plan: dict) -> list[str]:
         "contextDates": ["2026-10-15", "2026-10-16"],
         "historyArchive": {"snapshotKey": "market-data/snapshots/2026-10-16/fixture.json", "snapshotSha256": "d" * 64}})
     _write(tmp_path / "read-models-dashboard/manifest.json", {
-        "asOf": "2026-10-16", "releaseId": "release:2026-10-16:fixture", "manifestSha256": "e" * 64})
+        "asOf": "2026-10-16", "releaseId": "release:2026-10-16:fixture", "manifestSha256": "e" * 64,
+        "schemaVersion": 3, "calculationVersion": "fixture-daily-changes", "classificationVersion": "2026-07-v3",
+        "artifacts": {"bootstrap": {"sha256": "a" * 64, "bytes": 2}}})
     _write(source / "previous-release.json", {"releaseId": "release:2026-10-29:current"})
-    _write(tmp_path / "activation.json", {"status": "staged_stale_revision", "releaseId": "release:2026-10-16:fixture"})
+    _write(tmp_path / "activation.json", {"status": "published_historical", "releaseId": "release:2026-10-16:fixture",
+        "activeReleaseId": "release:2026-10-29:current", "slot": "dashboard"})
+    _write(tmp_path / "dashboard-published-date.json", {"status": "PASS", "mode": "published_date",
+        "releaseId": "release:2026-10-16:fixture", "asOf": "2026-10-16", "slot": "dashboard",
+        "activeReleaseId": "release:2026-10-29:current", "artifactHashes": {"bootstrap": "a" * 64}})
     _write(tmp_path / "metrics.json", {"measurementStatus": "MEASURED", "d1RowsRead": 7,
         "d1RowsWritten": 6, "workerRequests": 96, "r2ClassA": 8, "r2ClassB": 7,
         "r2Bytes": 1000, "actionsMinutes": 1, "measuredAt": "2026-10-30T16:28:57Z"})
@@ -144,5 +150,25 @@ def test_receipt_still_rejects_semantic_plan_tampering(tmp_path: Path, monkeypat
     _write(tmp_path / "recovery-execution.json", altered)
     monkeypatch.setattr(sys, "argv", _receipt_inputs(tmp_path, plan))
     with pytest.raises(RecoveryContractError, match="plan_hash_mismatch"):
+        receipts.main()
+    assert not (tmp_path / ".recovery/receipts").exists()
+
+
+@pytest.mark.parametrize("fault", ["staged", "missing", "date", "release", "hash", "active"])
+def test_completion_requires_normal_date_readback(tmp_path: Path, monkeypatch, fault):
+    plan = _plan()
+    _write(tmp_path / "recovery-execution.json", plan)
+    monkeypatch.setattr(sys, "argv", _receipt_inputs(tmp_path, plan))
+    path = tmp_path / "dashboard-published-date.json"
+    value = json.loads(path.read_text())
+    if fault == "staged":
+        _write(tmp_path / "activation.json", {"status": "staged_stale_revision", "releaseId": "release:2026-10-16:fixture"})
+    elif fault == "missing": path.unlink()
+    elif fault == "date": value["asOf"] = "2026-10-15"
+    elif fault == "release": value["releaseId"] = "release:2026-10-16:other"
+    elif fault == "hash": value["artifactHashes"]["bootstrap"] = "0" * 64
+    elif fault == "active": value["activeReleaseId"] = "release:2026-10-28:old"
+    if fault not in {"missing", "staged"}: _write(path, value)
+    with pytest.raises(ValueError, match="recovery_publication_not_readable|recovery_published_date_"):
         receipts.main()
     assert not (tmp_path / ".recovery/receipts").exists()

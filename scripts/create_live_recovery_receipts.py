@@ -45,7 +45,7 @@ def _active_release(path: Path | None) -> str | None:
     # the active-after pointer; use an explicit activeReleaseId/active object
     # when the endpoint supplies one, otherwise let the caller fall back to
     # the verified active-before pointer.
-    if status in {"staged_older_than_active", "staged_stale_revision"}:
+    if status in {"staged_older_than_active", "staged_stale_revision", "published_historical"}:
         for key in ("activeReleaseId", "active_release_id"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate:
@@ -111,6 +111,9 @@ def _evidence_keys(source_dir: Path, evidence_dir: Path, stage: str) -> list[str
     result = [key for key in names if key.rsplit("/", 1)[-1] in available]
     if "recovery-resource-metrics.json" in available:
         result.append("recovery-live/recovery-resource-metrics.json")
+    for name in ("dashboard-published-date.json", "penetration-published-date.json"):
+        if name in available:
+            result.append("recovery-live/" + name)
     return sorted(set(result))
 
 
@@ -225,6 +228,35 @@ def main() -> None:
     target = scope.data_dates[0]
     active_before = _active_release(args.active_before)
     active_after = _active_release(args.active_after) or active_before
+    activation = _read(args.active_after) if args.active_after and args.active_after.is_file() else {}
+    # Check every required slot before emitting any COMPLETED bytes. A local
+    # candidate canary is not proof of normal historical date visibility.
+    manifests = {}
+    for stage in scope.required_stages:
+        manifest_path, slot = _manifest_for_stage(args.models_dir, stage)
+        manifest = _read(manifest_path)
+        prefix = "penetration" if slot == "etf_penetration" else "dashboard"
+        slot_activation_path = args.evidence_dir / f"{prefix}-read-model-activation.json"
+        slot_activation = _read(slot_activation_path) if slot_activation_path.is_file() else activation
+        if slot_activation.get("status") not in {"activated", "published_historical"} or slot_activation.get("slot", "dashboard") != slot:
+            raise ValueError("recovery_publication_not_readable")
+        before = slot_activation.get("activeBeforeReleaseId", active_before)
+        after = _active_release(slot_activation_path if slot_activation_path.is_file() else args.active_after) or before
+        proof_path = args.evidence_dir / f"{prefix}-published-date.json"
+        if not proof_path.is_file():
+            raise ValueError("recovery_published_date_readback_missing")
+        proof = _read(proof_path)
+        expected_hashes = {name: item["sha256"] for name, item in manifest.get("artifacts", {}).items()}
+        if (proof.get("status"), proof.get("mode"), proof.get("releaseId"), proof.get("asOf"), proof.get("slot")) != (
+                "PASS", "published_date", manifest.get("releaseId"), target, slot):
+            raise ValueError("recovery_published_date_identity_mismatch")
+        if not expected_hashes or proof.get("artifactHashes") != expected_hashes:
+            raise ValueError("recovery_published_date_hash_mismatch")
+        if not isinstance(proof.get("activeReleaseId"), str) or proof["activeReleaseId"] != after:
+            raise ValueError("recovery_published_date_active_mismatch")
+        if type(manifest.get("schemaVersion")) is not int or not isinstance(manifest.get("calculationVersion"), str) or not manifest["calculationVersion"] or not isinstance(manifest.get("classificationVersion"), str):
+            raise ValueError("recovery_manifest_versions_missing")
+        manifests[stage] = (manifest_path, manifest, slot, before, after)
     output_dir = args.output_dir.resolve()
     assert_recovery_output_path(str(output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -238,8 +270,7 @@ def main() -> None:
     for stage in scope.required_stages:
         if stage == "pcf_exact":
             raise ValueError("live_recovery_pcf_exact_not_supported_by_bounded_runner")
-        manifest_path, slot = _manifest_for_stage(args.models_dir, stage)
-        manifest = _read(manifest_path)
+        manifest_path, manifest, slot, active_before, active_after = manifests[stage]
         as_of = manifest.get("asOf")
         release_id = manifest.get("releaseId")
         manifest_sha = manifest.get("manifestSha256") or _sha256(manifest_path)
@@ -261,9 +292,11 @@ def main() -> None:
             "status": "COMPLETED",
             "inputObjects": source_objects,
             "versions": {
-                "schema": "read-model-v3",
-                "calculation": "etf-stock-pressure-v2",
-                "classification": "etf-classification-v2",
+                "schema": f"read-model-v{manifest['schemaVersion']}",
+                # Calculation labels can be non-ASCII prose. Bind their exact
+                # value by digest within the existing identifier-only contract.
+                "calculation": "sha256-" + hashlib.sha256(manifest["calculationVersion"].encode()).hexdigest(),
+                "classification": manifest["classificationVersion"],
             },
             "producerBuildSha": args.producer_build_sha,
             "collectorRunId": collector_run_id,
