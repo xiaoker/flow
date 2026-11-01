@@ -42,6 +42,17 @@ def api(plan, state, artifact, *, failure=""):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             calls.append(("GET", self.path))
+            if self.headers.get("User-Agent") != "flow-publish-resume/1.0" or failure == "edge":
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"error code: 1010\n")
+                return
+            if failure in {"private_body", "redirect"}:
+                self.send_response(302 if failure == "redirect" else 401)
+                self.send_header("Location", "/secret-redirect-must-not-follow")
+                self.end_headers()
+                self.wfile.write(b"fixture-secret response body must not be logged")
+                return
             if "/actions/artifacts/" in self.path:
                 assert self.headers["Authorization"] == "Bearer fixture-github"
                 payload = artifact
@@ -54,12 +65,18 @@ def api(plan, state, artifact, *, failure=""):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(("POST", self.path, body))
+            assert self.headers.get("User-Agent") == "flow-publish-resume/1.0"
             assert body["leaseOwner"] == "github-publish:987:1"
             assert body["recoveryId"] == "resume-16"
             if self.path == "/recovery/claim":
                 assert body["sourceFingerprint"] == "c" * 64
                 if failure == "lost_claim":
                     self.connection.shutdown(2)
+                    return
+                if failure == "http_claim":
+                    self.send_response(503)
+                    self.end_headers()
+                    self.wfile.write(b"fixture-secret partial write details")
                     return
                 result = dict(decision="skip_leased" if failure == "race" else "acquired",
                     recoveryId="resume-16", runKey=plan["runKey"], leaseOwner=body["leaseOwner"],
@@ -189,3 +206,19 @@ def test_actual_source_identity_shell_keeps_normal_compatibility(tmp_path, mode,
              "INPUT_RECOVERY_ID": "resume-16", "INPUT_RECOVERY_DATA_DATE": "2026-10-16",
              "INPUT_RESUME_EXISTING_SOURCE": mode})
     assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("edge", "publish_resume_http_read_status_403_edge_1010"),
+    ("private_body", "publish_resume_http_read_status_401"),
+    ("redirect", "publish_resume_redirect_refused"),
+    ("http_claim", "publish_resume_http_claim_503_write_outcome_unknown"),
+])
+def test_safe_stage_diagnostics_keep_auth_redirect_and_unknown_guards(tmp_path, failure, code):
+    result, calls, output = execute(tmp_path, *values(), failure=failure)
+    assert result.returncode != 0 and not output
+    assert code in result.stderr
+    assert "fixture-secret" not in result.stderr and "secret-redirect" not in result.stderr
+    assert not any(call[1] == "/recovery/status" for call in calls)
+    assert sum(call[1] == "/recovery/claim" for call in calls) == (1 if failure == "http_claim" else 0)
+    assert len(calls) == (4 if failure == "http_claim" else 1)

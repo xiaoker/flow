@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,11 +31,23 @@ def required(name):
     return value
 
 
-def request_json(url, headers, body=None):
+def request_json(url, headers, body=None, *, stage="request"):
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=12) as response:
-        raw = response.read(350_001)
+    # Identify the real application, not a browser or another client. Default
+    # Python-urllib is rejected by the production edge before service auth.
+    request = urllib.request.Request(url, data=data, headers={
+        "Accept": "application/json", **headers, "User-Agent": "flow-publish-resume/1.0"})
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=12) as response:
+            raw = response.read(350_001)
+    except urllib.error.HTTPError as error:
+        # Only a numeric Cloudflare error is safe to report. Never emit URLs,
+        # response headers/bodies, credentials, cookies or arbitrary API text.
+        body = error.read(256).decode("utf-8", errors="replace")
+        match = re.fullmatch(r"error code: ([0-9]{3,5})\s*", body)
+        edge = "_edge_" + match[1] if match else ""
+        outcome = "_write_outcome_unknown" if data is not None else ""
+        raise ValueError(f"publish_resume_http_{stage}_{error.code}{edge}{outcome}") from None
     if len(raw) > 350_000:
         raise ValueError("publish_resume_response_limit")
     value = json.loads(raw)
@@ -61,14 +74,14 @@ def resume():
                "CF-Access-Client-Secret": required("FLOW_CF_ACCESS_CLIENT_SECRET"),
                "Content-Type": "application/json"}
     suffix = "?recoveryId=" + quote(recovery_id, safe="")
-    state = request_json(base + "/recovery" + suffix, headers)
+    state = request_json(base + "/recovery" + suffix, headers, stage="read_status")
     if state.get("recoveryId") != recovery_id or state.get("runKey") != run_key:
         raise ValueError("publish_resume_state_identity")
     if state.get("status") == "COMPLETED":
         return {"should_run": "false"}
     if state.get("status") not in {"AUTHORIZED", "ACTIVE", "PAUSED"} or not future(state.get("expiresAt")):
         raise ValueError("publish_resume_approval_unavailable")
-    envelope = request_json(base + "/recovery/plan" + suffix, headers)
+    envelope = request_json(base + "/recovery/plan" + suffix, headers, stage="read_plan")
     plan = envelope.get("plan", {})
     expected = required("INPUT_RECOVERY_PLAN_SHA256")
     validate_recovery_plan(plan, expected_plan_hash=expected)
@@ -101,7 +114,7 @@ def resume():
         raise ValueError("publish_resume_repository")
     artifact = request_json(required("GITHUB_API_URL").rstrip("/") +
         f"/repos/{repository}/actions/artifacts/{source['artifactId']}",
-        {"Authorization": "Bearer " + required("GH_TOKEN"), "Accept": "application/vnd.github+json"})
+        {"Authorization": "Bearer " + required("GH_TOKEN"), "Accept": "application/vnd.github+json"}, stage="artifact_metadata")
     workflow = artifact.get("workflow_run", {})
     if (artifact.get("id") != source["artifactId"] or artifact.get("name") != source["artifactName"]
             or artifact.get("size_in_bytes") != source["artifactBytes"] or artifact.get("expired") is not False
@@ -112,7 +125,7 @@ def resume():
     owner = "github-publish:" + required("GITHUB_RUN_ID") + ":" + required("GITHUB_RUN_ATTEMPT")
     claim = request_json(base + "/recovery/claim", headers, {
         "recoveryId": recovery_id, "runKey": run_key, "leaseOwner": owner,
-        "sourceFingerprint": source["sourceFingerprint"], "githubRunId": required("GITHUB_RUN_ID")})
+        "sourceFingerprint": source["sourceFingerprint"], "githubRunId": required("GITHUB_RUN_ID")}, stage="claim")
     if claim.get("decision") in {"already_satisfied", "skip_leased", "skip_blocked"}:
         return {"should_run": "false"}
     attempt = source["expectedAttemptCount"] + 1
@@ -124,7 +137,7 @@ def resume():
     running = request_json(base + "/recovery/status", headers, {
         "recoveryId": recovery_id, "runKey": run_key, "leaseOwner": owner,
         "expectedAttemptCount": attempt, "githubRunId": required("GITHUB_RUN_ID"),
-        "status": "RUNNING", "renewLease": True})
+        "status": "RUNNING", "renewLease": True}, stage="mark_running")
     if (running.get("recoveryId") != recovery_id or running.get("runKey") != run_key
             or running.get("status") != "RUNNING" or running.get("attemptCount") != attempt
             or running.get("leaseOwner") != owner or not future(running.get("leaseExpiresAt"))):
