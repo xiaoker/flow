@@ -3,6 +3,11 @@ name: ETF stock-flow history inventory
 on:
   workflow_dispatch:
     inputs:
+      exact_slots_json:
+        description: 'Optional 1–6 exact [{"date":"YYYY-MM-DD","source":"sse|szse"}] share slots; skips D1 and PCF'
+        required: false
+        default: ''
+        type: string
       start_date:
         description: "First market-history date to probe"
         required: true
@@ -46,10 +51,12 @@ jobs:
         run: python -m pip install -e '.[dev]'
 
       - name: Install Wrangler
+        if: ${{ inputs.exact_slots_json == '' }}
         run: npm ci
         working-directory: web
 
       - name: Resolve official market-history dates
+        if: ${{ inputs.exact_slots_json == '' }}
         env:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
@@ -66,7 +73,17 @@ jobs:
             --end "$END_DATE"
 
       - name: Probe archived normalized metadata only
+        env:
+          EXACT_SLOTS_JSON: ${{ inputs.exact_slots_json }}
         run: |
+          if [ -n "$EXACT_SLOTS_JSON" ]; then
+            python scripts/inventory_stock_flow_inputs.py \
+              --base-url "$FLOW_PUBLIC_URL" \
+              --slots-json "$EXACT_SLOTS_JSON" \
+              --output reports/stock-flow-inventory/pcf-inventory.json \
+              --attempts 1
+            exit 0
+          fi
           python scripts/inventory_stock_flow_inputs.py \
             --base-url "$FLOW_PUBLIC_URL" \
             --dates reports/stock-flow-inventory/dates.txt \
