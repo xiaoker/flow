@@ -12,9 +12,16 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import requests
+
 
 class BoundedHTTPError(ValueError):
-    pass
+    def __init__(self, code: str, *, cause: str = "unknown", phase: str = "unknown"):
+        # Preserve existing error strings/consumer behavior. Never expose
+        # arbitrary exception messages, headers, response bodies or URLs.
+        super().__init__(code)
+        self.safe_cause = cause if cause in {"timeout", "connection", "tls", "other"} else "unknown"
+        self.safe_phase = phase if phase in {"request", "stream", "close"} else "unknown"
 
 
 @dataclass(frozen=True)
@@ -49,10 +56,12 @@ class BoundedHTTPExchange:
 
             def perform():
                 response = None
+                phase = "request"
                 started = self._clock()
                 try:
                     response = self._session.request(method, url, **kwargs,
                         timeout=(5, 10), stream=True, allow_redirects=False)
+                    phase = "stream"
                     content = bytearray()
                     for count, chunk in enumerate(response.iter_content(chunk_size=chunk_size)):
                         if (count >= max_chunks or not isinstance(chunk, (bytes, bytearray))
@@ -66,14 +75,22 @@ class BoundedHTTPExchange:
                                                   getattr(response, "headers", {}).copy())
                 except BoundedHTTPError as exc:
                     exchange["error"] = str(exc)
-                except Exception:
+                    exchange["phase"] = phase
+                except Exception as exc:
                     exchange["error"] = "request_unavailable"
+                    exchange["phase"] = phase
+                    exchange["cause"] = ("timeout" if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)) else
+                        "tls" if isinstance(exc, requests.exceptions.SSLError) else
+                        "connection" if isinstance(exc, (requests.exceptions.ConnectionError, ConnectionError)) else "other")
                 finally:
                     if response is not None:
                         try:
                             response.close()
                         except Exception:
-                            exchange["error"] = "request_unavailable"
+                            # A close error must not hide a prior size/integrity
+                            # failure and turn it into a retryable transport error.
+                            if "error" not in exchange:
+                                exchange.update(error="request_unavailable", phase="close", cause="other")
 
             self.inflight = threading.Thread(target=perform, daemon=True)
             self.inflight.start()
@@ -81,5 +98,6 @@ class BoundedHTTPExchange:
             if self.inflight.is_alive():
                 raise BoundedHTTPError("response_deadline")
             if "error" in exchange:
-                raise BoundedHTTPError(exchange["error"])
+                raise BoundedHTTPError(exchange["error"], cause=exchange.get("cause", "unknown"),
+                                       phase=exchange.get("phase", "unknown"))
             return exchange["reply"]

@@ -64,9 +64,23 @@ def _read_verified_archive_object(exchange: Any, base_url: str,
                                   auth: dict[str, str], ref: dict[str, Any]) -> bytes:
     """Preserve exact hash fences and report only bounded, non-secret identity."""
     from trading_desk.phase0_archive import MAX_OBJECT_BYTES
-    reply = exchange.request("GET", base_url.rstrip("/") + "/api/v1/admin/history-artifact",
-        max_bytes=MAX_OBJECT_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
-        headers=auth, params={"archive_key": ref["objectKey"], "archive_sha256": ref["sha256"]})
+    from trading_desk.bounded_http import BoundedHTTPError
+    try:
+        reply = exchange.request("GET", base_url.rstrip("/") + "/api/v1/admin/history-artifact",
+            max_bytes=MAX_OBJECT_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+            headers=auth, params={"archive_key": ref["objectKey"], "archive_sha256": ref["sha256"]})
+    except BoundedHTTPError as exc:
+        code = str(exc)
+        retryable = code in {"request_unavailable", "response_deadline", "request_still_unconfirmed"}
+        detail = {"transportCode": code if code in {"request_unavailable", "response_deadline",
+            "request_still_unconfirmed", "response_limit", "invalid_response_bounds"} else "bounded_http_error",
+            "phase": exc.safe_phase, "cause": exc.safe_cause,
+            "objectKey": ref["objectKey"], "expectedSha256": ref["sha256"]}
+        # Read-only failure is not proof of bad source data. Still stop this
+        # invocation, preserve its request cost and never silently retry.
+        raise LiveRecoveryError("live_recovery_archive_read_unavailable" if retryable
+            else "live_recovery_archive_read_invalid", json.dumps(detail, separators=(",", ":")),
+            status="FAILED_RETRYABLE" if retryable else "BLOCKED_QUALITY") from None
     if (reply.status != 200 or reply.headers.get("x-flow-archive-key") != ref["objectKey"]
             or reply.headers.get("x-flow-archive-sha256") != ref["sha256"]):
         error = None
@@ -88,9 +102,14 @@ def _read_verified_archive_object(exchange: Any, base_url: str,
                   "responseKeyMatches": reply.headers.get("x-flow-archive-key") == ref["objectKey"],
                   "cfRay": ray if re.fullmatch(r"[a-zA-Z0-9-]{1,80}", ray) else None}
         # Never include arbitrary response bodies, auth headers or a URL/query.
-        # Keep the existing block classification and single-attempt behavior.
+        # Temporary HTTP failures are availability failures, not bad facts.
+        # Auth, missing/wrong objects, hash and size conflicts still block.
+        retryable = reply.status in {408, 429, 500, 502, 503, 504} and error not in {
+            "archive_object_hash_mismatch", "artifact_not_found", "artifact_too_large",
+            "invalid_pinned_official_object", "unauthorized"}
         raise LiveRecoveryError("live_recovery_archive_read_invalid",
-                                json.dumps(detail, separators=(",", ":")))
+                                json.dumps(detail, separators=(",", ":")),
+                                status="FAILED_RETRYABLE" if retryable else "BLOCKED_QUALITY")
     return reply.content
 
 

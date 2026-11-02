@@ -61,8 +61,9 @@ export type PipelineRecoveryRegistrationInput = {
   authorizedAt: string;
   expiresAt: string;
   /**
-   * Optional expired authorization that is being replaced (normally PAUSED;
-   * BLOCKED requires server-derived archive projection proof below). This is
+   * Authorization being replaced (normally expired PAUSED; archive-conflict
+   * BLOCKED requires expiry and proof; terminal transport misclassification
+   * requires a fresh administrator review instead of an expiry wait). This is
    * intentionally part of the registration contract so replacing a stale
    * control-plane generation cannot be done with an ad-hoc D1 UPDATE.
    */
@@ -72,6 +73,13 @@ export type PipelineRecoveryRegistrationInput = {
     previousPlanSha256: string;
     previousSourceFingerprint: string;
     nextSourceFingerprint: string;
+  };
+  /** Server-checked immutable review; explicit admin reapproval, not QA bypass. */
+  transportFailureReapproval?: {
+    previousPlanSha256: string;
+    failedGithubRunId: string;
+    failedAttemptCount: number;
+    failureFileSha256: string;
   };
 };
 
@@ -434,7 +442,7 @@ async function runAtomicPair(
 
 /**
  * Atomically retire one expired PAUSED recovery generation (or preserve an
- * explicitly reapproved archive-conflict BLOCKED generation), unbind its
+ * explicitly reviewed BLOCKED generation), unbind its
  * pipeline row, and insert the replacement authorization.  The partial
  * unique index on active/paused generations means this must be one SQLite
  * transaction; separate UPDATE/INSERT calls can leave a stale generation
@@ -450,19 +458,24 @@ async function runAtomicRecoverySupersede(
 ): Promise<AtomicRecoverySupersedeResult | null> {
   const batch = requireBatch(db);
   const rebind = newInput.archiveProjectionRebind;
+  const transport = newInput.transportFailureReapproval;
+  const blocked = rebind ?? transport;
+  const expectedError = rebind ? "live_recovery_archive_read_invalid" : transport ? "live_recovery_failed" : null;
   const pipelineMutation = db.prepare(
     `UPDATE pipeline_window
         SET recovery_id = NULL, status = 'FAILED_RETRYABLE'
       WHERE run_key = ? AND recovery_id = ? AND status = ?
-        AND (? = 0 OR last_error_code = 'live_recovery_archive_read_invalid')
+        AND (? IS NULL OR last_error_code = ?)
+        AND (? IS NULL OR github_run_id = ?)
         AND lease_owner IS NULL
         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
         AND attempt_count = ? AND updated_at = ?`,
   ).bind(
     runKey,
     oldRecoveryId,
-    rebind ? "BLOCKED_QUALITY" : "FAILED_RETRYABLE",
-    rebind ? 1 : 0,
+    blocked ? "BLOCKED_QUALITY" : "FAILED_RETRYABLE",
+    expectedError, expectedError,
+    transport?.failedGithubRunId ?? null, transport?.failedGithubRunId ?? null,
     nowIso,
     newInput.expectedAttemptCount,
     newInput.expectedUpdatedAt,
@@ -484,11 +497,11 @@ async function runAtomicRecoverySupersede(
   // A matched no-op preserves the old BLOCKED record byte-for-byte, while
   // retaining the same guarded transaction/rollback contract as PAUSED.
   // D1 charges the matched update; include it in rowsWritten, not zero cost.
-  const oldRecoveryMutation = rebind ? db.prepare(
+  const oldRecoveryMutation = blocked ? db.prepare(
     `UPDATE pipeline_window_recovery SET status = status
       WHERE recovery_id = ? AND run_key = ? AND status = 'BLOCKED'
-        AND expires_at <= ? AND plan_sha256 = ?`,
-  ).bind(oldRecoveryId, runKey, nowIso, rebind.previousPlanSha256) : db.prepare(
+        AND (? = 1 OR expires_at <= ?) AND plan_sha256 = ?`,
+  ).bind(oldRecoveryId, runKey, transport ? 1 : 0, nowIso, blocked.previousPlanSha256) : db.prepare(
     `UPDATE pipeline_window_recovery
         SET status = 'REVOKED', updated_at = ?
       WHERE recovery_id = ? AND run_key = ? AND status = 'PAUSED'
@@ -606,7 +619,7 @@ export type PipelineRecoveryRegistration = {
   rowsRead: number;
 };
 
-/** Register an authorization, optionally replacing one expired generation atomically. */
+/** Register an authorization, optionally replacing one safely reviewed generation atomically. */
 export async function registerPipelineWindowRecovery(
   db: D1Like,
   input: PipelineRecoveryRegistrationInput,
@@ -644,6 +657,17 @@ export async function registerPipelineWindowRecovery(
       throw new PipelineWindowError("superseded_recovery_run_key_mismatch", 409);
     }
     const rebind = input.archiveProjectionRebind;
+    const transport = input.transportFailureReapproval;
+    if (rebind && transport) throw new PipelineWindowError("recovery_review_conflict", 409);
+    if (transport && (
+      input.reasonCode !== "transport_failure_reapproved" || oldRecovery.status !== "BLOCKED" ||
+      oldRecovery.plan_sha256 !== transport.previousPlanSha256 || input.planSha256 === oldRecovery.plan_sha256 ||
+      transport.failedAttemptCount !== pipeline.attempt_count ||
+      transport.failedGithubRunId !== pipeline.github_run_id || !SHA256.test(transport.failureFileSha256) ||
+      input.approvalReference === oldRecovery.approval_reference ||
+      Date.parse(input.authorizedAt) <= Date.parse(oldRecovery.updated_at) ||
+      Date.parse(input.authorizedAt) > now.getTime() || Date.parse(input.expiresAt) <= now.getTime()
+    )) throw new PipelineWindowError("transport_review_approval_conflict", 409);
     if (rebind && (
       input.reasonCode !== "archive_projection_rebound" ||
       oldRecovery.status !== "BLOCKED" ||
@@ -657,13 +681,18 @@ export async function registerPipelineWindowRecovery(
       Date.parse(input.authorizedAt) > now.getTime() ||
       Date.parse(input.expiresAt) <= now.getTime()
     )) throw new PipelineWindowError("archive_rebind_approval_conflict", 409);
-    if ((!rebind && oldRecovery.status !== "PAUSED") || Date.parse(oldRecovery.expires_at) > now.getTime()) {
+    const blocked = rebind ?? transport;
+    // A terminal, unleased, explicitly reviewed transport misclassification
+    // cannot execute under its old BLOCKED generation. Waiting for expiry
+    // adds no fence; the state/run/attempt CAS below is the safety boundary.
+    if ((!blocked && oldRecovery.status !== "PAUSED") || (!transport && Date.parse(oldRecovery.expires_at) > now.getTime())) {
       throw new PipelineWindowError("superseded_recovery_not_expired", 409);
     }
     if (
       pipeline.recovery_id !== oldRecovery.recovery_id ||
-      pipeline.status !== (rebind ? "BLOCKED_QUALITY" : "FAILED_RETRYABLE") ||
+      pipeline.status !== (blocked ? "BLOCKED_QUALITY" : "FAILED_RETRYABLE") ||
       (rebind && pipeline.last_error_code !== "live_recovery_archive_read_invalid") ||
+      (transport && pipeline.last_error_code !== "live_recovery_failed") ||
       pipeline.lease_owner !== null ||
       !leaseExpired(pipeline, createdAt) ||
       pipeline.attempt_count !== input.expectedAttemptCount ||

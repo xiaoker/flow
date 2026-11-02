@@ -112,6 +112,9 @@ class LocalD1 {
   }
 
   batch(statements) {
+    if (this.beforeBatch) {
+      const hook = this.beforeBatch; this.beforeBatch = null; hook();
+    }
     this.database.exec("BEGIN");
     const results = [];
     try {
@@ -982,6 +985,124 @@ test("HTTP registration derives archive proof and never trusts a client fingerpr
     assert.deepEqual(await getPipelineWindowRecovery(db, base.recoveryId), before);
     assert.equal((await post(next)).status, 200);
     assert.equal(bucket.putCount, 2);
+  } finally { db.close(); }
+});
+
+test("HTTP administrator transport review reauthorizes exact inputs atomically without rewriting history", async () => {
+  const worker = (await import(new URL("../dist/server/index.js", import.meta.url).href)).default;
+  const db = await createDatabase();
+  const bucket = new MemoryR2();
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const env = { DB: db, RAW_BUCKET: bucket, INGEST_API_KEY: "test-key", PIPELINE_RECOVERY_ENABLED: "1", ASSETS: { fetch: async () => new Response("", { status: 404 }) } };
+  const post = (body, overrides = {}, auth = "test-key") => worker.fetch(new Request("http://localhost/api/v1/admin/pipeline-window/recovery", { method: "POST", headers: { Authorization: `Bearer ${auth}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }), { ...env, ...overrides }, context);
+  const encode = async base => {
+    const unsigned = structuredClone(base); delete unsigned.planHash;
+    const planSha256 = await sha256Hex(new TextEncoder().encode(canonicalJson(unsigned)));
+    const planJson = JSON.stringify({ ...unsigned, planHash: planSha256 });
+    return { planJson, planSha256, scopeSha256: await sha256Hex(new TextEncoder().encode(planJson)) };
+  };
+  try {
+    const setup = await completedWindow(db);
+    const base = (await recoveryPlanFixture(setup.runKey)).plan;
+    base.requiredStages = ["dashboard", "publish"];
+    base.budgetManifest = { fixedCommit: "a".repeat(40), resourceEstimate: { workerRequests: 300 },
+      archivePhase0Source: { contract: "flow-phase0-archive-source-v1", calendar: { dates: ["2026-09-03"] },
+        files: [{ path: "raw.csv", objectKey: `market-data/raw/sse/etf_scale/2026-09-03/${"a".repeat(64)}.csv`, sha256: "a".repeat(64), bytes: 20 }] } };
+    const oldExpiry = new Date(Date.now() + 60_000).toISOString();
+    assert.equal((await post(registrationInput(setup.runKey, setup.row, base.recoveryId, {
+      ...await encode(base), planKey: undefined, expiresAt: oldExpiry,
+    }))).status, 201);
+    const owner = "recovery:owner01";
+    const claim = await claimPipelineWindowRecovery(db, input(setup.runKey, owner, { githubRunId: "12345" }), new Date());
+    await markPipelineWindowRecovery(db, { recoveryId: base.recoveryId, runKey: setup.runKey, leaseOwner: owner,
+      expectedAttemptCount: claim.attemptCount, status: "BLOCKED_QUALITY", errorCode: "live_recovery_failed", githubRunId: "12345" }, new Date());
+    const before = await getPipelineWindowRecovery(db, base.recoveryId);
+    const row = await getPipelineWindow(db, setup.runKey);
+    // A reviewed terminal BLOCKED generation cannot execute, even while its
+    // old approval has time left. No artificial expiry wait is necessary.
+    assert.ok(Date.parse(oldExpiry) > Date.now());
+    const reviewedAt = new Date(Date.parse(row.updated_at) + 1).toISOString();
+    const authorizedAt = reviewedAt;
+    const failure = { schemaVersion: 1, status: "BLOCKED_QUALITY", errorCode: "live_recovery_failed",
+      detail: "request_unavailable", measuredAt: row.updated_at };
+    const failureBytes = new TextEncoder().encode(JSON.stringify(failure));
+    const nextBase = structuredClone(base);
+    nextBase.recoveryId = "recovery-http-transport-review";
+    nextBase.artifactRoot = `.recovery/${nextBase.recoveryId}`;
+    nextBase.stateDir = `${nextBase.artifactRoot}/state`;
+    nextBase.budgetManifest.fixedCommit = "b".repeat(40);
+    nextBase.budgetManifest.transportFailureReview = { contract: "flow-transport-failure-review-v1", review: "administrator_reviewed",
+      recoveryId: base.recoveryId, runKey: setup.runKey, attemptCount: row.attempt_count, githubRunId: "12345", producerCommit: "a".repeat(40),
+      failureArtifactId: "98765", failureArtifactSha256: "d".repeat(64), failureFileSha256: await sha256Hex(failureBytes),
+      failureFileBase64: Buffer.from(failureBytes).toString("base64"), approvalReference: "explicit-reviewed-reapproval", reviewedAt };
+    const request = async plan => registrationInput(setup.runKey, row, plan.recoveryId, { ...await encode(plan), planKey: undefined,
+      reasonCode: "transport_failure_reapproved", approvalReference: "explicit-reviewed-reapproval", authorizedAt,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), supersedesRecoveryId: base.recoveryId });
+    assert.equal((await post(await request(nextBase), {}, "wrong-key")).status, 401);
+    assert.equal((await post(await request(nextBase), { PIPELINE_RECOVERY_ENABLED: "0" })).status, 404);
+    assert.equal((await post({ ...await request(nextBase), transportFailureReapproval: {} })).status, 422);
+    for (const mutate of [
+      p => { p.maxRequests++; },
+      p => { p.budgetManifest.archivePhase0Source.files[0].sha256 = "f".repeat(64); },
+      p => { p.budgetManifest.resourceEstimate.workerRequests++; },
+      p => { p.budgetManifest.transportFailureReview.githubRunId = "99999"; },
+      p => { p.budgetManifest.transportFailureReview.attemptCount++; },
+      p => { p.budgetManifest.transportFailureReview.producerCommit = "c".repeat(40); },
+      p => { p.budgetManifest.transportFailureReview.failureFileSha256 = "e".repeat(64); },
+      p => { p.budgetManifest.transportFailureReview.reviewedAt = before.created_at; },
+      p => { p.budgetManifest.transportFailureReview.extra = "not-allowed"; },
+    ]) {
+      const invalid = structuredClone(nextBase); mutate(invalid);
+      assert.equal((await post(await request(invalid))).status, 409);
+      assert.deepEqual(await getPipelineWindow(db, setup.runKey), row);
+      assert.equal(bucket.putCount, 1);
+    }
+    // A genuine hash/QA diagnostic cannot be relabelled as transport failure,
+    // even if an administrator supplies a matching digest for those bytes.
+    const invalid = structuredClone(nextBase);
+    const qualityBytes = new TextEncoder().encode(JSON.stringify({ ...failure, detail: "archive_object_hash_mismatch" }));
+    invalid.budgetManifest.transportFailureReview.failureFileBase64 = Buffer.from(qualityBytes).toString("base64");
+    invalid.budgetManifest.transportFailureReview.failureFileSha256 = await sha256Hex(qualityBytes);
+    assert.equal((await post(await request(invalid))).status, 409);
+    const next = await request(nextBase);
+    assert.equal((await post({ ...next, expectedAttemptCount: next.expectedAttemptCount + 1 })).status, 409);
+    assert.equal((await post({ ...next, expectedUpdatedAt: "2026-09-03T00:00:00.000Z" })).status, 409);
+    db.beforeBatch = () => db.database.prepare("UPDATE pipeline_window SET lease_owner = ? WHERE run_key = ?")
+      .run("concurrent:owner", setup.runKey);
+    assert.equal((await post(next)).status, 409);
+    assert.equal((await getPipelineWindow(db, setup.runKey)).lease_owner, "concurrent:owner");
+    assert.deepEqual(await getPipelineWindowRecovery(db, base.recoveryId), before);
+    assert.equal(await getPipelineWindowRecovery(db, nextBase.recoveryId), null);
+    db.database.prepare("UPDATE pipeline_window SET lease_owner = NULL WHERE run_key = ?").run(setup.runKey);
+    db.failAtBatchIndex = 4;
+    assert.equal((await post(next)).status, 503);
+    assert.deepEqual(await getPipelineWindow(db, setup.runKey), row);
+    assert.deepEqual(await getPipelineWindowRecovery(db, base.recoveryId), before);
+    assert.equal(await getPipelineWindowRecovery(db, nextBase.recoveryId), null);
+    db.failAtBatchIndex = null;
+    const accepted = await post(next);
+    assert.equal(accepted.status, 200, JSON.stringify(await accepted.clone().json()));
+    const result = await accepted.json();
+    assert.ok(result.rowsWritten > 0 && result.rowsWritten <= 10);
+    const after = await getPipelineWindow(db, setup.runKey);
+    assert.equal(after.status, "FAILED_RETRYABLE");
+    assert.equal(after.attempt_count, row.attempt_count);
+    assert.equal(after.lease_owner, null);
+    assert.equal(after.target_date, row.target_date);
+    assert.deepEqual(await getPipelineWindowRecovery(db, base.recoveryId), before);
+    assert.equal((await getPipelineWindowRecovery(db, nextBase.recoveryId)).status, "AUTHORIZED");
+    assert.equal((await post(next)).status, 200);
+    const newClaim = await claimPipelineWindowRecovery(db, input(setup.runKey, "reviewed:newowner", {
+      recoveryId: nextBase.recoveryId, githubRunId: "56789",
+    }), new Date());
+    assert.equal(newClaim.decision, "acquired");
+    assert.equal(newClaim.attemptCount, row.attempt_count + 1);
+    assert.equal((await post(next)).status, 200);
+    assert.equal((await getPipelineWindow(db, setup.runKey)).github_run_id, "56789");
+    assert.equal((await post({ ...next, supersedesRecoveryId: "different-old-recovery" })).status, 409);
+    assert.equal((await post({ ...next, approvalReference: "different-approval" })).status, 409);
+    await assert.rejects(markPipelineWindowRecovery(db, { recoveryId: base.recoveryId, runKey: setup.runKey,
+      leaseOwner: owner, expectedAttemptCount: row.attempt_count, status: "FAILED_RETRYABLE" }), /recovery_status_conflict/);
   } finally { db.close(); }
 });
 
