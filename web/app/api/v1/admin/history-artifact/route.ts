@@ -1,4 +1,8 @@
 import { runtimeEnv } from "@/app/lib/dashboard-store";
+import {
+  HistoryArtifactCandidateLimitError,
+  listUnindexedHistoryArtifactCandidates,
+} from "@/app/lib/history-artifact-list";
 import { sha256Hex } from "@/app/lib/source-observation";
 
 export const dynamic = "force-dynamic";
@@ -85,10 +89,6 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
 
 function expectedPair(source: string, dataset: string): boolean {
   return dataset === "etf_scale" ? source === "sse" || source === "szse" : source === "sse";
-}
-
-function matchesFile(key: string, file: string): boolean {
-  return key.endsWith(`/${file}.csv`) || key.endsWith(`/${file}.csv.gz`);
 }
 
 async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string, indexed = false) {
@@ -180,19 +180,22 @@ export async function GET(request: Request): Promise<Response> {
         },
       });
     }
-    const objectsByKey = new Map<string, R2Object>();
-    for (const requestedDate of dateCandidates) {
-      const prefix = `market-data/normalized/${source}/${dataset}/${requestedDate}/`;
-      let cursor: string | undefined;
-      do {
-        const listed = await runtime.RAW_BUCKET.list({ prefix, limit: 1000, cursor });
-        for (const object of listed.objects ?? []) {
-          if (matchesFile(object.key, file)) objectsByKey.set(object.key, object);
-        }
-        cursor = listed.truncated ? listed.cursor : undefined;
-      } while (cursor);
+    let candidates: Awaited<ReturnType<typeof listUnindexedHistoryArtifactCandidates>>;
+    try {
+      candidates = await listUnindexedHistoryArtifactCandidates(
+        runtime.RAW_BUCKET,
+        dateCandidates.map(
+          (requestedDate) =>
+            `market-data/normalized/${source}/${dataset}/${requestedDate}/`,
+        ),
+        file,
+      );
+    } catch (error) {
+      if (error instanceof HistoryArtifactCandidateLimitError) {
+        return badRequest(error.code, 413);
+      }
+      throw error;
     }
-    const candidates = [...objectsByKey.values()];
     if (!candidates.length) return badRequest("artifact_not_found", 404);
     // A date can legitimately have more than one immutable object after a
     // corrected or retried official publication.  The normalized D1 tables
