@@ -86,3 +86,12 @@ def test_close_failure_does_not_return_success_or_leak_secret():
     with pytest.raises(BoundedHTTPError, match="request_unavailable") as error:
         request(BoundedHTTPExchange(Session(BadClose([b"ok"]))))
     assert "fixture-secret" not in str(error.value)
+
+
+def test_stream_limit_is_not_hidden_by_secondary_close_error():
+    class BadClose(Reply):
+        def close(self): raise RuntimeError("fixture-secret")
+    with pytest.raises(BoundedHTTPError, match="response_limit") as caught:
+        request(BoundedHTTPExchange(Session(BadClose([b"oversized"]))))
+    assert caught.value.safe_phase == "stream"
+    assert "fixture-secret" not in str(caught.value)

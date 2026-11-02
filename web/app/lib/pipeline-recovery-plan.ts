@@ -3,6 +3,65 @@ import { PipelineWindowError } from "./pipeline-window-recovery.ts";
 
 export const MAX_RECOVERY_PLAN_BYTES = 300_000;
 
+/** Explicit administrator review, NOT automatic proof of network causality.
+ * The reviewed failure bytes and artifact digest remain in the immutable new
+ * plan. Reapproval keeps the exact source/scope and cannot waive execution QA.
+ */
+export async function verifyArchiveTransportReapproval(
+  previous: Record<string, unknown>, next: Record<string, unknown>,
+  expected: { recoveryId: string; runKey: string; attemptCount: number; githubRunId: string | null;
+    createdAt: string; updatedAt: string; authorizedAt: string; approvalReference: string },
+): Promise<{ previousPlanSha256: string; failedGithubRunId: string; failedAttemptCount: number; failureFileSha256: string }> {
+  function reject(): never { throw new PipelineWindowError("transport_review_invalid", 409); }
+  for (const key of ["runKey", "dataDates", "maxDates", "maxRequests", "requiredStages"]) {
+    if (canonicalJson(previous[key]) !== canonicalJson(next[key])) reject();
+  }
+  if (!Array.isArray(next.dataDates) || next.dataDates.length !== 1 ||
+      canonicalJson(next.requiredStages) !== canonicalJson(["dashboard", "publish"])) reject();
+  const oldBudget = previous.budgetManifest, newBudget = next.budgetManifest;
+  if (!isRecord(oldBudget) || !isRecord(newBudget) || !isRecord(oldBudget.archivePhase0Source) ||
+      oldBudget.archivePhase0Source.contract !== "flow-phase0-archive-source-v1" ||
+      canonicalJson(oldBudget.archivePhase0Source) !== canonicalJson(newBudget.archivePhase0Source) ||
+      canonicalJson(oldBudget.resourceEstimate) !== canonicalJson(newBudget.resourceEstimate)) reject();
+  const review = newBudget.transportFailureReview;
+  if (!isRecord(review) || review.contract !== "flow-transport-failure-review-v1" ||
+      review.review !== "administrator_reviewed" || review.recoveryId !== expected.recoveryId ||
+      review.runKey !== expected.runKey || review.attemptCount !== expected.attemptCount ||
+      !expected.githubRunId || review.githubRunId !== expected.githubRunId ||
+      review.producerCommit !== oldBudget.fixedCommit || typeof review.producerCommit !== "string" ||
+      !/^[a-f0-9]{40}$/.test(review.producerCommit) ||
+      typeof review.failureArtifactId !== "string" || !/^\d{1,30}$/.test(review.failureArtifactId) ||
+      typeof review.failureArtifactSha256 !== "string" || !SHA256.test(review.failureArtifactSha256) ||
+      typeof review.failureFileSha256 !== "string" || !SHA256.test(review.failureFileSha256) ||
+      typeof review.failureFileBase64 !== "string" || review.failureFileBase64.length > 5500 ||
+      review.approvalReference !== expected.approvalReference ||
+      typeof review.reviewedAt !== "string" || !ISO_INSTANT.test(review.reviewedAt) ||
+      !Number.isFinite(Date.parse(review.reviewedAt)) ||
+      Date.parse(review.reviewedAt) <= Date.parse(expected.updatedAt) ||
+      Date.parse(review.reviewedAt) > Date.parse(expected.authorizedAt)) reject();
+  if (Object.keys(review).sort().join(",") !== ["contract", "review", "recoveryId", "runKey", "attemptCount",
+      "githubRunId", "producerCommit", "failureArtifactId", "failureArtifactSha256", "failureFileSha256",
+      "failureFileBase64", "approvalReference", "reviewedAt"].sort().join(",")) reject();
+  let bytes: Uint8Array, failure: unknown;
+  try {
+    const decoded = atob(review.failureFileBase64);
+    bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+    if (bytes.byteLength > 4096) reject();
+    failure = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch { return reject(); }
+  if (await sha256Hex(bytes) !== review.failureFileSha256 || !isRecord(failure) ||
+      Object.keys(failure).sort().join(",") !== "detail,errorCode,measuredAt,schemaVersion,status" ||
+      failure.schemaVersion !== 1 || failure.status !== "BLOCKED_QUALITY" ||
+      failure.errorCode !== "live_recovery_failed" || failure.detail !== "request_unavailable" ||
+      typeof failure.measuredAt !== "string" || !ISO_INSTANT.test(failure.measuredAt) ||
+      !Number.isFinite(Date.parse(failure.measuredAt)) ||
+      Date.parse(failure.measuredAt) < Date.parse(expected.createdAt) ||
+      Date.parse(failure.measuredAt) > Date.parse(expected.updatedAt)) reject();
+  if (typeof previous.planHash !== "string" || !SHA256.test(previous.planHash)) reject();
+  return { previousPlanSha256: previous.planHash, failedGithubRunId: expected.githubRunId,
+    failedAttemptCount: expected.attemptCount, failureFileSha256: review.failureFileSha256 };
+}
+
 /** Compare verified immutable plans, not caller-supplied fingerprints.
  * Only legacy mutable non-share projections may be rebound; raw facts and
  * official calendar evidence remain byte-identical. Execution QA is unchanged.

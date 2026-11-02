@@ -13,6 +13,7 @@ import {
   readRecoveryPlanObject,
   validateRecoveryPlanBytes,
   verifyArchiveProjectionRebind,
+  verifyArchiveTransportReapproval,
 } from "@/app/lib/pipeline-recovery-plan";
 
 export const dynamic = "force-dynamic";
@@ -157,7 +158,7 @@ export async function POST(request: Request): Promise<Response> {
       throw new PipelineWindowError("invalid_plan_key", 422);
     }
     // Proof is never accepted from the request; derive it from immutable plans.
-    if (body.archiveProjectionRebind !== undefined) {
+    if (body.archiveProjectionRebind !== undefined || body.transportFailureReapproval !== undefined) {
       throw new PipelineWindowError("archive_rebind_client_proof_forbidden", 422);
     }
     const registration: PipelineRecoveryRegistrationInput = {
@@ -198,6 +199,41 @@ export async function POST(request: Request): Promise<Response> {
         previousPlanSha256: previous.plan_sha256,
         ...await verifyArchiveProjectionRebind(oldPlan, newPlan),
       };
+    }
+    if (registration.reasonCode === "transport_failure_reapproved") {
+      if (!registration.supersedesRecoveryId) throw new PipelineWindowError("transport_review_previous_required", 422);
+      const newPlan = await validateRecoveryPlanBytes(new TextEncoder().encode(planJson), {
+        recoveryId, runKey, planSha256, scopeSha256,
+      }, 422);
+      const budget = newPlan.budgetManifest;
+      const review = isRecord(budget) ? budget.transportFailureReview : null;
+      if (!isRecord(review) || review.recoveryId !== registration.supersedesRecoveryId) {
+        throw new PipelineWindowError("transport_review_previous_invalid", 409);
+      }
+      const existing = await getPipelineWindowRecovery(runtime.DB, recoveryId);
+      if (existing && (existing.run_key !== runKey || existing.plan_sha256 !== planSha256 ||
+          existing.scope_sha256 !== scopeSha256 || existing.plan_key !== planKey)) {
+        throw new PipelineWindowError("recovery_registration_conflict", 409);
+      }
+      // A replay refers to the already-reviewed immutable authorization, not
+      // the current pipeline owner/run (which may have advanced). The shared
+      // registration function still compares every approval/state field.
+      if (!existing) {
+        const previous = await getPipelineWindowRecovery(runtime.DB, registration.supersedesRecoveryId);
+        const window = await getPipelineWindow(runtime.DB, runKey);
+        if (!previous || previous.run_key !== runKey || previous.status !== "BLOCKED" || !window ||
+            window.last_error_code !== "live_recovery_failed") {
+          throw new PipelineWindowError("transport_review_previous_invalid", 409);
+        }
+        const oldPlan = await readRecoveryPlanObject(runtime.RAW_BUCKET, previous.plan_key, {
+          recoveryId: previous.recovery_id, runKey, planSha256: previous.plan_sha256, scopeSha256: previous.scope_sha256,
+        });
+        registration.transportFailureReapproval = await verifyArchiveTransportReapproval(oldPlan, newPlan, {
+          recoveryId: previous.recovery_id, runKey, attemptCount: registration.expectedAttemptCount,
+          githubRunId: window.github_run_id, createdAt: previous.created_at, updatedAt: registration.expectedUpdatedAt,
+          authorizedAt: registration.authorizedAt, approvalReference: registration.approvalReference,
+        });
+      }
     }
     const stored = await storeImmutableRecoveryPlan(
       runtime.RAW_BUCKET,

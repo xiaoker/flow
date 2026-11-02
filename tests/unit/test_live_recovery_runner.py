@@ -20,6 +20,96 @@ from scripts.run_live_recovery import (
 from trading_desk.recovery_execution import build_recovery_plan
 
 
+@pytest.mark.parametrize("cause", ["connection", "timeout", "tls", "stream", "close"])
+def test_archive_transport_failure_is_retryable_safe_and_counted_once(cause, tmp_path, monkeypatch):
+    import requests
+    from trading_desk.bounded_http import BoundedHTTPExchange
+    class Reply:
+        status_code = 200
+        headers = {}
+        def iter_content(self, **kwargs):
+            if cause == "stream": raise requests.exceptions.ReadTimeout("fixture-secret")
+            yield b"ok"
+        def close(self): raise RuntimeError("fixture-secret")
+    class Session:
+        headers = {}
+        calls = 0
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            if cause == "timeout": raise requests.exceptions.ReadTimeout("fixture-secret")
+            if cause == "connection": raise requests.exceptions.ConnectionError("fixture-secret")
+            if cause == "tls": raise requests.exceptions.SSLError("fixture-secret")
+            return Reply()
+    session = Session()
+    counted = BudgetedRateLimitedSession(session, maximum=2, min_interval_seconds=0)
+    key = "market-data/normalized/sse/etf_nav/2026-10-29/" + "a" * 64 + "/data.csv"
+    with pytest.raises(LiveRecoveryError) as caught:
+        runner._read_verified_archive_object(BoundedHTTPExchange(counted), "https://flow.xiaoker.com",
+            {"Authorization": "Bearer fixture-secret"}, {"objectKey": key, "sha256": "b" * 64})
+    assert caught.value.status == "FAILED_RETRYABLE"
+    assert caught.value.code == "live_recovery_archive_read_unavailable"
+    detail = json.loads(str(caught.value).split(": ", 1)[1])
+    assert detail["transportCode"] == "request_unavailable"
+    assert detail["phase"] == ("close" if cause == "close" else "stream" if cause == "stream" else "request")
+    assert detail["cause"] == ("other" if cause == "close" else "timeout" if cause == "stream" else cause)
+    assert detail["objectKey"] == key and detail["expectedSha256"] == "b" * 64
+    assert session.calls == counted.request_count == 1
+    assert "fixture-secret" not in str(caught.value)
+    # Exercise the real CLI's failure-file boundary: the workflow consumes
+    # this status, not the exception class or its exit code alone.
+    import sys
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}")
+    failure_path = tmp_path / ".recovery" / "failure.json"
+    def failed_run(**kwargs): raise caught.value
+    monkeypatch.setattr(runner, "run_live_recovery", failed_run)
+    monkeypatch.setattr(sys, "argv", ["run_live_recovery.py", "--plan", str(plan_path),
+        "--attempt", "1", "--producer-build-sha", "a" * 64, "--failure-output", str(failure_path)])
+    with pytest.raises(SystemExit) as exit_code: runner.main()
+    assert exit_code.value.code == 2
+    failure = json.loads(failure_path.read_text())
+    assert failure["status"] == "FAILED_RETRYABLE"
+    assert failure["errorCode"] == "live_recovery_archive_read_unavailable"
+    assert "fixture-secret" not in failure_path.read_text()
+
+
+@pytest.mark.parametrize("code,retryable", [("response_deadline", True),
+    ("request_still_unconfirmed", True), ("response_limit", False), ("invalid_response_bounds", False)])
+def test_archive_bounded_failures_preserve_retry_and_integrity_boundaries(code, retryable):
+    from trading_desk.bounded_http import BoundedHTTPError
+    class Exchange:
+        calls = 0
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            raise BoundedHTTPError(code)
+    exchange = Exchange()
+    with pytest.raises(LiveRecoveryError) as caught:
+        runner._read_verified_archive_object(exchange, "https://flow.xiaoker.com", {},
+            {"objectKey": "approved-key", "sha256": "a" * 64})
+    assert caught.value.status == ("FAILED_RETRYABLE" if retryable else "BLOCKED_QUALITY")
+    assert exchange.calls == 1
+
+
+@pytest.mark.parametrize("status,error,retryable", [(503, "archive_object_unavailable", True),
+    (429, None, True), (408, None, True), (500, None, True), (502, None, True), (504, None, True),
+    (401, "unauthorized", False), (403, None, False), (404, "artifact_not_found", False),
+    (409, "archive_object_hash_mismatch", False), (413, "artifact_too_large", False),
+    (503, "archive_object_hash_mismatch", False), (200, None, False)])
+def test_archive_http_availability_does_not_relax_integrity_or_auth(status, error, retryable):
+    from trading_desk.bounded_http import HTTPReply
+    class Exchange:
+        calls = 0
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            return HTTPReply(status, json.dumps({"error": error}).encode(), {})
+    exchange = Exchange()
+    with pytest.raises(LiveRecoveryError) as caught:
+        runner._read_verified_archive_object(exchange, "https://flow.xiaoker.com", {},
+            {"objectKey": "approved-key", "sha256": "a" * 64})
+    assert caught.value.status == ("FAILED_RETRYABLE" if retryable else "BLOCKED_QUALITY")
+    assert exchange.calls == 1
+
+
 def test_archive_read_conflict_has_safe_identity_evidence_without_retry():
     from trading_desk.bounded_http import HTTPReply
     key = "market-data/normalized/sse/margin_security_daily/2026-10-26/" + "a" * 64 + "/data.csv"
