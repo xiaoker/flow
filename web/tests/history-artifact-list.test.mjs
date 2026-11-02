@@ -10,6 +10,42 @@ function item(key, uploaded = "2026-11-02T00:00:00.000Z") {
   return { key, uploaded: new Date(uploaded) };
 }
 
+test("both complete pages at the exact cap remain readable", async () => {
+  let calls = 0;
+  const candidates = await listUnindexedHistoryArtifactCandidates({
+    async list({ prefix, limit }) {
+      calls += 1;
+      assert.equal(limit, MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX);
+      return { truncated: false, objects: Array.from({ length: limit }, (_, i) => item(`${prefix}${i}/data.csv`)) };
+    },
+  }, ["iso/", "compact/"], "data");
+  assert.equal(calls, 2);
+  assert.equal(candidates.length, 2 * MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX);
+});
+
+test("exact hash-bound archive reads bypass legacy listing and D1 discovery", async () => {
+  const { createHash } = await import("node:crypto");
+  const bytes = new TextEncoder().encode("code,shares\n510000,100\n");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const key = `market-data/normalized/sse/etf_scale/2026-09-24/${digest}/data.csv`;
+  const { default: worker } = await import(new URL("../dist/server/index.js", import.meta.url).href);
+  let gets = 0;
+  const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/history-artifact?${new URLSearchParams({ archive_key: key, archive_sha256: digest })}`, {
+    headers: { authorization: "Bearer test-key" },
+  }), {
+    INGEST_API_KEY: "test-key",
+    DB: { prepare() { throw new Error("exact reads must not query D1"); } },
+    RAW_BUCKET: {
+      async list() { throw new Error("exact reads must not list objects"); },
+      async get(requested) { gets += 1; assert.equal(requested, key); return { body: bytes, size: bytes.length }; },
+    },
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), new TextDecoder().decode(bytes));
+  assert.equal(gets, 1);
+});
+
 test("unindexed artifact discovery makes one capped list call per exact date prefix", async () => {
   const calls = [];
   const bucket = {
