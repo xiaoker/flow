@@ -10,6 +10,7 @@ import { activateReadModels } from "../import/route";
 import { candidateUploadAuthority, parseCandidateExecution } from "@/app/lib/candidate-upload-authority";
 import { PipelineWindowError } from "@/app/lib/pipeline-window";
 import { candidateManifestSha256 } from "@/app/lib/candidate-read";
+import { canonicalJson } from "@/app/lib/pipeline-recovery-plan";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,7 @@ type ReadModelUpload = {
   finalize?: boolean;
   pipelineExecution?: unknown;
   candidateManifestJson?: unknown;
+  productionManifestJson?: unknown;
   operation?: "inspect_artifact" | "upload_once";
 };
 
@@ -163,6 +165,7 @@ export async function stageReadModels(
   release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
   manifest: ReadModelManifest,
   stagedAt: string,
+  exactManifestJson?: string,
 ): Promise<"staged_candidate"> {
   let observedAtColumnsReady = false;
   try {
@@ -194,7 +197,7 @@ export async function stageReadModels(
         release.asOf,
         manifest.schemaVersion,
         release.manifestSha256,
-        JSON.stringify(manifest),
+        exactManifestJson ?? JSON.stringify(manifest),
         stagedAt,
       )
       .run();
@@ -221,7 +224,7 @@ export async function stageReadModels(
         release.asOf,
         manifest.schemaVersion,
         release.manifestSha256,
-        JSON.stringify(manifest),
+        exactManifestJson ?? JSON.stringify(manifest),
         manifest.observedAt ?? null,
         stagedAt,
       )
@@ -267,6 +270,21 @@ export async function POST(request: Request) {
         () => new Date(), { bucket: runtime.RAW_BUCKET, enabled: runtime.PIPELINE_RECOVERY_ENABLED })
       : null;
     let exactManifestJson: string | undefined;
+    if (value.manifest.rollingPublication !== undefined || Object.hasOwn(value, "productionManifestJson")) {
+      if (value.manifest.schemaVersion !== 3 || value.manifest.rollingPublication === undefined || authority
+          || value.activationMode !== "stage_only" || typeof value.productionManifestJson !== "string"
+          || new TextEncoder().encode(value.productionManifestJson).byteLength > 65536) {
+        throw new PipelineWindowError("invalid_production_manifest_bytes", 422);
+      }
+      let parsed: unknown;
+      try { parsed = JSON.parse(value.productionManifestJson); }
+      catch { throw new PipelineWindowError("invalid_production_manifest_bytes", 422); }
+      if (canonicalJson(parsed) !== canonicalJson(value.manifest)
+          || await candidateManifestSha256(value.productionManifestJson) !== value.manifest.manifestSha256) {
+        throw new PipelineWindowError("production_manifest_bytes_mismatch", 409);
+      }
+      exactManifestJson = value.productionManifestJson;
+    }
     if (Object.hasOwn(value, "candidateManifestJson")) {
       if (!authority || typeof value.candidateManifestJson !== "string"
           || new TextEncoder().encode(value.candidateManifestJson).byteLength > 65536) {
@@ -385,7 +403,7 @@ export async function POST(request: Request) {
     const activation = authority
       ? await authority.stage(release, value.manifest, manifestBody)
       : value.activationMode === "stage_only"
-      ? await stageReadModels(runtime.DB, release, value.manifest, activatedAt)
+      ? await stageReadModels(runtime.DB, release, value.manifest, activatedAt, exactManifestJson)
       : await activateReadModels(runtime.DB, release, value.manifest, activatedAt);
     return NextResponse.json({
       status: activation,

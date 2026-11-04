@@ -40,6 +40,34 @@ def validate_replay_scope(scope: dict) -> dict:
             'metrics': sorted(scope['metrics'])}
 
 
+def parse_replay_partition(data: bytes, source: str, day: str):
+    if source not in {"sse", "szse"} or len(data) > MAX_SOURCE_BYTES:
+        raise ValueError("etf_replay_partition_identity_invalid")
+    frame = pd.read_csv(io.BytesIO(data),dtype={"instrument_code":str})
+    if (frame.empty or len(frame)>5000 or not {"trade_date","market","instrument_code","shares"}.issubset(frame)
+        or set(frame.trade_date)!={day} or set(frame.market)!={source.upper()}
+        or frame.instrument_code.duplicated().any()
+        or not frame.instrument_code.str.fullmatch(r"\d{6}").fillna(False).all()):
+        raise ValueError("etf_replay_rows_invalid")
+    counts = pd.to_numeric(frame.shares,errors="coerce")
+    # Existing SSE normalized bytes retain float conversion noise from
+    # 万份 -> 份 (e.g. n+0.000001). Preserve them and the existing formula;
+    # do not invent a stricter integer schema or silently round inputs.
+    if counts.isna().any() or (counts<0).any() or not all(math.isfinite(v) for v in counts):
+        raise ValueError("etf_replay_shares_invalid")
+
+    return frame
+
+
+def build_replay_daily_terminal(source, previous, day, left, right):
+    frames = pd.concat([parse_replay_partition(left, source, previous),
+                        parse_replay_partition(right, source, day)], ignore_index=True)
+    empty = pd.DataFrame()
+    return _build_etf_terminal_data(frames if source == "sse" else empty,
+                                    frames if source == "szse" else empty,
+                                    [previous, day])
+
+
 def validated_replay_inputs(profile: dict, target: str):
     """Validate exact pinned canonical bytes without materializing a view."""
     scoped = isinstance(profile, dict) and profile.get('contractVersion') == SCOPED_REPLAY_CONTRACT
@@ -79,18 +107,7 @@ def validated_replay_inputs(profile: dict, target: str):
             raise ValueError("etf_replay_size_exceeded")
         if hashlib.sha256(data).hexdigest()!=part["sha256"]:
             raise ValueError("etf_replay_hash_mismatch")
-        frame = pd.read_csv(io.BytesIO(data),dtype={"instrument_code":str})
-        if (frame.empty or len(frame)>5000 or not {"trade_date","market","instrument_code","shares"}.issubset(frame)
-            or set(frame.trade_date)!={day} or set(frame.market)!={source.upper()}
-            or frame.instrument_code.duplicated().any()
-            or not frame.instrument_code.str.fullmatch(r"\d{6}").fillna(False).all()):
-            raise ValueError("etf_replay_rows_invalid")
-        counts = pd.to_numeric(frame.shares,errors="coerce")
-        # Existing SSE normalized bytes retain float conversion noise from
-        # 万份 -> 份 (e.g. n+0.000001). Preserve them and the existing formula;
-        # do not invent a stricter integer schema or silently round inputs.
-        if counts.isna().any() or (counts<0).any() or not all(math.isfinite(v) for v in counts):
-            raise ValueError("etf_replay_shares_invalid")
+        frame = parse_replay_partition(data, source, day)
         frames[(source,day)] = frame
         evidence.append({k:part[k] for k in ("sourceId","tradeDate","objectKey","sha256")})
     if not any(day==target for _,day in frames):

@@ -19,6 +19,17 @@ def capabilities():
                 "sourceReadinessLedger", "capabilityContractV07"]}
 
 
+def test_native_rolling_requires_deployed_byte_preservation_capability():
+    payload = capabilities()
+    with pytest.raises(RuntimeError, match="deployed capability lacks"):
+        validate_publication_capabilities(payload, slot="dashboard", require_rolling_publication=True)
+    payload["features"].append("rollingPublicationV1")
+    validate_publication_capabilities(payload, slot="dashboard", require_rolling_publication=True)
+    with pytest.raises(RuntimeError, match="native_dashboard"):
+        validate_publication_capabilities(payload, slot="dashboard", required_manifest_schema=4,
+            require_rolling_publication=True)
+
+
 @pytest.mark.parametrize("mode,schema,finalize", [("active", 3, False), ("active", 3, True),
                                                   ("stage_only", 3, True), ("stage_only", 4, True)])
 def test_shared_upload_preserves_existing_wire_contract(monkeypatch, mode, schema, finalize):

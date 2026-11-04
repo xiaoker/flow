@@ -112,6 +112,39 @@ test("accepts v4 core candidate while leaving unbound PCF capabilities unknown",
   assert.equal(isFullCapabilitySetReady(manifest), false);
 });
 
+test("native rolling production evidence is explicit and cannot promote a v4 candidate", () => {
+  const manifest = dashboardCandidate();
+  const rolling = {
+    contractVersion: "flow-etf-rolling-publication-v1", asOf, status: "READY",
+    checkpointSha256: "b".repeat(64), calendarSha256: "c".repeat(64),
+    evidenceSha256: "d".repeat(64), scope: { periods: ["2w", "1m"], metrics: ["shares"] },
+  };
+  manifest.rollingPublication = rolling;
+  manifest.producerBuildSha = "e".repeat(40);
+  assert.equal(isReadModelManifest(manifest), false);
+  assert.equal(isCandidateOnlyReadModelManifest(dashboardCandidate()), true);
+  const production = { ...manifest, schemaVersion: 3 };
+  delete production.capabilityContract;
+  assert.equal(isReadModelManifest(production), true);
+  assert.equal(isReadModelManifest({ ...production, producerBuildSha: "e".repeat(64) }), true);
+  assert.equal(isReadModelManifest({ ...production, producerBuildSha: "e".repeat(41) }), false);
+  assert.equal(isCandidateOnlyReadModelManifest(production), false);
+  for (const patch of [{ asOf: "2026-08-05" }, { checkpointSha256: "bad" },
+    { scope: { periods: ["2w", "1m"], metrics: ["estimatedAmount"] } },
+    { scope: { periods: ["2w", "1m", "3m"], metrics: ["shares"] } }]) {
+    assert.equal(isReadModelManifest({ ...production, rollingPublication: { ...rolling, ...patch } }), false);
+  }
+  assert.equal(isReadModelManifest({ ...production, producerBuildSha: undefined }), false);
+  assert.equal(isReadModelManifest({ ...production, slot: "etf_penetration" }), false);
+  const unavailable = { ...production, rollingPublication: {
+    contractVersion: "flow-etf-rolling-publication-v1", asOf, status: "UNAVAILABLE",
+    reasonCode: "rolling_proof_unavailable", scope: { periods: ["2w", "1m"], metrics: ["shares"] },
+  } };
+  assert.equal(isReadModelManifest(unavailable), true);
+  assert.equal(isReadModelManifest({ ...unavailable, rollingPublication: {
+    ...unavailable.rollingPublication, checkpointSha256: "f".repeat(64) } }), false);
+});
+
 test("rejects a declared READY capability with a damaged artifact reference", () => {
   const manifest = dashboardCandidate();
   manifest.capabilityContract.capabilities.etf_daily_core.artifactRefs[0].sha256 = "b".repeat(64);

@@ -14,6 +14,31 @@ PCF_WORKFLOW = WORKFLOWS / "pcf-v2-capture.yml"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 
 
+def test_rolling_production_bundle_is_verified_and_bound_only_after_activation():
+    collect, publish = COLLECT_WORKFLOW.read_text(), PUBLISH_WORKFLOW.read_text()
+    for name in ("rolling-publication-input.json", "rolling-checkpoint.gz", "rolling-calendar.json"):
+        assert name in collect[collect.index("- name: Upload immutable collection source bundle"):]
+        assert name in publish[publish.index("- name: Materialize source files"):]
+    build = publish.index("--rolling-input rolling-publication-input.json")
+    activate = publish.index("python scripts/activate_read_models.py", build)
+    binding = publish.index("- name: Bind checkpoint only after native latest dashboard activation")
+    assert build < activate < binding
+    block = publish[binding:publish.index("- name: Check and stage ETF penetration candidate", binding)]
+    assert "inputs.recovery_id == ''" in block and "continue-on-error: true" in block
+    assert "--attempt-count" in block and "--lease-owner" in block
+    assert "Incomplete rolling source bundle; refusing an unverified fallback." in publish
+    assert "Native rolling publication requires the verified pipeline lease gate." in publish
+    assert "--rolling-unavailable-status rolling-publication-status.json" in publish
+    preparation = collect[collect.index("- name: Prepare rolling proof from the active published checkpoint"):
+        collect.index("- name: Verify immutable collection source bundle")]
+    assert "vars.FLOW_ROLLING_PERIODS_ENABLED == '1'" in preparation
+    assert "continue-on-error" not in preparation
+    assert "cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json" in preparation
+    gate = collect[collect.index("- name: Claim or skip pipeline window"):collect.index("  recovery_execution_contract:")]
+    assert "Rolling publication requires the leased delegated Publisher" in gate
+    assert gate.index("Rolling publication requires") < gate.index("/claim")
+
+
 def test_date_major_recovery_chain_has_explicit_configured_timeouts() -> None:
     import re
 

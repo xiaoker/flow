@@ -86,6 +86,7 @@ def check_capabilities(
     slot: str = "full",
     required_manifest_schema: int = 3,
     metrics: dict[str, int] | None = None,
+    require_rolling_publication: bool = False,
 ) -> None:
     if slot not in {"dashboard", "etf_penetration", "full"}:
         raise ValueError(f"unsupported release slot: {slot}")
@@ -100,7 +101,8 @@ def check_capabilities(
     response.raise_for_status()
     payload = response.json()
     validate_publication_capabilities(payload, slot=slot,
-                                      required_manifest_schema=required_manifest_schema)
+                                      required_manifest_schema=required_manifest_schema,
+                                      require_rolling_publication=require_rolling_publication)
 
 
 def main() -> None:
@@ -150,6 +152,7 @@ def main() -> None:
         slot=effective_slot,
         required_manifest_schema=int(manifest["schemaVersion"]),
         metrics=metrics,
+        **({"require_rolling_publication": True} if "rollingPublication" in manifest else {}),
     )
     names = list(manifest["artifacts"])
     if not names:

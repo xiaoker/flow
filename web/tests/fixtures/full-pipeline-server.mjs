@@ -50,7 +50,7 @@ if (process.env.FLOW_FULL_FIXTURE_ACTIVE_MANIFEST) {
   if (data.length > 65_536) throw new Error("active seed too large");
   const manifest = JSON.parse(data);
   db.prepare("INSERT INTO release_manifest (release_id,as_of,schema_version,manifest_sha256,manifest_json,status,created_at) VALUES (?,?,?,?,?,'ACTIVE',?)")
-    .run(manifest.releaseId,manifest.asOf,manifest.schemaVersion,manifest.manifestSha256,JSON.stringify(manifest),NOW);
+    .run(manifest.releaseId,manifest.asOf,manifest.schemaVersion,manifest.manifestSha256,data.toString("utf8"),NOW);
   db.prepare("INSERT INTO active_release (slot,release_id,as_of,manifest_sha256,activated_at) VALUES ('dashboard',?,?,?,?)")
     .run(manifest.releaseId,manifest.asOf,manifest.manifestSha256,NOW);
 }

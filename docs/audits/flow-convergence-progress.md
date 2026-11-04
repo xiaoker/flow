@@ -7,6 +7,124 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-04: native rolling Collector/Publisher connection (local, not delivered)
+
+- Isolated clone `/private/tmp/flow-main-check.iBVUp4`, base
+  `6a55dca41317e1d64c15cef1cd8b4868048b5ae8`; original protected worktree is
+  untouched. Delivery branch is `codex/rolling-period-production-continuity`.
+  No merge, deployment, flag mutation or real task is claimed.
+- Removed the uncommitted v4 checkpoint-upload prototype. One path remains:
+  official archive + release-scoped checkpoint -> verified current-day cache
+  -> ordinary confirmed source bundle -> native v3 rolling evidence contract
+  -> existing Publisher -> binding only after latest activation. v4 candidates
+  remain isolated. No migration, new scheduler/table, formula or classification
+  change. Scope is shares for 2w/1m, not a claim that all long histories or NAV
+  amounts have recovered.
+- Collector preparation is opt-in via `FLOW_ROLLING_PERIODS_ENABLED == '1'`;
+  absent/default flags keep the existing pipeline unchanged. It reads at most
+  23 requests/4MB, never recollects exchange sources, and writes no D1/R2. The
+  normal fixture needs 7 reads (checkpoint plus six recent source partitions),
+  reusing downloaded bytes for the four actual calculation dependencies.
+  A request window ahead of the real asOf uses the explicit real date and raw
+  official response, not the scheduler date; that fixture needs 5 reads.
+- Official raw calendar proofs are composed through the existing validator
+  and reduced to a bounded overlapping cover. The 56-session continuation
+  regression retains at most 12 proofs and rejects contradictory overlap.
+  Missing/unavailable rolling proof withholds only 2w/1m share cells with an
+  explicit UNAVAILABLE contract; independently confirmed daily facts continue.
+  Current-source hash/lineage failures remain BLOCKED_SOURCE/BLOCKED_QUALITY,
+  never an unavailable fallback. Null cells are not advertised as recovered.
+- Publisher copies and verifies the immutable descriptor and three pinned
+  input identities, independently recomputes native production cells, refreshes
+  artifact-size evidence, then follows the existing stage/QA/activation path.
+  Only a successful latest ordinary activation may bind its checkpoint. The
+  client performs at most one POST; uncertainty stays UNKNOWN. Historical
+  publication skips binding and cannot roll back latest.
+- Native manifests preserve exact canonical producer bytes through staging
+  and activation (including 0.0 versus 0); capability preflight requires
+  `rollingPublicationV1`. Legacy v3 and isolated v4 semantics remain unchanged.
+  Producer identities accept existing 40/64-hex forms; ordinary same-data-day
+  continuation explicitly permits a same-day checkpoint without weakening the
+  default previous-session reader. Unsupported non-delegated/ungated opt-in
+  configurations stop before claim, rather than silently omitting proof.
+- Worker verifies the active declaration, owner/attempt/producer and compressed
+  blob hash without inflating the ~15MB real cache. Offline producers/readers
+  retain the expansion bound and inner-hash validation. The optional binding
+  has an upper bound of two immutable R2 puts (compressed bytes + <=2KB binding),
+  no D1 writes. Physical read/write counters not returned remain UNKNOWN;
+  this is not provider quota evidence or permission to clear existing holds.
+- Targeted builder/calendar/date/workflow tests pass; real Worker import,
+  historical publication, exact readback and no-pointer-regression tests pass.
+  Web lint, all 283 tests and build pass. Standalone TypeScript diagnostics
+  match the unchanged base exactly; existing type debt is not claimed fixed.
+  Full Python regression passes after the final connections with localhost
+  permission required by the real HTTP/SQLite integration tests. The initial
+  restricted run could not start local servers; no assertions were removed.
+  Real Oct30 archive parity previously proves 1693 instruments, with 1684 2w
+  and 1657 1m non-null cells; dates remain dynamic, not pinned to Oct30.
+- Next: finish full regression/review and bounded merge side-effects, then
+  deliver one integration PR. Enabling the opt-in, current-date bootstrap,
+  canary, account admission and production/page acceptance require their
+  corresponding bounded authorization and real evidence. None is complete.
+- Merge side effects: main CI plus automatic Worker deployment and checking/
+  applying any pending remote D1 migrations; this change adds no migration,
+  but the production pending set is UNKNOWN. The opt-in repository variable
+  is absent at delivery preparation and defaults off. PR CI does not deploy,
+  collect, publish or change remote D1. Runtime incremental bounds are at most
+  23 preparation reads/4MB and one binding request with at most two immutable
+  R2 puts; they do not establish whole-account quota admission. Existing
+  UNKNOWN reservations remain unchanged.
+
+### Earlier local implementation notes (historical, not current status)
+
+- Work continues in the isolated clone `/private/tmp/flow-main-check.iBVUp4`,
+  based on `6a55dca41317e1d64c15cef1cd8b4868048b5ae8`. Original protected
+  reports, memory and user handoffs are unchanged. No PR, deployment or new
+  production operation is claimed for this work.
+- Local archive replay demonstrated the Oct29-to-Oct30 rollover using one
+  compressed prior checkpoint and four exact market/day partitions; retained
+  nodes reproduce the scoped two-week/month candidate. Oct30 is regression
+  evidence, not a hardcoded current product date or permission to activate it.
+- The release-scoped checkpoint prototype retains v4 isolation and latest
+  pointer safety. Actual Worker/SQLite negative-route and historical-publication
+  regressions pass. Canonical manifest bytes must be retained by fixtures.
+  Web lint/build and all 282 Web tests pass. Complete Python regression exits
+  zero when run serially after the build (expected duplicate-ZIP warning only).
+  A concurrent build initially caused three fixture startup failures; all 16
+  affected entry scenarios also pass independently after the build.
+- This is NOT a complete daily pipeline: shared-budget binding, Collector and
+  successful publication entry wiring, and two-session end-to-end execution
+  remain unfinished. See `ROLLING-CUTOVER.md`. Do not ship isolated helpers as
+  restored UI, disable quality checks, or activate v4 to close this gap.
+- Follow-up integration verification: the successful built-Worker route binds
+  the production Python checkpoint encoding to an exact active v3 release,
+  returns byte-identical data, and an identical replay adds no R2 writes or
+  SQL/pointer mutations. The combined history/rolling regression passes all
+  23 scenarios. Compatibility inspection confirms that the normal v3 builder
+  rejects scoped `windowEvidence` without the v4 contract; connecting the
+  current candidate to the normal publisher unchanged would fail. A proper
+  production evidence contract is still needed; no date relabeling, evidence
+  deletion, schema downgrade or extra source collection is justified by this.
+- Next allowed action: finish this same integration and its full regressions;
+  review the entire diff before delivery. Production/history writes still
+  require a valid bounded action package. Historical recovery, current page
+  periods and production takeover remain unaccepted.
+- Native production compatibility is now implemented locally, not delivered:
+  ordinary source snapshot + pinned current-day checkpoint/calendar/version
+  are independently recomputed into a v3 dashboard manifest with the explicit
+  `flow-etf-rolling-publication-v1` evidence extension. Candidate snapshots,
+  candidate flags, wrong scope/date/hash remain rejected; v4 activation is not
+  enabled. The existing build-read-models CLI exposes bounded `--rolling-*`
+  inputs. Real Oct30 archived inputs successfully generate a native local
+  release; the date is regression evidence only. Actual Worker import,
+  historical publication and normal view reads prove 2w/1m cell values and no
+  latest-pointer rollback. All 18 historical HTTP regressions and 283 Web
+  tests pass; lint/build pass. Full Python regression after these changes
+  exits zero (expected duplicate-ZIP warning only). Collector/Publisher invocation and full resource accounting
+  remain unfinished, so no page recovery or production readiness is claimed.
+
+## Previous current stage (historical)
+
 ### 2026-11-02:29 retry stopped on unclassified read failure; transport handling fix
 
 - PR229 merged/deployed as0207b2be19a727333551b807d3df6ccaa67e5bd9; main CI41365628951 and deployment41365629284 passed, exact merged build verified on attempt1, Worker451a76f2-6023-4bd8-9359-f3d0a504fbf4. No pending migrations. Historical19 remains COMPLETED/readable; dashboard29:9447f89d1da35f21 and penetration29:ca036acf95b08d87 unchanged.

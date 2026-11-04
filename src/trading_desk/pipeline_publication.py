@@ -54,7 +54,8 @@ def build_candidate_upload_body(manifest_bytes: bytes, name: str, content: bytes
 
 
 def validate_publication_capabilities(payload: Any, *, slot: str = "full",
-                                      required_manifest_schema: int = 3) -> None:
+                                      required_manifest_schema: int = 3,
+                                      require_rolling_publication: bool = False) -> None:
     if slot not in {"dashboard", "etf_penetration", "full"}:
         raise ValueError(f"unsupported release slot: {slot}")
     if not isinstance(payload, dict):
@@ -76,6 +77,10 @@ def validate_publication_capabilities(payload: Any, *, slot: str = "full",
         required_features.update({"previousCompatibleRelease", "radarFlowView", "sourceReadinessLedger"})
     if required_manifest_schema == 4:
         required_features.add("capabilityContractV07")
+    if require_rolling_publication:
+        if slot != "dashboard" or required_manifest_schema != 3:
+            raise RuntimeError("rolling_publication_requires_native_dashboard")
+        required_features.add("rollingPublicationV1")
     if not required_features.issubset(features):
         raise RuntimeError(f"deployed capability lacks v{required_manifest_schema} release features")
 
@@ -92,9 +97,11 @@ def build_upload_body(manifest: dict[str, Any], name: str, declared: dict[str, A
         raise ValueError(f"unsupported activation mode: {activation_mode}")
     if manifest.get("schemaVersion") == 4 and activation_mode != "stage_only":
         raise ValueError("schema-v4 capability manifests are candidate-only and require --stage-only")
+    if "rollingPublication" in manifest and activation_mode != "stage_only":
+        raise ValueError("native_rolling_requires_stage_only")
     digest = hashlib.sha256(content).hexdigest()
     wire_content = gzip.compress(content, compresslevel=6)
-    return {
+    body = {
         "version": 1,
         "activationMode": activation_mode,
         "manifest": manifest,
@@ -106,3 +113,7 @@ def build_upload_body(manifest: dict[str, Any], name: str, declared: dict[str, A
         },
         "finalize": finalize,
     }
+    if "rollingPublication" in manifest:
+        from .read_models import canonical_json_bytes
+        body["productionManifestJson"] = canonical_json_bytes(manifest).decode("utf-8")
+    return body

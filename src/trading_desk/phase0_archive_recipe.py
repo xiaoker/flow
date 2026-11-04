@@ -75,7 +75,8 @@ def _same_observation_values(reference: bytes, stored: bytes) -> bool:
     return values[0] == values[1]
 
 
-def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: dict[str, Any]) -> dict[str, Any]:
+def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: dict[str, Any],
+                                  target_date: str | None = None) -> dict[str, Any]:
     """Prove the three requested business dates from the bundled official SSE response."""
     requested = manifest.get("requested_dates")
     history = history_bundle.get("history") if history_bundle.get("version") == 1 else None
@@ -83,7 +84,8 @@ def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: d
             or not all(isinstance(day, str) for day in requested)
             or requested != sorted(set(requested)) or not isinstance(history, dict)
             or history.get("runId") != manifest.get("run_id")
-            or history.get("asOf") != requested[-1]
+            or (target_date is not None and target_date not in requested)
+            or history.get("asOf") != (target_date if target_date is not None else requested[-1])
             or not isinstance(history.get("artifacts"), list) or len(history["artifacts"]) > 24):
         raise ValueError("archive_recipe_calendar_identity_invalid")
     source_rows = [part for part in history["artifacts"] if isinstance(part, dict)
@@ -111,7 +113,8 @@ def official_calendar_from_bundle(*, manifest: dict[str, Any], history_bundle: d
         begin, end = response["beginDate"], response["endDate"]
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise ValueError("archive_recipe_calendar_source_invalid") from exc
-    if (dates != requested or begin != requested[0].replace("-", "")
+    expected_dates = requested if target_date is None else requested[:requested.index(target_date) + 1]
+    if (dates != expected_dates or begin != requested[0].replace("-", "")
             or end != requested[-1].replace("-", "")):
         raise ValueError("archive_recipe_calendar_dates_mismatch")
     calendar = {"sourceId": OFFICIAL_MARGIN_DATES_SOURCE, "sha256": _sha(raw),
