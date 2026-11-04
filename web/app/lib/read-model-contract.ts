@@ -182,6 +182,11 @@ export type ReadModelManifest = {
   requiredArtifacts?: string[];
   capabilityContract?: ReadModelCapabilityContract;
   manifestSha256?: string;
+  rollingPublication?: {
+    contractVersion: "flow-etf-rolling-publication-v1"; asOf: string;
+    scope: { periods: ["2w", "1m"]; metrics: ["shares"] };
+  } & ({ status: "READY"; checkpointSha256: string; calendarSha256: string; evidenceSha256: string }
+    | { status: "UNAVAILABLE"; reasonCode: "rolling_bootstrap_required" | "rolling_proof_unavailable" });
   artifacts: Record<string, ReadModelArtifactDescriptor>;
 };
 
@@ -515,6 +520,27 @@ export function isReadModelManifest(value: unknown): value is ReadModelManifest 
   }
 
   const artifacts = value.artifacts as Record<string, unknown>;
+  const rolling = value.rollingPublication;
+  if (rolling !== undefined && (
+    value.schemaVersion !== 3 || value.slot !== "dashboard" ||
+    !isRecord(rolling) ||
+    rolling.contractVersion !== "flow-etf-rolling-publication-v1" || rolling.asOf !== value.asOf ||
+    !isValidIsoDate(rolling.asOf) ||
+    !isRecord(rolling.scope) || Object.keys(rolling.scope).length !== 2 ||
+    JSON.stringify(rolling.scope.periods) !== '["2w","1m"]' ||
+    JSON.stringify(rolling.scope.metrics) !== '["shares"]' ||
+    typeof value.producerBuildSha !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.producerBuildSha)
+  )) return false;
+  if (isRecord(rolling)) {
+    if (rolling.status === "READY") {
+      if (Object.keys(rolling).length !== 7 ||
+          ![rolling.checkpointSha256, rolling.calendarSha256, rolling.evidenceSha256]
+            .every(digest => typeof digest === "string" && SHA256.test(digest))) return false;
+    } else if (rolling.status === "UNAVAILABLE") {
+      if (Object.keys(rolling).length !== 5 || typeof rolling.reasonCode !== "string" ||
+          !["rolling_bootstrap_required", "rolling_proof_unavailable"].includes(rolling.reasonCode)) return false;
+    } else return false;
+  }
   const names = Object.keys(artifacts);
   if (
     !names.length ||

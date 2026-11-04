@@ -130,6 +130,8 @@ jobs:
     steps:
       - name: Claim or skip pipeline window
         id: gate
+        env:
+          FLOW_ROLLING_PERIODS_ENABLED: ${{ vars.FLOW_ROLLING_PERIODS_ENABLED || '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -165,6 +167,12 @@ jobs:
             DELEGATE_PUBLISH="false"
           else
             DELEGATE_PUBLISH="true"
+          fi
+          if [[ "$FLOW_ROLLING_PERIODS_ENABLED" == "1" && -z "$INPUT_RECOVERY_ID" ]]; then
+            if [[ "$DELEGATE_PUBLISH" != "true" || ( "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ) ]]; then
+              echo "Rolling publication requires the leased delegated Publisher; legacy rollback mode is not supported." >&2
+              exit 1
+            fi
           fi
           LEASE_OWNER="${INPUT_LEASE_OWNER:-github:${GITHUB_RUN_ID}}"
           {
@@ -1317,6 +1325,31 @@ jobs:
             --actions-run-attempt "${GITHUB_RUN_ATTEMPT:-1}" \
             --output reports/budget/core-collection.json
 
+      - name: Prepare rolling proof from the active published checkpoint
+        if: ${{ success() && vars.FLOW_ROLLING_PERIODS_ENABLED == '1' && inputs.recovery_id == '' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        env:
+          FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
+          FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src:. python scripts/prepare_rolling_etf_publication.py \
+            --snapshot dashboard-snapshot.json \
+            --manifest reports/phase0/latest-manifest.json \
+            --history-bundle history-bundle.json \
+            --output rolling-prepared \
+            --report reports/budget/rolling-preparation.json
+          if [[ -s rolling-prepared/rolling-publication-input.json ]]; then
+            cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json
+            cp rolling-prepared/rolling-publication-input.json rolling-publication-input.json
+            cp rolling-prepared/rolling-checkpoint.gz rolling-checkpoint.gz
+            cp rolling-prepared/rolling-calendar.json rolling-calendar.json
+          else
+            cp reports/budget/rolling-preparation.json rolling-publication-status.json
+            echo '::warning::Rolling shares are explicitly unavailable; confirmed daily data will still publish.'
+          fi
+
       - name: Verify immutable collection source bundle
         id: source_bundle
         # Both delegated and local publication paths must verify the same
@@ -1415,6 +1448,10 @@ jobs:
           retention-days: 3
           path: |
             dashboard-snapshot.json
+            rolling-publication-input.json
+            rolling-checkpoint.gz
+            rolling-calendar.json
+            rolling-publication-status.json
             stock-flow-gate.json
             stock-flow-catalog.json
             stock-flow-history.json
@@ -1431,6 +1468,7 @@ jobs:
             pipeline-recovery-running.json
             pipeline-recovery-running-response.json
             reports/budget/core-collection.json
+            reports/budget/rolling-preparation.json
 
       - name: Dispatch resumable market-data publish workflow
         id: publish_dispatch
@@ -1764,7 +1802,11 @@ jobs:
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
           STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
           STOCK_FLOW_GATE_REASON="$(jq -r '.reason // empty' stock-flow-gate.json 2>/dev/null || true)"
-          if [[ "$HISTORY_STATUS" == "BLOCKED_QUALITY" ]]; then
+          ROLLING_STATUS="$(jq -r '.status // empty' reports/budget/rolling-preparation.json 2>/dev/null || true)"
+          if [[ "$ROLLING_STATUS" == "BLOCKED_SOURCE" ]]; then
+            STATUS="BLOCKED_QUALITY"
+            ERROR_CODE="rolling_source_identity_failed"
+          elif [[ "$HISTORY_STATUS" == "BLOCKED_QUALITY" ]]; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="${HISTORY_ERROR_CODE:-stock_flow_history_incomplete}"
           elif [[ "$HISTORY_STATUS" == "FAILED_RETRYABLE" ]]; then

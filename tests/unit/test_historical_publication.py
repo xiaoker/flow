@@ -22,10 +22,16 @@ AUTH = {"Authorization": "Bearer fixture-only", "CF-Access-Client-Id": "fixture-
 
 
 @contextmanager
-def server(tmp_path, *, observed="2026-08-05T09:00:00+08:00", extra=None, race=False):
+def server(tmp_path, *, observed="2026-08-05T09:00:00+08:00", extra=None, race=False, checkpoint_active=False):
     base = _snapshot()
-    _, baseline = build_market_read_models(base, require_materialized=True)
-    before = tmp_path / "active.json"; before.write_text(json.dumps(baseline))
+    rolling_input = None
+    if checkpoint_active:
+        from test_etf_rolling_anchor import rolling_production_fixture
+        base, rolling_input = rolling_production_fixture()
+    _, baseline = build_market_read_models(base, require_materialized=True,
+        producer_build_sha="a" * 40 if checkpoint_active else None,
+        rolling_publication_input=rolling_input)
+    before = tmp_path / "active.json"; before.write_bytes(canonical_json_bytes(baseline))
     empty = tmp_path / "seed.json"; empty.write_text("[]")
     snapshot = materialize_dashboard_snapshot(base, _state(), as_of="2026-08-05")
     snapshot["observedAt"] = observed
@@ -38,6 +44,9 @@ def server(tmp_path, *, observed="2026-08-05T09:00:00+08:00", extra=None, race=F
         path = tmp_path / "extra.json"; path.write_text(json.dumps(extra))
         env["FLOW_FULL_FIXTURE_EXTRA_RELEASE"] = str(path)
     if race: env["FLOW_FULL_FIXTURE_HISTORY_POINTER_RACE"] = "1"
+    if checkpoint_active:
+        env["FLOW_FULL_FIXTURE_RUN_KEY"] = f"daily-market-data:{baseline['asOf']}:reconcile:v1"
+        env["FLOW_FULL_FIXTURE_TARGET"] = baseline["asOf"]
     process = subprocess.Popen(["node", "--experimental-strip-types", str(ROOT / "web/tests/fixtures/full-pipeline-server.mjs")],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
@@ -84,6 +93,153 @@ def test_explicit_historical_publication_is_normal_readable_without_latest_rollb
         assert again["sqlChanges"] == stats["sqlChanges"]
         assert again["r2Put"] == stats["r2Put"]
         assert again["activeIdentity"] == stats["activeIdentity"]
+
+
+def test_rolling_checkpoint_rejects_invalid_binding_without_storage_writes(tmp_path):
+    with server(tmp_path) as (origin, baseline, _manifest):
+        before = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        endpoint = origin + "/api/v1/admin/etf-state"
+        assert requests.post(endpoint, json={}, timeout=10).status_code == 401
+        invalid = requests.post(endpoint, json={}, headers=AUTH, timeout=10)
+        assert invalid.status_code == 422, invalid.text
+        stale = requests.post(endpoint, json={
+            "releaseId": "release:2026-08-01:0000000000000000",
+            "manifestSha256": "0" * 64, "sha256": "0" * 64,
+            "contentBase64": "",
+        }, headers=AUTH, timeout=10)
+        assert stale.status_code == 409, stale.text
+        missing = requests.get(endpoint, params={"kind": "rolling-checkpoint"}, headers=AUTH, timeout=10)
+        assert missing.status_code == 404, missing.text
+        after = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        assert after["sqlChanges"] == before["sqlChanges"]
+        assert after["r2Put"] == before["r2Put"]
+        assert after["activeIdentity"] == before["activeIdentity"]
+        assert after["activeIdentity"]["release_id"] == baseline["releaseId"]
+
+
+def test_rolling_checkpoint_binds_exact_active_release_and_is_immutable(tmp_path):
+    import base64
+    from scripts.bind_rolling_checkpoint import bind_checkpoint
+    from trading_desk.bounded_http import BoundedHTTPExchange
+    from trading_desk.etf_rolling_refs import unpack_rolling_checkpoint
+    from test_etf_rolling_anchor import rolling_production_fixture
+    with server(tmp_path, checkpoint_active=True) as (origin, baseline, _manifest):
+        endpoint = origin + "/api/v1/admin/etf-state"
+        wire = rolling_production_fixture()[1]["checkpoint"]
+        _, refs, cache = unpack_rolling_checkpoint(wire, hashlib.sha256(wire).hexdigest())
+        body = {"releaseId": baseline["releaseId"], "manifestSha256": baseline["manifestSha256"],
+            "sha256": hashlib.sha256(wire).hexdigest(), "contentBase64": base64.b64encode(wire).decode(),
+            "pipelineExecution": {"runKey": f"daily-market-data:{baseline['asOf']}:reconcile:v1",
+                "leaseOwner": "fixture-owner", "attemptCount": 1,
+                "targetDate": baseline["asOf"], "producerBuildSha": "a" * 40}}
+        before = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        wrong_digest = requests.post(endpoint, json={**body, "sha256": "f" * 64}, headers=AUTH, timeout=10)
+        assert wrong_digest.status_code == 409, wrong_digest.text
+        wrong_owner = requests.post(endpoint, json={**body, "pipelineExecution": {
+            **body["pipelineExecution"], "leaseOwner": "old-owner"}}, headers=AUTH, timeout=10)
+        assert wrong_owner.status_code == 409, wrong_owner.text
+        rejected = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        assert rejected["r2Put"] == before["r2Put"]
+        result = bind_checkpoint(manifest=baseline, activation={"status": "activated",
+            "slot": "dashboard", "asOf": baseline["asOf"], "releaseId": baseline["releaseId"]},
+            wire=wire, execution=body["pipelineExecution"],
+            exchange=BoundedHTTPExchange(requests.Session()), headers=AUTH, url=endpoint)
+        assert result["status"] == "BOUND"
+        assert result["workerRequests"] == 1 and result["d1RowsRead"] is None
+        readback = requests.get(endpoint, params={"kind": "rolling-checkpoint"}, headers=AUTH, timeout=10)
+        assert readback.status_code == 200, readback.text
+        assert readback.content == wire
+        assert readback.headers["x-flow-checkpoint-sha256"] == body["sha256"]
+        assert unpack_rolling_checkpoint(readback.content, body["sha256"])[1:] == (refs, cache)
+        first = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        replay = requests.post(endpoint, json=body, headers=AUTH, timeout=10)
+        assert replay.status_code == 200, replay.text
+        after = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        assert first["r2Put"] == before["r2Put"] + 2
+        assert after["r2Put"] == first["r2Put"]
+        assert after["sqlChanges"] == before["sqlChanges"]
+        assert after["activeIdentity"] == before["activeIdentity"]
+
+
+def test_native_rolling_publication_is_readable_without_activating_v4_or_rolling_back_latest(tmp_path):
+    from test_etf_rolling_anchor import rolling_production_fixture
+    base, inputs = rolling_production_fixture()
+    payloads, manifest = build_market_read_models(base, require_materialized=True,
+        producer_build_sha="a" * 40, rolling_publication_input=inputs)
+    with server(tmp_path) as (origin, baseline, _candidate):
+        for index, (name, descriptor) in enumerate(manifest["artifacts"].items()):
+            response = requests.post(origin + "/api/v1/admin/read-model-import", json=build_upload_body(
+                manifest, name, descriptor, canonical_json_bytes(payloads[name]),
+                finalize=index == len(manifest["artifacts"]) - 1, activation_mode="stage_only"),
+                headers=AUTH, timeout=10)
+            assert response.status_code == 200, response.text
+        published = requests.post(origin + "/api/v1/admin/read-model-activate", json={
+            "releaseId": manifest["releaseId"], "asOf": manifest["asOf"],
+            "slot": "dashboard", "publishHistory": True}, headers=AUTH, timeout=10)
+        assert published.status_code == 200, published.text
+        assert published.json()["status"] == "published_historical"
+        radar = requests.get(origin + "/api/v2/views/radar", params={
+            "date": manifest["asOf"], "slot": "dashboard"}, headers=AUTH, timeout=10)
+        assert radar.status_code == 200, radar.text
+        for row in radar.json()["data"]["etfTerminal"]["instruments"]:
+            assert row["periods"]["2w"] == 10 and row["periods"]["1m"] == 21
+            assert row["estimatedCashPeriods"].get("1m") is None
+        latest = requests.get(origin + "/api/v2/releases/latest", headers=AUTH, timeout=10).json()
+        assert latest["releaseId"] == baseline["releaseId"]
+
+
+def test_missing_rolling_proof_does_not_block_new_confirmed_daily_release(tmp_path):
+    base = _snapshot()
+    base["quality"]["warn"] = 0.0  # Preserve producer float spelling across JSON/Worker storage.
+    base["publication"] = {"status": "confirmed"}
+    base["observedAt"] = "2026-08-06T10:00:00+08:00"
+    payloads, manifest = build_market_read_models(base, require_materialized=True,
+        producer_build_sha="a" * 64, rolling_unavailable_reason="rolling_proof_unavailable")
+    with server(tmp_path) as (origin, baseline, _candidate):
+        for index, (name, descriptor) in enumerate(manifest["artifacts"].items()):
+            uploaded = requests.post(origin + "/api/v1/admin/read-model-import", json=build_upload_body(
+                manifest, name, descriptor, canonical_json_bytes(payloads[name]),
+                finalize=index == len(manifest["artifacts"]) - 1, activation_mode="stage_only"), headers=AUTH, timeout=10)
+            assert uploaded.status_code == 200, uploaded.text
+        result = requests.post(origin + "/api/v1/admin/read-model-activate", json={
+            "releaseId": manifest["releaseId"], "asOf": manifest["asOf"], "slot": "dashboard"}, headers=AUTH, timeout=10)
+        assert result.status_code == 200 and result.json()["status"] == "activated", result.text
+        latest = requests.get(origin + "/api/v2/releases/latest", headers=AUTH, timeout=10).json()
+        assert latest["releaseId"] == manifest["releaseId"] != baseline["releaseId"]
+        radar = requests.get(origin + "/api/v2/views/radar", headers=AUTH, timeout=10)
+        assert radar.status_code == 200, radar.text
+        rows = radar.json()["data"]["etfTerminal"]["instruments"]
+        for row in rows:
+            assert row["periods"]["1d"] is not None
+            assert row["periods"]["2w"] is None and row["periods"]["1m"] is None
+        before = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        checkpoint = requests.get(origin + "/api/v1/admin/etf-state", params={"kind": "rolling-checkpoint"}, headers=AUTH, timeout=10)
+        assert checkpoint.status_code == 404
+        after = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        assert after["r2Get"] == before["r2Get"]
+
+
+@pytest.mark.parametrize("fault", ["missing", "wire", "semantic"])
+def test_native_production_manifest_bytes_reject_mismatch_before_any_write(tmp_path, fault):
+    from test_etf_rolling_anchor import rolling_production_fixture
+    base, inputs = rolling_production_fixture()
+    payloads, manifest = build_market_read_models(base, require_materialized=True,
+        producer_build_sha="a" * 64, rolling_publication_input=inputs)
+    name = "bootstrap"
+    body = build_upload_body(manifest, name, manifest["artifacts"][name], canonical_json_bytes(payloads[name]),
+        finalize=False, activation_mode="stage_only")
+    if fault == "missing":
+        del body["productionManifestJson"]
+    elif fault == "wire":
+        body["productionManifestJson"] += " "
+    else:
+        body["manifest"] = {**manifest, "quality": {**manifest["quality"], "warn": 123}}
+    with server(tmp_path) as (origin, _baseline, _candidate):
+        before = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        reply = requests.post(origin + "/api/v1/admin/read-model-import", json=body, headers=AUTH, timeout=10)
+        assert reply.status_code == (422 if fault == "missing" else 409), reply.text
+        after = requests.get(origin + "/fixture/stats", headers=AUTH, timeout=10).json()
+        assert after["r2Put"] == before["r2Put"] and after["sqlChanges"] == before["sqlChanges"]
 
 
 @pytest.mark.parametrize("fault", ["auth", "slot", "date", "intent"])

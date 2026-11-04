@@ -282,6 +282,41 @@ def archive_replay_source_binding(recipe):
         "requestCount": len(recipe["partitions"])}
 
 
+def read_exact_etf_archive(ref, *, exchange, headers):
+    from .etf_replay import MAX_SOURCE_BYTES
+
+    reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
+        max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+        headers=headers, params={"source": ref["sourceId"], "dataset": "etf_scale",
+            "date": ref["tradeDate"], "file": "data", "indexed": "1",
+            "revision": ref["objectKey"].split("/")[-2]})
+    if (reply.status != 200 or hashlib.sha256(reply.content).hexdigest() != ref["sha256"]
+            or reply.headers.get("x-flow-normalized-key") != ref["objectKey"]
+            or reply.headers.get("x-flow-normalized-sha256") != ref["sha256"]):
+        raise PipelineRunnerError("entry_replay_archive_mismatch")
+    return reply.content
+
+
+def read_active_rolling_checkpoint(*, exchange, headers):
+    from .etf_rolling_refs import MAX_ROLLING_OBJECT_BYTES
+
+    reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/etf-state",
+        max_bytes=MAX_ROLLING_OBJECT_BYTES, chunk_size=65536, max_chunks=33,
+        deadline_seconds=20, headers=headers, params={"kind": "rolling-checkpoint"})
+    if reply.status == 404:
+        return None
+    if reply.status != 200:
+        raise PipelineRunnerError("entry_rolling_checkpoint_read_failed")
+    values = {k.lower(): v for k, v in reply.headers.items()}
+    manifest = {"slot": "dashboard", "releaseId": values.get("x-flow-release-id"),
+                "asOf": values.get("x-flow-as-of"),
+                "manifestSha256": values.get("x-flow-manifest-sha256")}
+    digest = values.get("x-flow-checkpoint-sha256")
+    if not all(manifest.values()) or hashlib.sha256(reply.content).hexdigest() != digest:
+        raise PipelineRunnerError("entry_rolling_checkpoint_identity_mismatch")
+    return manifest, {**manifest, "sha256": digest}, reply.content
+
+
 def hydrate_archive_replay_source(base, request, *, exchange, environment):
     """Read only exact indexed normalized objects; no list, retry or write."""
     import base64
@@ -324,18 +359,11 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
         "CF-Access-Client-Id": creds["access_client_id"], "CF-Access-Client-Secret": creds["access_client_secret"]}
     parts, total = [], 0
     for ref in refs:
-        reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
-            max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
-            headers=headers, params={"source":ref["sourceId"], "dataset":"etf_scale",
-                "date":ref["tradeDate"], "file":"data", "indexed":"1",
-                "revision":ref["objectKey"].split("/")[-2]})
-        total += len(reply.content)
-        if (reply.status != 200 or total > MAX_SOURCE_BYTES
-                or hashlib.sha256(reply.content).hexdigest() != ref["sha256"]
-                or reply.headers.get("x-flow-normalized-key") != ref["objectKey"]
-                or reply.headers.get("x-flow-normalized-sha256") != ref["sha256"]):
+        content = read_exact_etf_archive(ref, exchange=exchange, headers=headers)
+        total += len(content)
+        if total > MAX_SOURCE_BYTES:
             raise PipelineRunnerError("entry_replay_archive_mismatch")
-        parts.append({**ref, "contentBase64":base64.b64encode(reply.content).decode()})
+        parts.append({**ref, "contentBase64":base64.b64encode(content).decode()})
     profile = {"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}
     if recipe['contract'] in {SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}:
         profile.update(contractVersion=SCOPED_REPLAY_CONTRACT, scope=recipe['scope'])

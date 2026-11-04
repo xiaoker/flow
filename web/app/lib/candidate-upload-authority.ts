@@ -11,7 +11,7 @@ export type CandidateExecution = {
 
 export function parseCandidateExecution(value: unknown, manifest: {
   schemaVersion: number; asOf: string; producerBuildSha?: string;
-}, activationMode: unknown): CandidateExecution {
+}, activationMode: unknown, operation: "candidate" | "active_checkpoint" = "candidate"): CandidateExecution {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new PipelineWindowError("invalid_candidate_execution", 422);
   }
@@ -37,7 +37,8 @@ export function parseCandidateExecution(value: unknown, manifest: {
       || typeof ref.producerBuildSha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.producerBuildSha)) {
     throw new PipelineWindowError("invalid_candidate_execution", 422);
   }
-  if (activationMode !== "stage_only" || manifest.schemaVersion !== 4) {
+  if (activationMode !== "stage_only" ||
+      (operation === "candidate" ? manifest.schemaVersion !== 4 : manifest.schemaVersion !== 3)) {
     throw new PipelineWindowError("runner_candidate_requires_stage_only_v4", 409);
   }
   if (ref.targetDate !== manifest.asOf || ref.producerBuildSha !== manifest.producerBuildSha) {

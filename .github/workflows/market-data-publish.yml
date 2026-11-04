@@ -87,7 +87,7 @@ jobs:
       should_run: ${{ steps.gate.outputs.should_run || steps.resume.outputs.should_run }}
       gate_enabled: ${{ steps.gate.outputs.gate_enabled }}
       lease_owner: ${{ steps.resume.outputs.lease_owner || inputs.lease_owner }}
-      attempt_count: ${{ steps.resume.outputs.attempt_count || inputs.recovery_attempt_count }}
+      attempt_count: ${{ steps.resume.outputs.attempt_count || steps.gate.outputs.attempt_count || inputs.recovery_attempt_count }}
     env:
       PIPELINE_WINDOW_GATE_ENABLED: ${{ inputs.gate_enabled || 'false' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
@@ -263,6 +263,8 @@ jobs:
           fi
           echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
           echo "should_run=true" >> "$GITHUB_OUTPUT"
+          jq -e '(.attemptCount | type) == "number" and .attemptCount >= 1 and (.attemptCount | floor) == .attemptCount' pipeline-window-status.json >/dev/null
+          echo "attempt_count=$(jq -r '.attemptCount' pipeline-window-status.json)" >> "$GITHUB_OUTPUT"
           echo "Publish lease is valid for $RUN_KEY."
 
   publish:
@@ -466,12 +468,19 @@ jobs:
           if [[ -d .collection-source/stock-flow-partitions ]]; then
             cp -R .collection-source/stock-flow-partitions stock-flow-partitions
           fi
+          for file in rolling-publication-input.json rolling-checkpoint.gz rolling-calendar.json rolling-publication-status.json; do
+            if [[ -s ".collection-source/$file" ]]; then cp ".collection-source/$file" "$file"; fi
+          done
 
       - name: Build immutable read-model candidates offline
         id: build_models
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ( -e rolling-publication-input.json || -e rolling-publication-status.json ) && "${{ needs.publish_window_gate.outputs.gate_enabled }}" != "true" ]]; then
+            echo "Native rolling publication requires the verified pipeline lease gate." >&2
+            exit 1
+          fi
           if ! jq -e '.publication.status == "confirmed"' dashboard-snapshot.json >/dev/null; then
             echo "Source snapshot is pending; no read-model candidate will be built."
             echo "penetration_status=NOT_REQUIRED" >> "$GITHUB_OUTPUT"
@@ -523,6 +532,34 @@ jobs:
               --output-dir read-models-dashboard \
               --require-materialized \
               --producer-build-sha "${PRODUCER_BUILD_SHA}" \
+              "${HISTORY_ARGS[@]}"
+            python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
+          fi
+          if [[ -e rolling-publication-status.json && ( -e rolling-publication-input.json || -e rolling-checkpoint.gz || -e rolling-calendar.json ) ]]; then
+            echo "Conflicting rolling proof and unavailable status; refusing publication." >&2
+            exit 1
+          fi
+          if [[ -s rolling-publication-input.json ]]; then
+            # Recompute from the immutable ordinary source plus pinned proof;
+            # never relabel the runner's schema-v4 candidate for activation.
+            python scripts/build_read_models.py \
+              --slot dashboard \
+              --snapshot dashboard-snapshot.json \
+              --output-dir read-models-dashboard \
+              --require-materialized \
+              --producer-build-sha "${PRODUCER_BUILD_SHA}" \
+              --rolling-input rolling-publication-input.json \
+              "${HISTORY_ARGS[@]}"
+            python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
+          elif [[ -e rolling-checkpoint.gz || -e rolling-calendar.json ]]; then
+            echo "Incomplete rolling source bundle; refusing an unverified fallback." >&2
+            exit 1
+          elif [[ -s rolling-publication-status.json ]]; then
+            python scripts/build_read_models.py \
+              --slot dashboard --snapshot dashboard-snapshot.json \
+              --output-dir read-models-dashboard --require-materialized \
+              --producer-build-sha "${PRODUCER_BUILD_SHA}" \
+              --rolling-unavailable-status rolling-publication-status.json \
               "${HISTORY_ARGS[@]}"
             python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
           fi
@@ -585,6 +622,23 @@ jobs:
           jq -e --arg releaseId "$RELEASE_ID" --arg asOf "$AS_OF" \
             '.releaseId == $releaseId and .asOf == $asOf and .slot == "dashboard" and (.status == "activated" or .status == "published_historical" or .status == "staged_older_than_active" or .status == "staged_stale_revision")' \
             dashboard-read-model-activation.json >/dev/null
+
+      - name: Bind checkpoint only after native latest dashboard activation
+        if: ${{ success() && inputs.recovery_id == '' && needs.publish_window_gate.outputs.gate_enabled == 'true' && hashFiles('rolling-publication-input.json') != '' }}
+        # Checkpoint failure cannot undo an already successful data publication.
+        # Preserve UNKNOWN evidence and warn; never retry this write implicitly.
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/bind_rolling_checkpoint.py \
+            --manifest read-models-dashboard/manifest.json \
+            --activation dashboard-read-model-activation.json \
+            --checkpoint rolling-checkpoint.gz \
+            --run-key "$INPUT_RUN_KEY" \
+            --lease-owner "$INPUT_LEASE_OWNER" \
+            --attempt-count "$INPUT_RECOVERY_ATTEMPT_COUNT" \
+            --result rolling-checkpoint-binding.json
 
       - name: Check and stage ETF penetration candidate
         if: ${{ steps.build_models.outputs.ready == 'true' && hashFiles('read-models-penetration/manifest.json') != '' }}
@@ -890,6 +944,9 @@ jobs:
             artifact-size-report.json
             dashboard-capabilities.json
             dashboard-read-model-publish.json
+            rolling-publication-input.json
+            rolling-publication-status.json
+            rolling-checkpoint-binding.json
             dashboard-release-canary.json
             dashboard-read-model-activation.json
             penetration-capabilities.json

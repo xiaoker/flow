@@ -555,7 +555,11 @@ export async function activateReadModels(
   release: { releaseId: string; asOf: string; manifestKey: string; manifestSha256: string },
   manifest: ReadModelManifest,
   activatedAt: string,
+  exactManifestJson?: string,
 ): Promise<"activated" | "staged_older_than_active" | "staged_stale_revision"> {
+  if (manifest.rollingPublication !== undefined && !exactManifestJson) {
+    throw new Error("native_rolling_requires_exact_manifest_bytes");
+  }
   // A delayed/retried collection can finish after a newer trading date has
   // already been published. The release pointer is a monotonic cursor: a
   // newer date may replace an older one, and a release for the same date may
@@ -599,7 +603,7 @@ export async function activateReadModels(
           release.asOf,
           manifest.schemaVersion,
           release.manifestSha256,
-          JSON.stringify(manifest),
+          exactManifestJson ?? JSON.stringify(manifest),
           activatedAt,
         ),
       db
@@ -679,7 +683,7 @@ export async function activateReadModels(
           release.asOf,
           manifest.schemaVersion,
           release.manifestSha256,
-          JSON.stringify(manifest),
+          exactManifestJson ?? JSON.stringify(manifest),
           observedAt,
           activatedAt,
         ),

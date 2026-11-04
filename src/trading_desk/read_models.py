@@ -1154,6 +1154,8 @@ def build_market_read_models(
     previous_manifest: dict[str, Any] | None = None,
     producer_build_sha: str | None = None,
     capability_contract_version: str | None = None,
+    rolling_publication_input: dict[str, Any] | None = None,
+    rolling_unavailable_reason: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Build the core market release without requiring ETF PCF.
 
@@ -1163,12 +1165,27 @@ def build_market_read_models(
     separate ``etf_penetration`` slot when their own date gate passes.
     """
 
+    rolling_publication = None
+    if rolling_publication_input is not None or rolling_unavailable_reason is not None:
+        from .etf_rolling_refs import rebuild_rolling_publication, mark_rolling_unavailable
+        if capability_contract_version is not None:
+            raise ReadModelError("etf_rolling_production_candidate_conflict")
+        if not isinstance(producer_build_sha, str) or not re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", producer_build_sha):
+            raise ReadModelError("etf_rolling_production_build_identity_required")
+        if rolling_publication_input is not None and rolling_unavailable_reason is not None:
+            raise ReadModelError("etf_rolling_production_input_conflict")
+        if rolling_publication_input is not None:
+            snapshot, rolling_publication = rebuild_rolling_publication(snapshot, **rolling_publication_input)
+        else:
+            snapshot, rolling_publication = mark_rolling_unavailable(snapshot, rolling_unavailable_reason)
     if "etfReplayInput" in snapshot:
         from .etf_replay import replay_snapshot
         if capability_contract_version != CAPABILITY_CONTRACT_VERSION:
             raise ReadModelError("etf_replay_candidate_contract_required")
         snapshot = replay_snapshot(snapshot)
-    if "windowEvidence" in (snapshot.get("etfTerminal") or {}) and capability_contract_version != CAPABILITY_CONTRACT_VERSION:
+    if ("windowEvidence" in (snapshot.get("etfTerminal") or {})
+            and capability_contract_version != CAPABILITY_CONTRACT_VERSION
+            and rolling_publication is None):
         raise ReadModelError("etf_replay_candidate_contract_required")
     validate_snapshot(snapshot, require_materialized=require_materialized)
     compact_history = None
@@ -1242,6 +1259,8 @@ def build_market_read_models(
     }
     if capability_states is not None:
         release_contract["capabilityContract"] = capability_contract_identity(capability_states, "dashboard")
+    if rolling_publication is not None:
+        release_contract["rollingPublication"] = rolling_publication
     if producer_build_sha:
         release_contract["producerBuildSha"] = producer_build_sha
     release_hash = sha256_bytes(canonical_json_bytes(release_contract))
@@ -1283,6 +1302,8 @@ def build_market_read_models(
         manifest["capabilityContract"] = bind_capability_artifact_refs(capability_states, "dashboard", artifacts)
     if producer_build_sha:
         manifest["producerBuildSha"] = producer_build_sha
+    if rolling_publication is not None:
+        manifest["rollingPublication"] = rolling_publication
     manifest["manifestSha256"] = sha256_bytes(canonical_json_bytes(manifest))
     return payloads, manifest
 
@@ -1336,6 +1357,8 @@ def write_market_read_models(
     previous_manifest_path: Path | None = None,
     producer_build_sha: str | None = None,
     capability_contract_version: str | None = None,
+    rolling_publication_input: dict[str, Any] | None = None,
+    rolling_unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     market_history = None
     if market_history_path is not None:
@@ -1351,6 +1374,8 @@ def write_market_read_models(
         previous_manifest=previous_manifest,
         producer_build_sha=producer_build_sha,
         capability_contract_version=capability_contract_version,
+        rolling_publication_input=rolling_publication_input,
+        rolling_unavailable_reason=rolling_unavailable_reason,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():

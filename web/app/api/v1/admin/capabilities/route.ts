@@ -54,6 +54,7 @@ export async function GET(request: Request) {
       "radarFlowView",
         "releaseSlots",
         "capabilityContractV07",
+        "rollingPublicationV1",
         ...(sourceReadinessReady ? ["sourceReadinessLedger"] : []),
         ...(bseMarginColumnReady ? ["bseMarginSeparateScope"] : []),
       ]

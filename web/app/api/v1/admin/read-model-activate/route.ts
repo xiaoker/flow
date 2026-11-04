@@ -8,6 +8,7 @@ import {
   type ReadModelManifest,
 } from "@/app/lib/read-model-contract";
 import { activateReadModels } from "../import/route";
+import { candidateManifestSha256 } from "@/app/lib/candidate-read";
 
 export const dynamic = "force-dynamic";
 
@@ -114,6 +115,10 @@ export async function POST(request: Request) {
     if (parsed.releaseId !== row.release_id || parsed.asOf !== row.as_of) {
       return NextResponse.json({ error: "staged_manifest_identity_mismatch" }, { status: 503 });
     }
+    if (parsed.rollingPublication !== undefined &&
+        await candidateManifestSha256(row.manifest_json) !== row.manifest_sha256) {
+      return NextResponse.json({ error: "production_manifest_bytes_mismatch" }, { status: 409 });
+    }
     const parsedSlot = parsed.slot ?? "dashboard";
     if (expectedSlot !== null && expectedSlot !== parsedSlot) {
       return NextResponse.json({ error: "release_slot_mismatch" }, { status: 422 });
@@ -177,6 +182,7 @@ export async function POST(request: Request) {
       },
       parsed,
       activatedAt,
+      parsed.rollingPublication !== undefined ? row.manifest_json : undefined,
     );
     const activeAfter = publishHistory ? await readActive() : null;
     return NextResponse.json({ status, releaseId: row.release_id, asOf: row.as_of, slot: parsed.slot ?? "dashboard",
