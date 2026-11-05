@@ -120,13 +120,22 @@ def _fetch_bootstrap_calendar(target, *, source_exchange, exchange, headers, sou
     return _calendar_from_official_response(reply.content, start=start, end=target, target=target)
 
 
-def _collected_source_identity(source, day, manifest, history_bundle):
-    matches = [(artifact, part) for artifact in history_bundle["history"]["artifacts"]
+def _collected_source_identity(source, day, manifest, history_bundle, *, allow_absent=False):
+    declared = [item for item in manifest["artifacts"]
+        if item.get("requested_date") == day
+        and item.get("source", {}).get("source_id") == source
+        and item.get("source", {}).get("dataset") == "etf_scale"]
+    artifacts = [artifact for artifact in history_bundle["history"]["artifacts"]
         if artifact.get("sourceId") == source and artifact.get("dataset") == "etf_scale"
-        and artifact.get("requestedDate") == day
+        and artifact.get("requestedDate") == day]
+    if not declared and not artifacts:
+        if allow_absent:
+            return None
+        raise ValueError("rolling_collected_target_not_observed")
+    matches = [(artifact, part) for artifact in artifacts
         for part in artifact.get("normalized", [])
         if part.get("name") == "data" and part.get("tradeDates") == [day]]
-    if len(matches) != 1:
+    if len(declared) != 1 or len(artifacts) != 1 or len(matches) != 1:
         raise ValueError("rolling_collected_source_identity_missing")
     artifact, part = matches[0]
     try:
@@ -140,11 +149,7 @@ def _collected_source_identity(source, day, manifest, history_bundle):
     if (len(raw) > BOOTSTRAP_SOURCE_MAX_BYTES or len(normalized) > BOOTSTRAP_SOURCE_MAX_BYTES
             or sha256(raw).hexdigest() != artifact["sha256"]
             or sha256(normalized).hexdigest() != part["sha256"]
-            or not any(item.get("sha256") == artifact["sha256"]
-                and item.get("requested_date") == day
-                and item.get("source", {}).get("source_id") == source
-                and item.get("source", {}).get("dataset") == "etf_scale"
-                for item in manifest["artifacts"])):
+            or declared[0].get("sha256") != artifact["sha256"]):
         raise ValueError("rolling_collected_source_identity_invalid")
     return artifact["sha256"], part["sha256"]
 
@@ -191,8 +196,12 @@ def _prepare_initial_checkpoint(snapshot, manifest, history_bundle, *, exchange,
 
     refs, archive_bytes = [], {}
     for source, day in missing:
-        if day in current_dates:
-            raw_sha, expected_sha = _collected_source_identity(source, day, manifest, history_bundle)
+        # Calendar coverage and collection coverage are independent. The two
+        # markets need not have collected the same historical dates this run.
+        identity = _collected_source_identity(source, day, manifest, history_bundle,
+            allow_absent=day != target)
+        if identity is not None:
+            raw_sha, expected_sha = identity
             reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
                 headers=headers, params={"source": source, "dataset": "etf_scale",
                     "date": day, "file": "data", "indexed": "1"},
@@ -301,7 +310,12 @@ def prepare(snapshot, manifest, history_bundle, *, exchange, headers, bootstrap=
     # revisions remain pinned; a separate reconciliation handles older changes.
     for day in current_calendar["dates"]:
         for source in ("sse", "szse"):
-            raw_sha, expected_sha = _collected_source_identity(source, day, manifest, history_bundle)
+            identity = _collected_source_identity(source, day, manifest, history_bundle,
+                allow_absent=day != snapshot["asOf"])
+            if identity is None:
+                # A source not observed by this run cannot replace its pinned revision.
+                continue
+            raw_sha, expected_sha = identity
             reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
                 headers=headers, params={"source": source, "dataset": "etf_scale",
                     "date": day, "file": "data", "indexed": "1"},
@@ -412,7 +426,7 @@ def main():
         code = str(error)
         # Broken current-source lineage remains a global quality failure.
         # Projection/readiness failures only withhold the scoped rolling cells.
-        fatal = code in {"rolling_collected_source_identity_invalid",
+        fatal = code in {"rolling_collected_source_identity_invalid", "rolling_collected_source_identity_missing",
             "archive_recipe_calendar_identity_invalid", "archive_recipe_calendar_source_hash_mismatch"}
         status = {"status": "BLOCKED_SOURCE" if fatal else "UNAVAILABLE", "reason": code if re.fullmatch(r"[a-z0-9_]{1,100}", code)
                   else "rolling_read_or_proof_unconfirmed"}
