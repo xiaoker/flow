@@ -27,8 +27,7 @@ jobs:
     steps:
       - name: Fetch and validate one private staging object
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          STAGING_GET_URL: ${{ secrets.FLOW_SZSE_STAGING_GET_URL }}
           CONFIRM: ${{ inputs.confirm_apply }}
         shell: bash
         run: |
@@ -36,9 +35,15 @@ jobs:
           test -z "$CONFIRM" || test "$CONFIRM" = "$PAYLOAD_SHA"
           umask 077
           file="$RUNNER_TEMP/szse-archive.json"
-          status="$(curl -sS --max-time 30 --max-filesize 2000000 -o "$file" -w '%{http_code}' \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/flow/objects/operator-staging/szse-20261014-$PAYLOAD_SHA.json")"
+          prefix="https://21004860faeebc5fa4f297679796ee00.r2.cloudflarestorage.com/flow/operator-staging/szse-20261014-$PAYLOAD_SHA.json?"
+          query_pattern='^X-Amz-Algorithm=AWS4-HMAC-SHA256&[A-Za-z0-9%&=._~-]+$'
+          if [[ "$STAGING_GET_URL" != "$prefix"* || ! "${STAGING_GET_URL#"$prefix"}" =~ $query_pattern ]]; then
+            echo "Missing or invalid signed URL for the pinned R2 object" >&2
+            exit 1
+          fi
+          status="$(printf 'url = "%s"\n' "$STAGING_GET_URL" | curl -q -s --config - \
+            --proto '=https' --max-time 30 --max-filesize 2000000 -o "$file" -w '%{http_code}')"
+          unset STAGING_GET_URL
           echo "Staging read HTTP $status"
           test "$status" = 200
           echo "$PAYLOAD_SHA  $file" | sha256sum -c --status
