@@ -292,8 +292,8 @@ def prepare(snapshot, manifest, history_bundle, *, exchange, headers, bootstrap=
             raise ValueError("rolling_bootstrap_calendar_transport_missing")
         return _prepare_initial_checkpoint(snapshot, manifest, history_bundle, exchange=exchange,
             source_exchange=source_exchange, headers=headers, source_proxy_url=source_proxy_url)
-    if bootstrap:
-        raise ValueError("rolling_bootstrap_checkpoint_already_exists")
+    # Bootstrap permission is a cold-start fallback, not a separate mode that
+    # should fail every later ordinary run after the first checkpoint exists.
     active_manifest, reference, previous_wire = active
     checkpoint, prior_bytes, _ = unpack_rolling_checkpoint(previous_wire, reference["sha256"])
     if not isinstance(checkpoint.get("officialCalendar"), dict):

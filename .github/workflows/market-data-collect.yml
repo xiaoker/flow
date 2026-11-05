@@ -132,7 +132,10 @@ jobs:
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
       INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
-      INPUT_ROLLING_BOOTSTRAP: ${{ inputs.rolling_bootstrap || false }}
+      # Once rolling publication is enabled, normal non-recovery collection
+      # should bootstrap only when the release-scoped checkpoint is absent.
+      # The preparer treats an existing checkpoint as ordinary continuation.
+      INPUT_ROLLING_BOOTSTRAP: ${{ inputs.rolling_bootstrap || (vars.FLOW_ROLLING_PERIODS_ENABLED == '1' && inputs.recovery_id == '') }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Claim or skip pipeline window
