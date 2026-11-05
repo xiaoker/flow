@@ -138,6 +138,8 @@ def test_unavailable_rolling_proof_keeps_daily_facts_and_never_fills_unproven_ce
 
 
 @pytest.mark.parametrize("reason,fatal", [("request_unavailable", False),
+    ("rolling_collected_target_not_observed", False),
+    ("rolling_collected_source_identity_missing", True),
     ("rolling_collected_source_identity_invalid", True), ("archive_recipe_calendar_source_hash_mismatch", True)])
 def test_preparation_report_separates_optional_readiness_from_current_source_failure(tmp_path, monkeypatch, capsys, reason, fatal):
     import sys
@@ -256,7 +258,8 @@ def test_daily_preparation_cold_start_is_one_read_but_bad_existing_checkpoint_ca
 
 
 @pytest.mark.parametrize("window_ahead", [False, True])
-def test_daily_collector_preparation_advances_real_builders_without_recollecting(window_ahead):
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_daily_collector_preparation_advances_real_builders_without_recollecting(window_ahead, asymmetric):
     import base64
     from types import SimpleNamespace
     from scripts.prepare_rolling_etf_publication import prepare
@@ -309,6 +312,8 @@ def test_daily_collector_preparation_advances_real_builders_without_recollecting
     bundle = {"version": 1, "history": {"runId": "fixture", "asOf": dates[-1], "artifacts": [raw_margin]}}
     for day in recent["dates"]:
         for source in ("sse", "szse"):
+            if asymmetric and source == "szse" and day != dates[-1]:
+                continue
             raw = f"raw:{source}:{day}".encode()
             raw_sha = sha256(raw).hexdigest()
             bundle["history"]["artifacts"].append({"sourceId": source, "dataset": "etf_scale",
@@ -335,13 +340,16 @@ def test_daily_collector_preparation_advances_real_builders_without_recollecting
                 "x-flow-as-of": active["asOf"], "x-flow-manifest-sha256": "b" * 64,
                 "x-flow-checkpoint-sha256": sha256(active["wire"]).hexdigest()})
         query = kwargs["params"]
-        assert "revision" not in query  # fresh exact bytes are reused, not downloaded twice
         ref = pinned[query["source"], query["date"]]
+        if "revision" in query:
+            assert asymmetric and query["source"] == "szse" and query["date"] == dates[-2]
+            assert query["revision"] == ref["objectKey"].split("/")[-2]
         return SimpleNamespace(status=200, content=data[query["source"], query["date"]], headers={
             "x-flow-normalized-key": ref["objectKey"], "x-flow-normalized-sha256": ref["sha256"]})
     status, ready = prepare(current, manifest, bundle, exchange=SimpleNamespace(request=request), headers={})
     assert status == {"status": "READY", "asOf": dates[-1]}
-    assert len(calls) == (5 if window_ahead else 7)
+    expected_calls = 1 + 2 * len(recent["dates"]) - (len(recent["dates"]) - 1 if asymmetric else 0)
+    assert len(calls) == expected_calls + int(asymmetric)
     new_calendar, new_wire, version = ready
     payloads, published = build_market_read_models(current, producer_build_sha="d" * 40,
         rolling_publication_input={"calendar": new_calendar, "checkpoint": new_wire,
@@ -354,7 +362,7 @@ def test_daily_collector_preparation_advances_real_builders_without_recollecting
     active.update(wire=new_wire, asOf=dates[-1])
     status, again = prepare(current, manifest, bundle, exchange=SimpleNamespace(request=request), headers={})
     assert status["status"] == "READY" and sha256(again[1]).hexdigest() == sha256(new_wire).hexdigest()
-    assert len(calls) == (10 if window_ahead else 14)
+    assert len(calls) == 2 * expected_calls + int(asymmetric)
     # A later indexed revision cannot silently mix with the unchanged source
     # bundle from which the one-day snapshot was computed.
     changed = data["sse", dates[-1]].replace(b"2300000000", b"2400000000")
@@ -592,7 +600,8 @@ def test_period_windows_roll_without_cash_or_compressing_missing_sessions():
         )
 
 
-def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_archives():
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_archives(asymmetric):
     import base64
     from types import SimpleNamespace
     from scripts.prepare_rolling_etf_publication import (
@@ -644,7 +653,7 @@ def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_arch
             revision = sha256(f"{raw_sha}:{digest}".encode()).hexdigest()
             key = f"market-data/normalized/{source}/etf_scale/{day}/{revision}/data.csv"
             sources[source, day] = (raw_sha, digest, key, content)
-            if day in current_dates:
+            if day in current_dates and (not asymmetric or source == "sse" or day == target):
                 manifest["artifacts"].append({"source": {"source_id": source, "dataset": "etf_scale"},
                     "requested_date": day, "sha256": raw_sha})
                 bundle["history"]["artifacts"].append({"sourceId": source, "dataset": "etf_scale",
@@ -689,8 +698,12 @@ def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_arch
         "calendarSource": OFFICIAL_MARGIN_DATES_SOURCE}
     archive_reads = [params for url, params in archive.calls if url.endswith("/history-artifact")]
     assert len(archive_reads) == MAX_INITIAL_ROLLING_ARCHIVE_READS
-    assert len([params for params in archive_reads if params.get("indexed") == "1"]) == 6
-    assert len([params for params in archive_reads if params.get("indexed") != "1"]) == 38
+    expected_indexed = 4 if asymmetric else 6
+    assert len([params for params in archive_reads if params.get("indexed") == "1"]) == expected_indexed
+    assert len([params for params in archive_reads if params.get("indexed") != "1"]) == 44 - expected_indexed
+    if asymmetric:
+        assert all(p.get("indexed") != "1" for p in archive_reads
+            if p["source"] == "szse" and p["date"] in current_dates[:-1])
     calendar, wire, version = ready
     assert version == REPLAY_CONTRACT and target in calendar["dates"]
     payloads, release = build_market_read_models(snapshot, producer_build_sha="d" * 40,
@@ -700,6 +713,20 @@ def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_arch
     rows = payloads["radar"]["data"]["etfTerminal"]["instruments"]
     assert len(rows) == 2 and all(row["periods"]["2w"] is not None and row["periods"]["1m"] is not None for row in rows)
     assert all(row["estimatedCashPeriods"].get("1m") is None for row in rows)
+
+    # A declaration on either side without matching proof must never turn
+    # into a historical archive fallback, even if that archive is available.
+    for entries in (manifest["artifacts"], bundle["history"]["artifacts"]):
+        entry = entries.pop()
+        with pytest.raises(ValueError, match="rolling_collected_source_identity_missing"):
+            prepare(snapshot, manifest, bundle, exchange=ArchiveExchange(), headers={}, bootstrap=True,
+                source_exchange=CalendarExchange(), source_proxy_url=SOURCE_PROXY_URL)
+        entries.append(entry)
+    manifest["artifacts"].pop()
+    bundle["history"]["artifacts"].pop()
+    with pytest.raises(ValueError, match="rolling_collected_target_not_observed"):
+        prepare(snapshot, manifest, bundle, exchange=ArchiveExchange(), headers={}, bootstrap=True,
+            source_exchange=CalendarExchange(), source_proxy_url=SOURCE_PROXY_URL)
 
 
 def test_bootstrap_archive_requires_single_candidate_or_unique_pointer():

@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-05: distinguish calendar coverage from collected ETF partitions
+
+- PR #234 merged at `e797641`; no Worker deployment, flag change or real bootstrap was requested. The rolling flag remains unset in the last read-only repository check.
+- Offline evidence from Collector `41950656871`: confirmed snapshot `2026-11-04`, official sessions November 2–4, exact SSE inputs for all three days and SZSE input for November 4 only. The old day-based check requested missing SZSE current-bundle files for November 2–3. The verified source partition count is four, not six.
+- Local fix in `codex/rolling-bootstrap-source-identity`: bootstrap checks declarations by market/date and uses the existing unique archive lookup only for undeclared historical partitions. Continuation keeps existing pinned revisions for absent historical partitions; declared proof and target-day inputs still fail closed on missing/mismatched identity. No increase to request limits, and no change to date/QA or activation checks.
+- The retained Publisher source artifact does not include the manifest/history bundle; the separate Collector report artifact does. Publisher-only resume still requires approved recovery and does not generate rolling proof. This change fixes the source classification, not the production entry or full-task budget admission. No new run, release, budget clearance or UI recovery is claimed.
+- Local validation passed: real archived source identity checks (four verified, two historical archive lookups required), 34 targeted rolling tests, full Python suite with local HTTP fixtures, Web lint/build and all 283 Web tests. Only the existing duplicate-ZIP fixture warning remains in Python. Not pushed; next delivery is one PR and necessary CI once allowed, with no Worker change or migration.
+
+## Previous current stage (historical)
+
 ### 2026-11-05: bounded cold-start bootstrap for rolling share periods (in progress)
 
 - Base is latest `origin/main` at `d2a49cc` (`fix: connect verified rolling ETF periods to publication`, PR #233), in isolated worktree `/private/tmp/flow-rolling-bootstrap-20261105`, branch `codex/rolling-checkpoint-bootstrap-20261105`. Original worktree and protected paths are untouched.
@@ -18,8 +28,6 @@ R2, D1, release, or receipt evidence.
 - Scope is exactly four implementation/test/workflow files plus this progress index. PR #234 is open at `https://github.com/xiaoker/flow/pull/234`, on `codex/rolling-checkpoint-bootstrap-20261105`, based on `d2a49cc`; implementation commit `a13b6f1` and index-only follow-up `4701fe6`. Initial branch-freshness run `41958641874` and CI run `41958641960` passed (web-ci and unit-and-contract-tests); the follow-up commit's checks are tracked on the PR. No migration, deployment, flag mutation, real bootstrap, production write, page acceptance, or account-budget clearance is claimed.
 - Merge side effects: normal PR CI runs repository Python and Web checks. This diff does not match `.github/workflows/deploy-worker.yml`'s `web/**`, resource-budget, or deploy-workflow paths, so merge should not automatically deploy the Worker or apply D1 migrations. The only changed executable workflow is the existing Collector definition; no push/schedule trigger is added, and the new manual input defaults false and is rejected before claim unless the rolling flag, pipeline lease gate, delegated Publisher and ordinary-run conditions hold. No `workflow_dispatch`, feature-flag change, or data task is authorized here.
 - Next: stop for explicit merge authorization. After merge, do not assume production rolling periods are enabled: the rolling flag remains untouched, and an actual bootstrap requires a separate bounded production-action authorization.
-
-## Previous current stage (historical)
 
 ### 2026-11-04: native rolling Collector/Publisher connection (local, not delivered)
 
