@@ -11,6 +11,10 @@ from .etf_period_dependencies import validate_official_calendar
 MAX_DAILY_CACHE_BYTES = 20_000_000
 MAX_ROLLING_OBJECT_BYTES = 2_000_000
 ROLLING_PUBLICATION_CONTRACT = "flow-etf-rolling-publication-v1"
+# A first checkpoint contains 22 official sessions (one baseline plus 21
+# changes) across both exchanges. This explicit bootstrap envelope is separate
+# from the normal continuation cap; it is never used implicitly.
+MAX_INITIAL_ROLLING_ARCHIVE_READS = 22 * 2
 
 
 def rebuild_rolling_publication(snapshot, *, calendar, checkpoint, checkpoint_sha256,
@@ -222,7 +226,19 @@ def resolve_rolling_refs(calendar, target, references, lookup):
     return select_rolling_refs(calendar, target, selected + discovered)
 
 
-def plan_daily_reuse(calendar, target, current_refs, previous_refs, available_daily):
+def _archive_read_limit(value):
+    from .pipeline_entry import MAX_ARCHIVE_REPLAY_REQUESTS
+
+    if value is None:
+        return MAX_ARCHIVE_REPLAY_REQUESTS
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not MAX_ARCHIVE_REPLAY_REQUESTS <= value <= MAX_INITIAL_ROLLING_ARCHIVE_READS):
+        raise ValueError("etf_rolling_archive_read_limit_invalid")
+    return value
+
+
+def plan_daily_reuse(calendar, target, current_refs, previous_refs, available_daily,
+                     *, max_archive_reads=None):
     """Identify reusable deltas by both source identities, not date alone."""
     from .pipeline_entry import MAX_ARCHIVE_REPLAY_REQUESTS
 
@@ -245,14 +261,15 @@ def plan_daily_reuse(calendar, target, current_refs, previous_refs, available_da
             else:
                 rebuild.append(key)
                 reads.update(pair)
-    within_limit = len(reads) <= MAX_ARCHIVE_REPLAY_REQUESTS
+    within_limit = len(reads) <= _archive_read_limit(max_archive_reads)
     return dict(rebuild=rebuild, reuse=reuse, blocked=blocked,
                 reads=[current[k] for k in sorted(reads)] if within_limit else [],
                 requiredReadCount=len(reads), missing=missing,
                 status="WITHIN_READ_LIMIT" if within_limit else "BOUNDED_RECOVERY_REQUIRED")
 
 
-def execute_daily_reuse(calendar, target, current_refs, previous_refs, daily, *, read, build, calculation_version):
+def execute_daily_reuse(calendar, target, current_refs, previous_refs, daily, *, read, build,
+                        calculation_version, max_archive_reads=None):
     """Apply a bounded plan using caller-provided verified readers/builders."""
     from hashlib import sha256
     from .pipeline_application import canonical_sha256
@@ -277,7 +294,8 @@ def execute_daily_reuse(calendar, target, current_refs, previous_refs, daily, *,
                 and node.get("inputSha256") == fingerprint
                 and node.get("valueSha256") == canonical_sha256(node["value"])):
             verified[source, day] = node
-    plan = plan_daily_reuse(calendar, target, current_refs, previous_refs, verified)
+    plan = plan_daily_reuse(calendar, target, current_refs, previous_refs, verified,
+                            max_archive_reads=max_archive_reads)
     if plan["status"] != "WITHIN_READ_LIMIT":
         return plan, None
     inputs = {}
@@ -330,7 +348,7 @@ def materialize_rolling_daily(calendar, target, nodes, *, base_terminal=None):
 
 
 def build_rolling_candidate(snapshot, calendar, current_refs, previous_refs, daily,
-                            *, read, calculation_version):
+                            *, read, calculation_version, max_archive_reads=None):
     """Build a scoped snapshot without registering or activating a release."""
     from .etf_replay import REPLAY_CONTRACT, _scoped_result, build_replay_daily_terminal
     from .pipeline_application import canonical_sha256
@@ -352,6 +370,7 @@ def build_rolling_candidate(snapshot, calendar, current_refs, previous_refs, dai
     plan, nodes = execute_daily_reuse(
         calendar, target, current_refs, previous_refs, daily,
         read=read, build=build_replay_daily_terminal, calculation_version=calculation_version,
+        max_archive_reads=max_archive_reads,
     )
     if nodes is None or plan["blocked"]:
         return plan, None, nodes

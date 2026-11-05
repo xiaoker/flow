@@ -523,6 +523,10 @@ def test_period_windows_roll_without_cash_or_compressing_missing_sessions():
     cold = plan_daily_reuse(calendar, dates[-1], resolved, [], [])
     assert cold["status"] == "BOUNDED_RECOVERY_REQUIRED"
     assert cold["requiredReadCount"] == 44 and cold["reads"] == []
+    bootstrap_plan = plan_daily_reuse(calendar, dates[-1], resolved, [], [], max_archive_reads=44)
+    assert bootstrap_plan["status"] == "WITHIN_READ_LIMIT" and len(bootstrap_plan["reads"]) == 44
+    with pytest.raises(ValueError, match="archive_read_limit_invalid"):
+        plan_daily_reuse(calendar, dates[-1], resolved, [], [], max_archive_reads=45)
 
     def payload(ref):
         return ref["tradeDate"].encode()
@@ -552,6 +556,10 @@ def test_period_windows_roll_without_cash_or_compressing_missing_sessions():
     _, result = execute_daily_reuse(calendar, dates[-1], pinned, [], {},
                                     read=read, build=rebuild, calculation_version="fixture-v1")
     assert result is None and len(reads) == 4
+    _, result = execute_daily_reuse(calendar, dates[-1], pinned, [], {},
+                                    read=read, build=rebuild, calculation_version="fixture-v1",
+                                    max_archive_reads=44)
+    assert len(reads) == 48 and len(result) == 42
     daily["sse", dates[-2]]["value"] = "tampered"
     plan, result = execute_daily_reuse(calendar, dates[-1], pinned, pinned[:-2], daily,
                                       read=read, build=rebuild, calculation_version="fixture-v1")
@@ -582,3 +590,249 @@ def test_period_windows_roll_without_cash_or_compressing_missing_sessions():
             read=lambda ref: pytest.fail("invalid identity must not read archive"),
             calculation_version="fixture-v1",
         )
+
+
+def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_archives():
+    import base64
+    from types import SimpleNamespace
+    from scripts.prepare_rolling_etf_publication import (
+        BOOTSTRAP_CALENDAR_LOOKBACK_DAYS,
+        SOURCE_PROXY_URL,
+        prepare,
+    )
+    from trading_desk.etf_rolling_refs import MAX_INITIAL_ROLLING_ARCHIVE_READS
+    from trading_desk.etf_period_dependencies import OFFICIAL_MARGIN_DATES_SOURCE
+    from trading_desk.etf_replay import REPLAY_CONTRACT
+    from trading_desk.read_models import build_market_read_models
+
+    snapshot, _ = rolling_production_fixture()
+    target = snapshot["asOf"]
+    end = date.fromisoformat(target)
+    start = (end - timedelta(days=BOOTSTRAP_CALENDAR_LOOKBACK_DAYS)).isoformat()
+    start_date = date.fromisoformat(start)
+    official_dates = [(start_date + timedelta(days=offset)).isoformat()
+        for offset in range(BOOTSTRAP_CALENDAR_LOOKBACK_DAYS + 1)
+        if (start_date + timedelta(days=offset)).weekday() < 5]
+    official_raw = canonical_json_bytes({"beginDate": start.replace("-", ""),
+        "endDate": target.replace("-", ""),
+        "result": [{"opDate": day.replace("-", "")} for day in official_dates],
+        "pageHelp": {"pageCount": 1, "total": len(official_dates)}})
+    dates = rolling_production_fixture()[1]["calendar"]["dates"]
+    current_dates = dates[-3:]
+    current_raw = canonical_json_bytes({"beginDate": current_dates[0].replace("-", ""),
+        "endDate": current_dates[-1].replace("-", ""),
+        "result": [{"opDate": day.replace("-", "")} for day in current_dates],
+        "pageHelp": {"pageCount": 1, "total": len(current_dates)}})
+    run_id = "bootstrap-fixture"
+    manifest = {"run_id": run_id, "requested_dates": current_dates, "artifacts": []}
+    bundle = {"version": 1, "history": {"runId": run_id, "asOf": target, "artifacts": []}}
+    calendar_sha = sha256(current_raw).hexdigest()
+    manifest["artifacts"].append({"source": {"source_id": "sse", "dataset": "margin_market_daily"},
+        "requested_date": f"{current_dates[0]}_{current_dates[-1]}", "sha256": calendar_sha})
+    bundle["history"]["artifacts"].append({"sourceId": "sse", "dataset": "margin_market_daily",
+        "requestedDate": f"{current_dates[0]}_{current_dates[-1]}", "sha256": calendar_sha,
+        "rawContentBase64": base64.b64encode(current_raw).decode()})
+
+    sources = {}
+    for index, day in enumerate(dates):
+        for source, market, code in (("sse", "SSE", "510300"), ("szse", "SZSE", "159915")):
+            raw = f"official:{source}:{day}".encode()
+            raw_sha = sha256(raw).hexdigest()
+            content = ("trade_date,market,instrument_code,shares\n"
+                f"{day},{market},{code},{index * 100000000}\n").encode()
+            digest = sha256(content).hexdigest()
+            revision = sha256(f"{raw_sha}:{digest}".encode()).hexdigest()
+            key = f"market-data/normalized/{source}/etf_scale/{day}/{revision}/data.csv"
+            sources[source, day] = (raw_sha, digest, key, content)
+            if day in current_dates:
+                manifest["artifacts"].append({"source": {"source_id": source, "dataset": "etf_scale"},
+                    "requested_date": day, "sha256": raw_sha})
+                bundle["history"]["artifacts"].append({"sourceId": source, "dataset": "etf_scale",
+                    "requestedDate": day, "sha256": raw_sha,
+                    "rawContentBase64": base64.b64encode(raw).decode(),
+                    "normalized": [{"name": "data", "tradeDates": [day], "sha256": digest,
+                        "contentBase64": base64.b64encode(content).decode()}]})
+
+    class ArchiveExchange:
+        def __init__(self):
+            self.calls = []
+        def request(self, method, url, **kwargs):
+            assert method == "GET"
+            params = kwargs.get("params", {})
+            self.calls.append((url, dict(params)))
+            if url.endswith("/etf-state"):
+                return SimpleNamespace(status=404, content=b"", headers={})
+            assert url.endswith("/history-artifact")
+            source, day = params["source"], params["date"]
+            raw_sha, digest, key, content = sources[source, day]
+            headers = {"X-Flow-Normalized-Key": key, "X-Flow-Normalized-Sha256": digest,
+                "X-Flow-Trade-Date": day}
+            if params.get("indexed") == "1":
+                headers["X-Flow-Pcf-Revision"] = key.split("/")[-2]
+            else:
+                headers.update({"X-Flow-Normalized-Candidate-Count": "1",
+                    "X-Flow-Normalized-Selection": "single"})
+            return SimpleNamespace(status=200, content=content, headers=headers)
+
+    class CalendarExchange:
+        def request(self, method, url, **kwargs):
+            assert method == "GET" and url.endswith("queryMargin.do")
+            assert kwargs["params"]["beginDate"] == start.replace("-", "")
+            assert kwargs["params"]["endDate"] == target.replace("-", "")
+            return SimpleNamespace(status=200, content=official_raw, headers={})
+
+    archive = ArchiveExchange()
+    status, ready = prepare(snapshot, manifest, bundle, exchange=archive, headers={}, bootstrap=True,
+        source_exchange=CalendarExchange(), source_proxy_url=SOURCE_PROXY_URL)
+    assert status == {"status": "READY", "asOf": target, "bootstrap": True,
+        "archiveReadRequests": MAX_INITIAL_ROLLING_ARCHIVE_READS,
+        "calendarSource": OFFICIAL_MARGIN_DATES_SOURCE}
+    archive_reads = [params for url, params in archive.calls if url.endswith("/history-artifact")]
+    assert len(archive_reads) == MAX_INITIAL_ROLLING_ARCHIVE_READS
+    assert len([params for params in archive_reads if params.get("indexed") == "1"]) == 6
+    assert len([params for params in archive_reads if params.get("indexed") != "1"]) == 38
+    calendar, wire, version = ready
+    assert version == REPLAY_CONTRACT and target in calendar["dates"]
+    payloads, release = build_market_read_models(snapshot, producer_build_sha="d" * 40,
+        rolling_publication_input={"calendar": calendar, "checkpoint": wire,
+            "checkpoint_sha256": sha256(wire).hexdigest(), "calculation_version": version})
+    assert release["rollingPublication"]["status"] == "READY"
+    rows = payloads["radar"]["data"]["etfTerminal"]["instruments"]
+    assert len(rows) == 2 and all(row["periods"]["2w"] is not None and row["periods"]["1m"] is not None for row in rows)
+    assert all(row["estimatedCashPeriods"].get("1m") is None for row in rows)
+
+
+def test_bootstrap_archive_requires_single_candidate_or_unique_pointer():
+    from types import SimpleNamespace
+    from scripts.prepare_rolling_etf_publication import _read_bootstrap_archive
+    day, source = "2026-11-04", "sse"
+    content = b"trade_date,market,instrument_code,shares\n2026-11-04,SSE,510300,1\n"
+    digest = sha256(content).hexdigest()
+    key = f"market-data/normalized/{source}/etf_scale/{day}/{'a' * 64}/data.csv"
+    def request(headers):
+        return SimpleNamespace(status=200, content=content, headers={
+            "X-Flow-Normalized-Key": key, "X-Flow-Normalized-Sha256": digest,
+            "X-Flow-Trade-Date": day, **headers})
+    with pytest.raises(ValueError, match="archive_ambiguous"):
+        _read_bootstrap_archive(source, day,
+            exchange=SimpleNamespace(request=lambda *a, **k: request({
+                "X-Flow-Normalized-Candidate-Count": "2", "X-Flow-Normalized-Selection": "latest-uploaded"})),
+            headers={})
+    with pytest.raises(ValueError, match="selection_unproven"):
+        _read_bootstrap_archive(source, day,
+            exchange=SimpleNamespace(request=lambda *a, **k: request({})), headers={})
+
+
+def test_bootstrap_calendar_relay_is_single_bounded_fallback_and_rejects_bad_direct_evidence():
+    from types import SimpleNamespace
+    from scripts.prepare_rolling_etf_publication import (
+        BOOTSTRAP_CALENDAR_LOOKBACK_DAYS,
+        SOURCE_PROXY_URL,
+        _calendar_from_official_response,
+        _fetch_bootstrap_calendar,
+    )
+    from trading_desk.etf_period_dependencies import OFFICIAL_MARGIN_DATES_SOURCE
+
+    target = "2026-08-05"
+    end = date.fromisoformat(target)
+    start = (end - timedelta(days=BOOTSTRAP_CALENDAR_LOOKBACK_DAYS)).isoformat()
+    start_date = date.fromisoformat(start)
+    official_dates = [(start_date + timedelta(days=offset)).isoformat()
+        for offset in range(BOOTSTRAP_CALENDAR_LOOKBACK_DAYS + 1)
+        if (start_date + timedelta(days=offset)).weekday() < 5
+        and (start_date + timedelta(days=offset)).isoformat() not in {"2026-05-01", "2026-05-04", "2026-05-05"}]
+    raw = canonical_json_bytes({"beginDate": start.replace("-", ""), "endDate": target.replace("-", ""),
+        "result": [{"opDate": day.replace("-", "")} for day in official_dates],
+        "pageHelp": {"pageCount": 1, "total": len(official_dates)}})
+
+    class WorkerExchange:
+        def __init__(self):
+            self.calls, self.attempts, self.bytes = [], 0, 0
+        def check_deadline(self): pass
+        def record_source_attempt(self): self.attempts += 1
+        def record_external_response(self, size): self.bytes += size
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            self.bytes += len(raw)
+            return SimpleNamespace(status=200, content=raw, headers={})
+
+    worker = WorkerExchange()
+    direct = SimpleNamespace(request=lambda *args, **kwargs: SimpleNamespace(status=503, content=b"", headers={}))
+    calendar = _fetch_bootstrap_calendar(target, source_exchange=direct, exchange=worker,
+        headers={"Authorization": "Bearer fixture"}, source_proxy_url=SOURCE_PROXY_URL)
+    assert calendar["sourceId"] == OFFICIAL_MARGIN_DATES_SOURCE
+    assert calendar["dates"][-1] == target and len(calendar["dates"]) >= 22
+    assert worker.attempts == 2 and len(worker.calls) == 1
+    method, url, kwargs = worker.calls[0]
+    assert method == "GET" and url == SOURCE_PROXY_URL
+    assert kwargs["params"]["path"].endswith("queryMargin.do")
+    assert worker.bytes == len(raw)
+
+    boolean_page_count = json.loads(raw)
+    boolean_page_count["pageHelp"]["pageCount"] = True
+    with pytest.raises(ValueError, match="calendar_invalid"):
+        _calendar_from_official_response(canonical_json_bytes(boolean_page_count),
+            start=start, end=target, target=target)
+
+    # Malformed successful evidence is not retried; client/configuration
+    # errors do not spend the one relay fallback either.
+    malformed_worker = WorkerExchange()
+    malformed_direct = SimpleNamespace(request=lambda *args, **kwargs: SimpleNamespace(
+        status=200, content=b"{}", headers={}))
+    with pytest.raises(ValueError, match="calendar_invalid"):
+        _fetch_bootstrap_calendar(target, source_exchange=malformed_direct, exchange=malformed_worker,
+            headers={}, source_proxy_url=SOURCE_PROXY_URL)
+    assert malformed_worker.calls == [] and malformed_worker.attempts == 1
+
+    client_error_worker = WorkerExchange()
+    client_error_direct = SimpleNamespace(request=lambda *args, **kwargs: SimpleNamespace(
+        status=400, content=b"bad request", headers={}))
+    with pytest.raises(ValueError, match="calendar_unavailable"):
+        _fetch_bootstrap_calendar(target, source_exchange=client_error_direct, exchange=client_error_worker,
+            headers={}, source_proxy_url=SOURCE_PROXY_URL)
+    assert client_error_worker.calls == [] and client_error_worker.attempts == 1
+
+
+def test_requested_bootstrap_unavailability_does_not_block_confirmed_daily_publication(tmp_path, monkeypatch, capsys):
+    import sys
+    import scripts.prepare_rolling_etf_publication as entry
+    snapshot, _ = rolling_production_fixture()
+    source = canonical_json_bytes(snapshot)
+    (tmp_path / "snapshot.json").write_bytes(source)
+    (tmp_path / "manifest.json").write_text("{}")
+    (tmp_path / "history.json").write_text("{}")
+    report = tmp_path / "status.json"
+    monkeypatch.setattr(sys, "argv", ["prepare", "--snapshot", str(tmp_path / "snapshot.json"),
+        "--manifest", str(tmp_path / "manifest.json"), "--history-bundle", str(tmp_path / "history.json"),
+        "--output", str(tmp_path / "ready"), "--report", str(report), "--bootstrap"])
+    for name in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "fixture")
+    monkeypatch.setattr(entry, "prepare", lambda *args, **kwargs: (
+        {"status": "UNAVAILABLE", "reason": "rolling_bootstrap_calendar_unavailable"}, None))
+
+    entry.main()
+
+    status = json.loads(report.read_bytes())
+    assert status["status"] == "UNAVAILABLE"
+    assert status["reason"] == "rolling_bootstrap_calendar_unavailable"
+    assert not (tmp_path / "ready").exists()
+    assert "UNAVAILABLE" in capsys.readouterr().out
+
+
+def test_bootstrap_workflow_is_opt_in_and_runs_before_any_publish_dispatch():
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/market-data-collect.yml").read_text()
+    start = workflow.index("      rolling_bootstrap:")
+    end = workflow.index("\n\n# Cloudflare Cron", start)
+    input_block = workflow[start:end]
+    assert "default: false" in input_block and "type: boolean" in input_block
+    gate_start = workflow.index("- name: Claim or skip pipeline window")
+    claim = workflow.index("/claim", gate_start)
+    validation = workflow.index("Rolling bootstrap requires the rolling flag", gate_start)
+    assert validation < claim
+    preparation = workflow.index("- name: Prepare rolling proof from the active published checkpoint")
+    publish_dispatch = workflow.index("- name: Dispatch resumable market-data publish workflow", preparation)
+    block = workflow[preparation:publish_dispatch]
+    assert 'BOOTSTRAP_ARGS+=(--bootstrap)' in block
+    assert 'INPUT_ROLLING_BOOTSTRAP' in block
+    assert "FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy" in block

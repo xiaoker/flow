@@ -1,26 +1,238 @@
-"""Read-only, bounded continuation from the active rolling checkpoint.
+"""Read-only, bounded continuation or explicit first rolling-checkpoint bootstrap.
 
-No collection, dispatch, claim, pointer mutation or retry. Bootstrap remains a
-separate approved operation. This entry is opt-in in the existing Collector.
+Does not recollect ETF share source data; it fetches one bounded official SSE
+business-date proof. It performs no dispatch, claim, pointer mutation or write.
+Initial bootstrap is an explicit manual opt-in in the existing Collector.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+from datetime import date, timedelta
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
+import time
 
 from trading_desk.etf_rolling_refs import (build_from_published_checkpoint,
-    unpack_rolling_checkpoint, encode_daily_cache, pack_rolling_checkpoint, select_rolling_refs)
+    unpack_rolling_checkpoint, encode_daily_cache, pack_rolling_checkpoint, select_rolling_refs,
+    build_rolling_candidate, MAX_INITIAL_ROLLING_ARCHIVE_READS)
 from trading_desk.etf_period_dependencies import (compose_official_margin_calendars,
-    validate_official_calendar, OFFICIAL_MARGIN_DATES_SOURCE, COMPOSITE_MARGIN_DATES_SOURCE)
+    validate_official_calendar, OFFICIAL_MARGIN_DATES_SOURCE, COMPOSITE_MARGIN_DATES_SOURCE,
+    MAX_CALENDAR_DATES)
+from trading_desk.etf_replay import REPLAY_CONTRACT
+from trading_desk.pipeline_application import canonical_sha256
 from trading_desk.phase0_archive_recipe import official_calendar_from_bundle
 from trading_desk.pipeline_entry import read_active_rolling_checkpoint, read_exact_etf_archive, candidate_credentials
 from trading_desk.read_models import canonical_json_bytes
 from scripts.build_rolling_etf_candidate import write_source_bundle, read_bounded
+
+
+NORMAL_REQUEST_LIMIT = 23
+BOOTSTRAP_WORKER_REQUEST_LIMIT = 46  # checkpoint + 44 archive reads + one SSE relay fallback
+NORMAL_RESPONSE_BYTE_LIMIT = 4_000_000
+BOOTSTRAP_RESPONSE_BYTE_LIMIT = 32_000_000  # 4MB * 44 / 6, rounded up with bounded overhead
+BOOTSTRAP_CALENDAR_LOOKBACK_DAYS = 120
+BOOTSTRAP_SOURCE_MAX_BYTES = 2_000_000
+SOURCE_PROXY_URL = "https://flow.xiaoker.com/api/v1/admin/source-proxy"
+SSE_MARGIN_URL = "https://query.sse.com.cn/marketdata/tradedata/queryMargin.do"
+SSE_MARGIN_PATH = "/marketdata/tradedata/queryMargin.do"
+
+
+def _calendar_from_official_response(raw, *, start, end, target):
+    if not isinstance(raw, bytes) or not raw or len(raw) > BOOTSTRAP_SOURCE_MAX_BYTES:
+        raise ValueError("rolling_bootstrap_calendar_size_invalid")
+    try:
+        response = json.loads(raw)
+        rows = response["result"]
+        page = response["pageHelp"]
+        begin, actual_end = response["beginDate"], response["endDate"]
+        if (not isinstance(rows, list) or not rows or len(rows) > MAX_CALENDAR_DATES
+                or not isinstance(page, dict) or type(page.get("pageCount")) is not int
+                or type(page.get("total")) is not int):
+            raise ValueError()
+        dates = []
+        for row in rows:
+            op_date = str(row["opDate"])
+            if not re.fullmatch(r"[0-9]{8}", op_date):
+                raise ValueError()
+            dates.append(f"{op_date[:4]}-{op_date[4:6]}-{op_date[6:]}")
+        dates.sort()
+    except (ValueError, TypeError, KeyError, AttributeError, UnicodeError):
+        raise ValueError("rolling_bootstrap_calendar_invalid") from None
+    if (page.get("pageCount") != 1
+            or page.get("total") != len(rows)
+            or begin != start.replace("-", "") or actual_end != end.replace("-", "")
+            or dates != sorted(set(dates)) or dates[-1] != target or target not in dates
+            or dates.index(target) < 21):
+        raise ValueError("rolling_bootstrap_calendar_incomplete")
+    calendar = {"sourceId": OFFICIAL_MARGIN_DATES_SOURCE, "sha256": sha256(raw).hexdigest(),
+        "dates": dates, "datesSha256": canonical_sha256(dates), "evidence": {
+            "contentBase64": base64.b64encode(raw).decode(), "rangeStart": start, "rangeEnd": end}}
+    validate_official_calendar(calendar)
+    return calendar
+
+
+def _fetch_bootstrap_calendar(target, *, source_exchange, exchange, headers, source_proxy_url):
+    end = date.fromisoformat(target)
+    start = (end - timedelta(days=BOOTSTRAP_CALENDAR_LOOKBACK_DAYS)).isoformat()
+    params = {"isPagination": "true", "beginDate": start.replace("-", ""),
+        "endDate": target.replace("-", ""), "tabType": "", "stockCode": "",
+        "pageHelp.pageSize": "5000", "pageHelp.pageNo": "1", "pageHelp.beginPage": "1",
+        "pageHelp.cacheSize": "1", "pageHelp.endPage": "5"}
+    request_headers = {"Referer": "https://www.sse.com.cn/market/othersdata/margin/sum/"}
+    if hasattr(exchange, "check_deadline"):
+        exchange.check_deadline()
+    if hasattr(exchange, "record_source_attempt"):
+        exchange.record_source_attempt()
+    direct_error = None
+    try:
+        reply = source_exchange.request("GET", SSE_MARGIN_URL, max_bytes=BOOTSTRAP_SOURCE_MAX_BYTES,
+            chunk_size=65536, max_chunks=33, deadline_seconds=20,
+            headers=request_headers, params=dict(params))
+    except Exception as error:
+        direct_error = error
+    if direct_error is not None and str(direct_error) in {
+            "response_limit", "response_deadline", "response_size_limit"}:
+        raise ValueError("rolling_bootstrap_calendar_read_limit") from None
+    if direct_error is None and hasattr(exchange, "record_external_response"):
+        exchange.record_external_response(len(reply.content))
+    if direct_error is None and reply.status == 200:
+        return _calendar_from_official_response(reply.content, start=start, end=target, target=target)
+    if direct_error is None and reply.status in {413, 422}:
+        raise ValueError("rolling_bootstrap_calendar_read_limit")
+    if direct_error is None and reply.status not in {401, 403, 408, 425, 429, 500, 502, 503, 504,
+            520, 521, 522, 523, 524}:
+        raise ValueError("rolling_bootstrap_calendar_unavailable")
+    # Only a transport or upstream status failure may use the one approved
+    # relay attempt; malformed or oversized official evidence is never retried.
+    if source_proxy_url != SOURCE_PROXY_URL:
+        raise ValueError("rolling_bootstrap_calendar_unavailable")
+    if hasattr(exchange, "record_source_attempt"):
+        exchange.record_source_attempt()
+    proxy_params = {"path": SSE_MARGIN_PATH, **params}
+    reply = exchange.request("GET", source_proxy_url, headers=headers, params=proxy_params,
+        max_bytes=BOOTSTRAP_SOURCE_MAX_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20)
+    if reply.status != 200:
+        raise ValueError("rolling_bootstrap_calendar_unavailable")
+    return _calendar_from_official_response(reply.content, start=start, end=target, target=target)
+
+
+def _collected_source_identity(source, day, manifest, history_bundle):
+    matches = [(artifact, part) for artifact in history_bundle["history"]["artifacts"]
+        if artifact.get("sourceId") == source and artifact.get("dataset") == "etf_scale"
+        and artifact.get("requestedDate") == day
+        for part in artifact.get("normalized", [])
+        if part.get("name") == "data" and part.get("tradeDates") == [day]]
+    if len(matches) != 1:
+        raise ValueError("rolling_collected_source_identity_missing")
+    artifact, part = matches[0]
+    try:
+        if any(not isinstance(encoded, str) or len(encoded) > 2_800_000
+                for encoded in (artifact["rawContentBase64"], part["contentBase64"])):
+            raise ValueError("invalid_source_bytes")
+        raw = base64.b64decode(artifact["rawContentBase64"], validate=True)
+        normalized = base64.b64decode(part["contentBase64"], validate=True)
+    except (KeyError, ValueError, TypeError):
+        raise ValueError("rolling_collected_source_identity_invalid") from None
+    if (len(raw) > BOOTSTRAP_SOURCE_MAX_BYTES or len(normalized) > BOOTSTRAP_SOURCE_MAX_BYTES
+            or sha256(raw).hexdigest() != artifact["sha256"]
+            or sha256(normalized).hexdigest() != part["sha256"]
+            or not any(item.get("sha256") == artifact["sha256"]
+                and item.get("requested_date") == day
+                and item.get("source", {}).get("source_id") == source
+                and item.get("source", {}).get("dataset") == "etf_scale"
+                for item in manifest["artifacts"])):
+        raise ValueError("rolling_collected_source_identity_invalid")
+    return artifact["sha256"], part["sha256"]
+
+
+def _read_bootstrap_archive(source, day, *, exchange, headers):
+    reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
+        headers=headers, params={"source": source, "dataset": "etf_scale", "date": day, "file": "data"},
+        max_bytes=BOOTSTRAP_SOURCE_MAX_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20)
+    values = {key.lower(): value for key, value in reply.headers.items()}
+    key = values.get("x-flow-normalized-key", "")
+    digest = values.get("x-flow-normalized-sha256", "")
+    candidate_count = values.get("x-flow-normalized-candidate-count")
+    revision = values.get("x-flow-pcf-revision")
+    if (reply.status != 200 or not re.fullmatch(
+            rf"market-data/normalized/{source}/etf_scale/{day}/[a-f0-9]{{64}}/data\.csv", key)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            or values.get("x-flow-trade-date") != day
+            or sha256(reply.content).hexdigest() != digest):
+        raise ValueError("rolling_bootstrap_archive_identity_invalid")
+    if candidate_count is not None:
+        if candidate_count != "1" or values.get("x-flow-normalized-selection") != "single":
+            raise ValueError("rolling_bootstrap_archive_ambiguous")
+    elif not re.fullmatch(r"[a-f0-9]{64}", revision or "") or key.split("/")[-2] != revision:
+        # The indexed pointer is unique by source/date/file; an unindexed
+        # listing must instead prove that it found exactly one immutable file.
+        raise ValueError("rolling_bootstrap_archive_selection_unproven")
+    return {"sourceId": source, "tradeDate": day, "objectKey": key, "sha256": digest}, reply.content
+
+
+def _prepare_initial_checkpoint(snapshot, manifest, history_bundle, *, exchange,
+                                source_exchange, headers, source_proxy_url):
+    target = snapshot["asOf"]
+    current_calendar = official_calendar_from_bundle(manifest=manifest,
+        history_bundle=history_bundle, target_date=target)
+    official_calendar = _fetch_bootstrap_calendar(target, source_exchange=source_exchange,
+        exchange=exchange, headers=headers, source_proxy_url=source_proxy_url)
+    calendar = extend_calendar(official_calendar, current_calendar, target)
+    _, missing = select_rolling_refs(calendar, target, [])
+    if len(missing) != MAX_INITIAL_ROLLING_ARCHIVE_READS:
+        raise ValueError("rolling_bootstrap_window_invalid")
+    current_dates = set(current_calendar["dates"])
+    if not current_dates.issubset({day for _, day in missing}):
+        raise ValueError("rolling_bootstrap_current_dates_outside_window")
+
+    refs, archive_bytes = [], {}
+    for source, day in missing:
+        if day in current_dates:
+            raw_sha, expected_sha = _collected_source_identity(source, day, manifest, history_bundle)
+            reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
+                headers=headers, params={"source": source, "dataset": "etf_scale",
+                    "date": day, "file": "data", "indexed": "1"},
+                max_bytes=BOOTSTRAP_SOURCE_MAX_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20)
+            values = {key.lower(): value for key, value in reply.headers.items()}
+            key, digest = values.get("x-flow-normalized-key"), values.get("x-flow-normalized-sha256")
+            if (reply.status != 200 or not isinstance(key, str)
+                    or not re.fullmatch(rf"market-data/normalized/{source}/etf_scale/{day}/[a-f0-9]{{64}}/data\.csv", key)
+                    or values.get("x-flow-trade-date") != day
+                    or sha256(reply.content).hexdigest() != digest):
+                raise ValueError("rolling_indexed_source_identity_mismatch")
+            if digest != expected_sha or key.split("/")[-2] not in {
+                    raw_sha, sha256(f"{raw_sha}:{digest}".encode()).hexdigest()}:
+                raise ValueError("rolling_collected_source_revision_changed")
+            ref = {"sourceId": source, "tradeDate": day, "objectKey": key, "sha256": digest}
+            content = reply.content
+        else:
+            ref, content = _read_bootstrap_archive(source, day, exchange=exchange, headers=headers)
+        refs.append(ref)
+        archive_bytes[source, day] = content
+
+    from trading_desk.etf_rolling_refs import encode_daily_cache
+    plan, candidate, nodes = build_rolling_candidate(snapshot, calendar, refs, [], {},
+        read=lambda ref: archive_bytes[ref["sourceId"], ref["tradeDate"]],
+        calculation_version=REPLAY_CONTRACT,
+        max_archive_reads=MAX_INITIAL_ROLLING_ARCHIVE_READS)
+    if (candidate is None or nodes is None or plan["status"] != "WITHIN_READ_LIMIT"
+            or plan["requiredReadCount"] != MAX_INITIAL_ROLLING_ARCHIVE_READS):
+        raise ValueError("rolling_bootstrap_builder_incomplete")
+    selected, still_missing = select_rolling_refs(calendar, target, refs)
+    if still_missing or len(selected) != MAX_INITIAL_ROLLING_ARCHIVE_READS:
+        raise ValueError("rolling_bootstrap_archive_gap")
+    ref_bytes, node_bytes = canonical_json_bytes(selected), encode_daily_cache(nodes)
+    wire = pack_rolling_checkpoint({"version": 1, "asOf": target,
+        "calculationVersion": REPLAY_CONTRACT, "officialCalendar": calendar,
+        "refsSha256": sha256(ref_bytes).hexdigest(), "cacheSha256": sha256(node_bytes).hexdigest()},
+        ref_bytes, node_bytes)
+    return {"status": "READY", "asOf": target, "bootstrap": True,
+        "archiveReadRequests": len(selected), "calendarSource": OFFICIAL_MARGIN_DATES_SOURCE}, (
+            calendar, wire, REPLAY_CONTRACT)
 
 
 def extend_calendar(previous, current, target):
@@ -61,10 +273,18 @@ def extend_calendar(previous, current, target):
     return compose_official_margin_calendars(selected)
 
 
-def prepare(snapshot, manifest, history_bundle, *, exchange, headers):
+def prepare(snapshot, manifest, history_bundle, *, exchange, headers, bootstrap=False,
+            source_exchange=None, source_proxy_url=""):
     active = read_active_rolling_checkpoint(exchange=exchange, headers=headers)
     if active is None:
-        return {"status": "BOOTSTRAP_REQUIRED"}, None
+        if not bootstrap:
+            return {"status": "BOOTSTRAP_REQUIRED"}, None
+        if source_exchange is None:
+            raise ValueError("rolling_bootstrap_calendar_transport_missing")
+        return _prepare_initial_checkpoint(snapshot, manifest, history_bundle, exchange=exchange,
+            source_exchange=source_exchange, headers=headers, source_proxy_url=source_proxy_url)
+    if bootstrap:
+        raise ValueError("rolling_bootstrap_checkpoint_already_exists")
     active_manifest, reference, previous_wire = active
     checkpoint, prior_bytes, _ = unpack_rolling_checkpoint(previous_wire, reference["sha256"])
     if not isinstance(checkpoint.get("officialCalendar"), dict):
@@ -77,38 +297,11 @@ def prepare(snapshot, manifest, history_bundle, *, exchange, headers):
     calendar = extend_calendar(checkpoint["officialCalendar"], current_calendar, snapshot["asOf"])
     refs = {(r["sourceId"], r["tradeDate"]): r for r in json.loads(prior_bytes)}
     cache = {}
-    def collected_identity(source, day):
-        matches = [(artifact, part) for artifact in history_bundle["history"]["artifacts"]
-            if artifact.get("sourceId") == source and artifact.get("dataset") == "etf_scale"
-            and artifact.get("requestedDate") == day
-            for part in artifact.get("normalized", [])
-            if part.get("name") == "data" and part.get("tradeDates") == [day]]
-        if len(matches) != 1:
-            raise ValueError("rolling_collected_source_identity_missing")
-        artifact, part = matches[0]
-        try:
-            if any(not isinstance(encoded, str) or len(encoded) > 2_800_000
-                    for encoded in (artifact["rawContentBase64"], part["contentBase64"])):
-                raise ValueError("invalid_source_bytes")
-            raw = base64.b64decode(artifact["rawContentBase64"], validate=True)
-            normalized = base64.b64decode(part["contentBase64"], validate=True)
-        except (KeyError, ValueError, TypeError):
-            raise ValueError("rolling_collected_source_identity_invalid") from None
-        if (len(raw) > 2_000_000 or len(normalized) > 2_000_000
-                or sha256(raw).hexdigest() != artifact["sha256"]
-                or sha256(normalized).hexdigest() != part["sha256"]
-                or not any(item.get("sha256") == artifact["sha256"]
-                    and item.get("requested_date") == day
-                    and item.get("source", {}).get("source_id") == source
-                    and item.get("source", {}).get("dataset") == "etf_scale"
-                    for item in manifest["artifacts"])):
-            raise ValueError("rolling_collected_source_identity_invalid")
-        return artifact["sha256"], part["sha256"]
     # Only the just-collected three official sessions are discovered. Older
     # revisions remain pinned; a separate reconciliation handles older changes.
     for day in current_calendar["dates"]:
         for source in ("sse", "szse"):
-            raw_sha, expected_sha = collected_identity(source, day)
+            raw_sha, expected_sha = _collected_source_identity(source, day, manifest, history_bundle)
             reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
                 headers=headers, params={"source": source, "dataset": "etf_scale",
                     "date": day, "file": "data", "indexed": "1"},
@@ -154,6 +347,8 @@ def main():
     parser.add_argument("--history-bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--bootstrap", action="store_true",
+        help="explicitly build the first checkpoint from one official calendar proof and pinned archive data")
     args = parser.parse_args()
     from trading_desk.bounded_http import BoundedHTTPExchange
     from trading_desk.http import HttpSettings, build_session
@@ -163,14 +358,40 @@ def main():
         "CF-Access-Client-Secret": creds["access_client_secret"]}
     inner = BoundedHTTPExchange(build_session(HttpSettings(total_retries=0)))
     class Counted:
-        count, bytes = 0, 0
+        def __init__(self):
+            self.count = self.bytes = self.archive_reads = self.indexed_archive_reads = 0
+            self.unindexed_archive_reads = self.source_calendar_attempts = 0
+            self.request_limit = BOOTSTRAP_WORKER_REQUEST_LIMIT if args.bootstrap else NORMAL_REQUEST_LIMIT
+            self.byte_limit = BOOTSTRAP_RESPONSE_BYTE_LIMIT if args.bootstrap else NORMAL_RESPONSE_BYTE_LIMIT
+            self.deadline = time.monotonic() + 480 if args.bootstrap else None
+
+        def check_deadline(self):
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                raise ValueError("rolling_bootstrap_total_deadline")
+
+        def record_source_attempt(self):
+            self.check_deadline()
+            self.source_calendar_attempts += 1
+
+        def record_external_response(self, size):
+            self.bytes += size
+            if self.bytes > self.byte_limit:
+                raise ValueError("rolling_read_byte_limit")
+
         def request(self, *pos, **kw):
-            if self.count >= 23:
+            self.check_deadline()
+            if self.count >= self.request_limit:
                 raise ValueError("rolling_read_request_limit")
             self.count += 1
+            if len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith("/history-artifact"):
+                self.archive_reads += 1
+                if kw.get("params", {}).get("indexed") == "1":
+                    self.indexed_archive_reads += 1
+                else:
+                    self.unindexed_archive_reads += 1
             reply = inner.request(*pos, **kw)
             self.bytes += len(reply.content)
-            if self.bytes > 4_000_000:
+            if self.bytes > self.byte_limit:
                 raise ValueError("rolling_read_byte_limit")
             return reply
     exchange = Counted()
@@ -181,7 +402,9 @@ def main():
         if snapshot.get("publication", {}).get("status") != "confirmed":
             raise ValueError("rolling_source_not_confirmed")
         status, ready = prepare(snapshot, json.loads(read_bounded(args.manifest, 2_000_000)),
-            json.loads(read_bounded(args.history_bundle, 40_000_000)), exchange=exchange, headers=headers)
+            json.loads(read_bounded(args.history_bundle, 40_000_000)), exchange=exchange, headers=headers,
+            bootstrap=args.bootstrap, source_exchange=inner,
+            source_proxy_url=os.getenv("FLOW_SOURCE_PROXY_URL", ""))
         if ready:
             calendar, wire, version = ready
             write_source_bundle(args.output, snapshot, calendar, wire, version, source_bytes=source)
@@ -194,12 +417,19 @@ def main():
         status = {"status": "BLOCKED_SOURCE" if fatal else "UNAVAILABLE", "reason": code if re.fullmatch(r"[a-z0-9_]{1,100}", code)
                   else "rolling_read_or_proof_unconfirmed"}
     args.report.write_bytes(canonical_json_bytes({**status, "workerRequests": exchange.count,
+        "archiveReadRequests": exchange.archive_reads,
+        "indexedArchiveReadRequests": exchange.indexed_archive_reads,
+        "unindexedArchiveReadRequests": exchange.unindexed_archive_reads,
+        "sourceCalendarRequestAttempts": exchange.source_calendar_attempts,
+        "maxSourceCalendarRequestAttempts": 2 if args.bootstrap else 0,
+        "maxWorkerRequests": exchange.request_limit,
         "asOf": snapshot.get("asOf") if isinstance(snapshot, dict) else None,
         "snapshotSha256": sha256(source).hexdigest() if source is not None else None,
-        "responseBytes": exchange.bytes, "d1RowsRead": None, "d1RowsWritten": 0,
+        "responseBytes": exchange.bytes, "maxResponseBytes": exchange.byte_limit,
+        "d1RowsRead": None, "d1RowsWritten": 0,
         "accountBudgetStatus": "UNKNOWN", "note": "read-only preparation is not account quota admission"}))
     if status["status"] != "READY":
-        print("Rolling proof unavailable; daily publication may proceed only with explicit unavailable cells.")
+        print(f"Rolling preparation {status['status']}: {status.get('reason', 'proof_unavailable')}")
     if status["status"] == "BLOCKED_SOURCE":
         raise SystemExit("current source identity failed; publication remains blocked")
 
