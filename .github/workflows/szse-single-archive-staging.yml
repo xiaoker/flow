@@ -1,0 +1,80 @@
+name: SZSE single archive staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_apply:
+        description: "Leave empty for read-only preflight; supply exact SHA-256 only after operator approval"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: szse-single-archive-20261014
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PAYLOAD_SHA: e06303e697a8d97fc20d54c946288947157ec09cb19cfffc794aa149fdc4be2e
+      NORMALIZED_SHA: 1b873671b4b512d403fc981878b488e11bc2b7a7d780e02db3d314705b5d832d
+      TARGET: "2026-10-14"
+    steps:
+      - name: Fetch and validate one private staging object
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONFIRM: ${{ inputs.confirm_apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$CONFIRM" || test "$CONFIRM" = "$PAYLOAD_SHA"
+          umask 077
+          file="$RUNNER_TEMP/szse-archive.json"
+          status="$(curl -sS --max-time 30 --max-filesize 2000000 -o "$file" -w '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/flow/objects/operator-staging/szse-20261014-$PAYLOAD_SHA.json")"
+          echo "Staging read HTTP $status"
+          test "$status" = 200
+          echo "$PAYLOAD_SHA  $file" | sha256sum -c --status
+          jq -e --arg date "$TARGET" --arg hash "$NORMALIZED_SHA" '
+            .history as $h | $h.artifacts[0] as $a |
+            $h.asOf == $date and $h.finalize == false and ($h | has("snapshot") | not)
+            and ($h.artifacts | length) == 1 and $h.expectedArtifacts == [$a.releaseId]
+            and $a.sourceId == "szse" and $a.dataset == "etf_scale" and $a.tradeDates == [$date]
+            and ($a.normalized | length) == 1 and $a.normalized[0].name == "data"
+            and $a.normalized[0].rowCount == 756 and $a.normalized[0].sha256 == $hash
+          ' "$file" >/dev/null
+          echo "Pinned one-partition payload verified"
+      - name: Submit once and verify exact indexed bytes
+        if: inputs.confirm_apply != ''
+        env:
+          INGEST: ${{ secrets.FLOW_INGEST_API_KEY }}
+          ACCESS_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          ACCESS_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$INGEST" && test -n "$ACCESS_ID" && test -n "$ACCESS_SECRET"
+          auth=(-H "Authorization: Bearer $INGEST" -H "CF-Access-Client-Id: $ACCESS_ID" -H "CF-Access-Client-Secret: $ACCESS_SECRET")
+          base=https://flow.xiaoker.com/api/v1/admin
+          receipt="$RUNNER_TEMP/szse-receipt.json"
+          status="$(curl -sS --max-time 100 --max-filesize 65536 -o "$receipt" -w '%{http_code}' "${auth[@]}" \
+            -H 'Content-Type: application/json' --data-binary "@$RUNNER_TEMP/szse-archive.json" "$base/history-import")"
+          echo "Archive POST HTTP $status; do not rerun on failure"
+          test "$status" = 200
+          jq -e --arg date "$TARGET" '.status == "chunk_archived" and .asOf == $date and .artifacts == 1' "$receipt" >/dev/null
+          csv="$RUNNER_TEMP/szse-readback.csv"
+          status="$(curl -sS --max-time 30 --max-filesize 2000000 -o "$csv" -D "$csv.headers" -w '%{http_code}' "${auth[@]}" \
+            "$base/history-artifact?source=szse&dataset=etf_scale&date=$TARGET&file=data&indexed=1")"
+          echo "Indexed readback HTTP $status"
+          test "$status" = 200
+          grep -Eiq "^x-flow-trade-date: $TARGET[[:space:]]*$" "$csv.headers"
+          echo "$NORMALIZED_SHA  $csv" | sha256sum -c --status
+          echo "Archive acknowledged and indexed readback SHA-256 verified"
