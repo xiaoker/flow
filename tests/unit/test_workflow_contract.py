@@ -32,6 +32,7 @@ def test_rolling_production_bundle_is_verified_and_bound_only_after_activation()
     preparation = collect[collect.index("- name: Prepare rolling proof from the active published checkpoint"):
         collect.index("- name: Verify immutable collection source bundle")]
     assert "vars.FLOW_ROLLING_PERIODS_ENABLED == '1'" in preparation
+    assert "needs.pipeline_window_gate.outputs.window_name == 'reconcile'" in preparation
     assert "continue-on-error" not in preparation
     assert "cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json" in preparation
     gate = collect[collect.index("- name: Claim or skip pipeline window"):collect.index("  recovery_execution_contract:")]

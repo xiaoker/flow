@@ -860,7 +860,7 @@ def test_bootstrap_workflow_is_opt_in_and_runs_before_any_publish_dispatch():
     end = workflow.index("\n\n# Cloudflare Cron", start)
     input_block = workflow[start:end]
     assert "default: false" in input_block and "type: boolean" in input_block
-    assert "vars.FLOW_ROLLING_PERIODS_ENABLED == '1'" in workflow
+    assert 'description: "Build rolling proof in the reconcile window' in input_block
     assert "inputs.recovery_id == ''" in workflow
     assert "rolling_bootstrap_checkpoint_already_exists" not in Path(
         __file__).resolve().parents[2].joinpath("scripts/prepare_rolling_etf_publication.py").read_text()
@@ -868,9 +868,12 @@ def test_bootstrap_workflow_is_opt_in_and_runs_before_any_publish_dispatch():
     claim = workflow.index("/claim", gate_start)
     validation = workflow.index("Rolling bootstrap requires the rolling flag", gate_start)
     assert validation < claim
+    assert '"$WINDOW" == "reconcile"' in workflow
+    assert 'Rolling checkpoint preparation is restricted to the reconcile window.' in workflow
     preparation = workflow.index("- name: Prepare rolling proof from the active published checkpoint")
     publish_dispatch = workflow.index("- name: Dispatch resumable market-data publish workflow", preparation)
     block = workflow[preparation:publish_dispatch]
     assert 'BOOTSTRAP_ARGS+=(--bootstrap)' in block
     assert 'INPUT_ROLLING_BOOTSTRAP' in block
+    assert "needs.pipeline_window_gate.outputs.window_name == 'reconcile'" in block
     assert "FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy" in block
