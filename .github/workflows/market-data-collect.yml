@@ -62,6 +62,11 @@ on:
         required: false
         default: true
         type: boolean
+      rolling_bootstrap:
+        description: "Explicitly build the first rolling checkpoint from official calendar proof and existing archives"
+        required: false
+        default: false
+        type: boolean
 
 # Cloudflare Cron is the primary release-window dispatcher. The watchdog owns
 # the GitHub schedule and only dispatches this workflow when its lease check
@@ -110,6 +115,7 @@ jobs:
       recovery_max_requests: ${{ steps.gate.outputs.recovery_max_requests }}
       recovery_deadline: ${{ steps.gate.outputs.recovery_deadline }}
       recovery_budget_manifest: ${{ steps.gate.outputs.recovery_budget_manifest }}
+      rolling_bootstrap: ${{ steps.gate.outputs.rolling_bootstrap }}
     env:
       # The gate is now the production default. An explicit repository value
       # of 0 remains the coordinated rollback switch.
@@ -126,6 +132,7 @@ jobs:
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
       INPUT_RECOVERY_PLAN_SHA256: ${{ inputs.recovery_plan_sha256 || '' }}
+      INPUT_ROLLING_BOOTSTRAP: ${{ inputs.rolling_bootstrap || false }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Claim or skip pipeline window
@@ -168,6 +175,12 @@ jobs:
           else
             DELEGATE_PUBLISH="true"
           fi
+          if [[ "$INPUT_ROLLING_BOOTSTRAP" == "true" ]]; then
+            if [[ "$FLOW_ROLLING_PERIODS_ENABLED" != "1" || ( "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ) || "$DELEGATE_PUBLISH" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
+              echo "Rolling bootstrap requires the rolling flag, pipeline lease gate, delegated Publisher and an ordinary non-recovery run." >&2
+              exit 1
+            fi
+          fi
           if [[ "$FLOW_ROLLING_PERIODS_ENABLED" == "1" && -z "$INPUT_RECOVERY_ID" ]]; then
             if [[ "$DELEGATE_PUBLISH" != "true" || ( "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ) ]]; then
               echo "Rolling publication requires the leased delegated Publisher; legacy rollback mode is not supported." >&2
@@ -198,6 +211,7 @@ jobs:
             echo "recovery_max_requests="
             echo "recovery_deadline="
             echo "recovery_budget_manifest="
+            echo "rolling_bootstrap=$INPUT_ROLLING_BOOTSTRAP"
           } >> "$GITHUB_OUTPUT"
 
           # A recovery dispatch is a separate control-plane path. It must be
@@ -672,6 +686,7 @@ jobs:
       RECOVERY_DEADLINE: ${{ needs.pipeline_window_gate.outputs.recovery_deadline }}
       RECOVERY_BUDGET_MANIFEST: ${{ needs.pipeline_window_gate.outputs.recovery_budget_manifest }}
       INPUT_DELEGATE_PUBLISH: ${{ needs.pipeline_window_gate.outputs.delegate_publish }}
+      INPUT_ROLLING_BOOTSTRAP: ${{ needs.pipeline_window_gate.outputs.rolling_bootstrap }}
       PIPELINE_WINDOW_GATE_ENABLED: ${{ needs.pipeline_window_gate.outputs.gate_enabled }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
       FLOW_PIPELINE_WINDOW_URL: https://flow.xiaoker.com/api/v1/admin/pipeline-window
@@ -1331,15 +1346,21 @@ jobs:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+          FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
         shell: bash
         run: |
           set -euo pipefail
+          BOOTSTRAP_ARGS=()
+          if [[ "$INPUT_ROLLING_BOOTSTRAP" == "true" ]]; then
+            BOOTSTRAP_ARGS+=(--bootstrap)
+          fi
           PYTHONPATH=src:. python scripts/prepare_rolling_etf_publication.py \
             --snapshot dashboard-snapshot.json \
             --manifest reports/phase0/latest-manifest.json \
             --history-bundle history-bundle.json \
             --output rolling-prepared \
-            --report reports/budget/rolling-preparation.json
+            --report reports/budget/rolling-preparation.json \
+            "${BOOTSTRAP_ARGS[@]}"
           if [[ -s rolling-prepared/rolling-publication-input.json ]]; then
             cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json
             cp rolling-prepared/rolling-publication-input.json rolling-publication-input.json
