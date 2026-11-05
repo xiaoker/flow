@@ -63,7 +63,7 @@ on:
         default: true
         type: boolean
       rolling_bootstrap:
-        description: "Explicitly build the first rolling checkpoint from official calendar proof and existing archives"
+        description: "Build rolling proof in the reconcile window from official calendar proof and existing archives"
         required: false
         default: false
         type: boolean
@@ -135,7 +135,7 @@ jobs:
       # Once rolling publication is enabled, normal non-recovery collection
       # should bootstrap only when the release-scoped checkpoint is absent.
       # The preparer treats an existing checkpoint as ordinary continuation.
-      INPUT_ROLLING_BOOTSTRAP: ${{ inputs.rolling_bootstrap || (vars.FLOW_ROLLING_PERIODS_ENABLED == '1' && inputs.recovery_id == '') }}
+      INPUT_ROLLING_BOOTSTRAP: ${{ inputs.rolling_bootstrap || false }}
       PIPELINE_RECOVERY_ENABLED: ${{ vars.PIPELINE_RECOVERY_ENABLED || '0' }}
     steps:
       - name: Claim or skip pipeline window
@@ -177,6 +177,13 @@ jobs:
             DELEGATE_PUBLISH="false"
           else
             DELEGATE_PUBLISH="true"
+          fi
+          if [[ "$INPUT_ROLLING_BOOTSTRAP" != "true" && "$FLOW_ROLLING_PERIODS_ENABLED" == "1" && "$WINDOW" == "reconcile" && -z "$INPUT_RECOVERY_ID" ]]; then
+            INPUT_ROLLING_BOOTSTRAP="true"
+          fi
+          if [[ "$INPUT_ROLLING_BOOTSTRAP" == "true" && "$WINDOW" != "reconcile" ]]; then
+            echo "Rolling checkpoint preparation is restricted to the reconcile window." >&2
+            exit 1
           fi
           if [[ "$INPUT_ROLLING_BOOTSTRAP" == "true" ]]; then
             if [[ "$FLOW_ROLLING_PERIODS_ENABLED" != "1" || ( "$PIPELINE_WINDOW_GATE_ENABLED" != "1" && "$PIPELINE_WINDOW_GATE_ENABLED" != "true" ) || "$DELEGATE_PUBLISH" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
@@ -1344,7 +1351,7 @@ jobs:
             --output reports/budget/core-collection.json
 
       - name: Prepare rolling proof from the active published checkpoint
-        if: ${{ success() && vars.FLOW_ROLLING_PERIODS_ENABLED == '1' && inputs.recovery_id == '' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        if: ${{ success() && needs.pipeline_window_gate.outputs.window_name == 'reconcile' && vars.FLOW_ROLLING_PERIODS_ENABLED == '1' && inputs.recovery_id == '' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
