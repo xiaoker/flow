@@ -363,6 +363,13 @@ def test_daily_collector_preparation_advances_real_builders_without_recollecting
     status, again = prepare(current, manifest, bundle, exchange=SimpleNamespace(request=request), headers={})
     assert status["status"] == "READY" and sha256(again[1]).hexdigest() == sha256(new_wire).hexdigest()
     assert len(calls) == 2 * expected_calls + int(asymmetric)
+    # A recurring opt-in must cold-start only once; with an active checkpoint
+    # the same flag follows the ordinary continuation path.
+    status_bootstrap, bootstrapped_again = prepare(current, manifest, bundle,
+        exchange=SimpleNamespace(request=request), headers={}, bootstrap=True)
+    assert status_bootstrap["status"] == "READY"
+    assert sha256(bootstrapped_again[1]).hexdigest() == sha256(new_wire).hexdigest()
+    assert len(calls) == 3 * expected_calls + int(asymmetric)
     # A later indexed revision cannot silently mix with the unchanged source
     # bundle from which the one-day snapshot was computed.
     changed = data["sse", dates[-1]].replace(b"2300000000", b"2400000000")
@@ -853,6 +860,10 @@ def test_bootstrap_workflow_is_opt_in_and_runs_before_any_publish_dispatch():
     end = workflow.index("\n\n# Cloudflare Cron", start)
     input_block = workflow[start:end]
     assert "default: false" in input_block and "type: boolean" in input_block
+    assert "vars.FLOW_ROLLING_PERIODS_ENABLED == '1'" in workflow
+    assert "inputs.recovery_id == ''" in workflow
+    assert "rolling_bootstrap_checkpoint_already_exists" not in Path(
+        __file__).resolve().parents[2].joinpath("scripts/prepare_rolling_etf_publication.py").read_text()
     gate_start = workflow.index("- name: Claim or skip pipeline window")
     claim = workflow.index("/claim", gate_start)
     validation = workflow.index("Rolling bootstrap requires the rolling flag", gate_start)
