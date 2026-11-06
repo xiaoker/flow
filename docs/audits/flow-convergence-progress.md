@@ -7,7 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
-### 2026-11-05: rolling bootstrap restricted to one reconcile window (local, not delivered)
+### 2026-11-06: bounded R2 staging error diagnosis (local, not delivered)
+
+- Latest `origin/main` is verified at `5cc67da4c3544ad76f552a0fa3724225682054ee` (PR #239); PRs #238 and #239 are merged and GitHub reports no open PR. The original dirty worktree and separate period-recovery evidence worktree remain untouched. The active code worktree is `/private/tmp/flow-szse-staging-error-code-20261106`, branch `codex/szse-staging-error-code-20261106`, based directly on that SHA.
+- Read-only run `42083105741` passed the pinned R2 URL host/path gate but returned HTTP 400. Submit/readback was skipped and the temporary signed-URL Secret was deleted. The job log contains only the HTTP status, not an XML error code/body; the actual credential, URL expiry, and object cause remain UNKNOWN. No POST or retry occurred.
+- Offline comparison with AWS Botocore 1.43.125 used synthetic credentials and a fixed UTC clock. The local signer exactly matched SDK host, path, query names, 444-character length, and signature for the same path-style request. This rules out a mismatch in the tested SigV4 construction; it does not prove the historical credentials, the URL's validity at dispatch, or R2 acceptance.
+- The local diagnostic change parses at most 64 KiB of failed GET response, prints only an allowlisted S3 `Code`, maps all unrecognized/malformed responses to `UNKNOWN`, never logs the body, and removes the temporary error response. Tests cover allowlisted, unknown, malformed, oversized bodies and URL non-disclosure. This does not yet identify or fix the original 400.
+- Local validation: focused workflow tests 9 passed; YAML parse and `git diff --check` passed; Web lint passed; `npm test` passed build plus 283 tests. Full Python tests passed after allowing the suite's loopback HTTP/SQLite fixtures; the existing duplicate-ZIP warning remains. The initial restricted run failed only because sandbox policy denied `127.0.0.1` binding; no assertion was skipped or weakened.
+- No R2 GET, upload, D1 write, production/recovery task, active-pointer or feature-flag change, deployment, or migration occurred this turn. No temporary GitHub Secret remains. The local change is not yet committed or pushed; no PR/CI is claimed.
+- Expected merge effects: existing PR CI runs Python and Web checks. The diff does not match `deploy-worker.yml`'s `web/**`, resource-budget, or deploy-workflow paths; it adds no migration and should not automatically deploy the Worker. The staging workflow remains manual (`workflow_dispatch` only) and was not triggered by this code change. After CI/merge, one fresh, separately authorized read-only diagnostic GET is still needed; do not repeat the consumed failed attempt.
+
+### Historical: 2026-11-05 rolling bootstrap restricted to one reconcile window (local, not delivered)
 
 - Latest GitHub commit on `main` is verified as `85c2a51987bbb3aeef5e138070853c70552e727c` (PR #236), which connects the existing bounded rolling checkpoint preparation to ordinary collection when `FLOW_ROLLING_PERIODS_ENABLED=1`. The original worktree remains untouched. Local `git fetch` could not update the shared worktree `FETCH_HEAD` due filesystem permission; the local `origin/main` ref and isolated worktree `HEAD` both resolve to the same verified SHA.
 - The follow-up narrows automatic preparation to `window_name=reconcile`; the explicit manual input is also rejected outside reconcile, and the preparation step repeats the reconcile condition. This prevents the evening, morning, and reconcile schedules from repeating the expensive bootstrap up to three times in one business day. It reuses the existing pipeline and archive limits; it adds no scheduler, data source, table, or migration.
@@ -16,7 +26,7 @@ R2, D1, release, or receipt evidence.
 - Focused Python rolling/workflow tests: 68 passed. Full `PYTHONPATH=src:. .venv/bin/python -m pytest -q` passed after allowing the suite's local HTTP fixtures to bind `127.0.0.1`; the expected duplicate-ZIP fixture warning remains. Web lint passed; `npm test` passed build and 283 tests (existing large-chunk warning only). No test was skipped or weakened.
 - The pending code diff is limited to the existing Collector workflow and two contract-test files; this progress entry records the verified state. It does not match `deploy-worker.yml`'s deployment paths, so merging should not automatically deploy a Worker or apply a D1 migration. Normal PR CI is still required. Do not enable the production rolling flag or run collection/bootstrap as part of this PR.
 
-## Previous current stage (historical)
+## Earlier historical stages
 
 ### 2026-11-05: bounded cold-start bootstrap for rolling share periods (in progress)
 

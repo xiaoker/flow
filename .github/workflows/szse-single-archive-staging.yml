@@ -41,11 +41,57 @@ jobs:
             echo "Missing or invalid signed URL for the pinned R2 object" >&2
             exit 1
           fi
+          read_r2_error_code() {
+            python3 - "$1" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          allowed = {
+              "AccessDenied",
+              "AuthorizationHeaderMalformed",
+              "AuthorizationQueryParametersError",
+              "ExpiredToken",
+              "InvalidAccessKeyId",
+              "InvalidArgument",
+              "InvalidBucketName",
+              "InvalidRequest",
+              "InvalidRegion",
+              "MalformedXML",
+              "NoSuchBucket",
+              "NoSuchKey",
+              "PermanentRedirect",
+              "RequestExpired",
+              "RequestTimeTooSkewed",
+              "SignatureDoesNotMatch",
+          }
+          try:
+              root = ET.parse(sys.argv[1]).getroot()
+              codes = [
+                  element.text.strip()
+                  for element in root.iter()
+                  if element.tag.rsplit("}", 1)[-1] == "Code" and element.text
+              ]
+              result = codes[0] if len(codes) == 1 and codes[0] in allowed else "UNKNOWN"
+          except Exception:
+              result = "UNKNOWN"
+          print(result)
+          PY
+          }
           status="$(printf 'url = "%s"\n' "$STAGING_GET_URL" | curl -q -s --config - \
             --proto '=https' --max-time 30 --max-filesize 2000000 -o "$file" -w '%{http_code}')"
           unset STAGING_GET_URL
-          echo "Staging read HTTP $status"
-          test "$status" = 200
+          if [[ "$status" != 200 ]]; then
+            response_bytes="$(wc -c < "$file" | tr -d '[:space:]')"
+            if [[ "$response_bytes" =~ ^[0-9]+$ ]] && (( response_bytes <= 65536 )); then
+              error_code="$(read_r2_error_code "$file")"
+            else
+              error_code="ERROR_BODY_TOO_LARGE"
+            fi
+            rm -f "$file"
+            echo "Staging read HTTP $status; R2 code=$error_code" >&2
+            exit 1
+          fi
+          echo "Staging read HTTP 200"
           echo "$PAYLOAD_SHA  $file" | sha256sum -c --status
           jq -e --arg date "$TARGET" --arg hash "$NORMALIZED_SHA" '
             .history as $h | $h.artifacts[0] as $a |
