@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      PAYLOAD_SHA: e06303e697a8d97fc20d54c946288947157ec09cb19cfffc794aa149fdc4be2e
-      NORMALIZED_SHA: 1b873671b4b512d403fc981878b488e11bc2b7a7d780e02db3d314705b5d832d
+      PAYLOAD_SHA: 0d41e50cf184b6cad329b1de0eb5e0651660c9aacc566d30b651dc941fc329a4
+      NORMALIZED_SHA: 68ae8f780c83d0877b105641aab991d56f5dff9c226636390bb2b11c487afc9c
       TARGET: "2026-10-14"
     steps:
       - name: Fetch and validate one private staging object
