@@ -272,3 +272,4 @@ jobs:
             ${{ runner.temp }}/flow-pipeline-candidate/state/intent.sqlite
             ${{ runner.temp }}/flow-pipeline-candidate/archive-verified-recipe.json
             ${{ runner.temp }}/flow-pipeline-candidate/etf-archive-verification.json
+            ${{ runner.temp }}/flow-pipeline-candidate/raw-source-evidence/

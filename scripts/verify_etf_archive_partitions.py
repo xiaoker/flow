@@ -1,7 +1,11 @@
 """Exact GET-only byte/row verification, not provenance or publication approval.
 
 Existing archive-verify workflow request_json supports either exact object
-references or one bounded date-candidate resolution. Exact reads accept at most
+references, one bounded date-candidate resolution, or one raw-source identity.
+The raw-source contract accepts sourceId, tradeDate and rawSha256, reads the
+exact metadata and its hash-pinned raw object, and saves verified evidence only
+to the workflow's seven-day artifact. It never proves publication readiness.
+Exact normalized reads accept at most
 eight distinct market-date partitions; date resolution requests one date from
 the existing authenticated history-artifact route, which may inspect no more
 than two R2 prefixes (128 objects each) and returns at most one object. Both
@@ -30,7 +34,73 @@ from trading_desk.etf_replay import MAX_SOURCE_BYTES, parse_replay_partition
 
 CONTRACT = "flow-etf-partition-verification-v1"
 DATE_CANDIDATE_CONTRACT = "flow-etf-date-candidate-resolution-v1"
+RAW_SOURCE_CONTRACT = "flow-etf-raw-source-verification-v1"
 MAX_PARTITIONS = 8
+
+
+def _verify_raw_source(value, *, read=None):
+    """Resolve one exact metadata identity, then verify its raw bytes (two GETs)."""
+    if not isinstance(value, dict) or set(value) != {"contract", "partition"} or value["contract"] != RAW_SOURCE_CONTRACT:
+        raise ValueError("etf_raw_source_request_invalid")
+    part = value["partition"]
+    if not isinstance(part, dict) or set(part) != {"sourceId", "tradeDate", "rawSha256"}:
+        raise ValueError("etf_raw_source_identity_invalid")
+    source, day, digest = part["sourceId"], part["tradeDate"], part["rawSha256"]
+    if source not in ("sse", "szse") or not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise ValueError("etf_raw_source_identity_invalid")
+    date.fromisoformat(day)
+    prefix = f"market-data/raw/{source}/etf_scale/{day}/{digest}"
+    read = read or (lambda key, sha, metadata: _archive_get(key, sha, metadata_raw=metadata, max_bytes=MAX_SOURCE_BYTES))
+    metadata_bytes = read(prefix + ".metadata.json", digest, True)
+    if len(metadata_bytes) > MAX_SOURCE_BYTES:
+        raise ValueError("etf_raw_source_size_exceeded")
+    metadata = json.loads(metadata_bytes)
+    identity = metadata.get("source", {})
+    key = metadata.get("archived_raw_key")
+    if (metadata.get("sha256") != digest or metadata.get("requested_date") != day
+            or identity.get("source_id") != source or identity.get("dataset") != "etf_scale"
+            or metadata.get("release_id") != f"etf_scale:{source}:{day}:{digest[:16]}"
+            or not isinstance(key, str) or not re.fullmatch(re.escape(prefix) + r"\.(json|js|jsonp|xlsx|gz)", key)):
+        raise ValueError("etf_raw_source_metadata_mismatch")
+    raw = read(key, digest, False)
+    if len(raw) > MAX_SOURCE_BYTES or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("etf_raw_source_bytes_mismatch")
+    return {"contract": RAW_SOURCE_CONTRACT, "status": "RAW_SOURCE_BYTES_VERIFIED",
+            "partition": part, "objectKey": key, "archiveReadCount": 2, "archiveReadAttempts": 2,
+            "rawBytes": len(raw), "metadataSha256": hashlib.sha256(metadata_bytes).hexdigest(),
+            "sideEffects": {"remoteWrites": False, "dispatch": False, "activation": False},
+            "provesOfficialProvenance": False, "provesPeriodRecovery": False}, metadata_bytes, raw
+
+
+def verify_raw_source(value, *, read=None):
+    completed = 0
+    attempts = 0
+    def bounded_read(key, digest, metadata):
+        nonlocal completed, attempts
+        attempts += 1
+        if attempts > 2:
+            raise ValueError("etf_raw_source_request_limit")
+        data = (read(key, digest, metadata) if read else
+                _archive_get(key, digest, metadata_raw=metadata, max_bytes=MAX_SOURCE_BYTES))
+        completed += 1
+        return data
+    try:
+        return _verify_raw_source(value, read=bounded_read)
+    except Exception as error:
+        failure = {"errorCode": "etf_raw_source_validation_failed"}
+        if isinstance(error, ArchiveReadError):
+            failure["errorCode"] = str(error)
+            if error.status is not None:
+                failure["httpStatus"] = error.status
+            if error.ray:
+                failure["rayId"] = error.ray
+        raise ArchiveVerificationError({
+            "contract": RAW_SOURCE_CONTRACT, "status": "RAW_SOURCE_VERIFICATION_FAILED",
+            "archiveReadCount": completed, "archiveReadAttempts": attempts,
+            "failure": failure,
+            "sideEffects": {"remoteWrites": False, "dispatch": False, "activation": False},
+            "provesPeriodRecovery": False,
+        }) from None
 
 
 class ArchiveVerificationError(ValueError):
@@ -248,7 +318,13 @@ def main():
         raise ValueError("etf_archive_verification_request_too_large")
     try:
         value = json.loads(raw)
-        if isinstance(value, dict) and value.get("contract") == DATE_CANDIDATE_CONTRACT:
+        if isinstance(value, dict) and value.get("contract") == RAW_SOURCE_CONTRACT:
+            result, metadata, source = verify_raw_source(value)
+            evidence_dir = args.output.parent / "raw-source-evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "metadata.json").write_bytes(metadata)
+            (evidence_dir / "source.bin").write_bytes(source)
+        elif isinstance(value, dict) and value.get("contract") == DATE_CANDIDATE_CONTRACT:
             result = resolve_date_candidate(value)
         else:
             result = verify(value)
