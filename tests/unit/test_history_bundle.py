@@ -16,6 +16,31 @@ from trading_desk.history_bundle import (
 )
 
 
+@pytest.mark.parametrize("source", [None, "sse", "szse"])
+def test_historical_scale_bundle_requires_row_source_identity(tmp_path, source):
+    raw = tmp_path / "raw.json"
+    raw.write_bytes(b"{}")
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text("{}")
+    normalized = tmp_path / "data.csv"
+    frame = pd.DataFrame([{"trade_date": "2026-10-14", "observed_at": "2026-10-27T11:17:07Z"}])
+    if source is not None:
+        frame["source_id"] = source
+    frame.to_csv(normalized, index=False)
+    artifact = {"source": {"source_id": "szse", "dataset": "etf_scale",
+        "date_semantics": "source_historical_scale_size_date"},
+        "requested_date": "2026-10-14", "raw_path": str(raw), "metadata_path": str(metadata),
+        "normalized_path": str(normalized), "sha256": hashlib.sha256(b"{}").hexdigest()}
+    before = normalized.read_bytes()
+    if source != "szse":
+        with pytest.raises(ValueError, match="source identity"):
+            serialize_history_artifact(artifact, workspace_root=tmp_path)
+    else:
+        result = serialize_history_artifact(artifact, workspace_root=tmp_path)
+        assert base64.b64decode(result["normalized"][0]["contentBase64"]) == before
+    assert normalized.read_bytes() == before
+
+
 def test_pending_fallback_validates_window_baseline_without_relabeling_it(tmp_path):
     from test_etf_archive_adjacent import reference
     test_history_bundle_preserves_raw_and_normalized_hashes(tmp_path)
