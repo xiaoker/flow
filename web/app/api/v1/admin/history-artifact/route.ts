@@ -212,6 +212,13 @@ export async function GET(request: Request): Promise<Response> {
     const key = selected.key;
     const object = await runtime.RAW_BUCKET.get(key);
     if (!object?.body) return badRequest("artifact_not_found", 404);
+    // Date-based ETF candidate resolution is a diagnostic read, not a bulk
+    // archive export. Enforce its two-MB ceiling in the Worker before the R2
+    // stream is returned; a client-side read cap alone is not sufficient.
+    if (dataset === "etf_scale" && file === "data"
+        && (typeof object.size !== "number" || object.size > 2_000_000)) {
+      return badRequest("artifact_too_large", 413);
+    }
     if (typeof object.size === "number" && object.size > MAX_OBJECT_BYTES) {
       return badRequest("artifact_too_large", 413);
     }

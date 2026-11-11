@@ -15,7 +15,7 @@ on:
           - candidate
           - archive-verify
       request_json:
-        description: Non-secret execution request, or exact ETF refs in archive-verify; never enter credentials
+        description: Non-secret execution request; archive-verify accepts exact refs or one bounded ETF date candidate request; never enter credentials
         type: string
         default: ''
       source_artifact_id:
@@ -102,7 +102,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE_TARGET_DATE: ${{ inputs.archive_target_date }}
-          FLOW_ETF_ARCHIVE_REFS_JSON: ${{ inputs.request_json }}
+          FLOW_ETF_ARCHIVE_REQUEST_JSON: ${{ inputs.request_json }}
           ARCHIVE_CURRENT_RUN_ID: ${{ inputs.archive_current_run_id }}
           ARCHIVE_PREVIOUS_RUN_ID: ${{ inputs.archive_previous_run_id }}
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
@@ -110,7 +110,7 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          if [[ -n "$FLOW_ETF_ARCHIVE_REFS_JSON" ]]; then
+          if [[ -n "$FLOW_ETF_ARCHIVE_REQUEST_JSON" ]]; then
             test -z "$ARCHIVE_TARGET_DATE"
             test -z "$ARCHIVE_CURRENT_RUN_ID"
             test -z "$ARCHIVE_PREVIOUS_RUN_ID"

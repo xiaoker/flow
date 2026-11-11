@@ -151,3 +151,41 @@ test("history artifact route reports a truncated archive search as bounded incom
   assert.equal(calls[0].limit, MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX);
   assert.equal("cursor" in calls[0], false);
 });
+
+test("date-based ETF candidate resolution rejects oversized R2 objects before streaming", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("bounded-etf-candidate-size", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const lists = [];
+  let gets = 0;
+  const candidateKey = "market-data/normalized/sse/etf_scale/2026-09-24/" + "a".repeat(64) + "/data.csv";
+  const response = await worker.fetch(
+    new Request("http://localhost/api/v1/admin/history-artifact?source=sse&dataset=etf_scale&date=2026-09-24&file=data", {
+      headers: { authorization: "Bearer test-key" },
+    }),
+    {
+      INGEST_API_KEY: "test-key",
+      DB: { prepare() { throw new Error("unindexed ETF lookup must not query D1"); } },
+      RAW_BUCKET: {
+        async list(options) {
+          lists.push(options);
+          return { truncated: false, objects: options.prefix.endsWith("/2026-09-24/")
+            ? [item(candidateKey)] : [] };
+        },
+        async get(key) {
+          gets += 1;
+          assert.equal(key, candidateKey);
+          return { body: new Uint8Array([1]), size: 2_000_001 };
+        },
+      },
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: "artifact_too_large" });
+  assert.equal(lists.length, 2);
+  assert.ok(lists.every((call) => call.limit === MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX));
+  assert.equal(gets, 1);
+});
