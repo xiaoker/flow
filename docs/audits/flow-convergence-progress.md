@@ -7,6 +7,17 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-11: bounded ETF partition identity verification (local)
+
+- Main is `918151f` (PR #243). Corrected SZSE October 14 archive import run `42991378031` completed successfully: archive POST and indexed normalized readback both returned 200 and the pinned normalized SHA was verified. Do not repeat this consumed import. The user-authorized deletion removed only the redundant `operator-staging/history-import.json`; hashed staging objects remain.
+- Latest retained Collector source `42941236274` and Publisher `42941892016` target November 10. Its snapshot has non-null share values in all 14 groups for 1d/3d/1w/2w; all 14 remain null for 1m and longer. Cached daily changes lack SZSE October 12/13/15 and both markets October 14. These are projection gaps, not proof of absent archives. Cached dates are not an independent official-calendar proof.
+- Retained official inputs for October 12–15 allow six source/adjacent-day recomputations (October 13/14/15, both markets). Existing daily builder totals match independent comparable-code subtraction. This is local arithmetic evidence only, not remote archive verification, one-month recovery, or publication acceptance.
+- Worktree `/private/tmp/flow-period-resume-20261111`, branch `codex/etf-partition-archive-verify-20261111`. Existing manual main-only archive-verify entry now accepts exact ETF key/hash pairs through request_json: maximum eight distinct market/date partitions, two MB per response, GET only, no discovery/retry/dispatch/claim/activation. Existing legacy full-source mode remains unchanged. Compact evidence explicitly does not prove provenance or period recovery. No new workflow, endpoint, table, migration or flag.
+- Web lint and npm test (build plus 283 tests) passed. Full Python regression passed (existing duplicate-ZIP fixture warning only); final focused verifier/workflow regressions passed 16 tests, including actual localhost HTTP/CSV parsing and response-size rejection. The final response-size assertion was also run after full-suite collection. Initial integration startup failures before dependencies/build existed were superseded by the passing full regression, not waived. Original dirty worktree/protected paths remain untouched.
+- This local change has not been pushed and no live verification dispatched. Diff does not match automatic Worker deployment paths; merge would run normal main CI only. Finish full regression and review before delivery. A subsequent bounded read-only run and any period publication remain separate production action authorizations; do not reuse staging-only credentials for broader reads.
+
+### Historical current block
+
 ### 2026-11-11: corrected SZSE historical import package (workflow-pin PR preparation)
 
 - PR #242 merged as `5599c824f5ca883e2f5856c8b81d3d57d09383fb`, now `origin/main`. Its source-contract CI passed. No Worker deployment or migration occurred.
