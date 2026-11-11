@@ -9,7 +9,8 @@ import pytest
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/szse-single-archive-staging.yml"
 HOST = "https://21004860faeebc5fa4f297679796ee00.r2.cloudflarestorage.com"
-DIGEST = "e06303e697a8d97fc20d54c946288947157ec09cb19cfffc794aa149fdc4be2e"
+DIGEST = "0d41e50cf184b6cad329b1de0eb5e0651660c9aacc566d30b651dc941fc329a4"
+NORMALIZED_DIGEST = "68ae8f780c83d0877b105641aab991d56f5dff9c226636390bb2b11c487afc9c"
 PREFIX = f"{HOST}/flow/operator-staging/szse-20261014-{DIGEST}.json?"
 QUERY = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=synthetic-test-secret"
 MOCK_CURL = r'''curl() {
@@ -38,6 +39,15 @@ def run_staging_step(tmp_path, url, body="", status="400"):
         "STAGING_GET_URL": url, "CONFIRM": "", "MOCK_BODY": body,
         "MOCK_STATUS": status,
     }, capture_output=True, text=True, check=False)
+
+
+def test_workflow_pins_the_corrected_single_date_bundle():
+    source = WORKFLOW.read_text()
+    assert f"PAYLOAD_SHA: {DIGEST}" in source
+    assert f"NORMALIZED_SHA: {NORMALIZED_DIGEST}" in source
+    assert 'TARGET: "2026-10-14"' in source
+    assert "e06303e697a8d97fc20d54c946288947157ec09cb19cfffc794aa149fdc4be2e" not in source
+    assert "1b873671b4b512d403fc981878b488e11bc2b7a7d780e02db3d314705b5d832d" not in source
 
 
 @pytest.mark.parametrize("url,reaches_curl", [
