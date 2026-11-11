@@ -16,6 +16,125 @@ DATA = b"trade_date,market,instrument_code,shares\n2026-10-14,SZSE,159001,100\n"
 KEY = "market-data/normalized/szse/etf_scale/2026-10-14/" + "a" * 64 + "/data.csv"
 
 
+def raw_fixture():
+    raw = b'{"official": "fixture"}'
+    digest = hashlib.sha256(raw).hexdigest()
+    prefix = f"market-data/raw/sse/etf_scale/2026-10-13/{digest}"
+    value = {"contract": verifier.RAW_SOURCE_CONTRACT, "partition": {
+        "sourceId": "sse", "tradeDate": "2026-10-13", "rawSha256": digest}}
+    metadata = {"source": {"source_id": "sse", "dataset": "etf_scale"},
+                "sha256": digest, "requested_date": "2026-10-13",
+                "release_id": f"etf_scale:sse:2026-10-13:{digest[:16]}",
+                "archived_raw_key": prefix + ".json"}
+    return value, metadata, raw, prefix
+
+
+def test_raw_source_exact_two_reads_and_no_recovery_claim():
+    value, metadata, raw, prefix = raw_fixture()
+    calls = []
+    def read(key, digest, is_metadata):
+        calls.append((key, digest, is_metadata))
+        return json.dumps(metadata).encode() if is_metadata else raw
+    receipt, stored_metadata, stored_raw = verifier.verify_raw_source(value, read=read)
+    assert [c[0] for c in calls] == [prefix + ".metadata.json", prefix + ".json"]
+    assert [c[2] for c in calls] == [True, False]
+    assert receipt["archiveReadCount"] == 2
+    assert json.loads(stored_metadata) == metadata and stored_raw == raw
+    assert not receipt["provesPeriodRecovery"] and not any(receipt["sideEffects"].values())
+
+
+@pytest.mark.parametrize("field", ["sha256", "requested_date", "release_id", "source", "archived_raw_key"])
+def test_raw_metadata_conflict_stops_before_raw_get(field):
+    value, metadata, raw, prefix = raw_fixture()
+    metadata[field] = "invalid"
+    calls = []
+    def read(*args):
+        calls.append(args)
+        return json.dumps(metadata).encode()
+    with pytest.raises(ArchiveVerificationError) as caught:
+        verifier.verify_raw_source(value, read=read)
+    assert len(calls) == 1
+    assert caught.value.receipt["archiveReadAttempts"] == 1
+
+
+def test_raw_hash_conflict_and_http_failure_never_retry():
+    value, metadata, raw, prefix = raw_fixture()
+    calls = []
+    def read(key, digest, is_metadata):
+        calls.append(key)
+        return json.dumps(metadata).encode() if is_metadata else b"wrong"
+    with pytest.raises(ArchiveVerificationError):
+        verifier.verify_raw_source(value, read=read)
+    assert len(calls) == 2
+    def failed(*args):
+        raise ArchiveReadError("archive_recipe_remote_http_error", status=404)
+    with pytest.raises(ArchiveVerificationError) as caught:
+        verifier.verify_raw_source(value, read=failed)
+    assert caught.value.receipt["archiveReadAttempts"] == 1
+    assert caught.value.receipt["archiveReadCount"] == 0
+    assert caught.value.receipt["failure"]["httpStatus"] == 404
+
+
+def test_raw_invalid_scope_rejected_without_reads():
+    value, *_ = raw_fixture()
+    value["partition"]["tradeDate"] = "2026-02-30"
+    with pytest.raises(ArchiveVerificationError) as caught:
+        verifier.verify_raw_source(value, read=lambda *_: pytest.fail("unexpected read"))
+    assert caught.value.receipt["archiveReadAttempts"] == 0
+
+
+def test_raw_cli_saves_verified_bytes_only(monkeypatch, tmp_path):
+    value, metadata, raw, _ = raw_fixture()
+    monkeypatch.setenv("FLOW_ETF_ARCHIVE_REQUEST_JSON", json.dumps(value))
+    def read(key, digest, **kwargs):
+        assert kwargs["max_bytes"] == verifier.MAX_SOURCE_BYTES
+        return json.dumps(metadata).encode() if kwargs["metadata_raw"] else raw
+    monkeypatch.setattr(verifier, "_archive_get", read)
+    output = tmp_path / "receipt.json"
+    monkeypatch.setattr("sys.argv", ["verifier", "--output", str(output)])
+    verifier.main()
+    assert json.loads(output.read_text())["status"] == "RAW_SOURCE_BYTES_VERIFIED"
+    assert (tmp_path / "raw-source-evidence/source.bin").read_bytes() == raw
+    assert json.loads((tmp_path / "raw-source-evidence/metadata.json").read_bytes()) == metadata
+
+
+@pytest.mark.parametrize("metadata_oversize", [True, False])
+def test_raw_size_limits_stop_without_retry(metadata_oversize):
+    value, metadata, raw, _ = raw_fixture()
+    calls = []
+    def read(key, digest, is_metadata):
+        calls.append(key)
+        if is_metadata and not metadata_oversize:
+            return json.dumps(metadata).encode()
+        return b"x" * (verifier.MAX_SOURCE_BYTES + 1)
+    with pytest.raises(ArchiveVerificationError):
+        verifier.verify_raw_source(value, read=read)
+    assert len(calls) == (1 if metadata_oversize else 2)
+
+
+def test_raw_cli_subprocess_invalid_scope_is_offline(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    value, *_ = raw_fixture()
+    value["partition"]["sourceId"] = "unsupported"
+    env = {**os.environ, "PYTHONPATH": str(root / "src") + ":" + str(root),
+           "FLOW_ETF_ARCHIVE_REQUEST_JSON": json.dumps(value)}
+    for key in ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET"):
+        env.pop(key, None)
+    output = tmp_path / "receipt.json"
+    result = subprocess.run([sys.executable, str(root / "scripts/verify_etf_archive_partitions.py"),
+                             "--output", str(output)], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 1
+    receipt = json.loads(output.read_text())
+    assert receipt["archiveReadAttempts"] == 0
+    assert receipt["status"] == "RAW_SOURCE_VERIFICATION_FAILED"
+    assert not (tmp_path / "raw-source-evidence").exists()
+
+
 def request():
     return {"contract": CONTRACT, "objects": [{"objectKey": KEY, "sha256": hashlib.sha256(DATA).hexdigest()}]}
 

@@ -7,6 +7,18 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-12: exact raw-source evidence entry (local, not delivered)
+
+- PR #246 merged as `3314c221c48f99cd47418d7e6c4c9533785f9c95`; deployment `43067852904` succeeded and verified that build identity. D1 reported no migrations to apply.
+- Separately authorized date resolution `43068979668` succeeded: two candidates, latest-uploaded selected, one object GET, 95,625 bytes / 921 rows. Actual/declared CSV hash `fdbda684fd58ab70a4921480325949d5c87908fc77d553db0bdad2681f7a8bf5` differs from retained expected `025927dc82ec2414016f84b61898334f40450b29a4adb569a858971c7b530dd0`. Neither provenance nor period recovery is established. No downstream dispatch, writes or activation occurred.
+- Offline key derivation proves both normalized revisions share raw identity `0c353629f564af6d70e8f3716de368cde67e9b89ac3efd38171879a38e5502f3`: hashing raw SHA plus expected wire SHA yields missing revision `57476d0a...`; hashing the same raw SHA plus actual wire SHA yields existing revision `df3699a0...`. This is a lineage clue, not raw-byte verification or proof of semantic equality.
+- Both October 14 morning/reconcile Collectors (`38494776432`, `38497475065`) confirmed source date October 13, but their downloadable artifacts are absent and logs do not preserve the required ETF wire identity. No new R2 read was made during that log investigation.
+- Isolated worktree `/private/tmp/flow-raw-archive-verifier-20261112`, branch `codex/raw-archive-verifier-20261112`, based on latest main `3314c22`. Existing manual archive verifier gains `flow-etf-raw-source-verification-v1`, one exact source/date/raw SHA, metadata then hash-pinned raw GET, two-MB cap per response, no retries or listing. Reuses existing authenticated transport and Worker endpoint. Verified raw/metadata evidence is retained only in the existing seven-day Actions artifact, never committed. No Worker or migration change.
+- Local validation is complete: focused verifier regression passes 38 tests (including CLI subprocess rejection, exact two-read success, identity/hash/HTTP failures and size bounds); final unchanged Python implementation passes the complete suite with loopback fixture permission. Web lint and npm test (build plus 284 tests) pass. git diff --check passes. The expected duplicate-ZIP fixture warning remains. No PR/CI or production-read success claimed. The user approved at most two exact production GETs, still unconsumed; execute only after this entry is tested and merged, without widening scope or retrying ambiguity. Original dirty workspace and protected paths remain untouched.
+- Merge side effects: four files only (existing verifier, its tests, existing manual workflow evidence upload path, this progress index). None matches Worker deployment paths (`web/**`, resource budget or deploy workflow); no Worker deployment or D1 migration is expected. Opening/updating a PR triggers normal CI; the manual archive entry is not dispatched by merge. Next: deliver one PR/necessary CI, stop for explicit merge authorization, then consume the existing two-GET authorization only through the merged entry. Do not rerun the earlier date-candidate resolution.
+
+### Historical current block
+
 ### 2026-11-12: bounded ETF archive date-candidate resolver (local, not delivered)
 
 - `origin/main` is `9b262243` (PR #245), including exact archive failure receipts. PRs #244 and #245 are merged. The 2026-10-14 SZSE import is complete; do not repeat it.
