@@ -3,6 +3,10 @@ name: SZSE single archive staging
 on:
   workflow_dispatch:
     inputs:
+      verify_only:
+        description: "Read back the pinned production partition only; never import"
+        type: boolean
+        default: false
       confirm_apply:
         description: "Leave empty for read-only preflight; supply exact SHA-256 only after operator approval"
         type: string
@@ -26,6 +30,7 @@ jobs:
       TARGET: "2026-10-14"
     steps:
       - name: Fetch and validate one private staging object
+        if: inputs.verify_only != true
         env:
           STAGING_GET_URL: ${{ secrets.FLOW_SZSE_STAGING_GET_URL }}
           CONFIRM: ${{ inputs.confirm_apply }}
@@ -103,7 +108,7 @@ jobs:
           ' "$file" >/dev/null
           echo "Pinned one-partition payload verified"
       - name: Submit once and verify exact indexed bytes
-        if: inputs.confirm_apply != ''
+        if: inputs.verify_only != true && inputs.confirm_apply != ''
         env:
           INGEST: ${{ secrets.FLOW_INGEST_API_KEY }}
           ACCESS_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -129,3 +134,27 @@ jobs:
           grep -Eiq "^x-flow-trade-date: $TARGET[[:space:]]*$" "$csv.headers"
           echo "$NORMALIZED_SHA  $csv" | sha256sum -c --status
           echo "Archive acknowledged and indexed readback SHA-256 verified"
+      - name: Verify existing production partition only
+        if: inputs.verify_only == true
+        env:
+          CONFIRM: ${{ inputs.confirm_apply }}
+          INGEST: ${{ secrets.FLOW_INGEST_API_KEY }}
+          ACCESS_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
+          ACCESS_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$CONFIRM"
+          umask 077
+          test -n "$INGEST" && test -n "$ACCESS_ID" && test -n "$ACCESS_SECRET"
+          csv="$RUNNER_TEMP/szse-existing.csv"
+          trap 'rm -f "$csv" "$csv.headers"' EXIT
+          auth=(-H "Authorization: Bearer $INGEST" -H "CF-Access-Client-Id: $ACCESS_ID" -H "CF-Access-Client-Secret: $ACCESS_SECRET")
+          status="$(curl -q -sS --request GET --proto '=https' --max-time 30 --max-filesize 2000000 \
+            -o "$csv" -D "$csv.headers" -w '%{http_code}' "${auth[@]}" \
+            "https://flow.xiaoker.com/api/v1/admin/history-artifact?source=szse&dataset=etf_scale&date=$TARGET&file=data&indexed=1")"
+          echo "Read-only production verification HTTP $status"
+          test "$status" = 200
+          grep -Eiq "^x-flow-trade-date: $TARGET[[:space:]]*$" "$csv.headers"
+          echo "$NORMALIZED_SHA  $csv" | sha256sum -c --status
+          echo "Existing normalized partition SHA-256 verified; import completion remains unproven"
