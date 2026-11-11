@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-11: historical SZSE row-source contract repair (PR delivery authorized)
+
+- Base `09c5449` (PR #241 merged). Isolated worktree `/private/tmp/flow-szse-source-contract-20261111`, branch `codex/szse-source-contract-20261111`. Original protected files untouched. GET-only run `42950787942` returned 404; both staging and POST steps skipped. No repeated import.
+- Offline replay used the retained 1,366,028-byte official raw JSON and the exact CSV SHA `1b873671b4b512d403fc981878b488e11bc2b7a7d780e02db3d314705b5d832d`. The production-built handler deterministically returned 500 with `standardize_failed:etf_scale:szse:2026-10-14:standard_source_mismatch`; local fake R2 saw four objects and D1 saw zero writes. This proves a payload defect and failure ordering, not production object state or the unlogged original response detail.
+- The acquisition producer omits source_id from its normalized rows. The verified historical adapter already adds source_id/source_grade and preserves observation evidence, but directly serializing the acquisition manifest bypasses that adapter. Fix adds the producer field and makes historical bundle packaging reject missing/conflicting per-row source identity or absent observation time. No server validator relaxation, automatic mutation of old CSVs, hash override, or new API.
+- New three-case packaging regression passes (missing/conflicting/valid source and input bytes unchanged). Web lint/build/283 tests passed. The actual retained-source verified-adapter-to-built-handler replay returned 200/chunk_archived, standardizedRows=756, archivedPointerCount=1 and archivedReadinessCount=1 using local fake R2/D1 only. Original raw SHA unchanged; corrected normalized SHA is `68ae8f780c83d0877b105641aab991d56f5dff9c226636390bb2b11c487afc9c`. The local package uses an offline run identity and is not a production execution package. Full Python running. One prior focused run had 54 passes and one build-prerequisite failure because this new worktree had no web/dist; it is not skipped.
+- Final local full Python suite passed (superseding the running status above; existing duplicate-ZIP warning only); focused packaging tests and Web lint/build/283 tests passed, as did diff check. User authorized one PR and necessary CI, not merge/deploy or production execution. Next: push this coherent producer/packager PR, wait for CI and stop. This diff does not match automatic Worker deployment paths and adds no migration; merge runs normal main CI only. Any new normalized bytes require a newly pinned package and separately authorized upload/import, never rerun old workflow confirmation.
+
+### Historical current block
+
 ### 2026-11-11: GET-only verification of the consumed SZSE import attempt (local)
 
 - Base `a7c6050` includes merged PR #240. Isolated worktree `/private/tmp/flow-szse-readonly-20261111`, branch `codex/szse-readonly-20261111`; original user changes remain untouched.

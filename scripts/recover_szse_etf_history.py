@@ -440,6 +440,7 @@ def main() -> None:
                     "nav": "",
                     "nav_date": "",
                     "date_basis": "source_historical_scale_size_date",
+                    "source_id": "szse",
                     "observed_at": observed_at,
                 }
             )

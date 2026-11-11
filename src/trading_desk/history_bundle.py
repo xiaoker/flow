@@ -128,6 +128,16 @@ def serialize_history_artifact(
         raise ValueError(f"Raw SHA-256 mismatch for {raw_path}")
 
     normalized = _normalized_files(payload, workspace_root)
+    if source.get("date_semantics") == "source_historical_scale_size_date":
+        for path in str(payload["normalized_path"]).split(";"):
+            frame = pd.read_csv(
+                _relative_or_absolute(path, workspace_root),
+                dtype=str, keep_default_na=False,
+            )
+            if "source_id" not in frame or not frame["source_id"].eq(source_id).all():
+                raise ValueError("Historical ETF normalized source identity is missing or conflicting; use the verified historical adapter before packaging")
+            if "observed_at" not in frame or not frame["observed_at"].str.strip().ne("").all():
+                raise ValueError("Historical ETF normalized observation time is missing")
     trade_dates = sorted(
         {
             trade_date
