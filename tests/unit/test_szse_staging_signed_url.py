@@ -1,4 +1,5 @@
 import os
+import hashlib
 from pathlib import Path
 import subprocess
 import textwrap
@@ -93,3 +94,65 @@ def test_staging_large_http_error_body_is_not_parsed(tmp_path):
     assert result.returncode != 0
     assert "R2 code=ERROR_BODY_TOO_LARGE" in result.stderr
     assert "x" * 100 not in result.stdout + result.stderr
+
+
+def test_verify_only_isolated_from_staging_and_import():
+    source = WORKFLOW.read_text()
+    assert "if: inputs.verify_only != true && inputs.confirm_apply != ''" in source
+    staging = source.split("- name: Fetch and validate one private staging object", 1)[1]
+    assert staging.lstrip().startswith("if: inputs.verify_only != true")
+    step = source.split("- name: Verify existing production partition only", 1)[1]
+    assert "if: inputs.verify_only == true" in step
+    assert 'test -z "$CONFIRM"' in step
+    assert "--request GET" in step
+    assert "--retry" not in step and "--location" not in step
+    assert "history-import" not in step and "--data" not in step
+    assert "STAGING_GET_URL" not in step
+    assert 'echo "$NORMALIZED_SHA  $csv" | sha256sum -c --status' in step
+    assert "import completion remains unproven" in step
+    shell = textwrap.dedent(step.split("run: |\n", 1)[1])
+    assert subprocess.run(["bash", "-n"], input=shell, text=True).returncode == 0
+
+
+def test_verify_only_rejects_apply_confirmation_before_network(tmp_path):
+    source = WORKFLOW.read_text().split("- name: Verify existing production partition only", 1)[1]
+    shell = textwrap.dedent(source.split("run: |\n", 1)[1])
+    result = subprocess.run(["bash", "-c", MOCK_CURL + shell], env={
+        **os.environ, "RUNNER_TEMP": str(tmp_path), "CONFIRM": DIGEST,
+    }, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not (tmp_path / "curl-called").exists()
+
+
+@pytest.mark.parametrize("status,valid_hash,expected", [("200", True, 0), ("404", True, 1), ("200", False, 1)])
+def test_verify_only_shell_reads_once_and_verifies_hash(tmp_path, status, valid_hash, expected):
+    step = WORKFLOW.read_text().split("- name: Verify existing production partition only", 1)[1]
+    shell = textwrap.dedent(step.split("run: |\n", 1)[1])
+    mock = r'''sha256sum() {
+      read -r expected file
+      actual="$(shasum -a 256 "$file")"
+      test "${actual%% *}" = "$expected"
+    }
+    curl() {
+      printf '%s\n' "$*" > "$RUNNER_TEMP/request"
+      while (($#)); do
+        case "$1" in
+          -o) printf 'fixture\n' > "$2"; shift 2;;
+          -D) printf 'x-flow-trade-date: 2026-10-14\r\n' > "$2"; shift 2;;
+          *) shift;;
+        esac
+      done
+      printf '%s' "$MOCK_STATUS"
+    }
+    '''
+    result = subprocess.run(["bash", "-c", mock + shell], env={
+        **os.environ, "RUNNER_TEMP": str(tmp_path), "CONFIRM": "", "TARGET": "2026-10-14",
+        "INGEST": "synthetic-secret", "ACCESS_ID": "synthetic-id", "ACCESS_SECRET": "synthetic-secret",
+        "MOCK_STATUS": status,
+        "NORMALIZED_SHA": hashlib.sha256(b"fixture\n").hexdigest() if valid_hash else "0" * 64,
+    }, capture_output=True, text=True)
+    assert (result.returncode == 0) == (expected == 0)
+    request = (tmp_path / "request").read_text()
+    assert "--request GET" in request and "history-import" not in request
+    assert "synthetic-secret" not in result.stdout + result.stderr
+    assert not (tmp_path / "szse-existing.csv").exists()

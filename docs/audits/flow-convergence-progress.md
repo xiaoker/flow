@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-11: GET-only verification of the consumed SZSE import attempt (local)
+
+- Base `a7c6050` includes merged PR #240. Isolated worktree `/private/tmp/flow-szse-readonly-20261111`, branch `codex/szse-readonly-20261111`; original user changes remain untouched.
+- Preflight run `42232000895` passed. The one authorized import run `42232363502` fetched and verified the pinned payload, then received HTTP 500 from history-import; indexed readback did not execute. Worker events confirm the failed request but expose only a generic stack, not the underlying cause. Import effects remain UNKNOWN; no retry is authorized. Browser prefix searches did not produce reliable reconciliation evidence and must not be treated as proof of absence.
+- Adds a default-off verify_only input to the existing manual workflow. It skips staging and POST, rejects any apply confirmation, and makes one bounded authenticated GET for the fixed 2026-10-14 SZSE normalized partition. It verifies date and pinned SHA, logs no response body/credentials, and explicitly does not prove full import completion. No new endpoint, Worker code, migration, flag or source collection.
+- Focused workflow regressions: 14 passed, including actual shell success/404/hash-mismatch cases and pre-network rejection. Full Python suite passed with loopback fixture permission (initial sandbox-only run failed on socket permission); Web lint and npm test passed build plus 283 tests. YAML parse, bash syntax and diff checks passed. Added shell tests ran separately after full-suite collection; no implementation changed during that run. User authorized one PR and necessary CI, not merge/deploy or a production verification dispatch. No production request performed by this code task.
+- Merge scope is workflow/tests/progress only, outside Worker deploy path filters; inspect final diff and CI before reporting side effects. Next: finish validation, push one PR, wait for CI, stop for authorization. Do not repeat the consumed import POST.
+
+### Historical current block
+
 ### 2026-11-06: bounded R2 staging error diagnosis (PR #240 open; CI not yet reported)
 
 - Latest `origin/main` at branch creation was verified at `5cc67da4c3544ad76f552a0fa3724225682054ee` (PR #239); PRs #238 and #239 were merged and there was no competing open PR at that check. The original dirty worktree and separate period-recovery evidence worktree remain untouched. The active code worktree is `/private/tmp/flow-szse-staging-error-code-20261106`, branch `codex/szse-staging-error-code-20261106`, based directly on that SHA.
