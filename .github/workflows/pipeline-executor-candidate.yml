@@ -15,7 +15,7 @@ on:
           - candidate
           - archive-verify
       request_json:
-        description: Non-secret bounded execution request; never enter credentials
+        description: Non-secret execution request, or exact ETF refs in archive-verify; never enter credentials
         type: string
         default: ''
       source_artifact_id:
@@ -102,6 +102,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE_TARGET_DATE: ${{ inputs.archive_target_date }}
+          FLOW_ETF_ARCHIVE_REFS_JSON: ${{ inputs.request_json }}
           ARCHIVE_CURRENT_RUN_ID: ${{ inputs.archive_current_run_id }}
           ARCHIVE_PREVIOUS_RUN_ID: ${{ inputs.archive_previous_run_id }}
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
@@ -109,6 +110,14 @@ jobs:
           FLOW_CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
+          if [[ -n "$FLOW_ETF_ARCHIVE_REFS_JSON" ]]; then
+            test -z "$ARCHIVE_TARGET_DATE"
+            test -z "$ARCHIVE_CURRENT_RUN_ID"
+            test -z "$ARCHIVE_PREVIOUS_RUN_ID"
+            PYTHONPATH=src:. python scripts/verify_etf_archive_partitions.py \
+              --output "$RUNNER_TEMP/flow-pipeline-candidate/etf-archive-verification.json"
+            exit 0
+          fi
           [[ "$ARCHIVE_TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
           [[ "$ARCHIVE_CURRENT_RUN_ID" =~ ^[0-9]{1,12}$ ]]
           [[ "$ARCHIVE_PREVIOUS_RUN_ID" =~ ^[0-9]{1,12}$ ]]
@@ -262,3 +271,4 @@ jobs:
             ${{ runner.temp }}/flow-pipeline-candidate/budget.sqlite
             ${{ runner.temp }}/flow-pipeline-candidate/state/intent.sqlite
             ${{ runner.temp }}/flow-pipeline-candidate/archive-verified-recipe.json
+            ${{ runner.temp }}/flow-pipeline-candidate/etf-archive-verification.json

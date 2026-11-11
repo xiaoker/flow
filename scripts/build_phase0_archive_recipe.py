@@ -47,7 +47,10 @@ def _read_json(path: Path) -> dict:
     return value
 
 
-def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalized_raw: bool = False) -> bytes:
+def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalized_raw: bool = False,
+                 max_bytes: int = MAX_OBJECT_BYTES) -> bytes:
+    if type(max_bytes) is not int or not 0 < max_bytes <= MAX_OBJECT_BYTES:
+        raise ValueError("archive_recipe_read_limit_invalid")
     if metadata_raw and normalized_raw:
         raise ValueError("archive_recipe_discovery_mode_invalid")
     required = ("FLOW_INGEST_API_KEY", "FLOW_CF_ACCESS_CLIENT_ID", "FLOW_CF_ACCESS_CLIENT_SECRET")
@@ -71,7 +74,7 @@ def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalize
                     or (response.headers.get("x-flow-archive-raw-sha256") != digest
                         if metadata_raw or normalized_raw else actual != digest)):
                 raise ValueError("archive_recipe_remote_identity_mismatch")
-            content = response.read(MAX_OBJECT_BYTES + 1)
+            content = response.read(max_bytes + 1)
     except HTTPError as error:
         # Do not persist arbitrary edge HTML, request headers, cookies or auth.
         ray = error.headers.get("cf-ray") if error.headers else None
@@ -79,7 +82,7 @@ def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalize
         raise ArchiveReadError("archive_recipe_remote_http_error", status=error.code, ray=ray) from None
     except (URLError, TimeoutError):
         raise ArchiveReadError("archive_recipe_remote_transport_error") from None
-    if len(content) > MAX_OBJECT_BYTES or hashlib.sha256(content).hexdigest() != actual:
+    if len(content) > max_bytes or hashlib.sha256(content).hexdigest() != actual:
         raise ValueError("archive_recipe_remote_hash_mismatch")
     return content
 
