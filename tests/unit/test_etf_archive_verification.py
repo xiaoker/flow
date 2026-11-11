@@ -1,9 +1,12 @@
 import hashlib
+import json
 from copy import deepcopy
 
 import pytest
 
-from scripts.verify_etf_archive_partitions import CONTRACT, verify
+from scripts.build_phase0_archive_recipe import ArchiveReadError
+from scripts import verify_etf_archive_partitions as verifier
+from scripts.verify_etf_archive_partitions import CONTRACT, ArchiveVerificationError, verify
 
 
 DATA = b"trade_date,market,instrument_code,shares\n2026-10-14,SZSE,159001,100\n"
@@ -52,9 +55,56 @@ def test_http_failure_is_not_retried():
     calls = []
     def read(*args):
         calls.append(args)
-        raise TimeoutError()
-    with pytest.raises(TimeoutError): verify(request(), read=read)
+        raise ArchiveReadError("archive_recipe_remote_http_error", status=404, ray="ray-test-123")
+    with pytest.raises(ArchiveVerificationError) as captured:
+        verify(request(), read=read)
     assert len(calls) == 1
+    assert captured.value.receipt["failure"] == {
+        "index": 1, "objectKey": KEY, "errorCode": "archive_recipe_remote_http_error",
+        "httpStatus": 404, "rayId": "ray-test-123",
+    }
+    assert captured.value.receipt["archiveReadCount"] == 0
+    assert not any(captured.value.receipt["sideEffects"].values())
+
+
+def test_failure_receipt_retains_prior_success_and_identifies_failed_index():
+    first_key = KEY.replace("szse", "sse")
+    first_data = DATA.replace(b"SZSE", b"SSE")
+    calls = []
+    def read(key, _digest):
+        calls.append(key)
+        if key == KEY:
+            raise ArchiveReadError("archive_recipe_remote_http_error", status=404)
+        return first_data
+    value = {"contract": CONTRACT, "objects": [
+        {"objectKey": KEY, "sha256": hashlib.sha256(DATA).hexdigest()},
+        {"objectKey": first_key, "sha256": hashlib.sha256(first_data).hexdigest()},
+    ]}
+    with pytest.raises(ArchiveVerificationError) as captured:
+        verify(value, read=read)
+    receipt = captured.value.receipt
+    assert len(calls) == 2
+    assert receipt["archiveReadCount"] == 1
+    assert receipt["objects"][0]["objectKey"] == first_key
+    assert receipt["failure"]["index"] == 2
+    assert receipt["failure"]["objectKey"] == KEY
+    assert receipt["failure"]["httpStatus"] == 404
+
+
+def test_cli_persists_safe_failure_receipt_and_stays_failed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("FLOW_ETF_ARCHIVE_REFS_JSON", json.dumps(request()))
+    monkeypatch.setattr(verifier, "_archive_get", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        ArchiveReadError("archive_recipe_remote_http_error", status=403, ray="ray-safe-456")))
+    output = tmp_path / "receipt.json"
+    monkeypatch.setattr("sys.argv", ["verify_etf_archive_partitions.py", "--output", str(output)])
+    with pytest.raises(SystemExit) as captured:
+        verifier.main()
+    assert captured.value.code == 1
+    receipt = json.loads(output.read_text())
+    assert receipt["failure"]["httpStatus"] == 403
+    assert receipt["failure"]["rayId"] == "ray-safe-456"
+    assert receipt["status"] == "ARCHIVE_VERIFICATION_FAILED"
+    assert "403" in capsys.readouterr().out
 
 
 def test_actual_get_transport_and_parser(monkeypatch):
