@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,7 @@ def _manifest_for_stage(models_dir: Path, stage: str) -> tuple[Path, str]:
 def _evidence_keys(source_dir: Path, evidence_dir: Path, stage: str) -> list[str]:
     names = [
         "recovery-live/recovery-evidence.json",
+        "recovery-live/retained-source-evidence.json",
         "recovery-live/dashboard-release-canary.json",
         "recovery-live/dashboard-read-model-activation.json",
     ]
@@ -133,6 +135,8 @@ def _input_objects(
     """
 
     objects: list[dict[str, Any]] = []
+    if evidence.get("provenance", {}).get("contractVersion") == "flow-retained-source-evidence-v1":
+        objects.extend(evidence.get("retainedInputObjects", []))
     archive = evidence.get("historyArchive")
     if isinstance(archive, dict):
         key = archive.get("snapshotKey")
@@ -210,10 +214,24 @@ def main() -> None:
     )
     if any(key not in metrics for key in required_metrics) or metrics.get("measurementStatus") != "MEASURED":
         raise ValueError("recovery_resource_metrics_not_measured")
-    evidence_path = args.source_dir / "recovery-evidence.json"
+    retained = isinstance(scope.budget_manifest, dict) and "rollingPreparation" in scope.budget_manifest
+    evidence_path = args.source_dir / ("retained-source-evidence.json" if retained else "recovery-evidence.json")
     if not evidence_path.is_file():
         raise ValueError("recovery_evidence_missing")
     evidence = _read(evidence_path)
+    if retained:
+        from scripts.prepare_rolling_etf_publication import retained_source_evidence
+        refs = []
+        for item in evidence.get("retainedInputObjects", []):
+            match = re.fullmatch(r"market-data/normalized/(sse|szse)/etf_scale/(\d{4}-\d{2}-\d{2})/[a-f0-9]{64}/data\.csv", str(item.get("key", "")))
+            if not match:
+                raise ValueError("recovery_retained_lineage_invalid")
+            refs.append({"sourceId": match[1], "tradeDate": match[2],
+                         "objectKey": item["key"], "sha256": item.get("sha256")})
+        expected = retained_source_evidence(_read(args.plan),
+            snapshot=(args.source_dir / "dashboard-snapshot.json").read_bytes(), refs=refs)
+        if evidence != expected:
+            raise ValueError("recovery_retained_evidence_mismatch")
     input_sha = (evidence.get("files") or {}).get("dashboard-snapshot.json", {}).get("sha256")
     if not isinstance(input_sha, str) or len(input_sha) != 64:
         raise ValueError("recovery_source_snapshot_sha_missing")

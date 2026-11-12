@@ -230,6 +230,46 @@ def test_budget_unknown_metrics_fail_closed() -> None:
     assert "actionsMinutes" in report["unknownMetrics"]
 
 
+def test_independent_rolling_allocation_is_additive_and_never_defaults_unknown_to_zero():
+    from dataclasses import replace
+    scope = replace(validate_recovery_plan(plan(dates=["2026-08-28"])), required_stages=("publish",))
+    resources = {"d1RowsRead": 44, "d1RowsWritten": 0, "workerRequests": 46,
+                 "actionsMinutes": 8, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 133}
+    scoped = replace(scope, budget_manifest={"rollingPreparation": {"resourcesUpperBound": resources}})
+    base = estimate_recovery_budget(scope=scope, config=CONFIG, retry_attempts=2)
+    result = estimate_recovery_budget(scope=scoped, config=CONFIG, retry_attempts=2)
+    assert result["estimate"]["actionsMinutes"] == base["estimate"]["actionsMinutes"] + 16
+    assert result["decision"] == "unknown_metrics"
+    for key in resources:
+        invalid = dict(resources)
+        invalid.pop(key)
+        broken = replace(scope, budget_manifest={"rollingPreparation": {"resourcesUpperBound": invalid}})
+        with pytest.raises(RecoveryContractError):
+            estimate_recovery_budget(scope=broken, config=CONFIG)
+
+
+@pytest.mark.parametrize("allocation", [None, {}, {"resourcesUpperBound": None},
+    {"resourcesUpperBound": {"d1RowsRead": True}}])
+def test_declared_rolling_preparation_cannot_fall_back_to_legacy_budget(allocation):
+    from dataclasses import replace
+    scope = replace(validate_recovery_plan(plan(dates=["2026-08-28"])),
+                    required_stages=("publish",), budget_manifest={"rollingPreparation": allocation})
+    with pytest.raises(RecoveryContractError):
+        estimate_recovery_budget(scope=scope, config=CONFIG)
+
+
+@pytest.mark.parametrize("dates,stages", [(["2026-08-28", "2026-08-31"], ("publish",)),
+                                        (["2026-08-28"], ("dashboard",))])
+def test_rolling_preparation_requires_one_date_and_publish_stage(dates, stages):
+    from dataclasses import replace
+    resources = dict(d1RowsRead=1, d1RowsWritten=0, workerRequests=1,
+                     actionsMinutes=1, r2Bytes=0, r2ClassA=0, r2ClassB=1)
+    scope = replace(validate_recovery_plan(plan(dates=dates)), required_stages=stages,
+                    budget_manifest={"rollingPreparation": {"resourcesUpperBound": resources}})
+    with pytest.raises(RecoveryContractError, match="rolling_preparation_scope_invalid"):
+        estimate_recovery_budget(scope=scope, config=CONFIG)
+
+
 def test_budget_unknown_r2_operation_limits_fail_closed_even_with_usage_inputs() -> None:
     scope = validate_recovery_plan(plan(dates=["2026-08-28"]))
     zero = {"d1Reads": 0, "d1Writes": 0, "workersRequests": 0, "actionsMinutes": 0, "r2Bytes": 0, "r2ClassA": 0, "r2ClassB": 0}

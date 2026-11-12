@@ -14,6 +14,163 @@ from trading_desk.etf_rolling_refs import validate_published_checkpoint_ref
 from trading_desk.etf_rolling_refs import resolve_rolling_binding
 
 
+@pytest.mark.parametrize("fault", [None, "snapshot", "manifest", "history", "date", "pending", "extra"])
+def test_retained_rolling_inputs_are_exactly_bound(fault):
+    from scripts.prepare_rolling_etf_publication import verify_retained_inputs
+    snapshot = canonical_json_bytes({"asOf": "2026-11-11", "publication": {
+        "status": "pending" if fault == "pending" else "confirmed"}})
+    manifest, history = b'{"artifacts":[]}', b'{"rows":[]}'
+    binding = {"contractVersion": "flow-retained-rolling-input-v1", "asOf": "2026-11-11",
+        "snapshotSha256": sha256(snapshot).hexdigest(), "manifestSha256": sha256(manifest).hexdigest(),
+        "historyBundleSha256": sha256(history).hexdigest()}
+    if fault == "date": binding["asOf"] = "2026-11-10"
+    if fault == "extra": binding["authorized"] = True
+    values = {"snapshot": snapshot, "manifest": manifest, "history_bundle": history}
+    if fault in {"snapshot", "manifest", "history"}:
+        values[{"history": "history_bundle"}.get(fault, fault)] += b" "
+    if fault is None:
+        verify_retained_inputs(binding, **values)
+    else:
+        with pytest.raises(ValueError, match="rolling_retained_"):
+            verify_retained_inputs(binding, **values)
+
+
+def test_retained_input_failure_precedes_credentials_and_transport(tmp_path, monkeypatch):
+    import sys
+    import scripts.prepare_rolling_etf_publication as entry
+    files = {"snapshot": b'{}', "manifest": b'{}', "history-bundle": b'{}',
+             "input-bindings": b'{}'}
+    argv = ["prepare"]
+    for name, content in files.items():
+        path = tmp_path / (name + ".json")
+        path.write_bytes(content)
+        argv.extend(["--" + name, str(path)])
+    argv.extend(["--output", str(tmp_path / "output"), "--report", str(tmp_path / "report.json")])
+    monkeypatch.setattr(sys, "argv", argv)
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid retained input reached credentials or transport")
+    monkeypatch.setattr(entry, "candidate_credentials", forbidden)
+    monkeypatch.setattr("trading_desk.http.build_session", forbidden)
+    with pytest.raises(ValueError, match="rolling_retained_binding_invalid"):
+        entry.main()
+    assert not (tmp_path / "output").exists()
+    assert not (tmp_path / "report.json").exists()
+
+
+@pytest.mark.parametrize("fault", [None, "date", "resources", "hash", "request-scope"])
+def test_retained_preparation_consumes_validated_recovery_plan(fault):
+    from scripts.prepare_rolling_etf_publication import retained_binding_from_plan
+    from trading_desk.recovery_execution import build_recovery_plan
+    resources = dict(d1RowsRead=44, d1RowsWritten=0, workerRequests=47,
+                     actionsMinutes=8, r2Bytes=0, r2ClassA=0, r2ClassB=133)
+    binding = {"asOf": "2026-11-10" if fault == "date" else "2026-11-11"}
+    if fault == "resources": resources["workerRequests"] = True
+    plan = build_recovery_plan(campaign_id="retained", recovery_id="retained-one",
+        run_key="daily-market-data:2026-11-11:reconcile:v1", data_dates=["2026-11-11"],
+        required_stages=["publish"], artifact_root=".recovery/retained",
+        state_dir=".recovery/retained/state", max_dates=1, max_requests=1 if fault == "request-scope" else 100,
+        deadline="2099-01-01T00:00:00Z", budget_manifest={"rollingPreparation": {
+            "resourcesUpperBound": resources, "inputBindings": binding}})
+    if fault == "hash": plan["planHash"] = "0" * 64
+    if fault is None:
+        assert retained_binding_from_plan(plan) == binding
+    else:
+        with pytest.raises(ValueError):
+            retained_binding_from_plan(plan)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_retained_preparation_entry_accumulates_provider_metrics(tmp_path, monkeypatch, missing):
+    import sys
+    from types import SimpleNamespace
+    import scripts.prepare_rolling_etf_publication as entry
+    from trading_desk.recovery_execution import build_recovery_plan
+    snapshot = canonical_json_bytes({"asOf": "2026-11-11", "publication": {"status": "confirmed"}})
+    manifest, history = b"{}", b"{}"
+    binding = {"contractVersion": "flow-retained-rolling-input-v1", "asOf": "2026-11-11",
+        "snapshotSha256": sha256(snapshot).hexdigest(), "manifestSha256": sha256(manifest).hexdigest(),
+        "historyBundleSha256": sha256(history).hexdigest()}
+    artifact = dict(sourceRunId="123", artifactId=456, artifactSha256="c" * 64, artifactBytes=1000)
+    source = {**artifact, "sourceFingerprint": canonical_sha256({
+        "contractVersion": "flow-retained-source-evidence-v1", "artifact": artifact, "inputBindings": binding})}
+    plan = build_recovery_plan(campaign_id="meter", recovery_id="meter-one",
+        run_key="daily-market-data:2026-11-11:reconcile:v1", data_dates=["2026-11-11"],
+        required_stages=["publish"], artifact_root=".recovery/meter", state_dir=".recovery/meter/state",
+        max_dates=1, max_requests=100, deadline="2099-01-01T00:00:00Z",
+        budget_manifest={"publishSource": source, "rollingPreparation": {"inputBindings": binding, "resourcesUpperBound": {
+            "d1RowsRead": 100, "d1RowsWritten": 0, "workerRequests": 47,
+            "actionsMinutes": 8, "r2Bytes": 0, "r2ClassA": 2, "r2ClassB": 100}}})
+    argv = ["prepare", "--bootstrap"]
+    for name, content in {"snapshot": snapshot, "manifest": manifest, "history-bundle": history,
+                          "recovery-plan": canonical_json_bytes(plan)}.items():
+        path = tmp_path / (name + ".json")
+        path.write_bytes(content)
+        argv += ["--" + name, str(path)]
+    report = tmp_path / "report.json"
+    argv += ["--output", str(tmp_path / "out"), "--report", str(report)]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(entry, "candidate_credentials", lambda _: {
+        "ingest_key": "test", "access_client_id": "test", "access_client_secret": "test"})
+    calls = []
+    def request(self, method, url, **kwargs):
+        calls.append(kwargs)
+        headers = {"X-Flow-D1-Rows-Read": "3", "X-Flow-D1-Rows-Written": "0",
+                   "X-Flow-R2-Class-A": "0", "X-Flow-R2-Class-B": "1", "X-Flow-R2-Write-Bytes": "0"}
+        if missing: headers.pop("X-Flow-D1-Rows-Read")
+        return SimpleNamespace(status=200, content=b"{}", headers=headers)
+    monkeypatch.setattr("trading_desk.bounded_http.BoundedHTTPExchange.request", request)
+    def prepare(*args, exchange, **kwargs):
+        for _ in range(2):
+            exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact", params={"indexed": "1"})
+        return {"status": "UNAVAILABLE", "reason": "fixture"}, None
+    monkeypatch.setattr(entry, "prepare", prepare)
+    entry.main()
+    result = json.loads(report.read_bytes())
+    assert len(calls) == 2 and all(call["params"] == {"indexed": "1", "metrics": "1"} for call in calls)
+    assert result["workerRequests"] == 2
+    assert result["measurementStatus"] == ("UNKNOWN" if missing else "MEASURED")
+    assert result["d1RowsRead"] == (None if missing else 6)
+    assert result["r2ClassB"] == (None if missing else 2)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("fault", [None, "snapshot", "fingerprint", "artifact", "lineage"])
+def test_retained_evidence_is_explicit_reuse_with_exact_provenance(fault):
+    from scripts.prepare_rolling_etf_publication import retained_source_evidence
+    from trading_desk.recovery_execution import build_recovery_plan
+    snapshot = b'{"asOf":"2026-11-11","publication":{"status":"confirmed"}}'
+    binding = {"contractVersion": "flow-retained-rolling-input-v1", "asOf": "2026-11-11",
+        "snapshotSha256": sha256(snapshot).hexdigest(), "manifestSha256": "a" * 64,
+        "historyBundleSha256": "b" * 64}
+    artifact = dict(sourceRunId="123", artifactId=456, artifactSha256="c" * 64, artifactBytes=1000)
+    fingerprint = canonical_sha256({"contractVersion": "flow-retained-source-evidence-v1",
+                                   "artifact": artifact, "inputBindings": binding})
+    source = {**artifact, "sourceFingerprint": fingerprint}
+    if fault == "fingerprint": source["sourceFingerprint"] = "d" * 64
+    if fault == "artifact": source["artifactId"] = True
+    resources = dict(d1RowsRead=44, d1RowsWritten=0, workerRequests=47,
+                     actionsMinutes=8, r2Bytes=0, r2ClassA=2, r2ClassB=100)
+    plan = build_recovery_plan(campaign_id="reuse", recovery_id="reuse-one",
+        run_key="daily-market-data:2026-11-11:reconcile:v1", data_dates=["2026-11-11"],
+        required_stages=["publish"], artifact_root=".recovery/reuse", state_dir=".recovery/reuse/state",
+        max_dates=1, max_requests=100, deadline="2099-01-01T00:00:00Z",
+        budget_manifest={"publishSource": source, "rollingPreparation": {
+            "resourcesUpperBound": resources, "inputBindings": binding}})
+    refs = [{"sourceId": "sse", "tradeDate": "2026-11-11", "sha256": "e" * 64,
+             "objectKey": f"market-data/normalized/sse/etf_scale/2026-11-11/{'f' * 64}/data.csv"}]
+    if fault == "lineage": refs[0]["objectKey"] = "market-data/other/data.csv"
+    if fault == "snapshot": snapshot += b" "
+    if fault is not None:
+        with pytest.raises(ValueError, match="rolling_retained_"):
+            retained_source_evidence(plan, snapshot=snapshot, refs=refs)
+    else:
+        evidence = retained_source_evidence(plan, snapshot=snapshot, refs=refs)
+        assert evidence["collectionPerformed"] is False and evidence["requestCount"] == 0
+        assert evidence["sourceFingerprint"] == fingerprint
+        assert evidence["collectorRunId"] == "123"
+        assert evidence["retainedInputObjects"][0]["key"] == refs[0]["objectKey"]
+
+
 def rolling_production_fixture():
     from test_read_models import _snapshot, _state
     from trading_desk.etf_flow_state import materialize_dashboard_snapshot

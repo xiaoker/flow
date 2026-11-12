@@ -113,6 +113,43 @@ def _receipt_inputs(tmp_path: Path, plan: dict) -> list[str]:
         "--output-dir", str(tmp_path / ".recovery/receipts")]
 
 
+@pytest.mark.parametrize("tamper", [False, True])
+def test_retained_provenance_reaches_real_receipt_builder(tmp_path, monkeypatch, tamper):
+    from hashlib import sha256
+    from scripts.prepare_rolling_etf_publication import retained_source_evidence
+    from trading_desk.pipeline_application import canonical_sha256
+    snapshot = b'{"asOf":"2026-10-16","publication":{"status":"confirmed"}}'
+    binding = {"contractVersion": "flow-retained-rolling-input-v1", "asOf": "2026-10-16",
+        "snapshotSha256": sha256(snapshot).hexdigest(), "manifestSha256": "a" * 64,
+        "historyBundleSha256": "b" * 64}
+    artifact = dict(sourceRunId="123", artifactId=456, artifactBytes=1000, artifactSha256="c" * 64)
+    fingerprint = canonical_sha256({"contractVersion": "flow-retained-source-evidence-v1",
+        "artifact": artifact, "inputBindings": binding})
+    plan = build_recovery_plan(campaign_id="receipt-boundary", recovery_id="receipt-boundary-16",
+        run_key="daily-market-data:2026-10-16:evening:v1", data_dates=["2026-10-16"],
+        required_stages=["dashboard", "publish"], artifact_root=".recovery/receipt-boundary-16",
+        state_dir=".recovery/receipt-boundary-16/state", max_dates=1, max_requests=194,
+        deadline="2026-12-31T00:00:00Z", budget_manifest={"publishSource": {
+            **artifact, "sourceFingerprint": fingerprint}, "rollingPreparation": {
+            "inputBindings": binding, "resourcesUpperBound": dict(d1RowsRead=44, d1RowsWritten=0,
+                workerRequests=47, actionsMinutes=8, r2Bytes=0, r2ClassA=2, r2ClassB=100)}})
+    argv = _receipt_inputs(tmp_path, plan)
+    _write(tmp_path / "recovery-execution.json", plan)
+    (tmp_path / "source/dashboard-snapshot.json").write_bytes(snapshot)
+    refs = [{"sourceId": "sse", "tradeDate": "2026-10-16", "sha256": "d" * 64,
+             "objectKey": f"market-data/normalized/sse/etf_scale/2026-10-16/{'e' * 64}/data.csv"}]
+    evidence = retained_source_evidence(plan, snapshot=snapshot, refs=refs)
+    if tamper: evidence["collectionPerformed"] = True
+    _write(tmp_path / "source/retained-source-evidence.json", evidence)
+    monkeypatch.setattr(sys, "argv", argv)
+    if tamper:
+        with pytest.raises(ValueError, match="recovery_retained_evidence_mismatch"):
+            receipts.main()
+    else:
+        receipts.main()
+        assert list((tmp_path / ".recovery/receipts").glob("*.json"))
+
+
 def test_actual_workflow_response_to_receipt_boundary(tmp_path: Path, monkeypatch):
     plan = _plan()
     result = _materialize(tmp_path, plan, _envelope(plan))
