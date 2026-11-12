@@ -132,6 +132,11 @@ export async function GET(request: Request): Promise<Response> {
     return badRequest("invalid_artifact_identity");
   }
   if (!expectedPair(source, dataset)) return badRequest("unsupported_artifact_pair");
+  const selection = query.get("selection");
+  if (selection !== null && (selection !== "indexed-or-single" || dataset !== "etf_scale" || file !== "data")) {
+    return badRequest("invalid_artifact_selection");
+  }
+  const preferIndexed = selection === "indexed-or-single";
   const revision = query.get("revision");
   if (revision !== null && (query.get("indexed") !== "1" || dataset !== "etf_scale"
       || file !== "data" || !/^[a-f0-9]{64}$/.test(revision))) return badRequest("invalid_archive_revision");
@@ -161,12 +166,12 @@ export async function GET(request: Request): Promise<Response> {
         "X-Flow-Trade-Date": tradeDate, "X-Flow-Pcf-Revision": revision,
       } });
     }
-    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1");
+    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1" || preferIndexed);
     if (query.get("indexed") === "1" && !pointer) return badRequest("artifact_not_found", 404);
     if (pointer?.objectKey && typeof pointer.objectKey === "string") {
       const object = await runtime.RAW_BUCKET.get(pointer.objectKey);
       if (!object?.body) return badRequest("artifact_not_found", 404);
-      if (query.get("indexed") === "1" && object.size > 2_000_000) return badRequest("artifact_too_large", 413);
+      if ((query.get("indexed") === "1" || preferIndexed) && object.size > 2_000_000) return badRequest("artifact_too_large", 413);
       const isGzip = pointer.objectKey.endsWith(".gz");
       return new Response(object.body, {
         headers: {
@@ -197,6 +202,9 @@ export async function GET(request: Request): Promise<Response> {
       throw error;
     }
     if (!candidates.length) return badRequest("artifact_not_found", 404);
+    // Rolling reconstruction may use a proven index or a unique legacy file,
+    // never a latest-uploaded guess among different immutable revisions.
+    if (preferIndexed && candidates.length !== 1) return badRequest("artifact_selection_ambiguous", 409);
     // A date can legitimately have more than one immutable object after a
     // corrected or retried official publication.  The normalized D1 tables
     // already resolve the same business key by latest observed_at; use the

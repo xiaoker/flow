@@ -680,6 +680,7 @@ def test_initial_rolling_checkpoint_bootstrap_uses_official_dates_and_exact_arch
                 return SimpleNamespace(status=404, content=b"", headers={})
             assert url.endswith("/history-artifact")
             source, day = params["source"], params["date"]
+            assert params.get("indexed") == "1" or params.get("selection") == "indexed-or-single"
             raw_sha, digest, key, content = sources[source, day]
             headers = {"X-Flow-Normalized-Key": key, "X-Flow-Normalized-Sha256": digest,
                 "X-Flow-Trade-Date": day}
@@ -747,6 +748,22 @@ def test_bootstrap_archive_requires_single_candidate_or_unique_pointer():
         return SimpleNamespace(status=200, content=content, headers={
             "X-Flow-Normalized-Key": key, "X-Flow-Normalized-Sha256": digest,
             "X-Flow-Trade-Date": day, **headers})
+    calls = []
+    def indexed_request(*args, **kwargs):
+        calls.append(kwargs["params"])
+        return request({"X-Flow-Pcf-Revision": "a" * 64})
+    ref, actual = _read_bootstrap_archive(source, day,
+        exchange=SimpleNamespace(request=indexed_request), headers={})
+    assert actual == content and ref["objectKey"] == key and ref["sha256"] == digest
+    assert len(calls) == 1 and calls[0]["selection"] == "indexed-or-single"
+    for response in (
+        SimpleNamespace(status=404, content=b"", headers={}),
+        SimpleNamespace(status=200, content=b"tampered", headers=request({"X-Flow-Pcf-Revision": "a" * 64}).headers),
+        request({"X-Flow-Pcf-Revision": "b" * 64}),
+    ):
+        with pytest.raises(ValueError, match="identity_invalid|selection_unproven"):
+            _read_bootstrap_archive(source, day,
+                exchange=SimpleNamespace(request=lambda *a, **k: response), headers={})
     with pytest.raises(ValueError, match="archive_ambiguous"):
         _read_bootstrap_archive(source, day,
             exchange=SimpleNamespace(request=lambda *a, **k: request({
