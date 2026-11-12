@@ -500,6 +500,16 @@ def collect_phase0(
     for dataset in validators:
         frame = combined.get(dataset, pd.DataFrame())
         profiles[dataset] = profile(frame)
+        if dataset in deferred_datasets:
+            findings.append(QualityFinding(
+                check_id="availability.deferred", dataset=dataset,
+                status="warn", severity="info",
+                message="本采集窗口主动延后此来源，等待完整来源窗口",
+                evidence={"collection_window": collection_window},
+            ))
+            # No request was made: an empty frame is not a source/schema error.
+            # Coverage checks below still keep the release pending.
+            continue
         if dataset in {"stock_connect_summary", "stock_connect_top"} and all_connect_closed and frame.empty:
             findings.append(QualityFinding(
                 check_id="availability.official_closed", dataset=dataset, status="pass", severity="info",

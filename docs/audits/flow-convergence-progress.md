@@ -7,6 +7,16 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-13: evening deferred-source validation repair (local, not deployed)
+
+- Main remains `2dd12b855b50273785b2e075744b32bc7e680c1d`; no open PR was found. Isolated worktree `/private/tmp/flow-evening-deferred-20261113`, branch `codex/evening-deferred-20261113`. Original user worktree and separate accounting changes remain untouched.
+- Failed Collect `43207637616` evidence was downloaded read-only (artifact `13940026123`, 1,153,485 compressed bytes). Its manifest says `collection_window=evening`, `collection_scope=early`, and defers `szse_etf`/`szse_margin`; it contains no SZSE source artifacts. Therefore the empty-frame QA findings do NOT prove SZSE returned an empty response: no SZSE request was made in this run.
+- Root cause: phase0 intentionally skips those fetches but still invokes nonempty/schema validators on their empty frames. Local repair emits an explicit deferred finding instead; existing date-coverage checks still make the gate `pending` and `release_eligible=false`. Full-source windows and actual transport/schema failures retain their validators. Existing workflow pending/archive behavior is reused, not replaced.
+- Real archived-adapter regression proves both deferred fetch methods are never called, no false schema failures occur, readiness is pending with no error domains, and release remains ineligible. Related Python regressions: 23 passed. Full Python initially lacked the built Worker fixture; Web install/lint/build/test is in progress before rerunning the full Python suite. No CI/merge/deploy or live collection has occurred.
+- Final local validation passed: full Python suite exit 0 (expected duplicate-ZIP fault-fixture warning only); Web lint and `npm test` build plus 287 tests passed; diff check passed. Logs are `/private/tmp/flow-evening-deferred-python-verified-20261113.log`, `/private/tmp/flow-evening-deferred-lint-20261113.log`, and `/private/tmp/flow-evening-deferred-web-20261113.log`. Next: deliver one PR and necessary CI, then await merge authorization. No migration, workflow or Worker code change; existing main-push deployment rules must still be checked at merge. This is not historical recovery/page acceptance or authorization for any production plan/claim/flag/publication. Yesterday's screenshots are historical product-level usage, not today's exact account-wide balance.
+
+## Historical handoff records
+
 ### 2026-11-12: retained-source rolling preparation (PR #249 deployed; source-proxy measurement follow-up in progress)
 
 - PR #249 merged as `f0ea6f6472f3681f9a799ad5fbd98e10cdd767d4`. Main CI `43209593813` and Worker deployment `43209594954` passed; deployment applied no migration and verified the live `buildSha` equals the merge SHA on attempt 1. No collection, recovery dispatch, feature flag, active pointer or production data was changed.
