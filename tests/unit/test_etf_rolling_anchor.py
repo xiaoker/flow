@@ -79,7 +79,7 @@ def test_retained_preparation_consumes_validated_recovery_plan(fault):
             retained_binding_from_plan(plan)
 
 
-@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("missing", [None, "archive", "source-proxy"])
 def test_retained_preparation_entry_accumulates_provider_metrics(tmp_path, monkeypatch, missing):
     import sys
     from types import SimpleNamespace
@@ -116,21 +116,29 @@ def test_retained_preparation_entry_accumulates_provider_metrics(tmp_path, monke
         calls.append(kwargs)
         headers = {"X-Flow-D1-Rows-Read": "3", "X-Flow-D1-Rows-Written": "0",
                    "X-Flow-R2-Class-A": "0", "X-Flow-R2-Class-B": "1", "X-Flow-R2-Write-Bytes": "0"}
-        if missing: headers.pop("X-Flow-D1-Rows-Read")
+        if missing == "archive" and url.endswith("/history-artifact"):
+            headers.pop("X-Flow-D1-Rows-Read")
+        if missing == "source-proxy" and url.endswith("/source-proxy"):
+            headers.pop("X-Flow-D1-Rows-Read")
         return SimpleNamespace(status=200, content=b"{}", headers=headers)
     monkeypatch.setattr("trading_desk.bounded_http.BoundedHTTPExchange.request", request)
     def prepare(*args, exchange, **kwargs):
         for _ in range(2):
             exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact", params={"indexed": "1"})
+        exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/source-proxy",
+            params={"path": "/marketdata/tradedata/queryMargin.do", "beginDate": "20260701"})
         return {"status": "UNAVAILABLE", "reason": "fixture"}, None
     monkeypatch.setattr(entry, "prepare", prepare)
     entry.main()
     result = json.loads(report.read_bytes())
-    assert len(calls) == 2 and all(call["params"] == {"indexed": "1", "metrics": "1"} for call in calls)
-    assert result["workerRequests"] == 2
+    assert len(calls) == 3
+    assert all(call["params"] == {"indexed": "1", "metrics": "1"} for call in calls[:2])
+    assert calls[2]["params"] == {
+        "path": "/marketdata/tradedata/queryMargin.do", "beginDate": "20260701", "metrics": "1"}
+    assert result["workerRequests"] == 3
     assert result["measurementStatus"] == ("UNKNOWN" if missing else "MEASURED")
-    assert result["d1RowsRead"] == (None if missing else 6)
-    assert result["r2ClassB"] == (None if missing else 2)
+    assert result["d1RowsRead"] == (None if missing else 9)
+    assert result["r2ClassB"] == (None if missing else 3)
     assert not (tmp_path / "out").exists()
 
 

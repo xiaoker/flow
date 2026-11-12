@@ -517,7 +517,8 @@ def main():
                 raise ValueError("rolling_read_request_limit")
             self.count += 1
             metered = bool(args.recovery_plan)
-            if metered and len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith(("/history-artifact", "/etf-state")):
+            if metered and len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith(
+                    ("/history-artifact", "/etf-state", "/source-proxy")):
                 kw["params"] = {**kw.get("params", {}), "metrics": "1"}
             if len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith("/history-artifact"):
                 self.archive_reads += 1
