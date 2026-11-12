@@ -60,11 +60,26 @@ export async function GET(request: Request): Promise<Response> {
   try {
     if (new URL(request.url).searchParams.get("kind") === "rolling-checkpoint") {
       if (!runtime.DB) return Response.json({ error: "storage_unavailable" }, { status: 503 });
-      const row = await runtime.DB.prepare(`SELECT m.release_id,m.as_of,m.manifest_sha256,m.manifest_json
+      const measured = new URL(request.url).searchParams.get("metrics") === "1";
+      const query = runtime.DB.prepare(`SELECT m.release_id,m.as_of,m.manifest_sha256,m.manifest_json
         FROM active_release a JOIN release_manifest m ON m.release_id=a.release_id
         WHERE a.slot='dashboard' AND m.status='ACTIVE' AND m.as_of=a.as_of LIMIT 1`)
-        .first<{release_id: string; as_of: string; manifest_sha256: string; manifest_json: string}>();
-      if (!row) return Response.json({ error: "rolling_checkpoint_not_found" }, { status: 404 });
+        ;
+      type Row = {release_id: string; as_of: string; manifest_sha256: string; manifest_json: string};
+      let rowsRead: number | null = null;
+      let row: Row | null;
+      if (measured) {
+        const result = await query.all<Row>();
+        const count = result.meta?.rows_read;
+        if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) rowsRead = count;
+        row = result.results?.[0] ?? null;
+      } else row = await query.first<Row>();
+      const metrics = (gets: number): Record<string, string> => measured ? {
+        "X-Flow-D1-Rows-Read": rowsRead === null ? "unknown" : String(rowsRead),
+        "X-Flow-D1-Rows-Written": "0", "X-Flow-R2-Class-A": "0",
+        "X-Flow-R2-Class-B": String(gets), "X-Flow-R2-Write-Bytes": "0",
+      } : {};
+      if (!row) return Response.json({ error: "rolling_checkpoint_not_found" }, { status: 404, headers: metrics(0) });
       const manifest: unknown = JSON.parse(row.manifest_json);
       if (!isReadModelManifest(manifest) || (manifest.slot ?? "dashboard") !== "dashboard" ||
           manifest.releaseId !== row.release_id || manifest.asOf !== row.as_of ||
@@ -72,7 +87,7 @@ export async function GET(request: Request): Promise<Response> {
         return Response.json({ error: "rolling_checkpoint_manifest_invalid" }, { status: 409 });
       }
       if (manifest.rollingPublication?.status !== "READY") {
-        return Response.json({ error: "rolling_checkpoint_not_found" }, { status: 404 });
+        return Response.json({ error: "rolling_checkpoint_not_found" }, { status: 404, headers: metrics(0) });
       }
       const prefix = `market-data/releases/${row.as_of}/${row.release_id}/rolling-checkpoint/`;
       const binding = await runtime.RAW_BUCKET.get(`${prefix}${row.manifest_sha256}.json`);
@@ -101,6 +116,7 @@ export async function GET(request: Request): Promise<Response> {
         "Content-Type": "application/gzip", "Cache-Control": "private, no-store",
         "X-Flow-Release-Id": row.release_id, "X-Flow-As-Of": row.as_of,
         "X-Flow-Manifest-Sha256": row.manifest_sha256, "X-Flow-Checkpoint-Sha256": ref.sha256,
+        ...metrics(2),
       } });
     }
     const pointerObject = await runtime.RAW_BUCKET.get(ETF_FLOW_STATE_POINTER_KEY);

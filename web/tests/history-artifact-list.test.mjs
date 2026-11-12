@@ -17,15 +17,20 @@ test("rolling selection uses the index, preserves unique legacy files and reject
   const digest = createHash("sha256").update(bytes).digest("hex");
   const prefix = "market-data/normalized/sse/etf_scale/2026-11-04/";
   const key = `${prefix}${"a".repeat(64)}/data.csv`;
-  for (const mode of ["indexed", "single", "ambiguous", "error", "oversize"]) {
+  for (const mode of ["indexed", "single", "ambiguous", "error", "oversize", "measured", "unknown-metrics"]) {
     let lists = 0, gets = 0, queries = 0;
     const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/history-artifact?${new URLSearchParams({
       source: "sse", dataset: "etf_scale", date: "2026-11-04", file: "data", selection: "indexed-or-single",
+      ...(["measured", "unknown-metrics"].includes(mode) ? { metrics: "1" } : {}),
     })}`, { headers: { authorization: "Bearer test-key" } }), {
       INGEST_API_KEY: "test-key",
       DB: { prepare(sql) {
         assert.match(sql, /SELECT[\s\S]*history_artifact_pointer[\s\S]*LIMIT 1/);
-        return { bind() { return { async first() {
+        return { bind() { return { async all() {
+          queries += 1;
+          return { results: [{ objectKey: key, sha256: digest }],
+            meta: mode === "measured" ? { rows_read: 1 } : {} };
+        }, async first() {
           queries += 1;
           if (mode === "error") throw new Error("lookup unavailable");
           return ["indexed", "oversize"].includes(mode)
@@ -49,7 +54,12 @@ test("rolling selection uses the index, preserves unique legacy files and reject
     assert.equal(queries, 1);
     assert.equal(response.status, mode === "ambiguous" ? 409 : mode === "error" ? 503 : mode === "oversize" ? 413 : 200);
     assert.equal(lists, ["single", "ambiguous"].includes(mode) ? 2 : 0);
-    assert.equal(gets, ["indexed", "single", "oversize"].includes(mode) ? 1 : 0);
+    assert.equal(gets, ["indexed", "single", "oversize", "measured", "unknown-metrics"].includes(mode) ? 1 : 0);
+    if (["measured", "unknown-metrics"].includes(mode)) {
+      assert.equal(response.headers.get("x-flow-d1-rows-read"), mode === "measured" ? "1" : "unknown");
+      assert.equal(response.headers.get("x-flow-r2-class-b"), "1");
+      assert.equal(response.headers.get("x-flow-r2-class-a"), "0");
+    }
     if (response.status === 200) assert.equal(await response.text(), new TextDecoder().decode(bytes));
   }
 });

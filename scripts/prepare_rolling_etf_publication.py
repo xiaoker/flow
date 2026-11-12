@@ -355,6 +355,101 @@ def prepare(snapshot, manifest, history_bundle, *, exchange, headers, bootstrap=
     return {"status": "READY", "asOf": snapshot["asOf"]}, (calendar, wire, version)
 
 
+def verify_retained_inputs(binding, *, snapshot, manifest, history_bundle):
+    """Bind independent preparation to exact retained bytes before any I/O.
+
+    This verifies input identity only; it does not grant production authority.
+    """
+    if (not isinstance(binding, dict) or set(binding) != {
+            "contractVersion", "asOf", "snapshotSha256", "manifestSha256", "historyBundleSha256"}
+            or binding.get("contractVersion") != "flow-retained-rolling-input-v1"):
+        raise ValueError("rolling_retained_binding_invalid")
+    for field, value in (("snapshotSha256", snapshot), ("manifestSha256", manifest),
+                         ("historyBundleSha256", history_bundle)):
+        if (not isinstance(binding.get(field), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", binding[field])
+                or sha256(value).hexdigest() != binding[field]):
+            raise ValueError("rolling_retained_input_hash_mismatch")
+    value = json.loads(snapshot)
+    try:
+        day = date.fromisoformat(binding["asOf"])
+    except (TypeError, ValueError):
+        raise ValueError("rolling_retained_date_invalid") from None
+    if (day.isoformat() != binding["asOf"] or not isinstance(value, dict)
+            or value.get("asOf") != binding["asOf"]
+            or not isinstance(value.get("publication"), dict)
+            or value["publication"].get("status") != "confirmed"):
+        raise ValueError("rolling_retained_source_invalid")
+
+
+def retained_binding_from_plan(plan):
+    """Read a pinned preparation scope; plan validity is not live approval."""
+    from trading_desk.recovery_execution import validate_recovery_plan
+    scope = validate_recovery_plan(plan)
+    allocation = (scope.budget_manifest.get("rollingPreparation")
+                  if isinstance(scope.budget_manifest, dict) else None)
+    if (len(scope.data_dates) != 1 or "publish" not in scope.required_stages
+            or not isinstance(allocation, dict)):
+        raise ValueError("rolling_retained_plan_scope_invalid")
+    resources = allocation.get("resourcesUpperBound")
+    fields = {"d1RowsRead", "d1RowsWritten", "workerRequests", "actionsMinutes",
+              "r2Bytes", "r2ClassA", "r2ClassB"}
+    if (not isinstance(resources, dict) or set(resources) != fields
+            or any(type(value) is not int or value < 0 for value in resources.values())
+            or resources["workerRequests"] < BOOTSTRAP_WORKER_REQUEST_LIMIT + 1
+            or resources["workerRequests"] > scope.max_requests):
+        raise ValueError("rolling_retained_plan_resources_invalid")
+    binding = allocation.get("inputBindings")
+    if not isinstance(binding, dict) or binding.get("asOf") != scope.data_dates[0]:
+        raise ValueError("rolling_retained_plan_date_mismatch")
+    return binding
+
+
+def verify_retained_artifact_fingerprint(plan, *, snapshot):
+    """Reject a mismatched approved artifact identity before remote reads."""
+    binding = retained_binding_from_plan(plan)
+    source = plan["budgetManifest"].get("publishSource")
+    if not isinstance(source, dict):
+        raise ValueError("rolling_retained_artifact_binding_missing")
+    identity = {key: source.get(key) for key in
+                ("sourceRunId", "artifactId", "artifactSha256", "artifactBytes")}
+    if (not isinstance(identity["sourceRunId"], str)
+            or not re.fullmatch(r"[1-9][0-9]*", identity["sourceRunId"])
+            or type(identity["artifactId"]) is not int or identity["artifactId"] <= 0
+            or type(identity["artifactBytes"]) is not int or identity["artifactBytes"] <= 0
+            or not isinstance(identity["artifactSha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", identity["artifactSha256"])):
+        raise ValueError("rolling_retained_artifact_binding_invalid")
+    provenance = {"contractVersion": "flow-retained-source-evidence-v1",
+                  "artifact": identity, "inputBindings": binding}
+    fingerprint = canonical_sha256(provenance)
+    if source.get("sourceFingerprint") != fingerprint or sha256(snapshot).hexdigest() != binding["snapshotSha256"]:
+        raise ValueError("rolling_retained_source_fingerprint_mismatch")
+    return binding, identity, fingerprint, provenance
+
+
+def retained_source_evidence(plan, *, snapshot, refs):
+    """Describe this reuse operation, never relabel it as a new collection."""
+    binding, identity, fingerprint, provenance = verify_retained_artifact_fingerprint(plan, snapshot=snapshot)
+    if not isinstance(refs, list) or not refs:
+        raise ValueError("rolling_retained_lineage_missing")
+    objects = []
+    for ref in refs:
+        if (not isinstance(ref, dict) or ref.get("sourceId") not in {"sse", "szse"}
+                or not isinstance(ref.get("tradeDate"), str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", ref["tradeDate"])
+                or not isinstance(ref.get("sha256"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", ref["sha256"])
+                or not isinstance(ref.get("objectKey"), str)
+                or not re.fullmatch(rf'market-data/normalized/{ref["sourceId"]}/etf_scale/{ref["tradeDate"]}/[a-f0-9]{{64}}/data\.csv', ref["objectKey"])):
+            raise ValueError("rolling_retained_lineage_invalid")
+        objects.append({"key": ref["objectKey"], "sha256": ref["sha256"],
+                        "sourceDates": [ref["tradeDate"]], "sourceFingerprint": fingerprint})
+    return {"schemaVersion": 1, "provenance": provenance, "sourceFingerprint": fingerprint,
+        "collectorRunId": identity["sourceRunId"], "targetDate": binding["asOf"],
+        "requestCount": 0, "collectionPerformed": False, "retainedInputObjects": objects,
+        "files": {"dashboard-snapshot.json": {"sha256": sha256(snapshot).hexdigest(), "bytes": len(snapshot)}}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -362,9 +457,29 @@ def main():
     parser.add_argument("--history-bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--input-bindings", type=Path,
+        help="exact retained input identities; validation is not production authorization")
+    parser.add_argument("--recovery-plan", type=Path,
+        help="validated immutable plan containing preparation allocation and input bindings; live approval is checked by the caller")
     parser.add_argument("--bootstrap", action="store_true",
         help="explicitly build the first checkpoint from one official calendar proof and pinned archive data")
     args = parser.parse_args()
+    if args.recovery_plan and (args.input_bindings or not args.bootstrap):
+        parser.error("recovery preparation requires --bootstrap and no separate --input-bindings")
+    retained_inputs = None
+    recovery_plan = None
+    if args.input_bindings or args.recovery_plan:
+        retained_inputs = {
+            "snapshot": read_bounded(args.snapshot, 20_000_000),
+            "manifest": read_bounded(args.manifest, 2_000_000),
+            "history_bundle": read_bounded(args.history_bundle, 40_000_000),
+        }
+        recovery_plan = json.loads(read_bounded(args.recovery_plan, 2_000_000)) if args.recovery_plan else None
+        binding = (retained_binding_from_plan(recovery_plan)
+                   if args.recovery_plan else json.loads(read_bounded(args.input_bindings, 4096)))
+        verify_retained_inputs(binding, **retained_inputs)
+        if recovery_plan is not None:
+            verify_retained_artifact_fingerprint(recovery_plan, snapshot=retained_inputs["snapshot"])
     from trading_desk.bounded_http import BoundedHTTPExchange
     from trading_desk.http import HttpSettings, build_session
     creds = candidate_credentials(os.environ)
@@ -379,6 +494,9 @@ def main():
             self.request_limit = BOOTSTRAP_WORKER_REQUEST_LIMIT if args.bootstrap else NORMAL_REQUEST_LIMIT
             self.byte_limit = BOOTSTRAP_RESPONSE_BYTE_LIMIT if args.bootstrap else NORMAL_RESPONSE_BYTE_LIMIT
             self.deadline = time.monotonic() + 480 if args.bootstrap else None
+            self.meter = {"d1RowsRead": 0, "d1RowsWritten": 0, "r2ClassA": 0,
+                          "r2ClassB": 0, "r2Bytes": 0}
+            self.meter_complete = True
 
         def check_deadline(self):
             if self.deadline is not None and time.monotonic() >= self.deadline:
@@ -398,13 +516,31 @@ def main():
             if self.count >= self.request_limit:
                 raise ValueError("rolling_read_request_limit")
             self.count += 1
+            metered = bool(args.recovery_plan)
+            if metered and len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith(("/history-artifact", "/etf-state")):
+                kw["params"] = {**kw.get("params", {}), "metrics": "1"}
             if len(pos) > 1 and isinstance(pos[1], str) and pos[1].endswith("/history-artifact"):
                 self.archive_reads += 1
                 if kw.get("params", {}).get("indexed") == "1":
                     self.indexed_archive_reads += 1
                 else:
                     self.unindexed_archive_reads += 1
-            reply = inner.request(*pos, **kw)
+            try:
+                reply = inner.request(*pos, **kw)
+            except Exception:
+                self.meter_complete = False
+                raise
+            if metered:
+                values = {key.lower(): value for key, value in reply.headers.items()}
+                fields = {"d1RowsRead": "x-flow-d1-rows-read", "d1RowsWritten": "x-flow-d1-rows-written",
+                          "r2ClassA": "x-flow-r2-class-a", "r2ClassB": "x-flow-r2-class-b",
+                          "r2Bytes": "x-flow-r2-write-bytes"}
+                for field, header in fields.items():
+                    value = values.get(header)
+                    if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]{0,14}", value):
+                        self.meter_complete = False
+                    else:
+                        self.meter[field] += int(value)
             self.bytes += len(reply.content)
             if self.bytes > self.byte_limit:
                 raise ValueError("rolling_read_byte_limit")
@@ -412,17 +548,25 @@ def main():
     exchange = Counted()
     source, snapshot = None, None
     try:
-        source = read_bounded(args.snapshot, 20_000_000)
+        source = retained_inputs["snapshot"] if retained_inputs is not None else read_bounded(args.snapshot, 20_000_000)
         snapshot = json.loads(source)
         if snapshot.get("publication", {}).get("status") != "confirmed":
             raise ValueError("rolling_source_not_confirmed")
-        status, ready = prepare(snapshot, json.loads(read_bounded(args.manifest, 2_000_000)),
-            json.loads(read_bounded(args.history_bundle, 40_000_000)), exchange=exchange, headers=headers,
+        manifest_bytes = retained_inputs["manifest"] if retained_inputs is not None else read_bounded(args.manifest, 2_000_000)
+        history_bytes = retained_inputs["history_bundle"] if retained_inputs is not None else read_bounded(args.history_bundle, 40_000_000)
+        status, ready = prepare(snapshot, json.loads(manifest_bytes),
+            json.loads(history_bytes), exchange=exchange, headers=headers,
             bootstrap=args.bootstrap, source_exchange=inner,
             source_proxy_url=os.getenv("FLOW_SOURCE_PROXY_URL", ""))
         if ready:
             calendar, wire, version = ready
             write_source_bundle(args.output, snapshot, calendar, wire, version, source_bytes=source)
+            if args.recovery_plan:
+                _, refs_bytes, _ = unpack_rolling_checkpoint(wire, sha256(wire).hexdigest())
+                evidence = retained_source_evidence(
+                    recovery_plan,
+                    snapshot=source, refs=json.loads(refs_bytes))
+                (args.output / "retained-source-evidence.json").write_bytes(canonical_json_bytes(evidence))
     except Exception as error:
         code = str(error)
         # Broken current-source lineage remains a global quality failure.
@@ -441,7 +585,9 @@ def main():
         "asOf": snapshot.get("asOf") if isinstance(snapshot, dict) else None,
         "snapshotSha256": sha256(source).hexdigest() if source is not None else None,
         "responseBytes": exchange.bytes, "maxResponseBytes": exchange.byte_limit,
-        "d1RowsRead": None, "d1RowsWritten": 0,
+        **({key: value if exchange.meter_complete else None for key, value in exchange.meter.items()}
+           if args.recovery_plan else {"d1RowsRead": None, "d1RowsWritten": 0}),
+        "measurementStatus": "MEASURED" if args.recovery_plan and exchange.meter_complete else "UNKNOWN",
         "accountBudgetStatus": "UNKNOWN", "note": "read-only preparation is not account quota admission"}))
     if status["status"] != "READY":
         print(f"Rolling preparation {status['status']}: {status.get('reason', 'proof_unavailable')}")

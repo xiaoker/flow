@@ -1139,6 +1139,25 @@ def estimate_recovery_budget(
                     r2_class_b=one.r2_class_b * retry_attempts,
                 )
             )
+    # Independent retained-source preparation is additional work, not covered
+    # by the legacy publish-stage default. Its reviewed allocation is pinned
+    # in the same immutable recovery plan; missing counters are never zero.
+    has_preparation = (isinstance(scope.budget_manifest, Mapping)
+                       and "rollingPreparation" in scope.budget_manifest)
+    if has_preparation:
+        preparation = scope.budget_manifest["rollingPreparation"]
+        preparation = _require_mapping(preparation, "invalid_rolling_preparation")
+        resources = _require_mapping(preparation.get("resourcesUpperBound"),
+                                     "rolling_preparation_resources_missing")
+        fields = {"d1_reads": "d1RowsRead", "d1_writes": "d1RowsWritten",
+                  "workers_requests": "workerRequests", "actions_minutes": "actionsMinutes",
+                  "r2_bytes": "r2Bytes", "r2_class_a": "r2ClassA", "r2_class_b": "r2ClassB"}
+        additional = {name: _nonnegative_int(resources.get(key), "rolling_preparation_" + key)
+                      for name, key in fields.items()}
+        if len(scope.data_dates) != 1 or "publish" not in scope.required_stages:
+            raise RecoveryContractError("rolling_preparation_scope_invalid")
+        estimate = estimate.plus(RecoveryBudgetEstimate(**{
+            name: value * retry_attempts for name, value in additional.items()}))
     report = evaluate_recovery_budget(config=config, estimate=estimate, measured=measured, reserved=reserved)
     report["scope"] = {
         "campaignId": scope.campaign_id,

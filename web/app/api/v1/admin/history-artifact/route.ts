@@ -91,16 +91,24 @@ function expectedPair(source: string, dataset: string): boolean {
   return dataset === "etf_scale" ? source === "sse" || source === "szse" : source === "sse";
 }
 
-async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string, indexed = false) {
+async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, source: string, dataset: string, tradeDate: string, file: string, indexed = false, meter?: { rowsRead: number | null }) {
   if (!runtime.DB || (!indexed && (source !== "sse" || dataset !== "etf_pcf"))) return null;
   try {
-    return await runtime.DB.prepare(
+    const query = runtime.DB.prepare(
       `SELECT revision_id AS revisionId, object_key AS objectKey, sha256, content_encoding AS contentEncoding,
               row_count AS rowCount, observed_at AS observedAt, status
          FROM history_artifact_pointer
         WHERE source_id = ? AND dataset = ? AND trade_date = ? AND file_name = ? AND status = 'READY'
         LIMIT 1`,
-    ).bind(source, dataset, tradeDate, file).first<Record<string, unknown>>();
+    ).bind(source, dataset, tradeDate, file);
+    if (meter) {
+      meter.rowsRead = null;
+      const result = await query.all<Record<string, unknown>>();
+      const count = result.meta?.rows_read;
+      if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) meter.rowsRead = count;
+      return result.results?.[0] ?? null;
+    }
+    return await query.first<Record<string, unknown>>();
   } catch (error) {
     if (indexed) throw error; // A failed lookup is not a proven missing archive.
     // The additive pointer table may not exist on an older Worker schema.
@@ -137,6 +145,12 @@ export async function GET(request: Request): Promise<Response> {
     return badRequest("invalid_artifact_selection");
   }
   const preferIndexed = selection === "indexed-or-single";
+  const meter = query.get("metrics") === "1" ? { rowsRead: 0 as number | null } : undefined;
+  const metricHeaders = (lists: number): Record<string, string> => meter ? {
+    "X-Flow-D1-Rows-Read": meter.rowsRead === null ? "unknown" : String(meter.rowsRead),
+    "X-Flow-D1-Rows-Written": "0", "X-Flow-R2-Class-A": String(lists),
+    "X-Flow-R2-Class-B": "1", "X-Flow-R2-Write-Bytes": "0",
+  } : {};
   const revision = query.get("revision");
   if (revision !== null && (query.get("indexed") !== "1" || dataset !== "etf_scale"
       || file !== "data" || !/^[a-f0-9]{64}$/.test(revision))) return badRequest("invalid_archive_revision");
@@ -166,7 +180,7 @@ export async function GET(request: Request): Promise<Response> {
         "X-Flow-Trade-Date": tradeDate, "X-Flow-Pcf-Revision": revision,
       } });
     }
-    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1" || preferIndexed);
+    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, query.get("indexed") === "1" || preferIndexed, meter);
     if (query.get("indexed") === "1" && !pointer) return badRequest("artifact_not_found", 404);
     if (pointer?.objectKey && typeof pointer.objectKey === "string") {
       const object = await runtime.RAW_BUCKET.get(pointer.objectKey);
@@ -182,6 +196,7 @@ export async function GET(request: Request): Promise<Response> {
           "X-Flow-Normalized-Sha256": String(pointer.sha256 ?? ""),
           "X-Flow-Trade-Date": tradeDate,
           "X-Flow-Pcf-Revision": String(pointer.revisionId ?? ""),
+          ...metricHeaders(0),
         },
       });
     }
@@ -239,6 +254,7 @@ export async function GET(request: Request): Promise<Response> {
         "X-Flow-Normalized-Key": key,
         "X-Flow-Normalized-Sha256": object.customMetadata?.sha256 ?? "",
         "X-Flow-Normalized-Candidate-Count": String(candidates.length),
+        ...metricHeaders(dateCandidates.length),
         "X-Flow-Normalized-Selection": candidates.length > 1 ? "latest-uploaded" : "single",
         "X-Flow-Trade-Date": tradeDate,
       },

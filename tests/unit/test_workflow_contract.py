@@ -2,6 +2,8 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import json
+import textwrap
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +14,57 @@ PUBLISH_WORKFLOW = WORKFLOWS / "market-data-publish.yml"
 WATCHDOG_WORKFLOW = WORKFLOWS / "market-data-watchdog.yml"
 PCF_WORKFLOW = WORKFLOWS / "pcf-v2-capture.yml"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
+
+
+def test_retained_renewal_shell_enforces_identity_measurements_and_combined_budget(tmp_path):
+    workflow = PUBLISH_WORKFLOW.read_text()
+    block = workflow.split("      - name: Renew recovery lease after retained preparation\n", 1)[1]
+    script = textwrap.dedent(block.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+    resources = dict(d1RowsRead=50, d1RowsWritten=5, workerRequests=47,
+                     r2Bytes=0, r2ClassA=2, r2ClassB=100)
+    prepared = dict(d1RowsRead=44, d1RowsWritten=0, workerRequests=45,
+                    r2Bytes=0, r2ClassA=0, r2ClassB=44)
+    (tmp_path / "recovery-execution.json").write_text(json.dumps({"budgetManifest": {
+        "rollingPreparation": {"resourcesUpperBound": resources}}}))
+    (tmp_path / "rolling-preparation.json").write_text(json.dumps(prepared))
+    (tmp_path / "pipeline-recovery-publish-running.json").write_text("{}")
+    env = {**os.environ, "INPUT_LEASE_OWNER": "owner", "INPUT_RECOVERY_ATTEMPT_COUNT": "1",
+           "INPUT_RUN_KEY": "run", "INPUT_RECOVERY_ID": "recovery", "FLOW_INGEST_API_KEY": "fixture",
+           "FLOW_CF_ACCESS_CLIENT_ID": "fixture", "FLOW_CF_ACCESS_CLIENT_SECRET": "fixture",
+           "FLOW_PIPELINE_WINDOW_URL": "https://invalid.example.test", "FIXTURE_RESPONSE": str(tmp_path / "response.json")}
+    for fault in (None, "owner", "count", "budget", "http"):
+        response = dict(status="RUNNING", leaseOwner="owner", attemptCount=1,
+                        runKey="run", recoveryId="recovery", leaseExpiresAt="2099-01-01T00:00:00.000Z",
+                        rowsRead=1, rowsWritten=1)
+        if fault == "owner": response["leaseOwner"] = "other"
+        if fault == "count": response["rowsRead"] = None
+        if fault == "budget": response["rowsRead"] = 100
+        (tmp_path / "response.json").write_text(json.dumps(response))
+        output = tmp_path / "retained-preparation-renewal-metrics.json"
+        output.unlink(missing_ok=True)
+        fake = "curl() { return 22; };\n" if fault == "http" else 'curl() { cp "$FIXTURE_RESPONSE" retained-preparation-renewal.json; };\n'
+        result = subprocess.run(["bash", "-c", fake + script], cwd=tmp_path, env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert (result.returncode == 0) == (fault is None), (fault, result.stderr)
+        if fault is None:
+            assert json.loads(output.read_text())["workerRequests"] == 1
+
+
+def test_independent_rolling_preparation_is_after_identity_and_before_build():
+    text = PUBLISH_WORKFLOW.read_text()
+    start = text.index("- name: Prepare explicitly approved retained rolling proof")
+    end = text.index("- name: Build immutable read-model candidates offline", start)
+    assert text.index("- name: Verify source artifact identity") < start
+    assert text.index("- name: Materialize source files") < start
+    block = text[start:end]
+    assert "inputs.recovery_id != '' && inputs.resume_existing_source" in block
+    assert 'has("rollingPreparation")' in block
+    assert "--recovery-plan recovery-execution.json --bootstrap" in block
+    assert ".collection-source/reports/phase0/latest-manifest.json" in block
+    assert "cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json" in block
+    assert '.status == "READY"' in block
+    assert "continue-on-error" not in block
+    assert "/claim" not in block and "market-data-collect" not in block
 
 
 def test_rolling_production_bundle_is_verified_and_bound_only_after_activation():

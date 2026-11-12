@@ -84,6 +84,11 @@ def main() -> None:
         for field in totals:
             value = metrics[field]
             totals[field] += _integer(value, field)
+        # Preparation exposes its own physical D1 counts. Legacy publisher
+        # metrics omit these fields; never infer a missing preparation count.
+        if "d1RowsRead" in metrics or "d1RowsWritten" in metrics:
+            d1_read += _integer(metrics.get("d1RowsRead"), "stageD1RowsRead")
+            d1_written += _integer(metrics.get("d1RowsWritten"), "stageD1RowsWritten")
         stage_metrics.append({"path": str(path), **{field: metrics[field] for field in totals}})
 
     elapsed = now - started

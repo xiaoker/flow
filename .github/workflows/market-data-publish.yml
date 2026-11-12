@@ -423,10 +423,12 @@ jobs:
               (.publication.status == "confirmed")
             ' .collection-source/dashboard-snapshot.json >/dev/null
             if [[ "${INPUT_RESUME_EXISTING_SOURCE:-false}" == "true" ]]; then
-              SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json)"
-              jq -e --arg fingerprint "$SOURCE_FINGERPRINT" '
-                .plan.budgetManifest.publishSource.sourceFingerprint == $fingerprint
-              ' recovery-plan.json >/dev/null
+              if ! jq -e '.plan.budgetManifest | type == "object" and has("rollingPreparation")' recovery-plan.json >/dev/null; then
+                SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json)"
+                jq -e --arg fingerprint "$SOURCE_FINGERPRINT" '
+                  .plan.budgetManifest.publishSource.sourceFingerprint == $fingerprint
+                ' recovery-plan.json >/dev/null
+              fi
             fi
           else
             if ! jq -e --arg targetDate "$INPUT_TARGET_DATE" '
@@ -471,6 +473,81 @@ jobs:
           for file in rolling-publication-input.json rolling-checkpoint.gz rolling-calendar.json rolling-publication-status.json; do
             if [[ -s ".collection-source/$file" ]]; then cp ".collection-source/$file" "$file"; fi
           done
+
+      - name: Prepare explicitly approved retained rolling proof
+        if: ${{ inputs.recovery_id != '' && inputs.resume_existing_source }}
+        env:
+          FLOW_SOURCE_PROXY_URL: https://flow.xiaoker.com/api/v1/admin/source-proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! jq -e '.budgetManifest | type == "object" and has("rollingPreparation")' recovery-execution.json >/dev/null; then
+            exit 0
+          fi
+          # The full, pinned Collector report is the input. Never change the
+          # original artifact or borrow an unbound report from another run.
+          test -s .collection-source/reports/phase0/latest-manifest.json
+          test -s .collection-source/history-bundle.json
+          for file in rolling-publication-input.json rolling-checkpoint.gz rolling-calendar.json rolling-publication-status.json; do
+            if [[ -e "$file" ]]; then
+              echo "Retained preparation refuses conflicting pre-existing rolling proof." >&2
+              exit 1
+            fi
+          done
+          python scripts/prepare_rolling_etf_publication.py \
+            --snapshot dashboard-snapshot.json \
+            --manifest .collection-source/reports/phase0/latest-manifest.json \
+            --history-bundle .collection-source/history-bundle.json \
+            --recovery-plan recovery-execution.json --bootstrap \
+            --output rolling-prepared --report rolling-preparation.json
+          jq -e '.status == "READY"' rolling-preparation.json >/dev/null
+          jq -e --slurpfile plan recovery-execution.json '
+            .measurementStatus == "MEASURED" and
+            (. as $actual | $plan[0].budgetManifest.rollingPreparation.resourcesUpperBound as $upper |
+              all(["d1RowsRead","d1RowsWritten","workerRequests","r2Bytes","r2ClassA","r2ClassB"][];
+                . as $key | ($actual[$key] | type == "number") and $actual[$key] <= $upper[$key]))
+          ' rolling-preparation.json >/dev/null
+          cmp -s rolling-prepared/dashboard-snapshot.json dashboard-snapshot.json
+          test -s rolling-prepared/retained-source-evidence.json
+          # Keep original report bytes untouched; this is a local, explicitly
+          # labelled provenance projection for the current reuse operation.
+          cp rolling-prepared/retained-source-evidence.json .collection-source/retained-source-evidence.json
+          for file in rolling-publication-input.json rolling-checkpoint.gz rolling-calendar.json; do
+            test -s "rolling-prepared/$file"
+            cp "rolling-prepared/$file" "$file"
+          done
+
+      - name: Renew recovery lease after retained preparation
+        if: ${{ success() && inputs.recovery_id != '' && inputs.resume_existing_source && hashFiles('rolling-preparation.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One mutation, no retries: ambiguous renewal must stop publication.
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLOW_INGEST_API_KEY" \
+            --header "CF-Access-Client-Id: $FLOW_CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $FLOW_CF_ACCESS_CLIENT_SECRET" \
+            --header 'Content-Type: application/json' \
+            --data-binary @pipeline-recovery-publish-running.json \
+            "$FLOW_PIPELINE_WINDOW_URL/recovery/status" \
+            --output retained-preparation-renewal.json
+          NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+          jq -e --arg owner "$INPUT_LEASE_OWNER" --arg attempt "$INPUT_RECOVERY_ATTEMPT_COUNT" --arg now "$NOW_ISO" \
+            --arg runKey "$INPUT_RUN_KEY" --arg recoveryId "$INPUT_RECOVERY_ID" '
+            .status == "RUNNING" and .leaseOwner == $owner and .runKey == $runKey and .recoveryId == $recoveryId and
+            (.attemptCount|tostring) == $attempt and .leaseExpiresAt > $now and
+            (.rowsRead|type == "number") and (.rowsWritten|type == "number")
+          ' retained-preparation-renewal.json >/dev/null
+          jq '{measurementStatus:"MEASURED",workerRequests:1,r2Bytes:0,r2ClassA:0,r2ClassB:0,
+            d1RowsRead:.rowsRead,d1RowsWritten:.rowsWritten}' \
+            retained-preparation-renewal.json > retained-preparation-renewal-metrics.json
+          jq -e --slurpfile preparation rolling-preparation.json --slurpfile plan recovery-execution.json '
+            . as $renewal | $preparation[0] as $prepared |
+            $plan[0].budgetManifest.rollingPreparation.resourcesUpperBound as $upper |
+            all(["d1RowsRead","d1RowsWritten","workerRequests","r2Bytes","r2ClassA","r2ClassB"][];
+              . as $key | ($renewal[$key] >= 0) and ($renewal[$key] == ($renewal[$key]|floor)) and
+              ($prepared[$key] + $renewal[$key] <= $upper[$key]))
+          ' retained-preparation-renewal-metrics.json >/dev/null
 
       - name: Build immutable read-model candidates offline
         id: build_models
@@ -697,10 +774,12 @@ jobs:
           for file in dashboard-publish-metrics.json dashboard-canary-metrics.json dashboard-activation-metrics.json penetration-publish-metrics.json penetration-canary-metrics.json penetration-activation-metrics.json; do
             if [[ -s "$file" ]]; then METRIC_ARGS+=(--metrics "$file"); fi
           done
+          if [[ -s rolling-preparation.json ]]; then METRIC_ARGS+=(--metrics rolling-preparation.json); fi
+          if [[ -s retained-preparation-renewal-metrics.json ]]; then METRIC_ARGS+=(--metrics retained-preparation-renewal-metrics.json); fi
           mkdir -p .recovery/recovery-resource
           python scripts/measure_recovery_resources.py \
             --start-epoch publish-start-epoch.txt \
-            --source-evidence .collection-source/recovery-evidence.json \
+            --source-evidence "$(if [[ -s .collection-source/retained-source-evidence.json ]]; then echo .collection-source/retained-source-evidence.json; else echo .collection-source/recovery-evidence.json; fi)" \
             --control-response pipeline-recovery-publish-running-response.json \
             "${METRIC_ARGS[@]}" \
             --output .recovery/recovery-resource/recovery-resource-metrics.json
@@ -955,6 +1034,10 @@ jobs:
             penetration-read-model-activation.json
             .recovery/recovery-receipts
             reports/budget/publish.json
+            rolling-preparation.json
+            rolling-prepared/**
+            retained-preparation-renewal.json
+            retained-preparation-renewal-metrics.json
             publish-start-epoch.txt
             dashboard-publish-metrics.json
             dashboard-canary-metrics.json
