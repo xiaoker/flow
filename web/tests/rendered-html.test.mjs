@@ -802,6 +802,68 @@ test("keeps the official-source relay private and allowlisted", async () => {
   assert.match(sourceProxy, /othersdata\/margin\/detail/);
 });
 
+test("source proxy exposes opt-in zero D1/R2 metering without forwarding it upstream", async () => {
+  const worker = await loadWorker();
+  const originalFetch = globalThis.fetch;
+  const upstreamCalls = [];
+  globalThis.fetch = async (input, init) => {
+    const url = input instanceof Request ? new URL(input.url) : new URL(input.toString());
+    upstreamCalls.push({ url, init });
+    return new Response('{"result":[]}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const runtime = {
+      ...env,
+      INGEST_API_KEY: "test-key",
+      DB: { prepare() { assert.fail("source relay must not query D1"); } },
+      RAW_BUCKET: {
+        async get() { assert.fail("source relay must not read R2"); },
+        async list() { assert.fail("source relay must not list R2"); },
+        async put() { assert.fail("source relay must not write R2"); },
+      },
+    };
+    const base = "http://localhost/api/v1/admin/source-proxy?path=/marketdata/tradedata/queryMargin.do&beginDate=20260701&endDate=20260702";
+    const ordinary = await worker.fetch(new Request(base, {
+      headers: { authorization: "Bearer test-key" },
+    }), runtime, context);
+    assert.equal(ordinary.status, 200);
+    assert.equal(ordinary.headers.get("X-Flow-D1-Rows-Read"), null);
+    assert.equal(await ordinary.text(), '{"result":[]}');
+
+    const measured = await worker.fetch(new Request(`${base}&metrics=1`, {
+      headers: { authorization: "Bearer test-key" },
+    }), runtime, context);
+    assert.equal(measured.status, 200);
+    assert.equal(await measured.text(), '{"result":[]}');
+    for (const header of [
+      "X-Flow-D1-Rows-Read",
+      "X-Flow-D1-Rows-Written",
+      "X-Flow-R2-Class-A",
+      "X-Flow-R2-Class-B",
+      "X-Flow-R2-Write-Bytes",
+    ]) {
+      assert.equal(measured.headers.get(header), "0", header);
+    }
+    assert.equal(upstreamCalls.length, 2);
+    for (const { url } of upstreamCalls) {
+      assert.equal(url.searchParams.has("metrics"), false);
+      assert.equal(url.searchParams.get("beginDate"), "20260701");
+      assert.equal(url.searchParams.get("endDate"), "20260702");
+    }
+
+    const invalidMetrics = await worker.fetch(new Request(`${base}&metrics=2`, {
+      headers: { authorization: "Bearer test-key" },
+    }), runtime, context);
+    assert.equal(invalidMetrics.status, 400);
+    assert.equal(upstreamCalls.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("streams an archived dashboard for an explicitly selected date", async () => {
   const worker = await loadWorker();
   const overview = await worker.fetch(

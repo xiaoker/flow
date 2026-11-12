@@ -17,6 +17,13 @@ const SSE_ETF_PCF_BASIC_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_JBXX_C";
 const SSE_ETF_PCF_COMPONENT_SQL = "COMMON_SSE_CP_JJLB_ETFJJGK_GGSGSHQD_COMPONENT_C";
 const SSE_MARGIN_SECURITY_SQL = "RZRQ_MX_INFO";
 const BSE_MARGIN_PATH = "/rzrqjyyexxController/summaryInfoResult.do";
+const RESOURCE_METRICS = {
+  "X-Flow-D1-Rows-Read": "0",
+  "X-Flow-D1-Rows-Written": "0",
+  "X-Flow-R2-Class-A": "0",
+  "X-Flow-R2-Class-B": "0",
+  "X-Flow-R2-Write-Bytes": "0",
+};
 
 const COMMON_QUERY_PARAMETERS = new Set([
   "isPagination",
@@ -80,6 +87,19 @@ function invalidRequest(detail: string) {
   );
 }
 
+function withResourceMetrics(response: Response, enabled: boolean): Response {
+  if (!enabled) return response;
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(RESOURCE_METRICS)) {
+    headers.set(name, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function allowedParameters(path: string): Set<string> | null {
   if (path === "/commonQuery.do") return COMMON_QUERY_PARAMETERS;
   if (path === "/commonSoaQuery.do") return MARGIN_SECURITY_QUERY_PARAMETERS;
@@ -91,10 +111,14 @@ function allowedParameters(path: string): Set<string> | null {
 }
 
 function validateQuery(path: string, query: URLSearchParams): string | null {
+  const metrics = query.getAll("metrics");
+  if (metrics.length > 1 || (metrics.length === 1 && metrics[0] !== "1")) {
+    return "metrics must be a single value of 1";
+  }
   const allowed = allowedParameters(path);
   if (!allowed) return "path is not allowlisted";
   for (const key of query.keys()) {
-    if (key === "path") continue;
+    if (key === "path" || key === "metrics") continue;
     if (!allowed.has(key)) return `query parameter is not allowlisted: ${key}`;
     if (query.getAll(key).length !== 1) return `duplicate query parameter: ${key}`;
   }
@@ -176,6 +200,9 @@ function validateQuery(path: string, query: URLSearchParams): string | null {
 }
 
 export async function GET(request: Request) {
+  const requestUrl = new URL(request.url);
+  const metricsEnabled = requestUrl.searchParams.getAll("metrics").length === 1
+    && requestUrl.searchParams.get("metrics") === "1";
   const runtime = await runtimeEnv();
   const suppliedKey = request.headers
     .get("authorization")
@@ -185,13 +212,12 @@ export async function GET(request: Request) {
     !suppliedKey ||
     !secureEqual(suppliedKey, runtime.INGEST_API_KEY)
   ) {
-    return unauthorized();
+    return withResourceMetrics(unauthorized(), metricsEnabled);
   }
 
-  const requestUrl = new URL(request.url);
   const path = requestUrl.searchParams.get("path") ?? "";
   const validationError = validateQuery(path, requestUrl.searchParams);
-  if (validationError) return invalidRequest(validationError);
+  if (validationError) return withResourceMetrics(invalidRequest(validationError), metricsEnabled);
 
   const isBseMargin = path === BSE_MARGIN_PATH;
   const upstreamUrl = new URL(
@@ -199,7 +225,7 @@ export async function GET(request: Request) {
     isBseMargin ? BSE_UPSTREAM_ORIGIN : UPSTREAM_ORIGIN,
   );
   for (const [key, value] of requestUrl.searchParams) {
-    if (key !== "path") upstreamUrl.searchParams.append(key, value);
+    if (key !== "path" && key !== "metrics") upstreamUrl.searchParams.append(key, value);
   }
   const referer = isBseMargin
     ? "https://www.bseinfo.net/disclosure/rzrq_trans_list.html"
@@ -222,21 +248,21 @@ export async function GET(request: Request) {
   });
   const expectedHost = isBseMargin ? "www.bseinfo.net" : "query.sse.com.cn";
   if (upstream.url && new URL(upstream.url).hostname !== expectedHost) {
-    return NextResponse.json(
+    return withResourceMetrics(NextResponse.json(
       { error: "unexpected_upstream_redirect" },
       { status: 502 },
-    );
+    ), metricsEnabled);
   }
 
   const declaredLength = Number(upstream.headers.get("content-length") ?? "0");
   if (declaredLength > MAX_RESPONSE_BYTES) {
-    return NextResponse.json(
+    return withResourceMetrics(NextResponse.json(
       { error: "upstream_response_too_large" },
       { status: 502 },
-    );
+    ), metricsEnabled);
   }
   if (!upstream.body) {
-    return new Response(null, {
+    return withResourceMetrics(new Response(null, {
       status: upstream.status,
       headers: {
         "Cache-Control": "no-store",
@@ -245,7 +271,7 @@ export async function GET(request: Request) {
           ? "cloudflare-bse-relay"
           : "cloudflare-sse-relay",
       },
-    });
+    }), metricsEnabled);
   }
 
   // Stream the allowlisted response through the Worker. The previous
@@ -265,7 +291,7 @@ export async function GET(request: Request) {
       },
     }),
   );
-  return new Response(boundedBody, {
+  return withResourceMetrics(new Response(boundedBody, {
     status: upstream.status,
     headers: {
       "Cache-Control": "no-store",
@@ -275,5 +301,5 @@ export async function GET(request: Request) {
         ? "cloudflare-bse-relay"
         : "cloudflare-sse-relay",
     },
-  });
+  }), metricsEnabled);
 }
