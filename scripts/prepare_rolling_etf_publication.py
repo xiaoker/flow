@@ -156,7 +156,8 @@ def _collected_source_identity(source, day, manifest, history_bundle, *, allow_a
 
 def _read_bootstrap_archive(source, day, *, exchange, headers):
     reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
-        headers=headers, params={"source": source, "dataset": "etf_scale", "date": day, "file": "data"},
+        headers=headers, params={"source": source, "dataset": "etf_scale", "date": day, "file": "data",
+            "selection": "indexed-or-single"},
         max_bytes=BOOTSTRAP_SOURCE_MAX_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20)
     values = {key.lower(): value for key, value in reply.headers.items()}
     key = values.get("x-flow-normalized-key", "")

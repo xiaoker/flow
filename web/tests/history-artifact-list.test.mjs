@@ -10,6 +10,50 @@ function item(key, uploaded = "2026-11-02T00:00:00.000Z") {
   return { key, uploaded: new Date(uploaded) };
 }
 
+test("rolling selection uses the index, preserves unique legacy files and rejects ambiguity/errors", async () => {
+  const { createHash } = await import("node:crypto");
+  const { default: worker } = await import(new URL("../dist/server/index.js", import.meta.url).href);
+  const bytes = new TextEncoder().encode("trade_date,shares\n2026-11-04,100\n");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const prefix = "market-data/normalized/sse/etf_scale/2026-11-04/";
+  const key = `${prefix}${"a".repeat(64)}/data.csv`;
+  for (const mode of ["indexed", "single", "ambiguous", "error", "oversize"]) {
+    let lists = 0, gets = 0, queries = 0;
+    const response = await worker.fetch(new Request(`http://localhost/api/v1/admin/history-artifact?${new URLSearchParams({
+      source: "sse", dataset: "etf_scale", date: "2026-11-04", file: "data", selection: "indexed-or-single",
+    })}`, { headers: { authorization: "Bearer test-key" } }), {
+      INGEST_API_KEY: "test-key",
+      DB: { prepare(sql) {
+        assert.match(sql, /SELECT[\s\S]*history_artifact_pointer[\s\S]*LIMIT 1/);
+        return { bind() { return { async first() {
+          queries += 1;
+          if (mode === "error") throw new Error("lookup unavailable");
+          return ["indexed", "oversize"].includes(mode)
+            ? { objectKey: key, sha256: digest, revisionId: "a".repeat(64) } : null;
+        } }; } };
+      } },
+      RAW_BUCKET: {
+        async list({ prefix: requested }) {
+          lists += 1;
+          const objects = requested === prefix ? [item(key)] : [];
+          if (mode === "ambiguous" && requested === prefix) objects.push(item(`${prefix}${"b".repeat(64)}/data.csv`));
+          return { truncated: false, objects };
+        },
+        async get(requested) {
+          gets += 1; assert.equal(requested, key);
+          return { body: bytes, size: mode === "oversize" ? 2_000_001 : bytes.length, customMetadata: { sha256: digest } };
+        },
+      },
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, { waitUntil() {}, passThroughOnException() {} });
+    assert.equal(queries, 1);
+    assert.equal(response.status, mode === "ambiguous" ? 409 : mode === "error" ? 503 : mode === "oversize" ? 413 : 200);
+    assert.equal(lists, ["single", "ambiguous"].includes(mode) ? 2 : 0);
+    assert.equal(gets, ["indexed", "single", "oversize"].includes(mode) ? 1 : 0);
+    if (response.status === 200) assert.equal(await response.text(), new TextDecoder().decode(bytes));
+  }
+});
+
 test("both complete pages at the exact cap remain readable", async () => {
   let calls = 0;
   const candidates = await listUnindexedHistoryArtifactCandidates({
