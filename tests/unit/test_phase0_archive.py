@@ -125,6 +125,31 @@ def test_real_lineage_and_mapping_checks_and_resume_without_refetch(tmp_path):
     assert result["manifest"]["requested_dates"] == DATES
 
 
+def test_evening_deferred_sources_remain_pending_without_schema_errors(tmp_path, monkeypatch):
+    from trading_desk.source_readiness import build_source_readiness
+
+    recipe, bodies = fixture_recipe()
+    adapter = ArchivedOfficialMarketAdapters(
+        recipe, target=DATES[-1], root=tmp_path / "archive",
+        fetch=lambda ref: bodies[ref["objectKey"]],
+    )
+    for name in ("fetch_szse_etf_current", "fetch_szse_margin"):
+        monkeypatch.setattr(adapter, name, lambda *a, **k: pytest.fail("deferred source requested"))
+    result = collect_phase0(
+        dates=DATES, data_root=tmp_path / "data", report_root=tmp_path / "reports",
+        workspace_root=tmp_path, collection_window="evening", archived_adapters=adapter,
+    )
+    quality = result["quality"]
+    assert quality["phase0_gate_status"] == "pending"
+    assert quality["release_eligible"] is False
+    assert quality["counts"]["fail"] == 0
+    assert quality["errors"] == []
+    ledger = build_source_readiness(result["manifest"], quality)
+    assert ledger["state"] == "pending"
+    assert ledger["errorDomains"] == []
+    assert ledger["pendingDomains"] == ["深交所 ETF", "深交所融资融券"]
+
+
 @pytest.mark.parametrize("fault", ["hash","missing","extra","path","date","key","size","duplicate","calendar"])
 def test_recipe_rejects_static_faults_before_any_fetch(tmp_path,fault):
     recipe,_ = fixture_recipe()
