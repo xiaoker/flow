@@ -2,13 +2,16 @@
 
 The inventory step is deliberately metadata-only. It asks the private history
 export whether an immutable normalized object exists for each date, records
-its SHA/key/candidate count, and closes the response without reading the body.
+its SHA/key and the selection metadata available from the response, then closes
+the response without reading the body.
 This lets a bounded stock-flow backfill choose real dates before any larger
 payload is fetched or any derived partition is published.
 
 Exact-slot mode uses the reconstruction path's indexed-or-single selection:
-an ambiguous 409 stops the bounded inventory instead of accepting the legacy
-latest-uploaded diagnostic choice. Metadata readiness is not byte verification,
+an indexed pointer is identified by its opaque revision header, while a unique
+legacy candidate is identified by its count/selection headers. An ambiguous
+409 stops the bounded inventory instead of accepting the legacy latest-uploaded
+diagnostic choice. Metadata readiness is not byte verification,
 official provenance, historical-universe completeness or publication approval.
 """
 
@@ -82,12 +85,17 @@ def _probe(
                 if strict_selection and last_code == 409:
                     return {"status": "ambiguous", "code": 409,
                             "selectionPolicy": "indexed-or-single"}
+                candidate_count_header = response.headers.get("x-flow-normalized-candidate-count")
+                if candidate_count_header is not None:
+                    candidate_count = int(candidate_count_header or "0")
+                else:
+                    candidate_count = None if strict_selection else 0
                 result: dict[str, Any] = {
                     "status": "ready" if response.ok else "missing" if response.status_code == 404 else "error",
                     "code": response.status_code,
                     "sha256": response.headers.get("x-flow-normalized-sha256"),
                     "key": response.headers.get("x-flow-normalized-key"),
-                    "candidateCount": int(response.headers.get("x-flow-normalized-candidate-count", "0") or 0),
+                    "candidateCount": candidate_count,
                     "contentLength": response.headers.get("content-length"),
                 }
                 if response.status_code == 404:
@@ -108,8 +116,12 @@ def _probe(
                             + r"/etf_scale/(?:" + re.escape(date_value) + "|"
                             + date_value.replace("-", "") + r")/[a-f0-9]{64}/data\.csv", key) is not None
                         and response.headers.get("x-flow-trade-date") == date_value)
-                    indexed = count is None and selection is None and re.fullmatch(r"[a-f0-9]{64}", revision)
-                    single = count == "1" and selection == "single"
+                    # The Worker emits a revision header only for a D1 pointer hit.
+                    # revision_id is an opaque TEXT identity, not necessarily a SHA-256:
+                    # existing rows also use values such as
+                    # etf_scale:szse:2026-09-21:<short-digest>.
+                    indexed = count is None and selection is None and bool(revision.strip())
+                    single = count == "1" and selection == "single" and not revision.strip()
                     if not valid_identity or not (indexed or single):
                         return {**result, "status": "invalid_metadata", "detail": "unproven strict selection"}
                     result.update(selectionPolicy="indexed-or-single", selection="indexed" if indexed else "single")
