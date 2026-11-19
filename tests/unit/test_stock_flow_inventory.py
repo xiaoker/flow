@@ -107,6 +107,7 @@ def test_exact_inventory_stops_on_unknown_and_preserves_unprobed_scope(tmp_path,
 
 @pytest.mark.parametrize("case,expected", [
     ("indexed", "ready"), ("single", "ready"), ("latest", "invalid_metadata"),
+    ("missing_revision", "invalid_metadata"),
     ("wrong_date", "invalid_metadata"), ("wrong_key", "invalid_metadata"),
     ("ambiguous", "ambiguous"), ("missing", "missing"),
 ])
@@ -114,10 +115,15 @@ def test_exact_probe_uses_formal_selection_without_reading_body(case, expected):
     from scripts.inventory_stock_flow_inputs import _probe
     headers = {"x-flow-normalized-sha256": "a" * 64,
         "x-flow-normalized-key": "market-data/normalized/szse/etf_scale/2026-09-21/" + "b" * 64 + "/data.csv",
-        "x-flow-trade-date": "2026-09-21", "x-flow-pcf-revision": "b" * 64}
+        "x-flow-trade-date": "2026-09-21",
+        # Pointer revisions are opaque strings, not guaranteed content hashes.
+        "x-flow-pcf-revision": "etf_scale:szse:2026-09-21:be073bc49af33f36"}
     if case in ("single", "latest"):
         headers.update({"x-flow-normalized-selection": "single" if case == "single" else "latest-uploaded",
             "x-flow-normalized-candidate-count": "1" if case == "single" else "2"})
+        headers.pop("x-flow-pcf-revision")
+    if case == "missing_revision":
+        headers.pop("x-flow-pcf-revision")
     if case == "wrong_date":
         headers["x-flow-trade-date"] = "2026-09-20"
     if case == "wrong_key":
@@ -145,7 +151,8 @@ def test_exact_probe_uses_formal_selection_without_reading_body(case, expected):
         source="szse", dataset="etf_scale", headers={}, attempts=1, strict_selection=True)
     assert result["status"] == expected
     if expected == "ready":
-        assert result["selection"] == case
+        assert result["selection"] == ("indexed" if case == "indexed" else "single")
+        assert result["candidateCount"] == (None if case == "indexed" else 1)
     assert session.calls == 1 and reply.closed
 
 
