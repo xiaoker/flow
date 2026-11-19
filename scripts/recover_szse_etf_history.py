@@ -8,12 +8,26 @@ trade date and a normalized CSV that can be checked before publication.
 This is deliberately a source-recovery tool, not a derived-value generator:
 shares are parsed from the exchange's ``current_size`` value in ten-thousand
 fund units and the original response is retained verbatim in the raw JSON.
+
+Transport requires curl >=8.4 (streaming max-filesize). Defaults bound one
+invocation to one hour, 2 MB per response and 100 MB including unknown response
+reservations; cached response files have a separate 100 MB aggregate read cap.
+--max-requests also counts host fallback and the failed-code pass. A nonblocking
+POSIX OS lock prevents concurrent invocations from sharing one output directory.
+Exact cache contracts bind code/date scope and official endpoints. Legacy
+caches without that contract are preserved but rejected: use a new output
+directory, never bless an old cache by editing its metadata. Local request
+telemetry is not shared production accounting or authorization to retry.
+These are source-capture bounds, not proof of historical ETF-universe coverage,
+NAV availability, final composite-artifact capacity, QA or publication readiness.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import html
 import json
@@ -21,11 +35,17 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl; fail closed before source requests.
+    fcntl = None
 
 import requests
 
@@ -53,28 +73,91 @@ CODE_RE = re.compile(r"\d{6}")
 class RequestBudget:
     """Bound and pace every top-level exchange request in this helper."""
 
-    def __init__(self, maximum: int | None, min_interval_seconds: float) -> None:
+    def __init__(self, maximum: int | None, min_interval_seconds: float, *,
+                 max_duration_seconds: float = 3600, max_response_bytes: int = 2_000_000,
+                 max_total_response_bytes: int = 100_000_000,
+                 max_total_cached_bytes: int = 100_000_000) -> None:
         if maximum is not None and maximum <= 0:
             raise ValueError("max_requests must be positive")
         if not math.isfinite(min_interval_seconds) or min_interval_seconds < 0:
             raise ValueError("min_interval_seconds must be non-negative")
+        if not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0:
+            raise ValueError("max_duration_seconds must be positive and finite")
+        if (type(max_response_bytes) is not int or max_response_bytes <= 0
+                or type(max_total_response_bytes) is not int or max_total_response_bytes < max_response_bytes
+                or type(max_total_cached_bytes) is not int or max_total_cached_bytes <= 0):
+            raise ValueError("invalid_response_byte_bounds")
         self.maximum = maximum
         self.min_interval_seconds = min_interval_seconds
         self.request_count = 0
-        self._last_request_at = 0.0
+        self._last_request_at: float | None = None
         self._lock = threading.Lock()
         self._active_host: str | None = None
+        self.deadline = time.monotonic() + max_duration_seconds
+        self.max_response_bytes = max_response_bytes
+        self.max_total_response_bytes = max_total_response_bytes
+        self.max_total_cached_bytes = max_total_cached_bytes
+        self.response_bytes = 0
+        self.cached_bytes = 0
+        self.pending_responses: set[int] = set()
+        self.report_path: Path | None = None
 
-    def before_request(self) -> None:
+    def _persist(self) -> None:
+        if self.report_path is None:
+            return
+        value = {"requestCount": self.request_count, "maxRequests": self.maximum,
+                 "observedResponseBytes": self.response_bytes,
+                 "unknownResponseBytesReserved": len(self.pending_responses) * self.max_response_bytes,
+                 "pendingAttempts": sorted(self.pending_responses),
+                 "maxTotalResponseBytes": self.max_total_response_bytes,
+                 "cachedFileBytes": self.cached_bytes,
+                 "maxTotalCachedBytes": self.max_total_cached_bytes,
+                 "note": "Local invocation telemetry, not shared production budget or retry authorization"}
+        with tempfile.NamedTemporaryFile(mode="w", dir=self.report_path.parent, delete=False) as stream:
+            json.dump(value, stream)
+            temporary = stream.name
+        os.replace(temporary, self.report_path)
+
+    def remaining_seconds(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("recovery_deadline_exceeded")
+        return remaining
+
+    def finish_response(self, attempt: int, size: int) -> None:
         with self._lock:
+            if attempt not in self.pending_responses or not 0 <= size <= self.max_response_bytes:
+                raise RuntimeError("invalid_response_accounting")
+            self.pending_responses.remove(attempt)
+            self.response_bytes += size
+            self._persist()
+
+    def account_cached_file(self, size: int) -> None:
+        with self._lock:
+            if size < 0 or self.cached_bytes + size > self.max_total_cached_bytes:
+                raise RuntimeError("recovery_cache_budget_exceeded")
+            self.cached_bytes += size
+            self._persist()
+
+    def before_request(self) -> int:
+        with self._lock:
+            remaining = self.remaining_seconds()
             if self.maximum is not None and self.request_count >= self.maximum:
                 raise RuntimeError("recovery_request_budget_exceeded")
             now = time.monotonic()
-            delay = self.min_interval_seconds - (now - self._last_request_at)
+            delay = 0 if self._last_request_at is None else self.min_interval_seconds - (now - self._last_request_at)
             if delay > 0:
+                if delay >= remaining:
+                    raise RuntimeError("recovery_deadline_exceeded")
                 time.sleep(delay)
+            self.remaining_seconds()
+            if self.response_bytes + (len(self.pending_responses) + 1) * self.max_response_bytes > self.max_total_response_bytes:
+                raise RuntimeError("recovery_response_budget_exceeded")
             self.request_count += 1
             self._last_request_at = time.monotonic()
+            self.pending_responses.add(self.request_count)
+            self._persist()
+            return self.request_count
 
     def host_order(self) -> tuple[str, ...]:
         configured = os.environ.get(SZSE_HOST_ENV, "").strip()
@@ -119,6 +202,14 @@ def _session() -> requests.Session:
     return session
 
 
+@lru_cache(maxsize=1)
+def _require_bounded_curl() -> None:
+    result = subprocess.run(["curl", "--version"], capture_output=True, text=True, timeout=5)
+    match = re.match(r"curl (\d+)\.(\d+)\.(\d+)", result.stdout)
+    if result.returncode or not match or tuple(map(int, match.groups())) < (8, 4, 0):
+        raise RuntimeError("curl_8_4_required_for_streaming_response_bound")
+
+
 def _request_json(
     session: requests.Session,
     params: dict[str, str],
@@ -145,16 +236,12 @@ def _request_json(
             hosts = (preferred,) + tuple(host for host in SZSE_HOSTS if host != preferred)
     if any(host not in SZSE_HOSTS for host in hosts):
         raise RuntimeError("invalid_szse_host")
+    _require_bounded_curl()
+    budget = budget or RequestBudget(None, 0)
     failures: list[str] = []
     for host in hosts:
-        if budget is not None:
-            try:
-                budget.before_request()
-            except RuntimeError as exc:
-                if str(exc) == "recovery_request_budget_exceeded":
-                    failures.append("budget_exhausted")
-                    break
-                raise
+        attempt = budget.before_request()
+        timeout = min(30.0, budget.remaining_seconds())
         command = [
             "curl",
             "--silent",
@@ -163,7 +250,7 @@ def _request_json(
             "--retry",
             "0",
             "--max-time",
-            "30",
+            str(timeout),
             "-A",
             "Mozilla/5.0",
             "-H",
@@ -177,18 +264,32 @@ def _request_json(
         endpoint = _report_url(host)
         command.append(endpoint)
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+            # Curl >=8.4 enforces max-filesize while streaming, including when
+            # Content-Length is absent. File output avoids unbounded stdout.
+            with tempfile.TemporaryDirectory(prefix="flow-szse-response-") as directory:
+                body_path = Path(directory) / "response.json"
+                command[-1:-1] = ["--max-filesize", str(budget.max_response_bytes), "--output", str(body_path)]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+                size = body_path.stat().st_size if body_path.exists() else 0
+                if size > budget.max_response_bytes or result.returncode == 63:
+                    raise RuntimeError("recovery_response_size_exceeded")
+                if result.returncode == 0:
+                    budget.finish_response(attempt, size)
+                # Failure/timeout leaves the response reservation occupied:
+                # a missing local body is not proof of zero wire consumption.
+                content = body_path.read_bytes() if body_path.exists() else b""
         except subprocess.TimeoutExpired:
             failures.append(f"{host}:timeout")
             continue
         except OSError:
             failures.append(f"{host}:unavailable")
             continue
+        budget.remaining_seconds()
         if result.returncode != 0:
             failures.append(f"{host}:exit={result.returncode}")
             continue
         try:
-            payload = json.loads(result.stdout)
+            payload = json.loads(content)
         except json.JSONDecodeError:
             failures.append(f"{host}:invalid_json")
             continue
@@ -317,7 +418,56 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def main() -> None:
+def _cache_contract(root: Path, codes: list[str], dates: list[str]) -> None:
+    """Reject incompatible resumes rather than treating code.json as identity."""
+    contract = {"version": "szse-history-cache-v1", "codes": codes, "dates": dates,
+                "start": dates[0], "end": dates[-1], "officialUrls": sorted([REPORT_URL, WWW_REPORT_URL])}
+    path = root / "cache-contract.json"
+    if path.is_symlink() or (root / "responses").is_symlink():
+        raise ValueError("historical_cache_path_invalid")
+    if path.exists():
+        if path.stat().st_size > 1_000_000 or json.loads(path.read_bytes()) != contract:
+            raise ValueError("historical_cache_contract_mismatch")
+    else:
+        if any((root / "responses").iterdir()):
+            raise ValueError("historical_cache_contract_missing")
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(contract, stream, ensure_ascii=False, sort_keys=True)
+
+
+@contextmanager
+def _exclusive_output_lock(root: Path):
+    """Prevent two processes from sharing a mutable recovery/cache directory."""
+    if fcntl is None:
+        raise RuntimeError("historical_output_lock_unsupported")
+    path = root / ".flow-recovery.lock"
+    with path.open("a+b") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("historical_output_already_in_use") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _load_cached_history(path: Path, code: str, start: str, end: str, limit: int,
+                         *, budget: RequestBudget | None = None) -> dict[str, Any]:
+    if path.is_symlink() or path.stat().st_size > limit * 2 + 4096:
+        raise ValueError("historical_cache_size_or_path_invalid")
+    size = path.stat().st_size
+    if budget is not None:
+        budget.account_cached_file(size)
+    value = json.loads(path.read_bytes())
+    if (not isinstance(value, dict) or value.get("request") != {"code": code, "start": start, "end": end}
+            or value.get("source_url") not in {REPORT_URL, WWW_REPORT_URL}
+            or not isinstance(value.get("response"), list)):
+        raise ValueError("historical_cache_identity_mismatch")
+    return value
+
+
+def _run_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dates", nargs="+", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -325,6 +475,10 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--max-requests", type=int)
     parser.add_argument("--min-interval", type=float, default=0.5)
+    parser.add_argument("--max-duration", type=float, default=3600)
+    parser.add_argument("--max-response-bytes", type=int, default=2_000_000)
+    parser.add_argument("--max-total-response-bytes", type=int, default=100_000_000)
+    parser.add_argument("--max-total-cached-bytes", type=int, default=100_000_000)
     args = parser.parse_args()
     dates = sorted(set(args.dates))
     if not dates or any(not DATE_RE.fullmatch(value) for value in dates):
@@ -334,7 +488,13 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     response_root = output_root / "responses"
     response_root.mkdir(parents=True, exist_ok=True)
-    budget = RequestBudget(args.max_requests, args.min_interval)
+    budget = RequestBudget(args.max_requests, args.min_interval, max_duration_seconds=args.max_duration,
+                           max_response_bytes=args.max_response_bytes,
+                           max_total_response_bytes=args.max_total_response_bytes,
+                           max_total_cached_bytes=args.max_total_cached_bytes)
+    with tempfile.NamedTemporaryFile(prefix="request-budget-", suffix=".json", dir=output_root, delete=False) as report:
+        budget.report_path = Path(report.name)
+    budget._persist()
 
     overrides = _load_code_overrides(args.code_overrides)
     # A D1 export from the last known release is a safer and much cheaper
@@ -348,12 +508,17 @@ def main() -> None:
     if codes is not overrides:
         codes.update(overrides)
     ordered_codes = sorted(codes)
+    _cache_contract(output_root, ordered_codes, dates)
     responses: dict[str, dict[str, Any]] = {}
     pending_codes: list[str] = []
     for code in ordered_codes:
+        budget.remaining_seconds()
         cache = response_root / f"{code}.json"
+        if cache.is_symlink():
+            raise ValueError("historical_cache_size_or_path_invalid")
         if cache.is_file():
-            responses[code] = json.loads(cache.read_text(encoding="utf-8"))
+            responses[code] = _load_cached_history(cache, code, start_date, end_date, budget.max_response_bytes,
+                                                   budget=budget)
         else:
             pending_codes.append(code)
     print(
@@ -376,9 +541,8 @@ def main() -> None:
             code = futures[future]
             try:
                 future.result()
-                responses[code] = json.loads(
-                    (response_root / f"{code}.json").read_text(encoding="utf-8")
-                )
+                responses[code] = _load_cached_history(response_root / f"{code}.json", code, start_date, end_date,
+                                                       budget.max_response_bytes, budget=budget)
             except Exception as exc:
                 failed.append(code)
                 print(f"deferred {code}: {exc}", flush=True)
@@ -390,7 +554,7 @@ def main() -> None:
     # The exchange occasionally rejects a burst of connections.  Retry failed
     # codes at a low rate rather than silently publishing an incomplete set.
     for code in failed:
-        time.sleep(0.25)
+        budget.remaining_seconds()
         _, payload = _historical_response(code, start_date, end_date, budget=budget)
         (response_root / f"{code}.json").write_text(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
@@ -409,9 +573,11 @@ def main() -> None:
     transport_page_url = _page_url(transport_host)
     artifacts: list[dict[str, Any]] = []
     for trade_date in dates:
+        budget.remaining_seconds()
         rows: list[dict[str, Any]] = []
         raw_rows: list[dict[str, Any]] = []
         for code in ordered_codes:
+            budget.remaining_seconds()
             payload = responses[code]
             response = payload["response"]
             raw_rows.append(payload)
@@ -460,6 +626,7 @@ def main() -> None:
             "responses": raw_rows,
         }
         raw_content = json.dumps(raw_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        budget.remaining_seconds()
         digest = hashlib.sha256(raw_content).hexdigest()
         directory = output_root / trade_date
         directory.mkdir(parents=True, exist_ok=True)
@@ -528,6 +695,14 @@ def main() -> None:
         "requestCount": budget.request_count,
         "maxRequests": args.max_requests,
         "minIntervalSeconds": args.min_interval,
+        "maxDurationSeconds": args.max_duration,
+        "maxResponseBytes": budget.max_response_bytes,
+        "maxTotalResponseBytes": budget.max_total_response_bytes,
+        "maxTotalCachedBytes": budget.max_total_cached_bytes,
+        "cachedFileBytes": budget.cached_bytes,
+        "observedResponseBytes": budget.response_bytes,
+        "unknownResponseBytesReserved": len(budget.pending_responses) * budget.max_response_bytes,
+        "requestBudgetReport": str(budget.report_path),
     }
     (output_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
@@ -542,6 +717,21 @@ def main() -> None:
             ensure_ascii=False,
         )
     )
+
+
+def main() -> None:
+    # Parse only the output path first, then hold a process lock for the entire
+    # invocation. The full parser still owns all option validation and help.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--output-root", type=Path)
+    args, _ = parser.parse_known_args()
+    if args.output_root is None:
+        _run_main()
+        return
+    output_root = args.output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    with _exclusive_output_lock(output_root):
+        _run_main()
 
 
 if __name__ == "__main__":
