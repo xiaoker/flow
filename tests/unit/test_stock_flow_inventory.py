@@ -55,6 +55,7 @@ def test_exact_inventory_probes_only_requested_slots_without_dates_or_pcf(tmp_pa
     inventory.main()
     assert [(c["source"], c["dataset"], c["attempts"]) for c in calls] == [("sse", "etf_scale", 1), ("szse", "etf_scale", 1)]
     assert len(json.loads(output.read_text())["slots"]) == 2
+    assert all(c["strict_selection"] is True for c in calls)
 
 
 def test_probe_does_not_follow_redirects_or_read_response_body() -> None:
@@ -80,7 +81,7 @@ def test_probe_does_not_follow_redirects_or_read_response_body() -> None:
     assert reply.closed
 
 
-@pytest.mark.parametrize("status", ["error", "invalid_metadata"])
+@pytest.mark.parametrize("status", ["error", "invalid_metadata", "ambiguous"])
 def test_exact_inventory_stops_on_unknown_and_preserves_unprobed_scope(tmp_path, monkeypatch, status) -> None:
     import json
     import sys
@@ -102,6 +103,50 @@ def test_exact_inventory_stops_on_unknown_and_preserves_unprobed_scope(tmp_path,
     assert report["complete"] is False
     assert len(report["requestedSlots"]) == 2
     assert len(report["slots"]) == 1
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("indexed", "ready"), ("single", "ready"), ("latest", "invalid_metadata"),
+    ("wrong_date", "invalid_metadata"), ("wrong_key", "invalid_metadata"),
+    ("ambiguous", "ambiguous"), ("missing", "missing"),
+])
+def test_exact_probe_uses_formal_selection_without_reading_body(case, expected):
+    from scripts.inventory_stock_flow_inputs import _probe
+    headers = {"x-flow-normalized-sha256": "a" * 64,
+        "x-flow-normalized-key": "market-data/normalized/szse/etf_scale/2026-09-21/" + "b" * 64 + "/data.csv",
+        "x-flow-trade-date": "2026-09-21", "x-flow-pcf-revision": "b" * 64}
+    if case in ("single", "latest"):
+        headers.update({"x-flow-normalized-selection": "single" if case == "single" else "latest-uploaded",
+            "x-flow-normalized-candidate-count": "1" if case == "single" else "2"})
+    if case == "wrong_date":
+        headers["x-flow-trade-date"] = "2026-09-20"
+    if case == "wrong_key":
+        headers["x-flow-normalized-key"] = headers["x-flow-normalized-key"].replace("szse", "sse")
+    class Reply:
+        status_code = 409 if case == "ambiguous" else 404 if case == "missing" else 200
+        ok = status_code == 200
+        closed = False
+        @property
+        def content(self):
+            pytest.fail("metadata probe must never read response bodies")
+        def close(self):
+            self.closed = True
+    reply = Reply()
+    reply.headers = headers
+    class Session:
+        calls = 0
+        def get(self, endpoint, **kwargs):
+            self.calls += 1
+            assert kwargs["params"]["selection"] == "indexed-or-single"
+            assert kwargs["stream"] and not kwargs["allow_redirects"]
+            return reply
+    session = Session()
+    result = _probe(session, endpoint="https://flow.xiaoker.com", date_value="2026-09-21",
+        source="szse", dataset="etf_scale", headers={}, attempts=1, strict_selection=True)
+    assert result["status"] == expected
+    if expected == "ready":
+        assert result["selection"] == case
+    assert session.calls == 1 and reply.closed
 
 
 def test_exact_workflow_skips_date_scan_and_pcf_without_shell_interpolation() -> None:
