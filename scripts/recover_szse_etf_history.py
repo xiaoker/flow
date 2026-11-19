@@ -11,7 +11,9 @@ fund units and the original response is retained verbatim in the raw JSON.
 
 Transport requires curl >=8.4 (streaming max-filesize). Defaults bound one
 invocation to one hour, 2 MB per response and 100 MB including unknown response
-reservations; --max-requests also counts host fallback and the failed-code pass.
+reservations; cached response files have a separate 100 MB aggregate read cap.
+--max-requests also counts host fallback and the failed-code pass. A nonblocking
+POSIX OS lock prevents concurrent invocations from sharing one output directory.
 Exact cache contracts bind code/date scope and official endpoints. Legacy
 caches without that contract are preserved but rejected: use a new output
 directory, never bless an old cache by editing its metadata. Local request
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import contextmanager
 from functools import lru_cache
 import hashlib
 import html
@@ -38,6 +41,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl; fail closed before source requests.
+    fcntl = None
 
 import requests
 
@@ -67,7 +75,8 @@ class RequestBudget:
 
     def __init__(self, maximum: int | None, min_interval_seconds: float, *,
                  max_duration_seconds: float = 3600, max_response_bytes: int = 2_000_000,
-                 max_total_response_bytes: int = 100_000_000) -> None:
+                 max_total_response_bytes: int = 100_000_000,
+                 max_total_cached_bytes: int = 100_000_000) -> None:
         if maximum is not None and maximum <= 0:
             raise ValueError("max_requests must be positive")
         if not math.isfinite(min_interval_seconds) or min_interval_seconds < 0:
@@ -75,7 +84,8 @@ class RequestBudget:
         if not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0:
             raise ValueError("max_duration_seconds must be positive and finite")
         if (type(max_response_bytes) is not int or max_response_bytes <= 0
-                or type(max_total_response_bytes) is not int or max_total_response_bytes < max_response_bytes):
+                or type(max_total_response_bytes) is not int or max_total_response_bytes < max_response_bytes
+                or type(max_total_cached_bytes) is not int or max_total_cached_bytes <= 0):
             raise ValueError("invalid_response_byte_bounds")
         self.maximum = maximum
         self.min_interval_seconds = min_interval_seconds
@@ -86,7 +96,9 @@ class RequestBudget:
         self.deadline = time.monotonic() + max_duration_seconds
         self.max_response_bytes = max_response_bytes
         self.max_total_response_bytes = max_total_response_bytes
+        self.max_total_cached_bytes = max_total_cached_bytes
         self.response_bytes = 0
+        self.cached_bytes = 0
         self.pending_responses: set[int] = set()
         self.report_path: Path | None = None
 
@@ -98,6 +110,8 @@ class RequestBudget:
                  "unknownResponseBytesReserved": len(self.pending_responses) * self.max_response_bytes,
                  "pendingAttempts": sorted(self.pending_responses),
                  "maxTotalResponseBytes": self.max_total_response_bytes,
+                 "cachedFileBytes": self.cached_bytes,
+                 "maxTotalCachedBytes": self.max_total_cached_bytes,
                  "note": "Local invocation telemetry, not shared production budget or retry authorization"}
         with tempfile.NamedTemporaryFile(mode="w", dir=self.report_path.parent, delete=False) as stream:
             json.dump(value, stream)
@@ -116,6 +130,13 @@ class RequestBudget:
                 raise RuntimeError("invalid_response_accounting")
             self.pending_responses.remove(attempt)
             self.response_bytes += size
+            self._persist()
+
+    def account_cached_file(self, size: int) -> None:
+        with self._lock:
+            if size < 0 or self.cached_bytes + size > self.max_total_cached_bytes:
+                raise RuntimeError("recovery_cache_budget_exceeded")
+            self.cached_bytes += size
             self._persist()
 
     def before_request(self) -> int:
@@ -414,9 +435,30 @@ def _cache_contract(root: Path, codes: list[str], dates: list[str]) -> None:
             json.dump(contract, stream, ensure_ascii=False, sort_keys=True)
 
 
-def _load_cached_history(path: Path, code: str, start: str, end: str, limit: int) -> dict[str, Any]:
+@contextmanager
+def _exclusive_output_lock(root: Path):
+    """Prevent two processes from sharing a mutable recovery/cache directory."""
+    if fcntl is None:
+        raise RuntimeError("historical_output_lock_unsupported")
+    path = root / ".flow-recovery.lock"
+    with path.open("a+b") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("historical_output_already_in_use") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _load_cached_history(path: Path, code: str, start: str, end: str, limit: int,
+                         *, budget: RequestBudget | None = None) -> dict[str, Any]:
     if path.is_symlink() or path.stat().st_size > limit * 2 + 4096:
         raise ValueError("historical_cache_size_or_path_invalid")
+    size = path.stat().st_size
+    if budget is not None:
+        budget.account_cached_file(size)
     value = json.loads(path.read_bytes())
     if (not isinstance(value, dict) or value.get("request") != {"code": code, "start": start, "end": end}
             or value.get("source_url") not in {REPORT_URL, WWW_REPORT_URL}
@@ -425,7 +467,7 @@ def _load_cached_history(path: Path, code: str, start: str, end: str, limit: int
     return value
 
 
-def main() -> None:
+def _run_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dates", nargs="+", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -436,6 +478,7 @@ def main() -> None:
     parser.add_argument("--max-duration", type=float, default=3600)
     parser.add_argument("--max-response-bytes", type=int, default=2_000_000)
     parser.add_argument("--max-total-response-bytes", type=int, default=100_000_000)
+    parser.add_argument("--max-total-cached-bytes", type=int, default=100_000_000)
     args = parser.parse_args()
     dates = sorted(set(args.dates))
     if not dates or any(not DATE_RE.fullmatch(value) for value in dates):
@@ -447,7 +490,8 @@ def main() -> None:
     response_root.mkdir(parents=True, exist_ok=True)
     budget = RequestBudget(args.max_requests, args.min_interval, max_duration_seconds=args.max_duration,
                            max_response_bytes=args.max_response_bytes,
-                           max_total_response_bytes=args.max_total_response_bytes)
+                           max_total_response_bytes=args.max_total_response_bytes,
+                           max_total_cached_bytes=args.max_total_cached_bytes)
     with tempfile.NamedTemporaryFile(prefix="request-budget-", suffix=".json", dir=output_root, delete=False) as report:
         budget.report_path = Path(report.name)
     budget._persist()
@@ -473,7 +517,8 @@ def main() -> None:
         if cache.is_symlink():
             raise ValueError("historical_cache_size_or_path_invalid")
         if cache.is_file():
-            responses[code] = _load_cached_history(cache, code, start_date, end_date, budget.max_response_bytes)
+            responses[code] = _load_cached_history(cache, code, start_date, end_date, budget.max_response_bytes,
+                                                   budget=budget)
         else:
             pending_codes.append(code)
     print(
@@ -496,7 +541,8 @@ def main() -> None:
             code = futures[future]
             try:
                 future.result()
-                responses[code] = _load_cached_history(response_root / f"{code}.json", code, start_date, end_date, budget.max_response_bytes)
+                responses[code] = _load_cached_history(response_root / f"{code}.json", code, start_date, end_date,
+                                                       budget.max_response_bytes, budget=budget)
             except Exception as exc:
                 failed.append(code)
                 print(f"deferred {code}: {exc}", flush=True)
@@ -652,6 +698,8 @@ def main() -> None:
         "maxDurationSeconds": args.max_duration,
         "maxResponseBytes": budget.max_response_bytes,
         "maxTotalResponseBytes": budget.max_total_response_bytes,
+        "maxTotalCachedBytes": budget.max_total_cached_bytes,
+        "cachedFileBytes": budget.cached_bytes,
         "observedResponseBytes": budget.response_bytes,
         "unknownResponseBytesReserved": len(budget.pending_responses) * budget.max_response_bytes,
         "requestBudgetReport": str(budget.report_path),
@@ -669,6 +717,21 @@ def main() -> None:
             ensure_ascii=False,
         )
     )
+
+
+def main() -> None:
+    # Parse only the output path first, then hold a process lock for the entire
+    # invocation. The full parser still owns all option validation and help.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--output-root", type=Path)
+    args, _ = parser.parse_known_args()
+    if args.output_root is None:
+        _run_main()
+        return
+    output_root = args.output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    with _exclusive_output_lock(output_root):
+        _run_main()
 
 
 if __name__ == "__main__":

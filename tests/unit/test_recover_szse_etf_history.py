@@ -93,6 +93,7 @@ def test_szse_history_request_rejects_invalid_configured_host(monkeypatch) -> No
     {'max_duration_seconds': 0}, {'max_duration_seconds': float('nan')},
     {'max_response_bytes': 0}, {'max_response_bytes': True},
     {'max_response_bytes': 10, 'max_total_response_bytes': 9},
+    {'max_total_cached_bytes': 0}, {'max_total_cached_bytes': True},
 ])
 def test_invalid_transport_bounds(kwargs):
     with pytest.raises(ValueError):
@@ -125,6 +126,32 @@ def test_response_reservations_prevent_concurrent_overcommit():
     assert budget.response_bytes == 3 and len(budget.pending_responses) == 1
     with pytest.raises(RuntimeError, match='accounting'):
         budget.finish_response(a, 0)
+
+
+def test_cached_file_reads_have_an_aggregate_bound(tmp_path):
+    path = tmp_path / 'cached.json'
+    body = {'request': {'code': '159915', 'start': '2026-08-28', 'end': '2026-09-28'},
+            'source_url': history.REPORT_URL, 'response': []}
+    path.write_text(json.dumps(body))
+    size = path.stat().st_size
+    budget = RequestBudget(10, 0, max_response_bytes=1000, max_total_cached_bytes=size)
+    assert history._load_cached_history(path, '159915', '2026-08-28', '2026-09-28', 1000,
+                                        budget=budget) == body
+    assert budget.cached_bytes == size
+    with pytest.raises(RuntimeError, match='cache_budget_exceeded'):
+        history._load_cached_history(path, '159915', '2026-08-28', '2026-09-28', 1000,
+                                     budget=budget)
+    assert budget.cached_bytes == size
+
+
+def test_output_root_lock_rejects_a_second_invocation_before_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['recover', '--output-root', str(tmp_path)])
+    with history._exclusive_output_lock(tmp_path):
+        with pytest.raises(RuntimeError, match='output_already_in_use'):
+            history.main()
+    assert not list(tmp_path.glob('request-budget-*.json'))
+    with history._exclusive_output_lock(tmp_path):
+        pass
 
 
 def test_cache_contract_binds_dates_codes_and_preserves_old_files(tmp_path):
@@ -296,9 +323,17 @@ def test_full_multidate_capture_reuses_verified_cache_without_refetch(tmp_path, 
     assert len(calls) == 500 and len(set((s, e) for _, s, e in calls)) == 1
     manifest = json.loads((tmp_path / 'manifest.json').read_text())
     assert manifest['requestCount'] == 500 and len(manifest['artifacts']) == 2
+    assert manifest['cachedFileBytes'] == sum(path.stat().st_size for path in (tmp_path / 'responses').glob('*.json'))
     monkeypatch.setattr(history, '_historical_response', lambda *a, **k: pytest.fail('cache must avoid HTTP'))
     history.main()
-    assert json.loads((tmp_path / 'manifest.json').read_text())['requestCount'] == 0
+    manifest = json.loads((tmp_path / 'manifest.json').read_text())
+    assert manifest['requestCount'] == 0 and manifest['cachedFileBytes'] > 0
+    monkeypatch.setattr(sys, 'argv', [*sys.argv, '--max-total-cached-bytes', '1'])
+    with pytest.raises(RuntimeError, match='cache_budget_exceeded'):
+        history.main()
+    monkeypatch.setattr(sys, 'argv', [
+        'recover', '--dates', '2026-08-28', '2026-09-01', '--output-root', str(tmp_path),
+        '--min-interval', '0', '--max-requests', '500', '--workers', '1'])
     cache = tmp_path / 'responses/159000.json'
     value = json.loads(cache.read_text());value['request']['start'] = '2026-08-27';cache.write_text(json.dumps(value))
     with pytest.raises(ValueError, match='identity_mismatch'):
