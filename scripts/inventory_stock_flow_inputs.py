@@ -5,6 +5,11 @@ export whether an immutable normalized object exists for each date, records
 its SHA/key/candidate count, and closes the response without reading the body.
 This lets a bounded stock-flow backfill choose real dates before any larger
 payload is fetched or any derived partition is published.
+
+Exact-slot mode uses the reconstruction path's indexed-or-single selection:
+an ambiguous 409 stops the bounded inventory instead of accepting the legacy
+latest-uploaded diagnostic choice. Metadata readiness is not byte verification,
+official provenance, historical-universe completeness or publication approval.
 """
 
 from __future__ import annotations
@@ -62,8 +67,11 @@ def _probe(
     dataset: str,
     headers: dict[str, str],
     attempts: int,
+    strict_selection: bool = False,
 ) -> dict[str, Any]:
     params = {"date": date_value, "source": source, "dataset": dataset, "file": "data"}
+    if strict_selection:
+        params["selection"] = "indexed-or-single"
     last_error = "not_requested"
     last_code = None
     for attempt in range(attempts):
@@ -71,6 +79,9 @@ def _probe(
             response = session.get(endpoint, params=params, headers=headers, timeout=(10, 45), stream=True, allow_redirects=False)
             try:
                 last_code = response.status_code
+                if strict_selection and last_code == 409:
+                    return {"status": "ambiguous", "code": 409,
+                            "selectionPolicy": "indexed-or-single"}
                 result: dict[str, Any] = {
                     "status": "ready" if response.ok else "missing" if response.status_code == 404 else "error",
                     "code": response.status_code,
@@ -86,6 +97,22 @@ def _probe(
                     continue
                 if not result["sha256"] or not result["key"]:
                     return {**result, "status": "invalid_metadata", "detail": "missing lineage headers"}
+                if strict_selection:
+                    digest = result["sha256"]
+                    key = result["key"]
+                    revision = response.headers.get("x-flow-pcf-revision", "")
+                    selection = response.headers.get("x-flow-normalized-selection")
+                    count = response.headers.get("x-flow-normalized-candidate-count")
+                    valid_identity = (re.fullmatch(r"[a-f0-9]{64}", digest) is not None
+                        and re.fullmatch(r"market-data/normalized/" + re.escape(source)
+                            + r"/etf_scale/(?:" + re.escape(date_value) + "|"
+                            + date_value.replace("-", "") + r")/[a-f0-9]{64}/data\.csv", key) is not None
+                        and response.headers.get("x-flow-trade-date") == date_value)
+                    indexed = count is None and selection is None and re.fullmatch(r"[a-f0-9]{64}", revision)
+                    single = count == "1" and selection == "single"
+                    if not valid_identity or not (indexed or single):
+                        return {**result, "status": "invalid_metadata", "detail": "unproven strict selection"}
+                    result.update(selectionPolicy="indexed-or-single", selection="indexed" if indexed else "single")
                 return result
             finally:
                 response.close()
@@ -131,7 +158,8 @@ def main() -> None:
                   "requestedSlots": slots, "complete": False, "slots": []}
         for slot in slots:
             result = _probe(session, endpoint=endpoint, date_value=slot["date"],
-                            source=slot["source"], dataset="etf_scale", headers=headers, attempts=1)
+                            source=slot["source"], dataset="etf_scale", headers=headers, attempts=1,
+                            strict_selection=True)
             report["slots"].append({**slot, **result})
             if result["status"] not in ("ready", "missing"):
                 break  # Unknown/auth is evidence, not permission to expand scope or retry.
