@@ -8,10 +8,13 @@ from pathlib import Path
 
 from .pipeline_adapters import PipelineAdapterError, _atomic_json
 from .pipeline_application import canonical_sha256
-from .pipeline_build_adapter import CoreReadModelBuildAdapter, MAX_FILES, MAX_OUTPUT_BYTES, MAX_INPUT_BYTES, _read
+from .pipeline_build_adapter import (CoreReadModelBuildAdapter, MAX_FILES, MAX_OUTPUT_BYTES,
+    MAX_INPUT_BYTES, MAX_REPLAY_BUNDLE_BYTES, MAX_REPLAY_INPUT_BYTES,
+    _read, _snapshot_input_bundle_limit, _snapshot_input_limit)
 
 RECEIPT_LIMIT = 65536
 MAX_SAVED_BYTES = MAX_OUTPUT_BYTES + MAX_INPUT_BYTES + RECEIPT_LIMIT
+MAX_REPLAY_SAVED_BYTES = MAX_OUTPUT_BYTES + MAX_REPLAY_BUNDLE_BYTES + RECEIPT_LIMIT
 
 
 def _verified_build(directory, identity, config, input_sha256):
@@ -24,16 +27,20 @@ def _verified_build(directory, identity, config, input_sha256):
     if not CoreReadModelBuildAdapter(directory / "input-snapshot.json").verify_checkpoint(
             checkpoint=checkpoint, identity=identity, workspace=directory):
         raise PipelineAdapterError("verify_build_checkpoint_invalid")
+    snapshot_path = directory / "input-snapshot.json"
+    snapshot = _read(snapshot_path, _snapshot_input_limit(snapshot_path))
+    maximum_saved_bytes = (MAX_REPLAY_SAVED_BYTES
+        if _snapshot_input_bundle_limit(snapshot) > MAX_INPUT_BYTES else MAX_SAVED_BYTES)
     manifest = json.loads(_read(directory / "manifest.json", RECEIPT_LIMIT))
     if not isinstance(manifest.get("publication"), dict) or manifest["publication"].get("status") != "confirmed":
         raise PipelineAdapterError("verify_publication_not_confirmed")
     files = {}
     total = 0
     for path in islice(directory.iterdir(), MAX_FILES + 1):
-        content = _read(path, MAX_SAVED_BYTES - total)
+        content = _read(path, maximum_saved_bytes - total)
         total += len(content)
         files[path.name] = content
-    if len(files) > MAX_FILES or total > MAX_SAVED_BYTES:
+    if len(files) > MAX_FILES or total > maximum_saved_bytes:
         raise PipelineAdapterError("verify_input_budget_exceeded")
     result = {"status": "COMPLETED", "outputSha256": canonical_sha256({
             "buildOutputSha256": config["buildOutputSha256"], "inputSha256": input_sha256}),

@@ -1,6 +1,6 @@
 import base64
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import gzip
 import hashlib
 import io
@@ -12,7 +12,8 @@ import pytest
 from trading_desk.pipeline_application import canonical_sha256
 from trading_desk.pipeline_entry import (ARCHIVE_REPLAY_SOURCE_CONTRACT, archive_replay_source_binding,
     hydrate_archive_replay_source, prepare_workflow_inputs, prepare_core_candidate,
-    candidate_preparation_cost_upper, load_candidate_cost_policy)
+    candidate_preparation_cost_upper, load_candidate_cost_policy,
+    BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT)
 from trading_desk.pipeline_runner import PipelineRunnerError
 from trading_desk.read_models import canonical_json_bytes
 from trading_desk.bounded_http import BoundedHTTPExchange
@@ -66,10 +67,12 @@ class Reply:
 
 
 class ArchiveSession:
-    def __init__(self,base,rows,fault=None):
+    def __init__(self,base,rows,fault=None,sidecars=None):
         self.rows,self.calls,self.fault=rows,[],fault
         out=io.BytesIO()
-        with zipfile.ZipFile(out,"w") as z: z.writestr("dashboard-snapshot.json",base)
+        with zipfile.ZipFile(out,"w") as z:
+            z.writestr("dashboard-snapshot.json",base)
+            for name, content in (sidecars or {}).items(): z.writestr(name,content)
         self.archive=out.getvalue()
     def request(self,method,url,**kw):
         self.calls.append((method,url,kw))
@@ -108,8 +111,8 @@ def source_env(package,request,plan):
 def historical_replay_inputs(tmp_path):
     from test_etf_replay import scoped_source
     from test_read_models import _market_history
-    from trading_desk.read_models import build_market_read_models
     from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
+    from trading_desk.read_models import build_market_read_models
     package, request, path, plan, _, rows = replay_inputs(tmp_path)
     value = scoped_source()
     profile = value.pop('etfReplayInput')
@@ -135,6 +138,80 @@ def historical_replay_inputs(tmp_path):
         archive.writestr('previous-release.json', sidecars['previousManifestSha256'])
     transport.archive = out.getvalue()
     return package, request, plan, transport, sidecars
+
+
+def long_window_replay_inputs(tmp_path):
+    from test_etf_replay import scoped_source
+    from test_read_models import _market_history
+    from trading_desk.etf_replay import (BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT,
+        MAX_REPLAY_PARTITIONS, canonical_gzip)
+    from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
+    from trading_desk.read_models import build_market_read_models
+    package, request, path, plan, _, _ = replay_inputs(tmp_path)
+    target = request['identity']['targetDate']
+    reverse_dates = []
+    cursor = date.fromisoformat(target)
+    while len(reverse_dates) < MAX_REPLAY_PARTITIONS // 2:
+        if cursor.weekday() < 5:
+            reverse_dates.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    dates = list(reversed(reverse_dates))
+    value = scoped_source()
+    profile = value.pop('etfReplayInput')
+    profile['contractVersion'] = BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+    profile['scope'] = {'periods': ['12m'], 'metrics': ['shares']}
+    calendar = {'sourceId': 'sse_official_trading_calendar', 'sha256': 'a'*64,
+        'dates': dates, 'datesSha256': canonical_sha256(dates)}
+    archive_rows, replay_parts, recipe_parts = [], [], []
+    for index, day in enumerate(dates):
+        for market, code, name in (('sse', '510300', '沪深300ETF'),
+                                   ('szse', '159915', '创业板ETF')):
+            raw = (f'trade_date,market,instrument_code,instrument_name,shares\n'
+                   f'{day},{market.upper()},{code},{name},{100000000 + index * 100000}\n').encode()
+            digest = hashlib.sha256(raw).hexdigest()
+            key = f'market-data/normalized/{market}/etf_scale/{day}/{digest}/data.csv'
+            wire = canonical_gzip(raw)
+            archive_rows.append({'sourceId': market, 'tradeDate': day, 'objectKey': key,
+                'sha256': digest, 'contentBase64': base64.b64encode(raw).decode()})
+            recipe_parts.append({'sourceId': market, 'tradeDate': day, 'objectKey': key,
+                'sha256': digest, 'bytes': len(raw)})
+            replay_parts.append({'sourceId': market, 'tradeDate': day, 'objectKey': key,
+                'sha256': digest, 'sourceBytes': len(raw), 'contentEncoding': 'gzip',
+                'contentBase64': base64.b64encode(wire).decode()})
+    calendar_bytes = canonical_json_bytes(calendar)
+    base = canonical_json_bytes(value)
+    profile.update(calendar=calendar, partitions=replay_parts)
+    final = canonical_json_bytes({**value, 'etfReplayInput': profile})
+    history = _market_history(start='2026-08-05', count=2)
+    _, previous = build_market_read_models(value, market_history=history,
+        capability_contract_version=CAPABILITY_CONTRACT_VERSION)
+    sidecars = {'marketHistorySha256': canonical_json_bytes(history),
+        'previousManifestSha256': canonical_json_bytes({'manifest': previous})}
+    sidecar_hashes = {key: hashlib.sha256(data).hexdigest() for key, data in sidecars.items()}
+    recipe = {'contract': BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+        'baseSnapshotSha256': hashlib.sha256(base).hexdigest(),
+        'calendarSha256': hashlib.sha256(calendar_bytes).hexdigest(),
+        'calendarGzipBase64': base64.b64encode(gzip.compress(calendar_bytes, mtime=0)).decode(),
+        'partitions': recipe_parts, 'scope': profile['scope'], 'sidecars': sidecar_hashes,
+        'sourceBytes': sum(part['bytes'] for part in recipe_parts)}
+    request['archiveReplaySource'] = recipe
+    request['stageConfigs'] = {'build': {'snapshotSha256': hashlib.sha256(final).hexdigest(),
+        **sidecar_hashes}}
+    plan['budgetManifest']['archiveReplaySource'] = archive_replay_source_binding(recipe)
+    from trading_desk.pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile
+    policy = load_candidate_cost_policy(ROOT, profile=FreshRecoveryCandidateRequestProfile(
+        'a'*64, 7, recovery_id=plan['recoveryId'], plan_sha256=plan['planHash']))
+    extra = candidate_preparation_cost_upper(policy, archive_requests=len(recipe_parts))
+    plan['budgetManifest']['candidatePreparationUpperBound'] = extra.as_dict()
+    plan['budgetManifest']['taskCostUpperBound'] = policy['task'].add(extra).as_dict()
+    plan['maxRequests'] = max(plan['maxRequests'], int(plan['budgetManifest']['taskCostUpperBound']['workerRequests']['value']))
+    package['expiresAt'] = (datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+    rebind(package, request, plan)
+    path.write_bytes(base)
+    transport = ArchiveSession(base, archive_rows, sidecars={
+        'market-history.json': sidecars['marketHistorySha256'],
+        'previous-release.json': sidecars['previousManifestSha256']})
+    return package, request, plan, transport, sidecars, final, archive_rows
 
 
 def test_historical_inputs_survive_formal_source_graph_and_checkpoint_preflight(tmp_path, monkeypatch):
@@ -304,6 +381,77 @@ def test_archive_preparation_cost_is_reserved_once_for_both_attempts(tmp_path):
     bad=deepcopy(plan);bad["budgetManifest"]["archiveReplaySource"]["requestCount"]-=1
     with pytest.raises(PipelineRunnerError):
         load_candidate_cost_policy(ROOT,profile=FreshRecoveryCandidateRequestProfile("a"*64,7,**args),approved_recovery_plan=bad)
+
+
+def test_bounded_long_window_recipe_hydrates_506_exact_partitions_and_replays_12m(tmp_path, monkeypatch):
+    from trading_desk.etf_replay import MAX_REPLAY_PARTITIONS, MAX_REPLAY_INPUT_BYTES
+    package, request, plan, transport, _sidecars, final, rows = long_window_replay_inputs(tmp_path)
+    monkeypatch.setattr('trading_desk.http.build_session', lambda settings: transport)
+    destination = tmp_path/'prepared-long'
+    report = prepare_workflow_inputs(destination, artifact_id='17', source_run_id='9',
+        environment=source_env(package, request, plan))
+    actual = (destination/'dashboard-snapshot.json').read_bytes()
+    assert len(rows) == MAX_REPLAY_PARTITIONS == 506
+    assert len(actual) <= MAX_REPLAY_INPUT_BYTES
+    assert actual == final
+    assert report['sourceReadRequests'] == {'github': 3, 'archive': 506}
+    assert len(transport.calls) == 509
+    from trading_desk.pipeline_checkpoint_preflight import FreshRecoveryCandidateRequestProfile
+    profile = FreshRecoveryCandidateRequestProfile('a'*64, 7,
+        recovery_id=plan['recoveryId'], plan_sha256=plan['planHash'])
+    policy = load_candidate_cost_policy(ROOT, profile=profile, approved_recovery_plan=plan)
+    assert policy['task'].metrics['workerRequests'].value == 740 + 8 + 2*MAX_REPLAY_PARTITIONS
+    assert plan['maxRequests'] >= policy['task'].metrics['workerRequests'].value
+    graph, context, manifest = prepare_core_candidate(request,
+        snapshot_path=destination/'dashboard-snapshot.json', producer_build_sha=sha(),
+        dependency_lock_paths=[LOCK, RUNTIME_LOCK], project_root=ROOT, now=NOW)
+    capability = manifest['capabilityContract']['capabilities']['etf_periods']['periods']['12m']['shares']
+    assert capability['status'] == 'READY'
+    from trading_desk.pipeline_preparation import preflight_candidate_checkpoints
+    checkpoint_sizes = preflight_candidate_checkpoints(graph, context, destination/'dashboard-snapshot.json')
+    assert set(checkpoint_sizes) == {'build', 'verify'}
+    assert all(0 < size <= 1048576 for size in checkpoint_sizes.values())
+    from trading_desk.pipeline_entry import candidate_build_inputs
+    builder, _hashes, _content = candidate_build_inputs(destination/'dashboard-snapshot.json', request)
+    built = builder.run(context=context, input_sha256=graph['stageInputs']['build'],
+        config=graph['stageConfigs']['build'], workspace=tmp_path/'long-build')
+    checkpoint = {'identity': context.identity.as_dict(), 'stage': 'build', 'status': 'COMPLETED',
+        'inputSha256': graph['stageInputs']['build'], 'outputSha256': built['outputSha256']}
+    assert built['evidence']['publicationPerformed'] is False
+    assert builder.verify_checkpoint(context=context, checkpoint=checkpoint, workspace=tmp_path/'long-build')
+
+
+def test_bounded_long_archive_hydration_stops_at_preparation_expiry(tmp_path):
+    package, request, _plan, transport, _sidecars, final, _rows = long_window_replay_inputs(tmp_path)
+    base = json.loads(final)
+    base.pop('etfReplayInput')
+    with pytest.raises(PipelineRunnerError, match='entry_replay_preparation_expired'):
+        hydrate_archive_replay_source(base, request, exchange=BoundedHTTPExchange(transport),
+            environment=ENV, deadline_monotonic=0)
+    assert transport.calls == []
+
+
+def test_bounded_long_replay_missing_market_date_cannot_mark_12m_ready(tmp_path):
+    from trading_desk.etf_replay import replay_snapshot
+    _package, _request, _plan, _transport, _sidecars, final, _rows = long_window_replay_inputs(tmp_path)
+    snapshot = json.loads(final)
+    partitions = snapshot['etfReplayInput']['partitions']
+    assert len(partitions) == 506
+    partitions.pop(len(partitions) // 2)
+    with pytest.raises(ValueError, match='etf_replay_scoped_window_incomplete'):
+        replay_snapshot(snapshot)
+
+
+def test_bounded_long_window_source_bytes_are_bound_before_network(tmp_path, monkeypatch):
+    package, request, plan, _transport, _sidecars, _final, _rows = long_window_replay_inputs(tmp_path)
+    request['archiveReplaySource']['partitions'][0]['bytes'] += 1
+    package['requestSha256'] = canonical_sha256(request)
+    monkeypatch.setattr('trading_desk.http.build_session',
+        lambda settings: pytest.fail('invalid byte binding must fail before network'))
+    with pytest.raises(PipelineRunnerError, match='entry_replay'):
+        prepare_workflow_inputs(tmp_path/'bad-long', artifact_id='17', source_run_id='9',
+            environment=source_env(package, request, plan))
+    assert not (tmp_path/'bad-long').exists()
 
 
 def test_replay_scope_uses_existing_preparation_and_shared_budget(tmp_path):

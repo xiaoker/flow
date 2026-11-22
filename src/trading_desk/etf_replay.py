@@ -23,8 +23,30 @@ from .pipeline_application import canonical_sha256
 
 REPLAY_CONTRACT = "flow-etf-archive-replay-v0.8.0"
 SCOPED_REPLAY_CONTRACT = "flow-etf-scoped-replay-v0.8.1"
+COMPRESSED_REPLAY_CONTRACT = "flow-etf-archive-replay-v0.9.0"
+COMPRESSED_SCOPED_REPLAY_CONTRACT = "flow-etf-scoped-replay-v0.9.1"
+BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT = "flow-etf-scoped-replay-v0.9.2"
+# The existing product offers at most 252 official-session changes. A replay
+# needs one baseline snapshot plus each changed session, for both markets.
+MAX_REPLAY_PARTITIONS = 2 * (252 + 1)
 MAX_SOURCE_BYTES = 2_000_000
+MAX_COMPRESSED_PART_BYTES = 2_100_000
+MAX_REPLAY_TOTAL_SOURCE_BYTES = 64_000_000
+MAX_REPLAY_COMPRESSED_BYTES = 24_000_000
+MAX_REPLAY_INPUT_BYTES = 40 * 1024 * 1024
+# Preserve the old contract ceiling. Only v0.9.2 opts into the tighter
+# one-year product-window limit below.
 MAX_PARTITIONS = MAX_CALENDAR_DATES * 2
+
+
+def canonical_gzip(data: bytes) -> bytes:
+    """Stable gzip envelope for replay inputs across host operating systems."""
+    import gzip
+
+    output = io.BytesIO()
+    with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0, compresslevel=6) as stream:
+        stream.write(data)
+    return output.getvalue()
 
 
 def validate_replay_scope(scope: dict) -> dict:
@@ -70,9 +92,16 @@ def build_replay_daily_terminal(source, previous, day, left, right):
 
 def validated_replay_inputs(profile: dict, target: str):
     """Validate exact pinned canonical bytes without materializing a view."""
-    scoped = isinstance(profile, dict) and profile.get('contractVersion') == SCOPED_REPLAY_CONTRACT
+    contract = profile.get('contractVersion') if isinstance(profile, dict) else None
+    scoped = contract in {SCOPED_REPLAY_CONTRACT, COMPRESSED_SCOPED_REPLAY_CONTRACT,
+                          BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT}
+    compressed = contract in {COMPRESSED_REPLAY_CONTRACT, COMPRESSED_SCOPED_REPLAY_CONTRACT,
+                              BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT}
     keys = {'contractVersion', 'calendar', 'partitions'} | ({'scope'} if scoped else set())
-    if not isinstance(profile, dict) or set(profile) != keys or profile.get("contractVersion") not in {REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT}:
+    allowed_contracts = {REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT,
+                         COMPRESSED_REPLAY_CONTRACT, COMPRESSED_SCOPED_REPLAY_CONTRACT,
+                         BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT}
+    if not isinstance(profile, dict) or set(profile) != keys or contract not in allowed_contracts:
         raise ValueError("etf_replay_contract_invalid")
     if scoped:
         validate_replay_scope(profile['scope'])
@@ -81,13 +110,21 @@ def validated_replay_inputs(profile: dict, target: str):
         raise ValueError("etf_replay_target_not_in_calendar")
     dates = dates[:dates.index(target)+1]
     partitions = profile["partitions"]
-    if not isinstance(partitions, list) or not partitions or len(partitions)>MAX_PARTITIONS:
+    max_partitions = (MAX_REPLAY_PARTITIONS
+        if contract == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT else MAX_PARTITIONS)
+    if not isinstance(partitions, list) or not partitions or len(partitions)>max_partitions:
         raise ValueError("etf_replay_partitions_invalid")
     frames = {}
     evidence = []
-    total = 0
+    total_source = 0
+    total_compressed = 0
     for part in partitions:
-        if not isinstance(part, dict) or set(part) != {"sourceId", "tradeDate", "objectKey", "sha256", "contentBase64"}:
+        part_keys = {"sourceId", "tradeDate", "objectKey", "sha256", "contentBase64"}
+        if compressed:
+            part_keys.add("contentEncoding")
+        if contract == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT:
+            part_keys.add("sourceBytes")
+        if not isinstance(part, dict) or set(part) != part_keys:
             raise ValueError("etf_replay_partition_identity_invalid")
         source, day = part["sourceId"], part["tradeDate"]
         if not isinstance(source,str) or not isinstance(day,str) or source not in {"sse", "szse"} or day not in dates or (source,day) in frames:
@@ -99,12 +136,40 @@ def validated_replay_inputs(profile: dict, target: str):
         if not isinstance(encoded,str) or len(encoded)>2_800_000:
             raise ValueError("etf_replay_size_exceeded")
         try:
-            data = base64.b64decode(encoded,validate=True)
+            wire = base64.b64decode(encoded,validate=True)
         except ValueError:
             raise ValueError("etf_replay_bytes_invalid") from None
-        total += len(data)
-        if total>MAX_SOURCE_BYTES:
-            raise ValueError("etf_replay_size_exceeded")
+        if compressed:
+            import gzip
+
+            wire_limit = MAX_COMPRESSED_PART_BYTES if contract == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT else MAX_SOURCE_BYTES
+            if part.get("contentEncoding") != "gzip" or len(wire) > wire_limit:
+                raise ValueError("etf_replay_partition_encoding_invalid")
+            declared_bytes = None
+            if contract == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT:
+                declared_bytes = part.get("sourceBytes")
+                if type(declared_bytes) is not int or not 0 < declared_bytes <= MAX_SOURCE_BYTES:
+                    raise ValueError("etf_replay_partition_size_invalid")
+            total_compressed += len(wire)
+            if total_compressed > MAX_REPLAY_COMPRESSED_BYTES:
+                raise ValueError("etf_replay_size_exceeded")
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(wire)) as stream:
+                    data = stream.read(MAX_SOURCE_BYTES + 1)
+            except (OSError, EOFError):
+                raise ValueError("etf_replay_partition_encoding_invalid") from None
+            if len(data) > MAX_SOURCE_BYTES:
+                raise ValueError("etf_replay_partition_expansion_exceeded")
+            if declared_bytes is not None and len(data) != declared_bytes:
+                raise ValueError("etf_replay_partition_size_mismatch")
+            total_source += len(data)
+            if total_source > MAX_REPLAY_TOTAL_SOURCE_BYTES:
+                raise ValueError("etf_replay_size_exceeded")
+        else:
+            data = wire
+            total_source += len(data)
+            if total_source > MAX_SOURCE_BYTES:
+                raise ValueError("etf_replay_size_exceeded")
         if hashlib.sha256(data).hexdigest()!=part["sha256"]:
             raise ValueError("etf_replay_hash_mismatch")
         frame = parse_replay_partition(data, source, day)
@@ -181,7 +246,13 @@ def _scoped_result(snapshot: dict, rebuilt: dict, profile: dict) -> dict:
                 'datesSha256': proof['datesSha256'], 'sourceInputs': proof['sourceInputs'],
                 'inputSha256': proof['inputSha256']}
     old['windowEvidence'] = window
-    old['scopedReplay'] = {'contractVersion': SCOPED_REPLAY_CONTRACT, 'scope': scope,
+    replay_contract = (
+        BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+        if profile.get('contractVersion') == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+        else COMPRESSED_SCOPED_REPLAY_CONTRACT
+        if profile.get('contractVersion') == COMPRESSED_SCOPED_REPLAY_CONTRACT
+        else SCOPED_REPLAY_CONTRACT)
+    old['scopedReplay'] = {'contractVersion': replay_contract, 'scope': scope,
         'baseSnapshotSha256': canonical_sha256({k:v for k,v in snapshot.items() if k != 'etfReplayInput'}),
         'sourceInputSha256': proof['inputSha256']}
     old['availablePeriods'] = list(dict.fromkeys([*old.get('availablePeriods', []), *scope['periods']]))
@@ -207,7 +278,8 @@ def replay_snapshot(snapshot: dict) -> dict:
     if not daily:
         raise ValueError("etf_replay_baseline_unavailable")
     state = build_etf_flow_state(daily, canonical_etf=True)
-    if profile['contractVersion'] == SCOPED_REPLAY_CONTRACT:
+    if profile['contractVersion'] in {SCOPED_REPLAY_CONTRACT, COMPRESSED_SCOPED_REPLAY_CONTRACT,
+                                      BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT}:
         # Classification is pinned by the published base, not recomputed by a
         # period-only repair. The final merge still rejects universe drift.
         identities = {(r['market'], r['code']): r
@@ -224,8 +296,11 @@ def replay_snapshot(snapshot: dict) -> dict:
     result = materialize_dashboard_snapshot(base,state)
     proof = result["etfTerminal"]["windowEvidence"]
     proof["sourceInputs"] = sorted(evidence,key=lambda r:(r["tradeDate"],r["sourceId"]))
-    proof["inputSha256"] = canonical_sha256({"contractVersion":REPLAY_CONTRACT,
+    input_contract = (REPLAY_CONTRACT if profile['contractVersion'] in {REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT}
+                      else profile['contractVersion'])
+    proof["inputSha256"] = canonical_sha256({"contractVersion":input_contract,
         "calendarSha256":proof["calendarSha256"],"datesSha256":proof["datesSha256"],"sourceInputs":proof["sourceInputs"]})
-    if profile['contractVersion'] == SCOPED_REPLAY_CONTRACT:
+    if profile['contractVersion'] in {SCOPED_REPLAY_CONTRACT, COMPRESSED_SCOPED_REPLAY_CONTRACT,
+                                      BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT}:
         return _scoped_result(snapshot, result, profile)
     return result
