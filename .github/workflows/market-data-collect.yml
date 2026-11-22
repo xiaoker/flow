@@ -879,7 +879,7 @@ jobs:
               --dates "${DATES[@]}" \
               --window "${{ steps.window.outputs.collection_window }}" \
               --pcf-max-codes "$PCF_MAX_CODES"
-            if jq -e '.phase0_gate_status != "blocked"' \
+            if jq -e '(.phase0_gate_status == "pass" or .phase0_gate_status == "conditional_pass")' \
               reports/phase0/latest-quality-summary.json >/dev/null; then
               echo "Official sources passed the collection gate for this window."
               break
@@ -890,10 +890,7 @@ jobs:
             # window; do not retry it as if it were a transport failure.
             if jq -e '
               (.errors | length == 0) and
-              (.phase0_gate_status == "pending" or
-              any(.findings[]?;
-                (.check_id == "timeliness.requested_date_coverage" and
-                 .status == "fail")))
+              (.phase0_gate_status == "pending")
             ' reports/phase0/latest-quality-summary.json >/dev/null; then
               echo "Official source date is not ready; this window is pending and the next window will retry." >&2
               echo "pending=true" >> "$GITHUB_OUTPUT"
@@ -901,7 +898,7 @@ jobs:
                 echo "## Collection window pending"
                 echo "- window: $COLLECTION_WINDOW"
                 echo "- reason: official source has not published the requested business date"
-                jq -r '.findings[]? | select(.check_id == "timeliness.requested_date_coverage" and .status == "fail") | "- dataset: \(.dataset)\n- message: \(.message)"' reports/phase0/latest-quality-summary.json
+                jq -r '.findings[]? | select(.check_id == "timeliness.requested_date_coverage" and .status != "pass") | "- dataset: \(.dataset)\n- message: \(.message)"' reports/phase0/latest-quality-summary.json
               } >> "$GITHUB_STEP_SUMMARY"
               break
             fi
@@ -1385,7 +1382,7 @@ jobs:
         id: source_bundle
         # Both delegated and local publication paths must verify the same
         # immutable source bundle before resolving its real data date.
-        if: ${{ success() && steps.collection.outcome == 'success' && steps.collection.outputs.pending != 'true' && steps.collection.outputs.phase0_gate != 'blocked' }}
+        if: ${{ success() && steps.collection.outcome == 'success' && steps.collection.outputs.pending != 'true' && (steps.collection.outputs.phase0_gate == 'pass' || steps.collection.outputs.phase0_gate == 'conditional_pass') }}
         shell: bash
         run: |
           set -euo pipefail
