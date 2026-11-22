@@ -102,6 +102,7 @@ jobs:
       window_date: ${{ steps.gate.outputs.window_date }}
       target_date: ${{ steps.gate.outputs.target_date }}
       lease_owner: ${{ steps.gate.outputs.lease_owner }}
+      attempt_count: ${{ steps.gate.outputs.attempt_count }}
       contract_version: ${{ steps.gate.outputs.contract_version }}
       delegate_publish: ${{ steps.gate.outputs.delegate_publish }}
       recovery_id: ${{ steps.gate.outputs.recovery_id }}
@@ -208,6 +209,7 @@ jobs:
             echo "window_date=$WINDOW_DATE"
             echo "target_date="
             echo "lease_owner=$LEASE_OWNER"
+            echo "attempt_count="
             echo "contract_version=$CONTRACT_VERSION"
             echo "delegate_publish=$DELEGATE_PUBLISH"
             echo "recovery_id=$INPUT_RECOVERY_ID"
@@ -358,8 +360,14 @@ jobs:
           NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
           if [[ "$STATUS_CODE" == "200" ]] && jq -e --arg owner "$LEASE_OWNER" --arg now "$NOW_ISO" \
             '.status == "DISPATCHED" and .leaseOwner == $owner and (.leaseExpiresAt // "") > $now' pipeline-window-status.json >/dev/null; then
+            ATTEMPT_COUNT="$(jq -r '.attemptCount // empty' pipeline-window-status.json)"
+            if [[ -z "$ATTEMPT_COUNT" || ! "$ATTEMPT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Cloudflare dispatch status did not include a valid attempt count." >&2
+              exit 1
+            fi
             echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "attempt_count=$ATTEMPT_COUNT" >> "$GITHUB_OUTPUT"
             echo "Consuming the lease acquired by the Cloudflare dispatcher."
             exit 0
           fi
@@ -394,8 +402,14 @@ jobs:
           DECISION="$(jq -r '.decision // empty' pipeline-window-claim.json)"
           case "$DECISION" in
             acquired|takeover)
+              ATTEMPT_COUNT="$(jq -r '.attemptCount // empty' pipeline-window-claim.json)"
+              if [[ -z "$ATTEMPT_COUNT" || ! "$ATTEMPT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Pipeline-window claim did not include a valid attempt count." >&2
+                exit 1
+              fi
               echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
               echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "attempt_count=$ATTEMPT_COUNT" >> "$GITHUB_OUTPUT"
               ;;
             skip_completed|skip_leased|skip_blocked_quality)
               echo "gate_enabled=true" >> "$GITHUB_OUTPUT"
@@ -683,6 +697,7 @@ jobs:
       INPUT_WINDOW_DATE: ${{ needs.pipeline_window_gate.outputs.window_date }}
       INPUT_TARGET_DATE: ${{ needs.pipeline_window_gate.outputs.target_date }}
       INPUT_LEASE_OWNER: ${{ needs.pipeline_window_gate.outputs.lease_owner }}
+      INPUT_PIPELINE_ATTEMPT_COUNT: ${{ needs.pipeline_window_gate.outputs.attempt_count }}
       INPUT_CONTRACT_VERSION: ${{ needs.pipeline_window_gate.outputs.contract_version }}
       INPUT_RECOVERY_ID: ${{ needs.pipeline_window_gate.outputs.recovery_id }}
       INPUT_RECOVERY_ATTEMPT_COUNT: ${{ needs.pipeline_window_gate.outputs.recovery_attempt_count }}
@@ -794,6 +809,64 @@ jobs:
             --data-binary "@$RUNNING_PAYLOAD" \
             "$RUNNING_URL" \
             --output pipeline-window-running-response.json
+
+      - name: Start ordinary pipeline-window lease heartbeat
+        id: lease_heartbeat
+        background: true
+        env:
+          PIPELINE_LEASE_HEARTBEAT_GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
+            echo "Ordinary pipeline lease heartbeat is not required for this run."
+            exit 0
+          fi
+          if [[ ! "$INPUT_PIPELINE_ATTEMPT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Ordinary pipeline gate did not provide a valid attempt count." >&2
+            exit 1
+          fi
+          python3 scripts/recovery_lease_renew.py \
+            --mode ordinary \
+            --url "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --run-key "$INPUT_RUN_KEY" \
+            --lease-owner "$INPUT_LEASE_OWNER" \
+            --attempt "$INPUT_PIPELINE_ATTEMPT_COUNT" \
+            --interval-seconds 300 \
+            --deadline "$(date -u -d '+30 minutes' '+%Y-%m-%dT%H:%M:%SZ')" \
+            --stop-file pipeline-window-lease-heartbeat.stop \
+            --evidence pipeline-window-lease-heartbeat.json
+
+      - name: Confirm ordinary pipeline-window lease heartbeat
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
+            exit 0
+          fi
+          READY=false
+          for _ in $(seq 1 45); do
+            if [[ -s pipeline-window-lease-heartbeat.json ]]; then
+              if jq -e '.status == "FAILED" or .status == "DEADLINE"' pipeline-window-lease-heartbeat.json >/dev/null 2>&1; then
+                jq '{status,errorCode,workflowCancellation}' pipeline-window-lease-heartbeat.json >&2
+                exit 1
+              fi
+              if jq -e --arg runKey "$INPUT_RUN_KEY" --arg leaseOwner "$INPUT_LEASE_OWNER" \
+                --arg attempt "$INPUT_PIPELINE_ATTEMPT_COUNT" \
+                '.status == "RUNNING" and .renewalCount >= 1 and .runKey == $runKey and .leaseOwner == $leaseOwner and (.attemptCount|tostring) == $attempt' \
+                pipeline-window-lease-heartbeat.json >/dev/null 2>&1; then
+                READY=true
+                break
+              fi
+            fi
+            sleep 1
+          done
+          if [[ "$READY" != "true" ]]; then
+            echo "Initial ordinary lease renewal was not confirmed; refusing to continue collection." >&2
+            exit 1
+          fi
+          echo "Ordinary pipeline lease heartbeat started for the claimed attempt."
 
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
         with:
@@ -1812,11 +1885,22 @@ jobs:
             exit 1
           fi
 
+      - name: Stop ordinary pipeline-window lease heartbeat
+        if: ${{ always() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && needs.pipeline_window_gate.outputs.recovery_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch pipeline-window-lease-heartbeat.stop
+
+      - name: Wait for ordinary pipeline-window lease heartbeat
+        id: lease_heartbeat_wait
+        wait: lease_heartbeat
+
       - name: Mark pipeline window terminal status
         # When publish is delegated, only the publish workflow is allowed to
         # close the pipeline window. A collection failure or failed dispatch
         # still closes it as FAILED_RETRYABLE/BLOCKED_QUALITY here.
-        if: always() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && steps.publish_dispatch.outcome != 'success'
+        if: ${{ always() && needs.pipeline_window_gate.outputs.gate_enabled == 'true' && steps.publish_dispatch.outcome != 'success' && (needs.pipeline_window_gate.outputs.recovery_id != '' || steps.lease_heartbeat_wait.outcome == 'success') }}
         env:
           RESOLVED_TARGET_DATE: ${{ steps.target_binding.outputs.resolved_target_date }}
         shell: bash
@@ -1943,6 +2027,7 @@ jobs:
             pipeline-recovery-terminal.json
             pipeline-window-terminal.json
             pipeline-window-terminal-response.json
+            pipeline-window-lease-heartbeat.json
             reports/phase0/latest-manifest.json
             reports/phase0/latest-quality-summary.json
             reports/phase0/latest-release-qa.json

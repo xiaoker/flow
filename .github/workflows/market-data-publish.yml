@@ -272,6 +272,9 @@ jobs:
     if: ${{ needs.publish_window_gate.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: read
     env:
       FLOW_PUBLIC_URL: https://flow.xiaoker.com
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
@@ -283,6 +286,7 @@ jobs:
       INPUT_TARGET_DATE: ${{ inputs.target_date }}
       INPUT_RESUME_EXISTING_SOURCE: ${{ inputs.resume_existing_source && 'true' || 'false' }}
       INPUT_LEASE_OWNER: ${{ needs.publish_window_gate.outputs.lease_owner }}
+      INPUT_PIPELINE_ATTEMPT_COUNT: ${{ needs.publish_window_gate.outputs.attempt_count || '' }}
       INPUT_CONTRACT_VERSION: ${{ inputs.contract_version || 'v1' }}
       INPUT_RECOVERY_ID: ${{ inputs.recovery_id || '' }}
       INPUT_RECOVERY_ATTEMPT_COUNT: ${{ needs.publish_window_gate.outputs.attempt_count || '' }}
@@ -293,6 +297,64 @@ jobs:
     steps:
       - name: Checkout producer
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Start ordinary pipeline-window lease heartbeat
+        id: lease_heartbeat
+        background: true
+        env:
+          PIPELINE_LEASE_HEARTBEAT_GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
+            echo "Ordinary pipeline lease heartbeat is not required for this run."
+            exit 0
+          fi
+          if [[ ! "$INPUT_PIPELINE_ATTEMPT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Publish gate did not provide a valid ordinary attempt count." >&2
+            exit 1
+          fi
+          python3 scripts/recovery_lease_renew.py \
+            --mode ordinary \
+            --url "$FLOW_PIPELINE_WINDOW_URL/status" \
+            --run-key "$INPUT_RUN_KEY" \
+            --lease-owner "$INPUT_LEASE_OWNER" \
+            --attempt "$INPUT_PIPELINE_ATTEMPT_COUNT" \
+            --interval-seconds 300 \
+            --deadline "$(date -u -d '+30 minutes' '+%Y-%m-%dT%H:%M:%SZ')" \
+            --stop-file pipeline-window-lease-heartbeat.stop \
+            --evidence pipeline-window-lease-heartbeat.json
+
+      - name: Confirm ordinary publish lease heartbeat
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
+            exit 0
+          fi
+          READY=false
+          for _ in $(seq 1 45); do
+            if [[ -s pipeline-window-lease-heartbeat.json ]]; then
+              if jq -e '.status == "FAILED" or .status == "DEADLINE"' pipeline-window-lease-heartbeat.json >/dev/null 2>&1; then
+                jq '{status,errorCode,workflowCancellation}' pipeline-window-lease-heartbeat.json >&2
+                exit 1
+              fi
+              if jq -e --arg runKey "$INPUT_RUN_KEY" --arg leaseOwner "$INPUT_LEASE_OWNER" \
+                --arg attempt "$INPUT_PIPELINE_ATTEMPT_COUNT" \
+                '.status == "RUNNING" and .renewalCount >= 1 and .runKey == $runKey and .leaseOwner == $leaseOwner and (.attemptCount|tostring) == $attempt' \
+                pipeline-window-lease-heartbeat.json >/dev/null 2>&1; then
+                READY=true
+                break
+              fi
+            fi
+            sleep 1
+          done
+          if [[ "$READY" != "true" ]]; then
+            echo "Initial ordinary publish lease renewal was not confirmed; refusing to continue." >&2
+            exit 1
+          fi
+          echo "Ordinary publish lease heartbeat started for the claimed attempt."
 
       - name: Record publish start and producer identity
         shell: bash
@@ -874,8 +936,19 @@ jobs:
             --actions-run-attempt "${GITHUB_RUN_ATTEMPT:-1}" \
             --output reports/budget/publish.json
 
+      - name: Stop ordinary pipeline-window lease heartbeat
+        if: ${{ always() && needs.publish_window_gate.outputs.gate_enabled == 'true' && inputs.recovery_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch pipeline-window-lease-heartbeat.stop
+
+      - name: Wait for ordinary pipeline-window lease heartbeat
+        id: lease_heartbeat_wait
+        wait: lease_heartbeat
+
       - name: Mark pipeline window terminal status
-        if: ${{ always() && needs.publish_window_gate.outputs.gate_enabled == 'true' }}
+        if: ${{ always() && needs.publish_window_gate.outputs.gate_enabled == 'true' && (inputs.recovery_id != '' || steps.lease_heartbeat_wait.outcome == 'success') }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -1008,6 +1081,7 @@ jobs:
             pipeline-window-status.json
             pipeline-window-terminal.json
             pipeline-window-terminal-response.json
+            pipeline-window-lease-heartbeat.json
             pipeline-recovery-status.json
             pipeline-recovery-publish-running.json
             pipeline-recovery-publish-running-response.json
