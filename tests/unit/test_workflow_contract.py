@@ -565,6 +565,77 @@ def test_daily_collection_retries_network_failures_and_archives_pending_sources(
     assert "Collection archived partial evidence but still has unresolved source errors." in workflow
 
 
+def test_daily_collection_gate_keeps_pending_and_blocked_out_of_publish_verification() -> None:
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    collection_step = workflow.split(
+        "      - name: Collect and validate official data\n", maxsplit=1
+    )[1].split("      - name: Preserve collected source checkpoints", maxsplit=1)[0]
+
+    filters = []
+    cursor = 0
+    marker = "if jq -e '"
+    while len(filters) < 2:
+        start = collection_step.index(marker, cursor) + len(marker)
+        end = collection_step.index("'", start)
+        filters.append(collection_step[start:end])
+        cursor = end + 1
+    ready_filter, pending_filter = filters
+
+    def matches(filter_text: str, quality: dict[str, object]) -> bool:
+        result = subprocess.run(
+            ["jq", "-e", filter_text],
+            input=json.dumps(quality),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    for gate in ("pass", "conditional_pass"):
+        quality = {"phase0_gate_status": gate, "errors": [], "findings": []}
+        assert matches(ready_filter, quality)
+        assert not matches(pending_filter, quality)
+
+    pending = {
+        "phase0_gate_status": "pending",
+        "errors": [],
+        "findings": [
+            {
+                "check_id": "timeliness.requested_date_coverage",
+                "status": "warn",
+                "dataset": "szse_etf",
+            }
+        ],
+    }
+    assert not matches(ready_filter, pending)
+    assert matches(pending_filter, pending)
+
+    blocked_coverage_failure = {
+        "phase0_gate_status": "blocked",
+        "errors": [],
+        "findings": [
+            {
+                "check_id": "timeliness.requested_date_coverage",
+                "status": "fail",
+                "dataset": "szse_etf",
+            }
+        ],
+    }
+    assert not matches(ready_filter, blocked_coverage_failure)
+    assert not matches(pending_filter, blocked_coverage_failure)
+    assert not matches(
+        pending_filter,
+        {**pending, "errors": [{"error_type": "HTTPError"}]},
+    )
+
+    source_bundle_step = workflow.split(
+        "      - name: Verify immutable collection source bundle\n", maxsplit=1
+    )[1].split("      - name: Bind pipeline window to verified source date", maxsplit=1)[0]
+    assert "steps.collection.outputs.phase0_gate == 'pass'" in source_bundle_step
+    assert "steps.collection.outputs.phase0_gate == 'conditional_pass'" in source_bundle_step
+    assert "steps.collection.outputs.phase0_gate != 'blocked'" not in source_bundle_step
+
+
 def test_stock_flow_history_uses_etf_snapshot_dates_for_previous_share_anchor() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
     history_step = workflow.split(
