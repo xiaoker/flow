@@ -119,6 +119,20 @@ def test_date_major_recovery_chain_has_explicit_configured_timeouts() -> None:
     assert "needs: pipeline_window_gate" in COLLECT_WORKFLOW.read_text()
 
 
+def test_ordinary_collector_has_five_minute_headroom_for_measured_source_fetch() -> None:
+    import re
+
+    workflow = COLLECT_WORKFLOW.read_text()
+    match = re.search(r"(?ms)^  collect:\n(.*?)(?=^  [A-Za-z_][\w-]*:\n|\Z)", workflow)
+    assert match, "ordinary collect job must remain explicit"
+    timeout = re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", match.group(1))
+    assert timeout, "ordinary collect job must not inherit the provider's default timeout"
+    assert int(timeout.group(1)) == 25
+    assert "--interval-seconds 300" in workflow
+    assert 'source_pending="${{ steps.collection.outputs.pending }}"' in workflow
+    assert 'echo "pending=true" >> "$GITHUB_OUTPUT"' in workflow
+
+
 def test_source_checkpoints_precede_downstream_computation_and_finalize_after_qa():
     workflow = COLLECT_WORKFLOW.read_text()
     early = workflow.index("- name: Preserve collected source checkpoints before downstream computation")
