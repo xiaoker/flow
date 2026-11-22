@@ -686,9 +686,11 @@ jobs:
     # interface; the date-major recovery runner owns recovery executions.
     if: ${{ needs.pipeline_window_gate.outputs.should_run == 'true' && needs.pipeline_window_gate.outputs.recovery_id == '' }}
     runs-on: ubuntu-latest
-    # Each window performs one bounded collection. Source timing is represented
-    # as pending and reconciled by the next window, not by a long-running job.
-    timeout-minutes: 20
+    # A measured official-source fetch ran 18m45s and hit the old 20m job cap
+    # before checkpoints could be preserved. Keep one bounded window, with only
+    # 5m additional runner-time headroom; source timing still resolves as
+    # pending for the next window rather than waiting indefinitely here.
+    timeout-minutes: 25
     env:
       INPUT_DATES: ${{ inputs.dates }}
       INPUT_COLLECTION_WINDOW: ${{ needs.pipeline_window_gate.outputs.window_name }}
