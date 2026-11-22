@@ -13,12 +13,14 @@ from .read_model_capabilities import CAPABILITY_CONTRACT_VERSION
 from .read_models import build_market_read_models, canonical_json_bytes
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
+MAX_REPLAY_INPUT_BYTES = 40 * 1024 * 1024
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_FILES = 32
 SIDECAR_INPUTS = {
     "marketHistorySha256": ("market_history_path", "input-market-history.json"),
     "previousManifestSha256": ("previous_manifest_path", "input-previous-manifest.json"),
 }
+MAX_REPLAY_BUNDLE_BYTES = MAX_REPLAY_INPUT_BYTES + len(SIDECAR_INPUTS) * MAX_INPUT_BYTES
 
 
 def _result(encoded, manifest):
@@ -39,6 +41,39 @@ def _read(path: Path, maximum: int) -> bytes:
     if len(data) > maximum:
         raise PipelineAdapterError("build_artifact_size_exceeded")
     return data
+
+
+def _snapshot_input_limit(path: Path) -> int:
+    """Keep legacy input at 4 MiB; admit only the versioned bounded replay up to 40 MiB."""
+    from .etf_replay import BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+    if path.is_symlink():
+        return MAX_INPUT_BYTES
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return MAX_INPUT_BYTES
+    if size <= MAX_INPUT_BYTES or size > MAX_REPLAY_INPUT_BYTES:
+        return MAX_INPUT_BYTES
+    try:
+        snapshot = json.loads(_read(path, MAX_REPLAY_INPUT_BYTES))
+    except (ValueError, RecursionError, PipelineAdapterError):
+        return MAX_INPUT_BYTES
+    profile = snapshot.get('etfReplayInput') if isinstance(snapshot, dict) else None
+    return (MAX_REPLAY_INPUT_BYTES if isinstance(profile, dict) and
+            profile.get('contractVersion') == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+            else MAX_INPUT_BYTES)
+
+
+def _snapshot_input_bundle_limit(data: bytes) -> int:
+    from .etf_replay import BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+    try:
+        snapshot = json.loads(data)
+    except (ValueError, RecursionError):
+        return MAX_INPUT_BYTES
+    profile = snapshot.get('etfReplayInput') if isinstance(snapshot, dict) else None
+    return (MAX_REPLAY_BUNDLE_BYTES if isinstance(profile, dict) and
+            profile.get('contractVersion') == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+            else MAX_INPUT_BYTES)
 
 
 @dataclass(frozen=True)
@@ -105,7 +140,7 @@ class CoreReadModelBuildAdapter:
             raise PipelineAdapterError("partial_build_requires_reconciliation")
         if context.lease_check is not None:
             context.lease_check()
-        data = _read(self.snapshot_path, MAX_INPUT_BYTES)
+        data = _read(self.snapshot_path, _snapshot_input_limit(self.snapshot_path))
         sidecars = {}
         for key, (attribute, _filename) in SIDECAR_INPUTS.items():
             path = getattr(self, attribute)
@@ -113,7 +148,7 @@ class CoreReadModelBuildAdapter:
                 raise PipelineAdapterError("build_sidecar_contract_mismatch")
             if path is not None:
                 sidecars[key] = _read(Path(path), MAX_INPUT_BYTES)
-        if len(data) + sum(map(len, sidecars.values())) > MAX_INPUT_BYTES:
+        if len(data) + sum(map(len, sidecars.values())) > _snapshot_input_bundle_limit(data):
             raise PipelineAdapterError("build_input_bundle_size_exceeded")
         encoded, manifest = self._expected(context.identity, config, input_sha256, data, sidecars)
         if context.lease_check is not None:
@@ -145,11 +180,12 @@ class CoreReadModelBuildAdapter:
                 return False
             if receipt.get("inputSha256") != input_sha:
                 return False
-            data = _read(workspace / "input-snapshot.json", MAX_INPUT_BYTES)
+            snapshot_path = workspace / "input-snapshot.json"
+            data = _read(snapshot_path, _snapshot_input_limit(snapshot_path))
             sidecars = {key: _read(workspace / filename, MAX_INPUT_BYTES)
                         for key, (_attribute, filename) in SIDECAR_INPUTS.items()
                         if key in receipt["config"]}
-            if len(data) + sum(map(len, sidecars.values())) > MAX_INPUT_BYTES:
+            if len(data) + sum(map(len, sidecars.values())) > _snapshot_input_bundle_limit(data):
                 return False
             encoded, manifest = self._expected(identity, receipt["config"], input_sha, data, sidecars)
             if receipt.get("stageResult") != _result(encoded, manifest):

@@ -1,5 +1,6 @@
 import base64
 from copy import deepcopy
+from datetime import date, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -8,7 +9,9 @@ import subprocess
 import pytest
 
 from trading_desk.etf_period_dependencies import validate_official_calendar, OFFICIAL_MARGIN_DATES_SOURCE
-from trading_desk.etf_replay import replay_snapshot, REPLAY_CONTRACT
+from trading_desk.etf_replay import (replay_snapshot, REPLAY_CONTRACT,
+    BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT, MAX_PARTITIONS, MAX_REPLAY_PARTITIONS,
+    canonical_gzip, validated_replay_inputs)
 from trading_desk.pipeline_application import canonical_sha256
 from trading_desk.read_models import build_market_read_models, canonical_json_bytes, ReadModelError
 from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
@@ -236,6 +239,54 @@ def test_invalid_replay_rejected(fault):
         data=base64.b64decode(part["contentBase64"]).replace(b'100000000',b'-1')
         part["sha256"]=hashlib.sha256(data).hexdigest();part["contentBase64"]=base64.b64encode(data).decode()
     with pytest.raises(ValueError):replay_snapshot(value)
+
+
+def test_bounded_compressed_replay_binds_expanded_bytes_and_keeps_old_contracts():
+    value = scoped_source()
+    profile = value['etfReplayInput']
+    profile['contractVersion'] = BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+    for part in profile['partitions']:
+        raw = base64.b64decode(part['contentBase64'])
+        part['contentBase64'] = base64.b64encode(canonical_gzip(raw)).decode()
+        part['contentEncoding'] = 'gzip'
+        part['sourceBytes'] = len(raw)
+    rebuilt = replay_snapshot(value)
+    assert rebuilt['etfTerminal']['scopedReplay']['contractVersion'] == BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT
+    assert rebuilt['etfTerminal']['instruments'][0]['periods']['3d'] == .03
+    bad = deepcopy(value)
+    bad['etfReplayInput']['partitions'][0]['sourceBytes'] += 1
+    with pytest.raises(ValueError, match='etf_replay_partition_size_mismatch'):
+        replay_snapshot(bad)
+
+
+def test_long_replay_cap_does_not_shrink_legacy_contract_ceiling():
+    assert MAX_PARTITIONS == 2 * 533
+    assert MAX_REPLAY_PARTITIONS == 2 * 253
+    dates = []
+    cursor = date(2024, 1, 1)
+    while len(dates) < 507:
+        if cursor.weekday() < 5:
+            dates.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    calendar = {'sourceId': 'sse_official_trading_calendar', 'sha256': 'a'*64,
+        'dates': dates, 'datesSha256': canonical_sha256(dates)}
+    legacy_parts, bounded_parts = [], []
+    for day in dates:
+        raw = f'trade_date,market,instrument_code,instrument_name,shares\n{day},SSE,510300,ETF,100000000\n'.encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        key = f'market-data/normalized/sse/etf_scale/{day}/{digest}/data.csv'
+        legacy_parts.append({'sourceId': 'sse', 'tradeDate': day, 'objectKey': key,
+            'sha256': digest, 'contentBase64': base64.b64encode(raw).decode()})
+        bounded_parts.append({'sourceId': 'sse', 'tradeDate': day, 'objectKey': key,
+            'sha256': digest, 'sourceBytes': len(raw), 'contentEncoding': 'gzip',
+            'contentBase64': base64.b64encode(canonical_gzip(raw)).decode()})
+    _dates, frames, _evidence = validated_replay_inputs({'contractVersion': REPLAY_CONTRACT,
+        'calendar': calendar, 'partitions': legacy_parts}, dates[-1])
+    assert len(frames) == 507
+    with pytest.raises(ValueError, match='etf_replay_partitions_invalid'):
+        validated_replay_inputs({'contractVersion': BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT,
+            'calendar': calendar, 'scope': {'periods': ['12m'], 'metrics': ['shares']},
+            'partitions': bounded_parts}, dates[-1])
 
 
 def test_source_revision_invalidates_only_semantic_result_not_input():

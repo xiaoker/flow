@@ -7,28 +7,35 @@ import os
 import sys
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from .pipeline_application import build_application_plan
 from .pipeline_runner import (PipelineRunnerError, build_execution_context,
     dependency_lock_digest, _stage_names, _stage_inputs)
 
-MAX_REQUEST_BYTES = 65536
+MAX_REQUEST_BYTES = 512 * 1024
+MAX_LEGACY_REQUEST_BYTES = 64 * 1024
 MAX_SOURCE_ARCHIVE_BYTES = 6 * 1024 * 1024
 CANDIDATE_PREPARATION_CONTRACT = "flow-candidate-preparation-v1"
 MAX_CANDIDATE_PREPARATION_REQUESTS = 8
 ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-archive-replay-source-v1"
 SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v2"
 HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v3"
+BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT = "flow-scoped-archive-replay-source-v4"
 ARCHIVE_REPLAY_CONTRACTS = {ARCHIVE_REPLAY_SOURCE_CONTRACT, SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT,
-                           HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+                           HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+                           BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT}
 HISTORICAL_SOURCE_FILES = {
     'marketHistorySha256': ('market-history.json', 'input-market-history.json', 'market_history_path'),
     'previousManifestSha256': ('previous-release.json', 'input-previous-manifest.json', 'previous_manifest_path'),
 }
-# One bounded recent-window batch (a baseline plus up to seven sessions in
-# both markets). Larger histories use a later bounded batch, not more calls.
+# Existing replay recipes retain the small recent-window cap. Long histories
+# use a separate, versioned contract with its own fixed partition ceiling.
 MAX_ARCHIVE_REPLAY_REQUESTS = 16
+# The existing long-period contract supports at most 252 official-session
+# changes plus one baseline, for two exchanges. This is a hard transport cap.
+MAX_ARCHIVE_REPLAY_PARTITIONS = 2 * (252 + 1)
 _SECRET_KEYS = {"token", "secret", "password", "apikey", "ingestapikey", "clientsecret",
                 "cfaccessclientsecret", "flowingestapikey", "flowcfaccessclientsecret",
                 "accesstoken", "refreshtoken", "githubtoken", "privatekey"}
@@ -51,6 +58,7 @@ def read_entry_request(path: Path):
         raise PipelineRunnerError("entry_request_json_invalid") from None
     if not isinstance(value, dict):
         raise PipelineRunnerError("entry_request_object_required")
+    _validate_request_size(value, len(data))
     reject_inline_credentials(value)
     return value
 
@@ -67,8 +75,18 @@ def read_environment_request(environment, name="FLOW_ENTRY_REQUEST_JSON", *, req
         raise PipelineRunnerError("entry_request_json_invalid") from None
     if not isinstance(value, dict):
         raise PipelineRunnerError("entry_request_object_required")
+    _validate_request_size(value, len(raw.encode()))
     reject_inline_credentials(value)
     return value
+
+
+def _validate_request_size(value, byte_count):
+    recipe = value.get("archiveReplaySource")
+    limit = (MAX_REQUEST_BYTES if isinstance(recipe, dict)
+        and recipe.get("contract") == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT
+        else MAX_LEGACY_REQUEST_BYTES)
+    if byte_count > limit:
+        raise PipelineRunnerError("entry_request_size_exceeded")
 
 
 def prepare_declared_request(destination, *, environment):
@@ -104,6 +122,7 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
     request = read_environment_request(environment)
     plan = read_environment_request(environment, "FLOW_ENTRY_RECOVERY_PLAN_JSON", required=False)
     replay = archive_replay_source_binding(request.get("archiveReplaySource"))
+    preparation_deadline_monotonic = None
     if replay is not None:
         from .pipeline_application import canonical_sha256
         from .recovery_execution import plan_bytes
@@ -127,6 +146,7 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
             deadline = datetime.fromisoformat(plan["deadline"].replace("Z", "+00:00"))
             if not 0 < remaining <= 600 or deadline < expiry:
                 raise ValueError()
+            preparation_deadline_monotonic = time.monotonic() + remaining
         except (KeyError, ValueError, TypeError):
             raise PipelineRunnerError("entry_replay_preparation_expired") from None
         # Before archive I/O, check the full declared hold against truthful
@@ -210,7 +230,8 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
             if len(snapshot) != matches[0].file_size:
                 raise PipelineRunnerError("entry_source_snapshot_size_mismatch")
             recipe = request.get('archiveReplaySource') or {}
-            if recipe.get('contract') == HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+            if recipe.get('contract') in {HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+                                          BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT}:
                 for key, (source_name, saved_name, _) in HISTORICAL_SOURCE_FILES.items():
                     siblings = [entry for entry in entries if entry.filename in {
                         source_name, matches[0].filename.removesuffix('dashboard-snapshot.json') + source_name}]
@@ -230,13 +251,17 @@ def prepare_workflow_inputs(destination, *, artifact_id, source_run_id, environm
                 or hashlib.sha256(snapshot).hexdigest() != expected_source):
             raise PipelineRunnerError("entry_source_snapshot_binding_mismatch")
         if replay is not None:
-            snapshot = hydrate_archive_replay_source(value, request, exchange=exchange, environment=environment)
+            snapshot = hydrate_archive_replay_source(value, request, exchange=exchange,
+                environment=environment, deadline_monotonic=preparation_deadline_monotonic)
     except PipelineRunnerError:
         raise
     except (BoundedHTTPError, ValueError, OSError, KeyError, AttributeError, zipfile.BadZipFile, RuntimeError):
         raise PipelineRunnerError("entry_source_read_failed") from None
     finally:
         session.close()
+    if (preparation_deadline_monotonic is not None
+            and time.monotonic() >= preparation_deadline_monotonic):
+        raise PipelineRunnerError("entry_replay_preparation_expired")
     root.mkdir(parents=True, mode=0o700)
     for name, data in {"request.json": json.dumps(request).encode(), "dashboard-snapshot.json": snapshot,
                        **historical_inputs,
@@ -253,10 +278,16 @@ def archive_replay_source_binding(recipe):
     """Public non-secret scope, bound by both request and immutable approval."""
     if recipe is None:
         return None
-    historical = isinstance(recipe, dict) and recipe.get('contract') == HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT
-    scoped = isinstance(recipe, dict) and recipe.get('contract') in {SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+    bounded_long = isinstance(recipe, dict) and recipe.get('contract') == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT
+    historical = isinstance(recipe, dict) and recipe.get('contract') in {
+        HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT, BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT}
+    scoped = isinstance(recipe, dict) and recipe.get('contract') in {
+        SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+        BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT}
     keys = ({'contract', 'baseSnapshotSha256', 'calendarGzipBase64', 'calendarSha256', 'partitions'}
-            | ({'scope'} if scoped else set()) | ({'sidecars'} if historical else set()))
+            | ({'scope'} if scoped else set()) | ({'sidecars'} if historical else set())
+            | ({'sourceBytes'} if bounded_long else set()))
+    max_partitions = MAX_ARCHIVE_REPLAY_PARTITIONS if bounded_long else MAX_ARCHIVE_REPLAY_REQUESTS
     if (not isinstance(recipe, dict) or set(recipe) != keys
             or recipe.get("contract") not in ARCHIVE_REPLAY_CONTRACTS
             or any(not isinstance(recipe.get(k), str) or not re.fullmatch(r"[a-f0-9]{64}", recipe[k])
@@ -264,8 +295,30 @@ def archive_replay_source_binding(recipe):
             or not isinstance(recipe["calendarGzipBase64"], str)
             or len(recipe["calendarGzipBase64"]) > 51200
             or not isinstance(recipe["partitions"], list)
-            or not 1 <= len(recipe["partitions"]) <= MAX_ARCHIVE_REPLAY_REQUESTS):
+            or not 1 <= len(recipe["partitions"]) <= max_partitions):
         raise PipelineRunnerError("entry_replay_recipe_invalid")
+    source_bytes = None
+    if bounded_long:
+        from .etf_replay import MAX_REPLAY_TOTAL_SOURCE_BYTES, MAX_SOURCE_BYTES
+        dates_seen = set()
+        source_bytes = 0
+        for ref in recipe['partitions']:
+            if (not isinstance(ref, dict) or set(ref) != {'sourceId', 'tradeDate', 'objectKey', 'sha256', 'bytes'}
+                    or ref['sourceId'] not in {'sse', 'szse'}
+                    or not isinstance(ref['tradeDate'], str)
+                    or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', ref['tradeDate'])
+                    or (ref['sourceId'], ref['tradeDate']) in dates_seen
+                    or type(ref['bytes']) is not int or not 0 < ref['bytes'] <= MAX_SOURCE_BYTES
+                    or not isinstance(ref['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', ref['sha256'])
+                    or not isinstance(ref['objectKey'], str) or not re.fullmatch(
+                        rf'market-data/normalized/{ref["sourceId"]}/etf_scale/{ref["tradeDate"]}/[a-f0-9]{{64}}/data\.csv',
+                        ref['objectKey'])):
+                raise PipelineRunnerError('entry_replay_recipe_invalid')
+            dates_seen.add((ref['sourceId'], ref['tradeDate']))
+            source_bytes += ref['bytes']
+        if (type(recipe['sourceBytes']) is not int or recipe['sourceBytes'] != source_bytes
+                or source_bytes > MAX_REPLAY_TOTAL_SOURCE_BYTES):
+            raise PipelineRunnerError('entry_replay_recipe_size_invalid')
     if scoped:
         from .etf_replay import validate_replay_scope
         try:
@@ -277,16 +330,19 @@ def archive_replay_source_binding(recipe):
             or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
                    for value in recipe['sidecars'].values())):
         raise PipelineRunnerError('entry_replay_sidecars_invalid')
-    return {"contract": recipe['contract'], "recipeSha256":
+    result = {"contract": recipe['contract'], "recipeSha256":
         hashlib.sha256(json.dumps(recipe, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "requestCount": len(recipe["partitions"])}
+    if bounded_long:
+        result['sourceBytes'] = source_bytes
+    return result
 
 
-def read_exact_etf_archive(ref, *, exchange, headers):
+def read_exact_etf_archive(ref, *, exchange, headers, deadline_seconds=20):
     from .etf_replay import MAX_SOURCE_BYTES
 
     reply = exchange.request("GET", "https://flow.xiaoker.com/api/v1/admin/history-artifact",
-        max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=20,
+        max_bytes=MAX_SOURCE_BYTES, chunk_size=65536, max_chunks=33, deadline_seconds=deadline_seconds,
         headers=headers, params={"source": ref["sourceId"], "dataset": "etf_scale",
             "date": ref["tradeDate"], "file": "data", "indexed": "1",
             "revision": ref["objectKey"].split("/")[-2]})
@@ -317,15 +373,19 @@ def read_active_rolling_checkpoint(*, exchange, headers):
     return manifest, {**manifest, "sha256": digest}, reply.content
 
 
-def hydrate_archive_replay_source(base, request, *, exchange, environment):
+def hydrate_archive_replay_source(base, request, *, exchange, environment, deadline_monotonic=None):
     """Read only exact indexed normalized objects; no list, retry or write."""
     import base64
     import gzip
     import io
-    from .etf_replay import REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT, MAX_SOURCE_BYTES, validated_replay_inputs
+    from .etf_replay import (REPLAY_CONTRACT, SCOPED_REPLAY_CONTRACT,
+        BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT,
+        MAX_SOURCE_BYTES, MAX_REPLAY_TOTAL_SOURCE_BYTES, MAX_REPLAY_COMPRESSED_BYTES,
+        MAX_REPLAY_INPUT_BYTES, canonical_gzip, validated_replay_inputs)
     from .etf_period_dependencies import validate_official_calendar
     from .read_models import canonical_json_bytes
     recipe = request["archiveReplaySource"]
+    bounded_long = recipe.get('contract') == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT
     archive_replay_source_binding(recipe)
     if "etfReplayInput" in base:
         raise PipelineRunnerError("entry_replay_base_already_materialized")
@@ -341,8 +401,10 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
         target = request["identity"]["targetDate"]
         refs = recipe["partitions"]
         seen = set()
+        declared_total = 0
         for ref in refs:
-            if (not isinstance(ref, dict) or set(ref) != {"sourceId", "tradeDate", "objectKey", "sha256"}
+            expected_ref_keys = {"sourceId", "tradeDate", "objectKey", "sha256"} | ({'bytes'} if bounded_long else set())
+            if (not isinstance(ref, dict) or set(ref) != expected_ref_keys
                     or ref["sourceId"] not in {"sse", "szse"} or ref["tradeDate"] not in dates
                     or ref["tradeDate"] > target or (ref["sourceId"], ref["tradeDate"]) in seen
                     or not isinstance(ref["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", ref["sha256"])
@@ -350,6 +412,12 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
                         rf'market-data/normalized/{ref["sourceId"]}/etf_scale/{ref["tradeDate"]}/[a-f0-9]{{64}}/data\.csv',ref["objectKey"])):
                 raise ValueError()
             seen.add((ref["sourceId"],ref["tradeDate"]))
+            if bounded_long:
+                if type(ref['bytes']) is not int or not 0 < ref['bytes'] <= MAX_SOURCE_BYTES:
+                    raise ValueError()
+                declared_total += ref['bytes']
+        if bounded_long and declared_total != recipe['sourceBytes']:
+            raise ValueError()
         if target not in dates:
             raise ValueError()
     except (ValueError, TypeError, KeyError, OSError, EOFError):
@@ -357,24 +425,45 @@ def hydrate_archive_replay_source(base, request, *, exchange, environment):
     creds = candidate_credentials(environment)
     headers = {"Authorization": "Bearer " + creds["ingest_key"],
         "CF-Access-Client-Id": creds["access_client_id"], "CF-Access-Client-Secret": creds["access_client_secret"]}
-    parts, total = [], 0
+    parts, total, compressed_total = [], 0, 0
     for ref in refs:
-        content = read_exact_etf_archive(ref, exchange=exchange, headers=headers)
+        deadline_seconds = 20
+        if deadline_monotonic is not None:
+            deadline_seconds = min(deadline_seconds, deadline_monotonic-time.monotonic())
+            if deadline_seconds <= 0:
+                raise PipelineRunnerError("entry_replay_preparation_expired")
+        content = read_exact_etf_archive(ref, exchange=exchange, headers=headers,
+            deadline_seconds=deadline_seconds)
         total += len(content)
-        if total > MAX_SOURCE_BYTES:
+        if (bounded_long and len(content) != ref['bytes']) or total > (
+                MAX_REPLAY_TOTAL_SOURCE_BYTES if bounded_long else MAX_SOURCE_BYTES):
             raise PipelineRunnerError("entry_replay_archive_mismatch")
-        parts.append({**ref, "contentBase64":base64.b64encode(content).decode()})
+        if bounded_long:
+            wire = canonical_gzip(content)
+            compressed_total += len(wire)
+            if compressed_total > MAX_REPLAY_COMPRESSED_BYTES:
+                raise PipelineRunnerError('entry_replay_compressed_size_exceeded')
+            parts.append({"sourceId": ref['sourceId'], "tradeDate": ref['tradeDate'],
+                "objectKey": ref['objectKey'], "sha256": ref['sha256'], "sourceBytes": len(content),
+                "contentEncoding": "gzip", "contentBase64": base64.b64encode(wire).decode()})
+        else:
+            parts.append({**ref, "contentBase64":base64.b64encode(content).decode()})
     profile = {"contractVersion":REPLAY_CONTRACT, "calendar":calendar, "partitions":parts}
     if recipe['contract'] in {SCOPED_ARCHIVE_REPLAY_SOURCE_CONTRACT, HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT}:
         profile.update(contractVersion=SCOPED_REPLAY_CONTRACT, scope=recipe['scope'])
+    elif bounded_long:
+        profile.update(contractVersion=BOUNDED_COMPRESSED_SCOPED_REPLAY_CONTRACT, scope=recipe['scope'])
     value = {**base, "etfReplayInput":profile}
     try:
         validated_replay_inputs(value["etfReplayInput"], target)
     except (ValueError, TypeError):
         raise PipelineRunnerError("entry_replay_facts_invalid") from None
     encoded = canonical_json_bytes(value)
-    if len(encoded) > 4*1024*1024 or hashlib.sha256(encoded).hexdigest() != request["stageConfigs"]["build"]["snapshotSha256"]:
+    maximum_snapshot = MAX_REPLAY_INPUT_BYTES if bounded_long else 4*1024*1024
+    if len(encoded) > maximum_snapshot or hashlib.sha256(encoded).hexdigest() != request["stageConfigs"]["build"]["snapshotSha256"]:
         raise PipelineRunnerError("entry_replay_snapshot_binding_mismatch")
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise PipelineRunnerError("entry_replay_preparation_expired")
     return encoded
 
 
@@ -432,7 +521,8 @@ def candidate_build_inputs(snapshot_path, payload):
     """Use only explicitly bound same-artifact sidecars; legacy stays unchanged."""
     from .pipeline_build_adapter import CoreReadModelBuildAdapter, _read, MAX_INPUT_BYTES
     recipe = payload.get('archiveReplaySource') or {}
-    if recipe.get('contract') != HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+    if recipe.get('contract') not in {HISTORICAL_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+                                      BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT}:
         return CoreReadModelBuildAdapter(Path(snapshot_path)), {}, {}
     archive_replay_source_binding(recipe)
     paths, content = {}, {}
@@ -457,7 +547,7 @@ def prepare_core_candidate(payload, *, snapshot_path, producer_build_sha,
     The caller still needs live server authorization and whole-task admission.
     """
     from .pipeline_application import canonical_sha256
-    from .pipeline_build_adapter import _read, _result, MAX_INPUT_BYTES
+    from .pipeline_build_adapter import _read, _result, _snapshot_input_limit
     from .pipeline_adapters import PipelineAdapterError
     reject_inline_credentials(payload)
     verify_checkout_sha(Path(project_root).resolve(), producer_build_sha)
@@ -469,7 +559,7 @@ def prepare_core_candidate(payload, *, snapshot_path, producer_build_sha,
     path = Path(snapshot_path)
     if any(p.is_symlink() for p in (path, *path.parents)):
         raise PipelineRunnerError("entry_source_path_invalid")
-    data = _read(path, MAX_INPUT_BYTES)
+    data = _read(path, _snapshot_input_limit(path))
     try:
         source_value = json.loads(data)
     except (ValueError, RecursionError):
@@ -517,7 +607,7 @@ def candidate_preparation_cost_upper(policy, *, archive_requests=0):
     """Eight fixed control calls; reviewed worst-operation cost, no allowance."""
     from .resource_budget import BudgetVector, RESOURCE_DIMENSIONS
     operations = [*policy["control"].values(), *policy["transport"].values()]
-    if type(archive_requests) is not int or not 0 <= archive_requests <= MAX_ARCHIVE_REPLAY_REQUESTS:
+    if type(archive_requests) is not int or not 0 <= archive_requests <= MAX_ARCHIVE_REPLAY_PARTITIONS:
         raise PipelineRunnerError("entry_replay_cost_invalid")
     # A resumed workflow may repeat source hydration before a build checkpoint
     # exists. Reserve both reads up front; takeover cannot mint a new hold.
@@ -590,10 +680,18 @@ def load_candidate_cost_policy(project_root, *, profile=None, approved_recovery_
             source = manifest.get("archiveReplaySource")
             count = 0
             if source is not None:
-                if (not isinstance(source,dict) or set(source) != {"contract","recipeSha256","requestCount"}
+                source_keys = {"contract", "recipeSha256", "requestCount"}
+                if isinstance(source, dict) and source.get('contract') == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT:
+                    source_keys.add('sourceBytes')
+                max_source_requests = (MAX_ARCHIVE_REPLAY_PARTITIONS if isinstance(source, dict)
+                    and source.get('contract') == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT
+                    else MAX_ARCHIVE_REPLAY_REQUESTS)
+                if (not isinstance(source,dict) or set(source) != source_keys
                     or source["contract"] not in ARCHIVE_REPLAY_CONTRACTS
                     or not isinstance(source["recipeSha256"],str) or not re.fullmatch(r"[a-f0-9]{64}",source["recipeSha256"])
-                    or type(source["requestCount"]) is not int or not 1 <= source["requestCount"] <= MAX_ARCHIVE_REPLAY_REQUESTS):
+                    or type(source["requestCount"]) is not int or not 1 <= source["requestCount"] <= max_source_requests
+                    or (source.get('contract') == BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT
+                        and (type(source.get('sourceBytes')) is not int or not 0 < source['sourceBytes'] <= 64_000_000))):
                     raise ValueError()
                 count = source["requestCount"]
             upper = candidate_preparation_cost_upper(result, archive_requests=count)

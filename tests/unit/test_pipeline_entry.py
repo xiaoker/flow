@@ -9,7 +9,8 @@ import sys
 import pytest
 
 from trading_desk.pipeline_entry import (read_entry_request, dry_run_entry, MAX_REQUEST_BYTES,
-    prepare_core_candidate, candidate_credentials)
+    MAX_LEGACY_REQUEST_BYTES, BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+    read_environment_request, prepare_core_candidate, candidate_credentials)
 from trading_desk.pipeline_runner import PipelineRunnerError, dependency_lock_digest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -301,6 +302,17 @@ def test_request_is_bounded_and_cannot_follow_symlink(tmp_path):
     linked.symlink_to(path)
     with pytest.raises(PipelineRunnerError, match="entry_request_path_invalid"):
         read_entry_request(linked)
+
+
+def test_large_request_limit_is_scoped_to_versioned_long_archive_recipe():
+    legacy = json.dumps({"padding": "x" * MAX_LEGACY_REQUEST_BYTES})
+    with pytest.raises(PipelineRunnerError, match="entry_request_size_exceeded"):
+        read_environment_request({"FLOW_ENTRY_REQUEST_JSON": legacy})
+    long_request = json.dumps({"archiveReplaySource": {
+        "contract": BOUNDED_LONG_ARCHIVE_REPLAY_SOURCE_CONTRACT,
+        "padding": "x" * MAX_LEGACY_REQUEST_BYTES}})
+    assert MAX_LEGACY_REQUEST_BYTES < len(long_request.encode()) <= MAX_REQUEST_BYTES
+    assert read_environment_request({"FLOW_ENTRY_REQUEST_JSON": long_request}) == json.loads(long_request)
 
 
 def test_cli_dry_run_has_no_checkpoint_or_report_writes(tmp_path):

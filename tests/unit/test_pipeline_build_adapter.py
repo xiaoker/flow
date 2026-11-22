@@ -92,6 +92,23 @@ def test_input_size_bound_and_workspace_symlink(tmp_path, monkeypatch):
     assert list(outside.iterdir()) == []
 
 
+def test_replay_input_extension_is_contract_scoped(tmp_path):
+    from trading_desk.pipeline_build_adapter import (_snapshot_input_limit,
+        _snapshot_input_bundle_limit, MAX_INPUT_BYTES, MAX_REPLAY_INPUT_BYTES,
+        MAX_REPLAY_BUNDLE_BYTES)
+    bounded = tmp_path/'bounded.json'
+    bounded.write_text(json.dumps({'etfReplayInput': {
+        'contractVersion': 'flow-etf-scoped-replay-v0.9.2'}, 'padding': 'x'*(MAX_INPUT_BYTES+1)}))
+    legacy = tmp_path/'legacy.json'
+    legacy.write_text(json.dumps({'etfReplayInput': {
+        'contractVersion': 'flow-etf-scoped-replay-v0.8.1'}, 'padding': 'x'*(MAX_INPUT_BYTES+1)}))
+    assert bounded.stat().st_size <= MAX_REPLAY_INPUT_BYTES
+    assert _snapshot_input_limit(bounded) == MAX_REPLAY_INPUT_BYTES
+    assert _snapshot_input_limit(legacy) == MAX_INPUT_BYTES
+    assert _snapshot_input_bundle_limit(bounded.read_bytes()) == MAX_REPLAY_BUNDLE_BYTES
+    assert _snapshot_input_bundle_limit(legacy.read_bytes()) == MAX_INPUT_BYTES
+
+
 def test_real_runner_build_stage_resume_without_original_input(tmp_path):
     from trading_desk.pipeline_runner import run_pipeline_request
     from test_pipeline_bundle_resume import ROOT, LOCK, Guard
