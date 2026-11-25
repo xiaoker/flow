@@ -131,6 +131,112 @@ async function pointerFor(runtime: Awaited<ReturnType<typeof runtimeEnv>>, sourc
   }
 }
 
+function metadataError(error: string, status: number): Response {
+  return new Response(null, { status, headers: { "Cache-Control": "private, no-store", "X-Flow-Error": error } });
+}
+
+/** Metadata-only counterpart to GET, used by bounded inventory tools. */
+export async function HEAD(request: Request): Promise<Response> {
+  const runtime = await runtimeEnv();
+  const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  if (!runtime.INGEST_API_KEY || !suppliedKey || !secureEqual(suppliedKey, runtime.INGEST_API_KEY)) {
+    return metadataError("unauthorized", 401);
+  }
+  if (!runtime.RAW_BUCKET) return metadataError("raw_bucket_unavailable", 503);
+
+  const query = new URL(request.url).searchParams;
+  const tradeDate = query.get("date") ?? "";
+  const source = query.get("source") ?? "";
+  const dataset = query.get("dataset") ?? "";
+  const file = query.get("file") ?? "data";
+  const parsedDate = new Date(`${tradeDate}T00:00:00.000Z`);
+  if (!ISO_DATE.test(tradeDate) || Number.isNaN(parsedDate.valueOf())
+      || parsedDate.toISOString().slice(0, 10) !== tradeDate) return metadataError("invalid_date", 400);
+  if (!ETF_SOURCE.test(source) || !DATASET.test(dataset) || !FILE_NAME.test(file)) {
+    return metadataError("invalid_artifact_identity", 400);
+  }
+  if (!expectedPair(source, dataset)) return metadataError("unsupported_artifact_pair", 400);
+  const selection = query.get("selection");
+  if (selection !== null && (selection !== "indexed-or-single" || file !== "data")) {
+    return metadataError("invalid_artifact_selection", 400);
+  }
+  if ([...query.keys()].some((key) => !["date", "source", "dataset", "file", "selection", "indexed"].includes(key))) {
+    return metadataError("invalid_artifact_identity", 400);
+  }
+  if (query.get("indexed") !== null && (query.get("indexed") !== "1" || dataset !== "etf_scale" || file !== "data")) {
+    return metadataError("invalid_artifact_selection", 400);
+  }
+
+  const indexed = query.get("indexed") === "1" || selection === "indexed-or-single";
+  const dateCandidates = [tradeDate, tradeDate.replaceAll("-", "")];
+  const expectedPrefix = `market-data/normalized/${source}/${dataset}/`;
+  const allowedKey = (key: string): boolean => dateCandidates.some((candidate) =>
+    key.startsWith(`${expectedPrefix}${candidate}/`)
+      && (key.endsWith(`/${file}.csv`) || key.endsWith(`/${file}.csv.gz`)));
+  try {
+    const pointer = await pointerFor(runtime, source, dataset, tradeDate, file, indexed);
+    if (query.get("indexed") === "1" && !pointer) return metadataError("artifact_not_found", 404);
+    if (pointer?.objectKey && typeof pointer.objectKey === "string") {
+      if (!allowedKey(pointer.objectKey)) return metadataError("artifact_identity_mismatch", 409);
+      const object = await runtime.RAW_BUCKET.head(pointer.objectKey);
+      if (!object) return metadataError("artifact_not_found", 404);
+      if (typeof object.size !== "number" || object.size > MAX_OBJECT_BYTES
+          || (dataset === "etf_scale" && file === "data" && object.size > 2_000_000)) {
+        return metadataError("artifact_too_large", 413);
+      }
+      const objectDigest = object.customMetadata?.sha256;
+      if (objectDigest && pointer.sha256 && objectDigest !== pointer.sha256) {
+        return metadataError("artifact_metadata_mismatch", 409);
+      }
+      const digest = objectDigest ?? pointer.sha256;
+      if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) {
+        return metadataError("artifact_metadata_invalid", 409);
+      }
+      return new Response(null, { headers: {
+        "Cache-Control": "private, no-store", "Content-Length": String(object.size),
+        "X-Flow-Normalized-Key": pointer.objectKey, "X-Flow-Normalized-Sha256": digest,
+        "X-Flow-Trade-Date": tradeDate, "X-Flow-Pcf-Revision": String(pointer.revisionId ?? ""),
+      } });
+    }
+
+    let candidates: Awaited<ReturnType<typeof listUnindexedHistoryArtifactCandidates>>;
+    try {
+      candidates = await listUnindexedHistoryArtifactCandidates(
+        runtime.RAW_BUCKET,
+        dateCandidates.map((candidate) => `${expectedPrefix}${candidate}/`),
+        file,
+      );
+    } catch (error) {
+      if (error instanceof HistoryArtifactCandidateLimitError) return metadataError(error.code, 413);
+      throw error;
+    }
+    if (!candidates.length) return metadataError("artifact_not_found", 404);
+    if (selection === "indexed-or-single" && candidates.length !== 1) {
+      return metadataError("artifact_selection_ambiguous", 409);
+    }
+    candidates.sort((left, right) => right.uploaded.getTime() - left.uploaded.getTime() || left.key.localeCompare(right.key));
+    const selected = candidates[0];
+    if (!allowedKey(selected.key)) return metadataError("artifact_identity_mismatch", 409);
+    const object = await runtime.RAW_BUCKET.head(selected.key);
+    if (!object) return metadataError("artifact_not_found", 404);
+    if (typeof object.size !== "number" || object.size > MAX_OBJECT_BYTES
+        || (dataset === "etf_scale" && file === "data" && object.size > 2_000_000)) {
+      return metadataError("artifact_too_large", 413);
+    }
+    return new Response(null, { headers: {
+      "Cache-Control": "private, no-store", "Content-Length": String(object.size),
+      "X-Flow-Normalized-Key": selected.key,
+      "X-Flow-Normalized-Sha256": object.customMetadata?.sha256 ?? "",
+      "X-Flow-Normalized-Candidate-Count": String(candidates.length),
+      "X-Flow-Normalized-Selection": candidates.length > 1 ? "latest-uploaded" : "single",
+      "X-Flow-Trade-Date": tradeDate,
+    } });
+  } catch {
+    console.warn("history artifact metadata export unavailable");
+    return metadataError("history_artifact_metadata_unavailable", 503);
+  }
+}
+
 export async function GET(request: Request): Promise<Response> {
   const runtime = await runtimeEnv();
   const suppliedKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";

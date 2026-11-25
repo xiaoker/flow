@@ -908,7 +908,7 @@ def test_r2_recovery_drill_is_read_only_and_preserves_evidence() -> None:
     assert "--apply" not in workflow
 
 
-def test_stock_flow_inventory_is_metadata_only_and_does_not_publish() -> None:
+def test_stock_flow_inventory_is_bounded_metadata_only_and_does_not_publish() -> None:
     workflow = (REPOSITORY_ROOT / ".github/workflows/stock-flow-inventory.yml").read_text(encoding="utf-8")
     script = (REPOSITORY_ROOT / "scripts/inventory_stock_flow_inputs.py").read_text(encoding="utf-8")
 
@@ -918,8 +918,18 @@ def test_stock_flow_inventory_is_metadata_only_and_does_not_publish() -> None:
     assert "publish_stock_flow_history.py" not in workflow
     assert "history-import" not in workflow
     assert "metadata_only" in script
-    assert "stream=True" in script
+    assert "MAX_INVENTORY_DATES = 5" in script
+    assert "MAX_ATTEMPTS = 2" in script
+    assert "session.head(" in script
+    assert "session.get(" not in script
     assert "response.close()" in script
+    assert "probe_dates" in workflow
+    assert "LIMIT 6" in workflow
+    assert "--validate-range" in workflow
+    assert "--explicit-dates" in workflow
+    assert "WHERE trade_date >= '$START_DATE' AND trade_date <= '$END_DATE'" in workflow
+    assert workflow.index("--validate-range") < workflow.index("npx wrangler d1 execute")
+    assert "WHERE trade_date >= ?" not in workflow  # the validated CLI values are calendar-only
 
 
 def test_r2_recovery_is_date_major_receipt_backed_and_never_falls_into_legacy_collector() -> None:

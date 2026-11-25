@@ -2,16 +2,16 @@
 
 The inventory step is deliberately metadata-only. It asks the private history
 export whether an immutable normalized object exists for each date, records
-its SHA/key and the selection metadata available from the response, then closes
-the response without reading the body.
+its SHA/key and the selection metadata available from a HEAD response, and
+never reads the object body.
 This lets a bounded stock-flow backfill choose real dates before any larger
 payload is fetched or any derived partition is published.
 
-Exact-slot mode uses the reconstruction path's indexed-or-single selection:
-an indexed pointer is identified by its opaque revision header, while a unique
-legacy candidate is identified by its count/selection headers. An ambiguous
-409 stops the bounded inventory instead of accepting the legacy latest-uploaded
-diagnostic choice. Metadata readiness is not byte verification,
+Every scale/PCF probe requires indexed-or-single selection: an indexed pointer
+is identified by its opaque revision header, while a unique legacy candidate
+is identified by its count/selection headers. An ambiguous 409 stops the
+bounded inventory instead of accepting the legacy latest-uploaded diagnostic
+choice. Metadata readiness is not byte verification,
 official provenance, historical-universe completeness or publication approval.
 """
 
@@ -30,6 +30,8 @@ import requests
 
 
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MAX_INVENTORY_DATES = 5
+MAX_ATTEMPTS = 2
 PROBES = (("sse", "etf_scale"), ("szse", "etf_scale"), ("sse", "etf_pcf"))
 
 
@@ -58,6 +60,15 @@ def _dates(path: Path) -> list[str]:
     values = sorted({line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()})
     if not values or any(not ISO_DATE.fullmatch(value) for value in values):
         raise ValueError("dates must contain at least one ISO date")
+    for value in values:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("dates must contain valid exact ISO dates") from exc
+        if parsed.isoformat() != value:
+            raise ValueError("dates must contain valid exact ISO dates")
+    if len(values) > MAX_INVENTORY_DATES:
+        raise ValueError(f"inventory is limited to {MAX_INVENTORY_DATES} dates")
     return values
 
 
@@ -79,7 +90,7 @@ def _probe(
     last_code = None
     for attempt in range(attempts):
         try:
-            response = session.get(endpoint, params=params, headers=headers, timeout=(10, 45), stream=True, allow_redirects=False)
+            response = session.head(endpoint, params=params, headers=headers, timeout=(10, 45), allow_redirects=False)
             try:
                 last_code = response.status_code
                 if strict_selection and last_code == 409:
@@ -111,10 +122,11 @@ def _probe(
                     revision = response.headers.get("x-flow-pcf-revision", "")
                     selection = response.headers.get("x-flow-normalized-selection")
                     count = response.headers.get("x-flow-normalized-candidate-count")
+                    suffix = r"data\.csv" if dataset == "etf_scale" else r"data\.csv(?:\.gz)?"
                     valid_identity = (re.fullmatch(r"[a-f0-9]{64}", digest) is not None
                         and re.fullmatch(r"market-data/normalized/" + re.escape(source)
-                            + r"/etf_scale/(?:" + re.escape(date_value) + "|"
-                            + date_value.replace("-", "") + r")/[a-f0-9]{64}/data\.csv", key) is not None
+                            + "/" + re.escape(dataset) + r"/(?:" + re.escape(date_value) + "|"
+                            + date_value.replace("-", "") + r")/[a-f0-9]{64}/" + suffix, key) is not None
                         and response.headers.get("x-flow-trade-date") == date_value)
                     # The Worker emits a revision header only for a D1 pointer hit.
                     # revision_id is an opaque TEXT identity, not necessarily a SHA-256:
@@ -144,10 +156,11 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--attempts", type=int, default=2)
     args = parser.parse_args()
-    if args.attempts <= 0:
-        raise ValueError("attempts must be positive")
+    if not 1 <= args.attempts <= MAX_ATTEMPTS:
+        raise ValueError(f"attempts must be between 1 and {MAX_ATTEMPTS}")
 
     slots = _exact_slots(args.slots_json) if args.slots_json is not None else None
+    dates = None if slots is not None else _dates(args.dates)
     if slots is not None and args.attempts != 1:
         raise ValueError("exact slots require exactly one attempt")
     if slots is not None:
@@ -191,7 +204,7 @@ def main() -> None:
         "completeShareDates": [],
         "pcfReadyDates": [],
     }
-    for date_value in _dates(args.dates):
+    for date_value in dates or []:
         statuses: dict[str, Any] = {}
         for source, dataset in PROBES:
             statuses[f"{source}_{dataset}"] = _probe(
@@ -202,6 +215,7 @@ def main() -> None:
                 dataset=dataset,
                 headers=headers,
                 attempts=args.attempts,
+                strict_selection=True,
             )
         report["dates"][date_value] = statuses
         sse_ready = statuses["sse_etf_scale"].get("status") == "ready"

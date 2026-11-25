@@ -243,3 +243,79 @@ test("date-based ETF candidate resolution rejects oversized R2 objects before st
   assert.ok(lists.every((call) => call.limit === MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX));
   assert.equal(gets, 1);
 });
+
+test("metadata HEAD probes bounded R2 metadata without reading object bodies", async () => {
+  const { default: worker } = await import(new URL("../dist/server/index.js", import.meta.url).href);
+  const prefix = "market-data/normalized/sse/etf_scale/2026-11-04/";
+  const key = `${prefix}${"a".repeat(64)}/data.csv`;
+  for (const mode of ["single", "ambiguous", "truncated"]) {
+    let queries = 0, lists = 0, heads = 0, gets = 0;
+    const response = await worker.fetch(new Request(
+      `http://localhost/api/v1/admin/history-artifact?${new URLSearchParams({
+        source: "sse", dataset: "etf_scale", date: "2026-11-04", file: "data", selection: "indexed-or-single",
+      })}`,
+      { method: "HEAD", headers: { authorization: "Bearer test-key" } },
+    ), {
+      INGEST_API_KEY: "test-key",
+      DB: { prepare(sql) {
+        assert.match(sql, /history_artifact_pointer[\s\S]*LIMIT 1/);
+        return { bind() { return { async first() { queries += 1; return null; } }; } };
+      } },
+      RAW_BUCKET: {
+        async list({ prefix: requested, limit }) {
+          lists += 1;
+          assert.equal(limit, MAX_UNINDEXED_HISTORY_OBJECTS_PER_PREFIX);
+          if (mode === "truncated") return { objects: [item(key)], truncated: true, cursor: "ignored" };
+          if (requested === prefix) return { truncated: false, objects: mode === "ambiguous"
+            ? [item(key), item(`${prefix}${"b".repeat(64)}/data.csv`)] : [item(key)] };
+          return { truncated: false, objects: [] };
+        },
+        async head(requested) {
+          heads += 1; assert.equal(requested, key);
+          return { size: 25, customMetadata: { sha256: "c".repeat(64) } };
+        },
+        async get() { gets += 1; throw new Error("metadata HEAD must not read bodies"); },
+      },
+      ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    }, { waitUntil() {}, passThroughOnException() {} });
+    assert.equal(queries, 1);
+    assert.equal(lists, mode === "truncated" ? 1 : 2);
+    assert.equal(heads, mode === "single" ? 1 : 0);
+    assert.equal(gets, 0);
+    assert.equal(response.status, mode === "single" ? 200 : mode === "ambiguous" ? 409 : 413);
+    assert.equal(await response.text(), "");
+    if (mode === "single") {
+      assert.equal(response.headers.get("x-flow-normalized-key"), key);
+      assert.equal(response.headers.get("x-flow-normalized-sha256"), "c".repeat(64));
+      assert.equal(response.headers.get("x-flow-normalized-selection"), "single");
+    }
+  }
+});
+
+test("metadata HEAD uses an indexed point lookup and R2 head without listing or get", async () => {
+  const { default: worker } = await import(new URL("../dist/server/index.js", import.meta.url).href);
+  const { createHash } = await import("node:crypto");
+  const digest = createHash("sha256").update("fixture").digest("hex");
+  const key = `market-data/normalized/szse/etf_scale/2026-11-04/${"a".repeat(64)}/data.csv`;
+  let queries = 0, lists = 0, heads = 0, gets = 0;
+  const response = await worker.fetch(new Request(
+    "http://localhost/api/v1/admin/history-artifact?source=szse&dataset=etf_scale&date=2026-11-04&selection=indexed-or-single",
+    { method: "HEAD", headers: { authorization: "Bearer test-key" } },
+  ), {
+    INGEST_API_KEY: "test-key",
+    DB: { prepare() { return { bind() { return { async first() {
+      queries += 1; return { objectKey: key, sha256: digest, revisionId: "opaque-revision" };
+    } }; } }; } },
+    RAW_BUCKET: {
+      async list() { lists += 1; throw new Error("indexed lookup must not list"); },
+      async head(requested) { heads += 1; assert.equal(requested, key); return { size: 7, customMetadata: {} }; },
+      async get() { gets += 1; throw new Error("metadata HEAD must not read bodies"); },
+    },
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-flow-pcf-revision"), "opaque-revision");
+  assert.equal(response.headers.get("x-flow-normalized-sha256"), digest);
+  assert.equal(await response.text(), "");
+  assert.deepEqual([queries, lists, heads, gets], [1, 0, 1, 0]);
+});
