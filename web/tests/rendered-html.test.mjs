@@ -118,6 +118,32 @@ test("pinned official recovery reads are authenticated, bounded and never list o
   assert.equal(gets.length,before,"invalid inputs and authentication stop before R2");
 });
 
+test("explicit raw wire reads large source without changing legacy limits or writing", async () => {
+  const worker = await loadWorker();
+  const {decodeRawWire} = await import("../app/lib/raw-wire.ts");
+  const bytes = new Uint8Array(2_049_642).fill(120);
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  const key = `market-data/raw/szse/etf_scale/2026-09-14/${sha}.json`;
+  let gets = 0;
+  const runtime = {...env, INGEST_API_KEY:"test-key",
+    DB:{prepare(){throw new Error("no SQL");}},
+    RAW_BUCKET:{async get(){gets++;return {body:bytes,size:bytes.length};},
+      put(){throw new Error("no writes");},list(){throw new Error("no lists");}}};
+  const request = (wire="", auth=true, objectKey=key) => worker.fetch(new Request(
+    `http://localhost/api/v1/admin/history-artifact?archive_key=${encodeURIComponent(objectKey)}&archive_sha256=${sha}${wire}`,
+    {headers:auth?{authorization:"Bearer test-key"}:{}}),runtime,context);
+  assert.equal((await request()).status,413);
+  const response = await request("&raw_wire=flow-raw-gzip-wire-v1");
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get("x-flow-archive-sha256"),sha);
+  assert.deepEqual(await decodeRawWire(await response.json()),bytes);
+  const before=gets;
+  assert.equal((await request("&raw_wire=unknown")).status,400);
+  assert.equal((await request("&raw_wire=flow-raw-gzip-wire-v1",false)).status,401);
+  assert.equal((await request("&raw_wire=flow-raw-gzip-wire-v1",true,key.replace("/szse/","/sse/"))).status,400);
+  assert.equal(gets,before);
+});
+
 test("discovers exact first-observation metadata by raw identity without weakening pinned byte reads", async () => {
   const worker = await loadWorker();
   const rawSha = "a".repeat(64);

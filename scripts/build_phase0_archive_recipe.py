@@ -48,7 +48,11 @@ def _read_json(path: Path) -> dict:
 
 
 def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalized_raw: bool = False,
-                 max_bytes: int = MAX_OBJECT_BYTES) -> bytes:
+                 max_bytes: int = MAX_OBJECT_BYTES, raw_wire: bool = False) -> bytes:
+    from trading_desk.raw_wire import CONTRACT as RAW_WIRE_CONTRACT, decode_raw_wire
+    if raw_wire and (metadata_raw or normalized_raw or not re.fullmatch(
+            r"market-data/raw/szse/etf_scale/\d{4}-\d{2}-\d{2}/[a-f0-9]{64}\.json", key)):
+        raise ValueError("archive_recipe_raw_wire_scope_invalid")
     if type(max_bytes) is not int or not 0 < max_bytes <= MAX_OBJECT_BYTES:
         raise ValueError("archive_recipe_read_limit_invalid")
     if metadata_raw and normalized_raw:
@@ -58,7 +62,10 @@ def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalize
         raise ValueError("archive_recipe_auth_missing")
     field = ("archive_metadata_raw_sha256" if metadata_raw else
              "archive_normalized_raw_sha256" if normalized_raw else "archive_sha256")
-    query = urlencode({"archive_key": key, field: digest})
+    params = {"archive_key": key, field: digest}
+    if raw_wire:
+        params["raw_wire"] = RAW_WIRE_CONTRACT
+    query = urlencode(params)
     request = Request(f"{ARCHIVE_ORIGIN}/api/v1/admin/history-artifact?{query}", headers={
         "Authorization": f"Bearer {os.environ['FLOW_INGEST_API_KEY']}",
         "CF-Access-Client-Id": os.environ["FLOW_CF_ACCESS_CLIENT_ID"],
@@ -74,7 +81,11 @@ def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalize
                     or (response.headers.get("x-flow-archive-raw-sha256") != digest
                         if metadata_raw or normalized_raw else actual != digest)):
                 raise ValueError("archive_recipe_remote_identity_mismatch")
-            content = response.read(max_bytes + 1)
+            # Base64 and envelope overhead are bounded separately from decoded bytes.
+            wire_limit = 2_700_000 if raw_wire else max_bytes
+            content = response.read(wire_limit + 1)
+            if raw_wire and response.headers.get("x-flow-raw-wire-contract") != RAW_WIRE_CONTRACT:
+                raise ValueError("archive_recipe_raw_wire_contract_mismatch")
     except HTTPError as error:
         # Do not persist arbitrary edge HTML, request headers, cookies or auth.
         ray = error.headers.get("cf-ray") if error.headers else None
@@ -82,7 +93,11 @@ def _archive_get(key: str, digest: str, *, metadata_raw: bool = False, normalize
         raise ArchiveReadError("archive_recipe_remote_http_error", status=error.code, ray=ray) from None
     except (URLError, TimeoutError):
         raise ArchiveReadError("archive_recipe_remote_transport_error") from None
-    if len(content) > max_bytes or hashlib.sha256(content).hexdigest() != actual:
+    if raw_wire:
+        if len(content) > wire_limit:
+            raise ValueError("archive_recipe_remote_size_exceeded")
+        content = decode_raw_wire(json.loads(content))
+    if (not raw_wire and len(content) > max_bytes) or hashlib.sha256(content).hexdigest() != actual:
         raise ValueError("archive_recipe_remote_hash_mismatch")
     return content
 
