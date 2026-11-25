@@ -995,3 +995,17 @@ def test_r2_recovery_contract_commands_are_offline_and_bounded() -> None:
     assert "SOURCE_UNAVAILABLE" in module
     assert "recovery_deadline_expired" in module
     assert "retry_attempts < 1 or retry_attempts > 3" in module
+
+
+def test_source_readiness_ledger_only_runs_after_collection_attempt() -> None:
+    workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
+    install_index = workflow.index("- name: Install collector")
+    collection_index = workflow.index("- name: Collect and validate official data")
+    readiness_start = workflow.index("      - name: Record source readiness ledger\n")
+    readiness_end = workflow.find("\n      - name:", readiness_start + 1)
+    readiness = workflow[readiness_start:readiness_end]
+
+    assert "if: ${{ always() && (steps.collection.outcome == 'success' || steps.collection.outcome == 'failure') }}" in readiness
+    assert install_index < collection_index < readiness_start
+    assert "python scripts/build_source_readiness.py" in readiness
+    assert "steps.collection.outcome != 'cancelled'" not in readiness

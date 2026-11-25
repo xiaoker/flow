@@ -1031,7 +1031,7 @@ jobs:
 
       - name: Record source readiness ledger
         id: readiness
-        if: ${{ always() && steps.collection.outcome != 'cancelled' }}
+        if: ${{ always() && (steps.collection.outcome == 'success' || steps.collection.outcome == 'failure') }}
         env:
           FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
           FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
