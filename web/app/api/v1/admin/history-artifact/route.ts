@@ -1,4 +1,5 @@
 import { runtimeEnv } from "@/app/lib/dashboard-store";
+import { encodeRawWire, RAW_WIRE_CONTRACT } from "@/app/lib/raw-wire";
 import {
   HistoryArtifactCandidateLimitError,
   listUnindexedHistoryArtifactCandidates,
@@ -40,11 +41,17 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
   };
   const discoveryField = metadataRaw !== null ? "archive_metadata_raw_sha256" : "archive_normalized_raw_sha256";
   const allowed = discoveryRaw === null ? ["archive_key", "archive_sha256"] : ["archive_key", discoveryField];
+  const wireContract = query.get("raw_wire");
+  if (wireContract !== null) allowed.push("raw_wire");
   if (!match || match[0] !== key || key.length > 500 || !/^[a-f0-9]{64}$/.test(digest)
       || !pairs[match[2]]?.includes(match[3]) || [...query.keys()].some(k => !allowed.includes(k))) {
     return badRequest("invalid_pinned_official_object");
   }
   const [, kind, source, dataset, partition, rawSha, suffix] = match;
+  if (wireContract !== null && (wireContract !== RAW_WIRE_CONTRACT || discoveryRaw !== null
+      || kind !== "raw" || source !== "szse" || dataset !== "etf_scale" || suffix !== ".json")) {
+    return badRequest("invalid_raw_wire_scope");
+  }
   if (metadataRaw !== null && (kind !== "raw" || suffix !== ".metadata.json" || metadataRaw !== rawSha)) {
     return badRequest("invalid_pinned_official_metadata");
   }
@@ -62,9 +69,10 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
   // bytes before approval, while execution still uses exact hash reads.
   const object = await bucket.get(key);
   if (!object?.body) return badRequest("artifact_not_found", 404);
-  if (object.size > 2_000_000) return badRequest("artifact_too_large", 413);
+  const sourceLimit = wireContract === null ? 2_000_000 : 4_000_000;
+  if (object.size > sourceLimit) return badRequest("artifact_too_large", 413);
   const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
-  if (bytes.byteLength > 2_000_000) return badRequest("artifact_too_large", 413);
+  if (bytes.byteLength > sourceLimit) return badRequest("artifact_too_large", 413);
   const actual = await sha256Hex(bytes);
   if (metadataRaw !== null) {
     // Metadata is first-observation evidence: recollecting unchanged raw bytes
@@ -81,6 +89,12 @@ async function pinnedOfficialObject(query: URLSearchParams, bucket: R2Bucket): P
       return badRequest("archive_metadata_identity_mismatch", 409);
     }
   } else if (normalizedRaw === null && actual !== expected) return badRequest("archive_object_hash_mismatch", 409);
+  if (wireContract !== null) {
+    const envelope = await encodeRawWire(bytes);
+    return Response.json(envelope, {headers: {"Cache-Control": "private, no-store",
+      "X-Flow-Archive-Key": key, "X-Flow-Archive-Sha256": actual,
+      "X-Flow-Raw-Wire-Contract": RAW_WIRE_CONTRACT}});
+  }
   return new Response(bytes, { headers: { "Cache-Control": "private, no-store",
     "Content-Type": key.endsWith(".csv.gz") ? "application/gzip" : "application/octet-stream",
     "X-Flow-Archive-Key": key, "X-Flow-Archive-Sha256": actual,

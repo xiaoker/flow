@@ -95,7 +95,8 @@ def _normalized_files(
 
 
 def serialize_history_artifact(
-    artifact: FetchArtifact | dict[str, Any], *, workspace_root: Path
+    artifact: FetchArtifact | dict[str, Any], *, workspace_root: Path,
+    compress_raw: bool = False,
 ) -> dict[str, Any]:
     payload = artifact.to_dict() if isinstance(artifact, FetchArtifact) else artifact
     source = payload.get("source") or {}
@@ -146,7 +147,7 @@ def serialize_history_artifact(
         }
     )
     extension = raw_path.suffix.lower().lstrip(".")
-    return {
+    result = {
         "releaseId": f"{dataset}:{source_id}:{requested_date}:{digest[:16]}",
         "sourceId": source_id,
         "dataset": dataset,
@@ -162,6 +163,13 @@ def serialize_history_artifact(
         "metadata": _read_json(metadata_path),
         "normalized": normalized,
     }
+    if compress_raw:
+        from .raw_wire import encode_raw_wire
+        if (source_id, dataset) != ("szse", "etf_scale") or source.get("date_semantics") != "source_historical_scale_size_date":
+            raise ValueError("raw_wire_source_not_supported")
+        result["rawWire"] = encode_raw_wire(raw_content)
+        result["rawContentBase64"] = ""
+    return result
 
 
 def _artifact_payload(artifact: FetchArtifact | dict[str, Any]) -> dict[str, Any]:

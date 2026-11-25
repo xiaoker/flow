@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { decodeRawWire } from "@/app/lib/raw-wire";
 import { isDashboardSnapshot, runtimeEnv } from "@/app/lib/dashboard-store";
 import type { DashboardSnapshot } from "@/app/lib/dashboard-data";
 import {
@@ -61,6 +62,7 @@ type HistoryArtifact = {
   contentType: string;
   extension: string;
   rawContentBase64: string;
+  rawWire?: Record<string, unknown>;
   metadata: Record<string, unknown>;
   normalized: NormalizedFile[];
 };
@@ -249,7 +251,10 @@ function isHistoryArtifact(value: unknown): value is HistoryArtifact {
       typeof value.extension === "string" &&
       /^[a-z0-9]{1,8}$/.test(value.extension) &&
       typeof value.rawContentBase64 === "string" &&
-      value.rawContentBase64.length > 0 &&
+      (value.rawWire === undefined ? value.rawContentBase64.length > 0
+        : value.rawContentBase64 === "" && isRecord(value.rawWire)
+          && sourceId === "szse" && dataset === "etf_scale"
+          && value.dateBasis === "source_historical_scale_size_date") &&
       isRecord(value.metadata) &&
       value.metadata.sha256 === value.sha256 &&
       Array.isArray(value.normalized) &&
@@ -1407,7 +1412,8 @@ export async function POST(request: Request) {
     };
     for (const artifact of history.artifacts) {
       try {
-        const raw = decodeBase64(artifact.rawContentBase64);
+        const raw = artifact.rawWire === undefined ? decodeBase64(artifact.rawContentBase64)
+          : await decodeRawWire(artifact.rawWire);
         if ((await sha256Hex(raw)) !== artifact.sha256) {
           throw new Error(`raw_sha256_mismatch:${artifact.releaseId}`);
         }
