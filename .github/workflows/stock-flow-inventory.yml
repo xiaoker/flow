@@ -8,6 +8,11 @@ on:
         required: false
         default: ''
         type: string
+      probe_dates:
+        description: 'Optional newline-separated 1–5 exact dates to probe directly, including dates absent from D1; does not infer trading days'
+        required: false
+        default: ''
+        type: string
       start_date:
         description: "First market-history date to probe"
         required: true
@@ -31,8 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       FLOW_PUBLIC_URL: https://flow.xiaoker.com
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -40,6 +43,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1, Node 24
+
+      - name: Reject conflicting inventory inputs
+        env:
+          EXACT_SLOTS_JSON: ${{ inputs.exact_slots_json }}
+          PROBE_DATES: ${{ inputs.probe_dates }}
+        run: |
+          set -euo pipefail
+          if [ -n "$EXACT_SLOTS_JSON" ] && [ -n "$PROBE_DATES" ]; then
+            echo "exact_slots_json and probe_dates are mutually exclusive" >&2
+            exit 2
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0, Node 24
@@ -51,20 +65,38 @@ jobs:
         run: python -m pip install -e '.[dev]'
 
       - name: Install Wrangler
-        if: ${{ inputs.exact_slots_json == '' }}
+        if: ${{ inputs.exact_slots_json == '' && inputs.probe_dates == '' }}
         run: npm ci
         working-directory: web
 
-      - name: Resolve official market-history dates
-        if: ${{ inputs.exact_slots_json == '' }}
+      - name: Resolve explicitly supplied dates
+        if: ${{ inputs.exact_slots_json == '' && inputs.probe_dates != '' }}
         env:
-          START_DATE: ${{ inputs.start_date }}
-          END_DATE: ${{ inputs.end_date }}
+          PROBE_DATES: ${{ inputs.probe_dates }}
         run: |
           set -euo pipefail
           mkdir -p reports/stock-flow-inventory
+          python scripts/select_market_history_dates.py \
+            --explicit-dates "$PROBE_DATES" \
+            --output reports/stock-flow-inventory/dates.txt
+
+      - name: Query bounded D1 dates
+        if: ${{ inputs.exact_slots_json == '' && inputs.probe_dates == '' }}
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/stock-flow-inventory
+          python scripts/select_market_history_dates.py \
+            --validate-range \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            > reports/stock-flow-inventory/range.json
           (cd web && npx wrangler d1 execute flow --remote --json \
-            --command "SELECT trade_date FROM market_history_daily ORDER BY trade_date ASC;") \
+            --command "SELECT trade_date FROM market_history_daily WHERE trade_date >= '$START_DATE' AND trade_date <= '$END_DATE' ORDER BY trade_date ASC LIMIT 6;") \
             > reports/stock-flow-inventory/market-history-query.json
           python scripts/select_market_history_dates.py \
             --input reports/stock-flow-inventory/market-history-query.json \
@@ -75,6 +107,7 @@ jobs:
       - name: Probe archived normalized metadata only
         env:
           EXACT_SLOTS_JSON: ${{ inputs.exact_slots_json }}
+          PROBE_DATES: ${{ inputs.probe_dates }}
         run: |
           if [ -n "$EXACT_SLOTS_JSON" ]; then
             python scripts/inventory_stock_flow_inputs.py \
