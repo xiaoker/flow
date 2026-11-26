@@ -291,6 +291,40 @@ def test_post_json_maps_http_error_without_reading_or_returning_body(monkeypatch
     assert status == 409 and body == {}
 
 
+def test_http_error_diagnostic_only_retains_safe_response_metadata(monkeypatch):
+    headers = {
+        "CF-Ray": "0123456789abcdef-SJC",
+        "Content-Type": "text/html; charset=UTF-8",
+        "cf-mitigated": "challenge",
+        "Location": "https://secret.invalid/token",
+        "Set-Cookie": "secret=credential",
+    }
+
+    def reject(*_args, **_kwargs):
+        raise HTTPError("https://flow.invalid/status", 403, "Forbidden", headers,
+                        io.BytesIO(b"secret-response-body"))
+
+    monkeypatch.setattr(renew, "urlopen", reject)
+    status, body = renew._post_json("https://flow.invalid/status", {}, {})
+    assert status == 403
+    assert body == {"httpDiagnostic": {
+        "cfRay": "0123456789abcdef-SJC",
+        "contentType": "text/html; charset=UTF-8",
+        "mitigation": "challenge",
+    }}
+    assert "secret" not in json.dumps(body)
+
+
+def test_http_error_diagnostic_rejects_arbitrary_header_values(monkeypatch):
+    def reject(*_args, **_kwargs):
+        raise HTTPError("https://flow.invalid/status", 403, "Forbidden",
+                        {"CF-Ray": "secret", "Content-Type": "secret", "cf-mitigated": "secret"},
+                        io.BytesIO(b"secret"))
+
+    monkeypatch.setattr(renew, "urlopen", reject)
+    assert renew._post_json("https://flow.invalid/status", {}, {}) == (403, {})
+
+
 def test_post_json_rejects_oversized_control_response(monkeypatch):
     class Response:
         status = 200
