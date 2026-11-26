@@ -45,7 +45,12 @@ def _post_json(
     timeout: float = 30,
 ) -> tuple[int, Any]:
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    request = Request(url, data=data, headers=headers, method="POST")
+    # Identify this application honestly; the edge may reject the default
+    # Python-urllib agent before service authentication (as with publish resume).
+    request = Request(url, data=data, headers={
+        **headers, "User-Agent": "flow-lease-heartbeat/1.0",
+        "Accept": "application/json",
+    }, method="POST")
     try:
         with urlopen(request, timeout=timeout) as response:
             raw = response.read(64 * 1024 + 1)
