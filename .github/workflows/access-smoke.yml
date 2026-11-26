@@ -2,6 +2,11 @@ name: Cloudflare Access smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      auth_diagnostic_only:
+        description: Two read-only status probes (curl and Python); no source request
+        type: boolean
+        default: false
   schedule:
     # Weekly independent check that Cloudflare Access and the SSE fallback
     # transport are healthy before a business-morning collection.
@@ -34,6 +39,7 @@ jobs:
           fi
 
       - name: Request the private data status endpoint
+        if: ${{ inputs.auth_diagnostic_only != true }}
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
@@ -43,6 +49,7 @@ jobs:
             "$STATUS_URL"
 
       - name: Validate the response contract
+        if: ${{ inputs.auth_diagnostic_only != true }}
         shell: bash
         run: |
           jq -e '
@@ -54,6 +61,7 @@ jobs:
           echo "Cloudflare Access service identity and private read endpoint are healthy."
 
       - name: Request an allowlisted SSE source through Cloudflare
+        if: ${{ inputs.auth_diagnostic_only != true }}
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
@@ -75,3 +83,59 @@ jobs:
           jq -e '.result | type == "array" and length > 0' \
             source-proxy-response.json >/dev/null
           echo "Authenticated, allowlisted SSE fallback transport is healthy."
+
+      - name: Compare read-only authenticated transports
+        if: ${{ inputs.auth_diagnostic_only == true }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from urllib.request import Request, build_opener, HTTPRedirectHandler
+          from urllib.error import HTTPError
+
+          # An absent key is intentional: authenticated 404 proves route access,
+          # without reading an existing task or performing a lease write.
+          url = "https://flow.xiaoker.com/api/v1/admin/pipeline-window/status?runKey=daily-market-data:2000-01-01:evening:v1"
+          headers = {"Authorization": "Bearer " + os.environ["INGEST_API_KEY"],
+                     "CF-Access-Client-Id": os.environ["CF_ACCESS_CLIENT_ID"],
+                     "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+                     "Content-Type": "application/json"}
+          for value in headers.values():
+              if any(c in value for c in '\r\n'):
+                  raise SystemExit("invalid credential format")
+          def safe(status, raw):
+              result = {"status": status}
+              for key, pattern in (("cf-ray", r"[a-fA-F0-9]{16,32}-[A-Z]{3}"),
+                                   ("content-type", r"(?:application/json|text/html)(?:;\s*charset=[A-Za-z0-9-]+)?"),
+                                   ("cf-mitigated", r"challenge")):
+                  value = raw.get(key, "").strip()
+                  if re.fullmatch(pattern, value, re.I):
+                      result[key] = value
+              return result
+          # Credentials enter curl through stdin, never argv; no redirect/retry.
+          config = ''.join('header = ' + json.dumps(k + ': ' + v) + '\n' for k,v in headers.items())
+          curl = subprocess.run(["curl", "--config", "-", "--silent", "--max-time", "20",
+                                 "--dump-header", "-", "--output", "/dev/null", url],
+                                input=config, text=True, capture_output=True, timeout=25)
+          lines = curl.stdout.splitlines()
+          status = int(lines[0].split()[1]) if lines and re.match(r'HTTP/\S+ \d{3}', lines[0]) else 0
+          fields = {k.lower():v.strip() for line in lines if ':' in line for k,v in [line.split(':',1)]}
+          results = {"curl": safe(status, fields), "curlExitCode": curl.returncode}
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                  return None
+          try:
+              response = build_opener(NoRedirect()).open(Request(url, headers=headers, method="GET"), timeout=20)
+          except HTTPError as error:
+              response = error
+          except Exception:
+              response = None
+          if response is None:
+              results["python"] = {"status": 0}
+          else:
+              results["python"] = safe(response.code, {k.lower():v for k,v in response.headers.items()})
+              response.close()
+          print(json.dumps(results, sort_keys=True))
+          if curl.returncode or any(results[k]["status"] != 404 for k in ("curl", "python")):
+              raise SystemExit("authenticated read-only transport comparison failed")
+          PY
