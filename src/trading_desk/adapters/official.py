@@ -217,6 +217,51 @@ def parse_hkex_tab_data(text: str) -> list[dict[str, Any]]:
     return parsed
 
 
+def _hkex_response_diagnostics(response: requests.Response) -> str:
+    """Return bounded, non-content metadata for a rejected HKEX response.
+
+    The response body may contain official market data or an intermediary's
+    challenge page, so never include a snippet in logs or quality reports.
+    A full-body hash lets operators correlate repeated responses without
+    disclosing those bytes.
+    """
+    raw = bytes(response.content)
+    raw_content_type = str(response.headers.get("Content-Type", ""))
+    mime_type = raw_content_type.split(";", 1)[0].strip().lower()
+    if not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", mime_type):
+        mime_type = "unknown"
+
+    if not raw:
+        body_shape = "empty"
+    elif all(byte == 0 for byte in raw):
+        body_shape = "nul_only"
+    elif not raw.strip(b"\x00\t\n\r "):
+        body_shape = "padding_only"
+    else:
+        sample = raw[:1024].lstrip(b"\xef\xbb\xbf\x00\t\n\r ")
+        lowered = sample.lower()
+        if re.match(rb"tabdata\s*=", sample, flags=re.IGNORECASE):
+            body_shape = "tabdata_assignment"
+        elif re.match(rb"(?:<!doctype\s+html|<html\b|<head\b|<body\b)", lowered):
+            body_shape = "html"
+        elif sample.startswith((b"[", b"{")):
+            body_shape = "json"
+        else:
+            body_shape = "other"
+
+    return json.dumps(
+        {
+            "status_code": int(response.status_code),
+            "content_type": mime_type,
+            "body_bytes": len(raw),
+            "body_sha256": hashlib.sha256(raw).hexdigest(),
+            "body_shape": body_shape,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _number(value: Any, *, multiplier: float = 1.0) -> float | None:
     if value is None or value == "":
         return None
@@ -1705,7 +1750,13 @@ class OfficialMarketAdapters:
                 "page_url": HKEX_CONNECT_PAGE_URL,
             },
         )
-        markets = parse_hkex_tab_data(response.text)
+        try:
+            markets = parse_hkex_tab_data(response.text)
+        except ValueError as exc:
+            diagnostics = _hkex_response_diagnostics(response)
+            raise ValueError(
+                f"{exc}; response_diagnostic={diagnostics}"
+            ) from exc
         summary_rows: list[dict[str, Any]] = []
         top_rows: list[dict[str, Any]] = []
         for market_payload in markets:
