@@ -60,7 +60,19 @@ def _post_json(
     except HTTPError as error:
         # Deliberately do not parse or log an error body; gateways can echo
         # request metadata and credentials.
-        return error.code, {}
+        diagnostic: dict[str, str] = {}
+        # Only fixed-format, non-secret response metadata is retained. Never
+        # retain Location, cookies, authentication headers or arbitrary values.
+        for header, key, pattern in (
+            ("CF-Ray", "cfRay", r"[a-fA-F0-9]{16,32}-[A-Z]{3}"),
+            ("Content-Type", "contentType", r"(?:application/json|text/html)(?:;\s*charset=[A-Za-z0-9-]+)?"),
+            ("cf-mitigated", "mitigation", r"challenge"),
+        ):
+            value = (error.headers.get(header, "") if error.headers else "").strip()
+            if re.fullmatch(pattern, value, re.IGNORECASE):
+                diagnostic[key] = value
+        error.close()
+        return error.code, {"httpDiagnostic": diagnostic} if diagnostic else {}
     except URLError as error:
         raise RuntimeError("control request transport failed") from error
 
@@ -231,6 +243,8 @@ def main() -> None:
                 _write(args.evidence, evidence)
                 raise
             if status_code != 200:
+                if isinstance(body, dict) and isinstance(body.get("httpDiagnostic"), dict):
+                    evidence["httpDiagnostic"] = body["httpDiagnostic"]
                 evidence["unknownRenewalCount"] += 1
                 evidence["lastRenewalOutcome"] = "unknown"
                 evidence.update({
