@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -921,6 +922,45 @@ def test_hkex_archives_official_404_for_expired_history(
     assert artifact.status_code == 404
     assert artifact.normalized_path is not None
     assert "官方文件返回 404" in artifact.warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "body_shape"),
+    [
+        (
+            "<!doctype html><title>private challenge marker</title>",
+            "text/html; charset=utf-8",
+            "html",
+        ),
+        ("\x00" * 8, "application/javascript", "nul_only"),
+        ("private challenge marker", "application/javascript", "other"),
+    ],
+)
+def test_hkex_invalid_wrapper_reports_redacted_response_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    adapters: OfficialMarketAdapters,
+    body: str,
+    content_type: str,
+    body_shape: str,
+) -> None:
+    response = FakeResponse(body, content_type)
+    monkeypatch.setattr(official, "get", lambda *args, **kwargs: response)
+
+    with pytest.raises(ValueError, match="expected tabData JSON wrapper") as error:
+        adapters.fetch_hkex_connect("2026-11-25")
+
+    message = str(error.value)
+    assert "response_diagnostic=" in message
+    diagnostic_text = message.split("response_diagnostic=", 1)[1]
+    diagnostic = json.loads(diagnostic_text)
+    assert diagnostic == {
+        "body_bytes": len(response.content),
+        "body_sha256": hashlib.sha256(response.content).hexdigest(),
+        "body_shape": body_shape,
+        "content_type": content_type.split(";", 1)[0],
+        "status_code": 200,
+    }
+    assert "private challenge marker" not in message
 
 
 def test_hkex_accepts_javascript_only_string_escapes(
