@@ -264,6 +264,8 @@ def test_post_json_uses_bounded_stdlib_http_and_preserves_request_contract(monke
         assert request.data == b'{"runKey":"fixture"}'
         assert request.get_header("Content-type") == "application/json"
         assert request.get_header("Authorization") == "Bearer fixture"
+        assert request.get_header("User-agent") == "flow-lease-heartbeat/1.0"
+        assert request.get_header("Accept") == "application/json"
         assert timeout == 7
         return Response()
 
