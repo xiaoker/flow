@@ -475,6 +475,15 @@ jobs:
             if [[ "${#EVIDENCE[@]}" -eq 1 ]]; then cp "${EVIDENCE[0]}" "$ROOT/recovery-evidence.json"; fi
           fi
 
+      - name: Verify explicitly approved ordinary source reuse
+        if: ${{ inputs.recovery_id != '' && inputs.resume_existing_source }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if jq -e '.budgetManifest.publishSource.evidenceContract == "flow-ordinary-source-reuse-v1"' recovery-execution.json >/dev/null; then
+            python3 scripts/resume_publish_source.py --ordinary-evidence recovery-execution.json .collection-source
+          fi
+
       - name: Verify source artifact identity
         shell: bash
         run: |
@@ -495,7 +504,11 @@ jobs:
             ' .collection-source/dashboard-snapshot.json >/dev/null
             if [[ "${INPUT_RESUME_EXISTING_SOURCE:-false}" == "true" ]]; then
               if ! jq -e '.plan.budgetManifest | type == "object" and has("rollingPreparation")' recovery-plan.json >/dev/null; then
-                SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json)"
+                SOURCE_EVIDENCE=".collection-source/recovery-evidence.json"
+                if jq -e '.plan.budgetManifest.publishSource.evidenceContract == "flow-ordinary-source-reuse-v1"' recovery-plan.json >/dev/null; then
+                  SOURCE_EVIDENCE=".collection-source/ordinary-source-evidence.json"
+                fi
+                SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' "$SOURCE_EVIDENCE")"
                 jq -e --arg fingerprint "$SOURCE_FINGERPRINT" '
                   .plan.budgetManifest.publishSource.sourceFingerprint == $fingerprint
                 ' recovery-plan.json >/dev/null
@@ -850,7 +863,7 @@ jobs:
           mkdir -p .recovery/recovery-resource
           python scripts/measure_recovery_resources.py \
             --start-epoch publish-start-epoch.txt \
-            --source-evidence "$(if [[ -s .collection-source/retained-source-evidence.json ]]; then echo .collection-source/retained-source-evidence.json; else echo .collection-source/recovery-evidence.json; fi)" \
+            --source-evidence "$(if [[ -s .collection-source/ordinary-source-evidence.json ]]; then echo .collection-source/ordinary-source-evidence.json; elif [[ -s .collection-source/retained-source-evidence.json ]]; then echo .collection-source/retained-source-evidence.json; else echo .collection-source/recovery-evidence.json; fi)" \
             --control-response pipeline-recovery-publish-running-response.json \
             "${METRIC_ARGS[@]}" \
             --output .recovery/recovery-resource/recovery-resource-metrics.json
@@ -1009,7 +1022,11 @@ jobs:
             ERROR_CODE="quality_gate_blocked"
           fi
           if [[ -n "$INPUT_RECOVERY_ID" && "$STATUS" == "COMPLETED" ]]; then
-            SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' .collection-source/recovery-evidence.json 2>/dev/null || true)"
+            SOURCE_EVIDENCE=".collection-source/recovery-evidence.json"
+            if jq -e '.budgetManifest.publishSource.evidenceContract == "flow-ordinary-source-reuse-v1"' recovery-execution.json >/dev/null; then
+              SOURCE_EVIDENCE=".collection-source/ordinary-source-evidence.json"
+            fi
+            SOURCE_FINGERPRINT="$(jq -r '.sourceFingerprint // empty' "$SOURCE_EVIDENCE" 2>/dev/null || true)"
             if [[ ! "$SOURCE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]; then
               STATUS="BLOCKED_QUALITY"
               ERROR_CODE="recovery_source_fingerprint_missing"

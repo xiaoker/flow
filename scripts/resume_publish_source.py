@@ -6,12 +6,13 @@ budget reset or release mutation. An ambiguous write is never retried.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -22,6 +23,108 @@ from trading_desk.recovery_execution import validate_recovery_plan  # noqa: E402
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         raise ValueError("publish_resume_redirect_refused")
+
+
+def ordinary_source_lineage(history, *, target_date):
+    """Extract observed normalized objects, never invent keys from dates.
+
+    This is a local projection of the immutable source bundle, not a new
+    collection receipt or proof of current R2 availability.
+    """
+    try:
+        if date.fromisoformat(target_date).isoformat() != target_date:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise ValueError("publish_resume_target_date") from None
+    if not isinstance(history, dict) or not isinstance(history.get("partitions"), list):
+        raise ValueError("publish_resume_partition_shape")
+    objects = {}
+    for partition in history.get("partitions", []):
+        if not isinstance(partition, dict):
+            raise ValueError("publish_resume_partition_shape")
+        day = partition.get("tradeDate")
+        if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or day > target_date:
+            raise ValueError("publish_resume_partition_date")
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            raise ValueError("publish_resume_partition_date") from None
+        artifacts = partition.get("lineage", {}).get("artifacts", {})
+        for market in ("sse", "szse"):
+            item = artifacts.get(market + "_etf_scale", {})
+            if item.get("status") != "ready":
+                continue
+            key, digest = item.get("key"), item.get("sha256")
+            if (not isinstance(key, str) or not re.fullmatch(
+                    rf"market-data/normalized/{market}/etf_scale/{day}/[a-f0-9]{{64}}/data\.csv", key)
+                    or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+                    or item.get("sha256Source") != "header-verified-object"):
+                raise ValueError("publish_resume_partition_lineage")
+            if key in objects and objects[key]["sha256"] != digest:
+                raise ValueError("publish_resume_partition_hash_conflict")
+            objects[key] = {"key": key, "sha256": digest, "sourceDates": [day]}
+    if not objects:
+        raise ValueError("publish_resume_partition_lineage_missing")
+    return [objects[key] for key in sorted(objects)]
+
+
+def ordinary_source_evidence(plan, source_dir):
+    """Validate an explicitly pinned ordinary bundle and describe its reuse.
+
+    Approval and artifact transport identity are checked by the existing
+    entry. This projection does not claim a fresh collection or remote reads.
+    """
+    validate_recovery_plan(plan)
+    source = plan.get("budgetManifest", {}).get("publishSource", {})
+    if source.get("evidenceContract") != "flow-ordinary-source-reuse-v1":
+        raise ValueError("publish_resume_ordinary_contract")
+    bindings = source.get("sourceFileBindings")
+    if not isinstance(bindings, dict) or not 1 <= len(bindings) <= 64:
+        raise ValueError("publish_resume_ordinary_bindings")
+    root = Path(source_dir).resolve()
+    observed = {}
+    total = 0
+    for name, binding in sorted(bindings.items()):
+        if (not isinstance(name, str) or not name or Path(name).is_absolute()
+                or ".." in Path(name).parts or "\\" in name
+                or name == "ordinary-source-evidence.json"):
+            raise ValueError("publish_resume_ordinary_path")
+        path = root / name
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
+            raise ValueError("publish_resume_ordinary_path")
+        size = path.stat().st_size
+        total += size
+        if total > 32 * 1024 * 1024:
+            raise ValueError("publish_resume_ordinary_size")
+        raw = path.read_bytes()
+        actual = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+        if actual != binding:
+            raise ValueError("publish_resume_ordinary_file_mismatch")
+        observed[name] = actual
+    actual_names = {p.relative_to(root).as_posix() for p in root.rglob("*")
+                    if p.is_file() and p.name != "ordinary-source-evidence.json"}
+    if actual_names != set(bindings):
+        raise ValueError("publish_resume_ordinary_unbound_file")
+    if not {"dashboard-snapshot.json", "stock-flow-history.json"} <= set(observed):
+        raise ValueError("publish_resume_ordinary_required_file")
+    snapshot = json.loads((root / "dashboard-snapshot.json").read_bytes())
+    if (plan.get("dataDates") != [snapshot.get("asOf")]
+            or snapshot.get("publication", {}).get("status") != "confirmed"):
+        raise ValueError("publish_resume_ordinary_date_status")
+    refs = ordinary_source_lineage(json.loads((root / "stock-flow-history.json").read_bytes()),
+                                   target_date=snapshot["asOf"])
+    identity = {key: source.get(key) for key in ("sourceRunId", "artifactId", "artifactName",
+                "artifactSha256", "artifactBytes", "producerCommit")}
+    provenance = {"contractVersion": "flow-ordinary-source-reuse-v1", "artifact": identity,
+                  "files": observed, "targetDate": snapshot["asOf"]}
+    fingerprint = hashlib.sha256(json.dumps(provenance, ensure_ascii=False, sort_keys=True,
+                                            separators=(",", ":")).encode()).hexdigest()
+    if source.get("sourceFingerprint") != fingerprint:
+        raise ValueError("publish_resume_ordinary_fingerprint")
+    return {"schemaVersion": 1, "provenance": provenance, "files": observed,
+            "sourceFingerprint": fingerprint, "collectorRunId": source["sourceRunId"],
+            "targetDate": snapshot["asOf"], "collectionPerformed": False, "requestCount": 0,
+            "retainedInputObjects": [{**ref, "sourceFingerprint": fingerprint} for ref in refs]}
 
 
 def required(name):
@@ -147,6 +250,18 @@ def resume():
 
 def main():
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "--ordinary-evidence":
+            if len(sys.argv) != 4:
+                raise ValueError("publish_resume_ordinary_arguments")
+            plan = json.loads(Path(sys.argv[2]).read_bytes())
+            root = Path(sys.argv[3])
+            output = root / "ordinary-source-evidence.json"
+            if output.exists() or output.is_symlink():
+                raise ValueError("publish_resume_ordinary_evidence_exists")
+            evidence = ordinary_source_evidence(plan, root)
+            with output.open("x") as stream:
+                json.dump(evidence, stream, sort_keys=True, separators=(",", ":"))
+            return
         outputs = resume()
         with Path(required("GITHUB_OUTPUT")).open("a") as stream:
             for key, value in outputs.items():
