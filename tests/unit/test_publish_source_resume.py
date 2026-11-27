@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -16,6 +17,129 @@ import pytest
 from trading_desk.recovery_execution import build_recovery_plan
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_ordinary_lineage_uses_only_observed_verified_objects():
+    from scripts.resume_publish_source import ordinary_source_lineage
+    item = {"status": "ready", "key": "market-data/normalized/sse/etf_scale/2026-11-26/" + "a" * 64 + "/data.csv",
+            "sha256": "b" * 64, "sha256Source": "header-verified-object"}
+    history = {"partitions": [{"tradeDate": "2026-11-26", "lineage": {"artifacts": {"sse_etf_scale": item}}}]}
+    rows = ordinary_source_lineage(history, target_date="2026-11-26")
+    assert rows == [{"key": item["key"], "sha256": "b" * 64, "sourceDates": ["2026-11-26"]}]
+    history["partitions"].append(json.loads(json.dumps(history["partitions"][0])))
+    assert ordinary_source_lineage(history, target_date="2026-11-26") == rows
+    history["partitions"][1]["lineage"]["artifacts"]["sse_etf_scale"]["sha256"] = "c" * 64
+    with pytest.raises(ValueError, match="hash_conflict"):
+        ordinary_source_lineage(history, target_date="2026-11-26")
+
+
+@pytest.mark.parametrize("day", ["2026-11-27", "2026-02-30", "not-a-date"])
+def test_ordinary_lineage_rejects_invalid_or_future_partition(day):
+    from scripts.resume_publish_source import ordinary_source_lineage
+    with pytest.raises(ValueError, match="partition_date"):
+        ordinary_source_lineage({"partitions": [{"tradeDate": day}]}, target_date="2026-11-26")
+
+
+def test_ordinary_lineage_does_not_invent_missing_sources():
+    from scripts.resume_publish_source import ordinary_source_lineage
+    with pytest.raises(ValueError, match="lineage_missing"):
+        ordinary_source_lineage({"partitions": []}, target_date="2026-11-26")
+
+
+def ordinary_bundle(tmp_path):
+    snapshot = {"asOf": "2026-10-16", "publication": {"status": "confirmed"}}
+    history = {"partitions": [{"tradeDate": "2026-10-16", "lineage": {"artifacts": {
+        "sse_etf_scale": {"status": "ready", "sha256Source": "header-verified-object",
+        "sha256": "d" * 64, "key": "market-data/normalized/sse/etf_scale/2026-10-16/" + "e" * 64 + "/data.csv"}}}}]}
+    files = {}
+    for name, value in (("dashboard-snapshot.json", snapshot), ("stock-flow-history.json", history)):
+        raw = json.dumps(value).encode()
+        (tmp_path / name).write_bytes(raw)
+        files[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    plan = values()[0]
+    source = plan["budgetManifest"]["publishSource"]
+    source.update(evidenceContract="flow-ordinary-source-reuse-v1", sourceFileBindings=files)
+    identity = {key: source[key] for key in ("sourceRunId", "artifactId", "artifactName", "artifactSha256", "artifactBytes", "producerCommit")}
+    provenance = {"contractVersion": source["evidenceContract"], "artifact": identity,
+                  "files": files, "targetDate": snapshot["asOf"]}
+    source["sourceFingerprint"] = hashlib.sha256(json.dumps(provenance, ensure_ascii=False,
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    plan.pop("planHash")
+    plan["planHash"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    return plan
+
+
+def test_ordinary_evidence_is_reuse_not_collection_and_receipt_revalidates(tmp_path):
+    from scripts.resume_publish_source import ordinary_source_evidence
+    from scripts.create_live_recovery_receipts import _input_objects
+    plan = ordinary_bundle(tmp_path)
+    evidence = ordinary_source_evidence(plan, tmp_path)
+    assert evidence["collectionPerformed"] is False and evidence["requestCount"] == 0
+    assert evidence["collectorRunId"] == "123"
+    refs = _input_objects(source_dir=tmp_path, evidence=evidence, target="2026-10-16",
+                          source_fingerprint=evidence["sourceFingerprint"])
+    assert len(refs) == 1 and refs[0]["sha256"] == "d" * 64
+    (tmp_path / "ordinary-source-evidence.json").write_text(json.dumps(evidence))
+    assert ordinary_source_evidence(plan, tmp_path) == evidence
+    (tmp_path / "dashboard-snapshot.json").write_text("{}")
+    with pytest.raises(ValueError, match="file_mismatch"):
+        ordinary_source_evidence(plan, tmp_path)
+
+
+def test_ordinary_evidence_rejects_unbound_file(tmp_path):
+    from scripts.resume_publish_source import ordinary_source_evidence
+    plan = ordinary_bundle(tmp_path)
+    (tmp_path / "unexpected.json").write_text("{}")
+    with pytest.raises(ValueError, match="unbound_file"):
+        ordinary_source_evidence(plan, tmp_path)
+
+
+def test_actual_ordinary_projection_cli_and_identity_shell(tmp_path):
+    source = tmp_path / ".collection-source"
+    source.mkdir()
+    plan = ordinary_bundle(source)
+    plan_path = tmp_path / "recovery-execution.json"
+    plan_path.write_text(json.dumps(plan))
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/resume_publish_source.py"),
+        "--ordinary-evidence", str(plan_path), str(source)], cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": "src:."}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    (tmp_path / "recovery-plan.json").write_text(json.dumps({"plan": plan}))
+    workflow = (ROOT / ".github/workflows/market-data-publish.yml").read_text()
+    step = workflow.split("      - name: Verify source artifact identity\n", 1)[1].split("\n      - uses:", 1)[0]
+    shell = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    env = {**os.environ, "INPUT_RUN_KEY": plan["runKey"], "INPUT_TARGET_DATE": "2026-10-16",
+           "INPUT_RECOVERY_ID": "resume-16", "INPUT_RECOVERY_DATA_DATE": "2026-10-16",
+           "INPUT_RESUME_EXISTING_SOURCE": "true"}
+    result = subprocess.run(["bash", "-c", shell], cwd=tmp_path, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    evidence_path = source / "ordinary-source-evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    evidence["sourceFingerprint"] = "f" * 64
+    evidence_path.write_text(json.dumps(evidence))
+    result = subprocess.run(["bash", "-c", shell], cwd=tmp_path, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("change", ["fingerprint", "contract", "path"])
+def test_ordinary_evidence_rejects_invalid_approved_binding(tmp_path, change):
+    from scripts.resume_publish_source import ordinary_source_evidence
+    plan = ordinary_bundle(tmp_path)
+    source = plan["budgetManifest"]["publishSource"]
+    if change == "fingerprint":
+        source["sourceFingerprint"] = "f" * 64
+    elif change == "contract":
+        source["evidenceContract"] = "unknown"
+    else:
+        source["sourceFileBindings"]["../outside.json"] = {"bytes": 0, "sha256": "a" * 64}
+    plan.pop("planHash")
+    plan["planHash"] = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(ValueError, match="publish_resume_ordinary"):
+        ordinary_source_evidence(plan, tmp_path)
 
 
 def values():

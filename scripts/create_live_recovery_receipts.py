@@ -89,6 +89,7 @@ def _evidence_keys(source_dir: Path, evidence_dir: Path, stage: str) -> list[str
     names = [
         "recovery-live/recovery-evidence.json",
         "recovery-live/retained-source-evidence.json",
+        "recovery-live/ordinary-source-evidence.json",
         "recovery-live/dashboard-release-canary.json",
         "recovery-live/dashboard-read-model-activation.json",
     ]
@@ -135,7 +136,7 @@ def _input_objects(
     """
 
     objects: list[dict[str, Any]] = []
-    if evidence.get("provenance", {}).get("contractVersion") == "flow-retained-source-evidence-v1":
+    if evidence.get("provenance", {}).get("contractVersion") in {"flow-retained-source-evidence-v1", "flow-ordinary-source-reuse-v1"}:
         objects.extend(evidence.get("retainedInputObjects", []))
     archive = evidence.get("historyArchive")
     if isinstance(archive, dict):
@@ -215,10 +216,19 @@ def main() -> None:
     if any(key not in metrics for key in required_metrics) or metrics.get("measurementStatus") != "MEASURED":
         raise ValueError("recovery_resource_metrics_not_measured")
     retained = isinstance(scope.budget_manifest, dict) and "rollingPreparation" in scope.budget_manifest
-    evidence_path = args.source_dir / ("retained-source-evidence.json" if retained else "recovery-evidence.json")
+    ordinary = (isinstance(scope.budget_manifest, dict) and
+                scope.budget_manifest.get("publishSource", {}).get("evidenceContract") == "flow-ordinary-source-reuse-v1")
+    if ordinary and retained:
+        raise ValueError("recovery_source_contract_conflict")
+    evidence_path = args.source_dir / ("ordinary-source-evidence.json" if ordinary else
+                                       "retained-source-evidence.json" if retained else "recovery-evidence.json")
     if not evidence_path.is_file():
         raise ValueError("recovery_evidence_missing")
     evidence = _read(evidence_path)
+    if ordinary:
+        from scripts.resume_publish_source import ordinary_source_evidence
+        if evidence != ordinary_source_evidence(_read(args.plan), args.source_dir):
+            raise ValueError("recovery_ordinary_evidence_mismatch")
     if retained:
         from scripts.prepare_rolling_etf_publication import retained_source_evidence
         refs = []
