@@ -24,6 +24,7 @@ from .etf_facts import build_canonical_etf_daily_fact
 from .etf_stock_flow import normalise_underlying_code
 from .instrument_names import clean_instrument_name, resolve_hkex_instrument_name
 from .models import QualityFinding
+from .phase0 import historical_hkex_error_dates, publication_blocking_errors
 from .quality import summarize_findings
 from .read_models import build_view_payloads
 from .storage import now_iso, write_json
@@ -939,6 +940,7 @@ def _load_combined_frames(
 def validate_combined_data(
     manifest: dict[str, Any], frames: dict[str, pd.DataFrame], *,
     connect_closed_dates: dict[str, str] | None = None,
+    historical_connect_errors: set[str] | None = None,
 ) -> list[QualityFinding]:
     findings: list[QualityFinding] = []
     requested_dates = sorted(str(value) for value in manifest.get("requested_dates", []))
@@ -1087,14 +1089,21 @@ def validate_combined_data(
             if channels != expected_channels or not currency_ok:
                 invalid_channel_dates[str(trade_date)] = [f"{market}:{direction}" for market, direction in sorted(channels)]
     observed_connect_dates = set(connect.get("trade_date", pd.Series(dtype=str)).astype(str).unique())
-    channels_ok = (observed_connect_dates | closed) == set(requested_dates) and not invalid_channel_dates and not (observed_connect_dates & closed)
+    missing_connect_dates = set(requested_dates) - (observed_connect_dates | closed)
+    isolated_gap = bool(missing_connect_dates) and missing_connect_dates.issubset(historical_connect_errors or set())
+    channels_valid = not invalid_channel_dates and not (observed_connect_dates & closed)
+    channels_ok = (observed_connect_dates | closed) == set(requested_dates) and channels_valid
+    isolated_gap = isolated_gap and channels_valid and (observed_connect_dates | closed).issubset(requested_dates)
     findings.append(
         _finding(
             "mapping.connect_channels",
             "stock_connect_summary",
             channels_ok,
-            message="每日四通道和币种映射完整" if channels_ok else "互联互通通道或币种映射异常",
-            evidence={"invalid_dates": invalid_channel_dates, "expected_dates": requested_dates},
+            message=("每日四通道和币种映射完整" if channels_ok else
+                     "当前日通道完整，历史响应错误保留为缺口" if isolated_gap else "互联互通通道或币种映射异常"),
+            evidence={"invalid_dates": invalid_channel_dates, "expected_dates": requested_dates,
+                      "observed_dates": sorted(observed_connect_dates), "missing_dates": sorted(missing_connect_dates)},
+            warn_only=isolated_gap,
             remediation="按 market + direction 业务键核对四通道，不以页面顺序匹配。",
         )
     )
@@ -1700,6 +1709,13 @@ def validate_snapshot_values(
         int((quality.get("counts") or {}).get("fail", 0)) == 0
         and quality.get("phase0_gate_status") != "blocked"
     )
+    base_gate_ok = base_gate_ok and not publication_blocking_errors(quality)
+    if "publication_scope" in quality:
+        scope = quality["publication_scope"]
+        base_gate_ok = base_gate_ok and (
+            isinstance(scope, dict) and scope.get("target_date") == as_of
+            and scope.get("requested_dates") == dates
+        )
     findings.append(
         _finding(
             "publication.base_quality_gate",
@@ -1741,8 +1757,13 @@ def run_release_qa(
         )
     )
     from .adapters.official import verified_hkex_closures
+    scope = quality.get("publication_scope") or {}
+    historical_errors = (historical_hkex_error_dates(quality)
+                         if isinstance(scope, dict) and scope.get("requested_dates") == manifest.get("requested_dates")
+                         and scope.get("target_date") == snapshot.get("asOf") else set())
     findings.extend(validate_combined_data(manifest, frames,
-        connect_closed_dates=verified_hkex_closures(manifest, workspace_root)))
+        connect_closed_dates=verified_hkex_closures(manifest, workspace_root),
+        historical_connect_errors=historical_errors))
     if not missing:
         findings.extend(
             validate_snapshot_values(

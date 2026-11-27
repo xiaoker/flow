@@ -217,6 +217,12 @@ def parse_hkex_tab_data(text: str) -> list[dict[str, Any]]:
     return parsed
 
 
+class HkexResponseParseError(ValueError):
+    """Rejected source response, not a validated fact or a timing-pending state."""
+
+    code = "hkex_response_parse_invalid"
+
+
 def _hkex_response_diagnostics(response: requests.Response) -> str:
     """Return bounded, non-content metadata for a rejected HKEX response.
 
@@ -1754,7 +1760,7 @@ class OfficialMarketAdapters:
             markets = parse_hkex_tab_data(response.text)
         except ValueError as exc:
             diagnostics = _hkex_response_diagnostics(response)
-            raise ValueError(
+            raise HkexResponseParseError(
                 f"{exc}; response_diagnostic={diagnostics}"
             ) from exc
         summary_rows: list[dict[str, Any]] = []

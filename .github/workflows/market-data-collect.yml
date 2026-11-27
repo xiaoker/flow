@@ -964,7 +964,7 @@ jobs:
             # readiness condition. Preserve the response and finish this
             # window; do not retry it as if it were a transport failure.
             if jq -e '
-              (.errors | length == 0) and
+              ((.publication_errors // .errors) | length == 0) and
               (.phase0_gate_status == "pending")
             ' reports/phase0/latest-quality-summary.json >/dev/null; then
               echo "Official source date is not ready; this window is pending and the next window will retry." >&2
@@ -982,7 +982,7 @@ jobs:
             # authentication and data-quality failures must remain visible and
             # fail closed instead of being hidden by repeated collection.
             if (( attempt >= MAX_ATTEMPTS )) || \
-              ! jq -e '(.errors | length > 0) and all(.errors[]; .error_type == "ConnectionError" or .error_type == "HTTPError")' \
+              ! jq -e '((.publication_errors // .errors) | length > 0) and all((.publication_errors // .errors)[]; .error_type == "ConnectionError" or .error_type == "HTTPError")' \
                 reports/phase0/latest-quality-summary.json >/dev/null; then
               break
             fi
@@ -1868,7 +1868,10 @@ jobs:
             jq . stock-flow-history-status.json >&2
             exit 1
           fi
-          errors="$(jq '.errors | length' reports/phase0/latest-quality-summary.json)"
+          # Keep every collection error in evidence. The producer's versioned
+          # publication projection isolates historical HKEX response failures;
+          # release QA independently checks its exact date/error identities.
+          errors="$(jq '(.publication_errors // .errors) | length' reports/phase0/latest-quality-summary.json)"
           gate="$(jq -r '.phase0_gate_status' reports/phase0/latest-quality-summary.json)"
           collection_window="${{ steps.window.outputs.collection_window }}"
           source_pending="${{ steps.collection.outputs.pending }}"
@@ -1938,7 +1941,7 @@ jobs:
           elif [[ "${{ steps.collection.outputs.pending }}" == "true" ]]; then
             STATUS="FAILED_RETRYABLE"
             ERROR_CODE="source_not_ready"
-          elif jq -e '(.errors | length > 0) or (.phase0_gate_status == "blocked")' reports/phase0/latest-quality-summary.json >/dev/null 2>&1; then
+          elif jq -e '((.publication_errors // .errors) | length > 0) or (.phase0_gate_status == "blocked")' reports/phase0/latest-quality-summary.json >/dev/null 2>&1; then
             STATUS="BLOCKED_QUALITY"
             ERROR_CODE="quality_gate_blocked"
           fi

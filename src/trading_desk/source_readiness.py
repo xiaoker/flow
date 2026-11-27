@@ -14,6 +14,8 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from .phase0 import historical_hkex_error_dates, publication_blocking_errors
+
 
 READINESS_SCHEMA_VERSION = 1
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -111,14 +113,17 @@ def _deadline_for(target_date: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _source_error(quality: dict[str, Any], dataset: str) -> str | None:
-    errors = quality.get("errors")
+def _source_error(quality: dict[str, Any], dataset: str, target_date: str) -> str | None:
+    scope = quality.get("publication_scope") or {}
+    errors = (publication_blocking_errors(quality)
+              if isinstance(scope, dict) and scope.get("target_date") == target_date else quality.get("errors"))
     if isinstance(errors, list):
         for item in errors:
             if not isinstance(item, dict):
                 continue
             step = str(item.get("step", ""))
-            if step == dataset or step.startswith(f"{dataset}:"):
+            source_step = "hkex_connect" if dataset == "stock_connect_summary" else dataset
+            if step in {dataset, source_step} or step.startswith((f"{dataset}:", f"{source_step}:")):
                 message = str(item.get("message") or item.get("error_type") or "source_error")
                 return message[:240]
     findings = quality.get("findings")
@@ -210,7 +215,7 @@ def build_source_readiness(
     source_rows: list[dict[str, Any]] = []
     for dataset, definition in SOURCE_DEFINITIONS.items():
         required = bool(definition["required"])
-        error = _source_error(quality, dataset)
+        error = _source_error(quality, dataset, target_date)
         missing = _missing_target(quality, dataset, target_date)
         closure = ((quality.get("profiles") or {}).get(dataset) or {}).get("official_closed_dates") or {}
         closed_sha = closure.get(target_date) if dataset == "stock_connect_summary" and isinstance(closure, dict) else None
@@ -254,6 +259,8 @@ def build_source_readiness(
                 "evidence": {
                     "qualityPath": str(manifest.get("quality_summary_path") or ""),
                     "combinedPath": (manifest.get("combined_paths") or {}).get(dataset),
+                    **({"historicalErrorDates": sorted(historical_hkex_error_dates(quality))}
+                       if dataset == "stock_connect_summary" else {}),
                     **({"closureRawSha256": closed_sha} if reason == "official_source_target_date_closed" else {}),
                 },
             }
