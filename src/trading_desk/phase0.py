@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import traceback
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -41,6 +42,48 @@ from .storage import new_run_id, now_iso, write_json, write_normalized_csv
 # cap explicitly; the daily default intentionally remains small and records
 # every deferred code in the PCF artifact warning.
 DEFAULT_PCF_MAX_CODES = 16
+PUBLICATION_SCOPE_CONTRACT = "flow-current-publication-scope-v1"
+
+
+def historical_hkex_error_dates(quality: dict[str, Any]) -> set[str]:
+    """Isolate only rejected historical HKEX responses under the explicit contract.
+
+    HKEX headlines consume the current date, unlike ETF deltas which require a
+    prior-day baseline. No hash/mapping/QA failure, unknown error, recovery or
+    legacy caller is made non-blocking by this narrow scope contract.
+    """
+    scope = quality.get("publication_scope")
+    if not isinstance(scope, dict) or scope.get("contract") != PUBLICATION_SCOPE_CONTRACT:
+        return set()
+    dates = scope.get("requested_dates")
+    if not isinstance(dates, list) or not dates or not all(isinstance(d, str) for d in dates):
+        return set()
+    try:
+        if any(date.fromisoformat(d).isoformat() != d for d in dates):
+            return set()
+    except ValueError:
+        return set()
+    if dates != sorted(set(dates)) or scope.get("target_date") != dates[-1]:
+        return set()
+    return {
+        day for error in quality.get("errors", [])
+        if isinstance(error, dict)
+        and error.get("error_code") == "hkex_response_parse_invalid"
+        and error.get("error_type") == "HkexResponseParseError"
+        and isinstance(error.get("step"), str)
+        and error["step"].startswith("hkex_connect:")
+        and (day := error["step"].split(":", 1)[1]) in dates[:-1]
+    }
+
+
+def publication_blocking_errors(quality: dict[str, Any]) -> list[dict[str, Any]]:
+    historical = historical_hkex_error_dates(quality)
+    return [error for error in quality.get("errors", []) if not (
+        isinstance(error, dict)
+        and error.get("error_code") == "hkex_response_parse_invalid"
+        and error.get("error_type") == "HkexResponseParseError"
+        and error.get("step") in {f"hkex_connect:{day}" for day in historical}
+    )]
 
 
 def _relative(path: str | Path, workspace_root: Path) -> str:
@@ -191,6 +234,7 @@ def collect_phase0(
     szse_etf_history_root: Path | None = None,
     application_context: Mapping[str, Any] | None = None,
     archived_adapters: Any | None = None,
+    isolate_historical_hkex_errors: bool = False,
 ) -> dict[str, Any]:
     if len(dates) != 3:
         raise ValueError("Phase 0 requires exactly three requested trading dates")
@@ -220,6 +264,11 @@ def collect_phase0(
         except (KeyError, ApplicationContractError) as exc:
             raise ValueError(f"invalid application context: {exc}") from exc
     dates = sorted(dates)
+    current_publication_scope = (
+        isolate_historical_hkex_errors is True
+        and archived_adapters is None and application_identity is None
+        and collection_window in {"morning", "reconcile"}
+    )
     deferred_datasets = _deferred_datasets_for_window(collection_window)
     run_id = new_run_id()
     started_at = now_iso()
@@ -257,6 +306,9 @@ def collect_phase0(
                 "message": str(exc),
                 "traceback": traceback.format_exc(limit=8),
             }
+            from .adapters.official import HkexResponseParseError
+            if isinstance(exc, HkexResponseParseError):
+                error["error_code"] = exc.code
             (errors if required else optional_errors).append(error)
             return None
 
@@ -518,6 +570,24 @@ def collect_phase0(
         else:
             findings.extend(validators[dataset](frame, dataset))
     profiles["stock_connect_summary"]["official_closed_dates"] = closure_evidence
+    if current_publication_scope:
+        connect = combined.get("stock_connect_summary", pd.DataFrame())
+        if not connect.empty and {"trade_date", "market", "direction", "currency"}.issubset(connect.columns):
+            current = connect[connect["trade_date"].astype(str).eq(dates[-1])]
+            if not current.empty:
+                expected = {(market, direction) for market in ("SSE", "SZSE")
+                            for direction in ("northbound", "southbound")}
+                channels = set(zip(current["market"].astype(str), current["direction"].astype(str)))
+                valid = channels == expected and len(current) == 4 and bool((
+                    (current["direction"].eq("northbound") & current["currency"].eq("RMB"))
+                    | (current["direction"].eq("southbound") & current["currency"].eq("HKD"))
+                ).all()) and dates[-1] not in closure_evidence
+                findings.append(QualityFinding(
+                    check_id="publication.current_connect_channels", dataset="stock_connect_summary",
+                    status="pass" if valid else "fail", severity="info" if valid else "high",
+                    message="当前日互联互通四通道和币种完整" if valid else "当前日互联互通通道或币种异常",
+                    evidence={"target_date": dates[-1], "rows": len(current)},
+                ))
 
     for error in optional_errors:
         findings.append(
@@ -586,8 +656,25 @@ def collect_phase0(
     )
 
     quality = summarize_findings(findings)
-    pending_domains = _pending_required_coverage_datasets(findings)
-    gate_status = _resolve_phase0_gate(quality, errors, pending_domains)
+    quality["errors"] = errors
+    # Archive/recovery and legacy auto callers retain their existing full-window
+    # contract. Only ordinary scheduled full-source windows use this projection.
+    if current_publication_scope:
+        quality["publication_scope"] = {
+            "contract": PUBLICATION_SCOPE_CONTRACT,
+            "target_date": dates[-1],
+            "requested_dates": dates,
+        }
+    historical_dates = historical_hkex_error_dates(quality)
+    publication_findings = [finding for finding in findings if not (
+        finding.dataset == "stock_connect_summary"
+        and finding.check_id == "timeliness.requested_date_coverage"
+        and set(finding.evidence.get("missing_dates") or []).issubset(historical_dates)
+    )]
+    pending_domains = _pending_required_coverage_datasets(publication_findings)
+    blocking_errors = publication_blocking_errors(quality)
+    quality["publication_errors"] = blocking_errors
+    gate_status = _resolve_phase0_gate(quality, blocking_errors, pending_domains)
     quality["phase0_gate_status"] = gate_status
     quality["phase0_gate_passed"] = gate_status == "pass"
     quality["release_eligible"] = gate_status in {"pass", "conditional_pass"}

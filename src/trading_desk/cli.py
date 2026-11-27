@@ -96,6 +96,7 @@ def main() -> None:
             workspace_root=workspace_root,
             collection_window=args.window,
             pcf_max_codes=args.pcf_max_codes,
+            isolate_historical_hkex_errors=args.window in {"morning", "reconcile"},
         )
         summary = {
             "run_id": result["manifest"]["run_id"],
