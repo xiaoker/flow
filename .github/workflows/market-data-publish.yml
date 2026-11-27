@@ -276,6 +276,7 @@ jobs:
       actions: write
       contents: read
     env:
+      PIPELINE_WINDOW_GATE_ENABLED: ${{ needs.publish_window_gate.outputs.gate_enabled }}
       FLOW_PUBLIC_URL: https://flow.xiaoker.com
       FLOW_INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       FLOW_CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
@@ -306,6 +307,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$PIPELINE_WINDOW_GATE_ENABLED" in
+            true|false) ;;
+            *) echo "Verified publish gate output is missing or invalid." >&2; exit 1 ;;
+          esac
           if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
             echo "Ordinary pipeline lease heartbeat is not required for this run."
             exit 0
@@ -330,6 +335,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$PIPELINE_WINDOW_GATE_ENABLED" in
+            true|false) ;;
+            *) echo "Verified publish gate output is missing or invalid." >&2; exit 1 ;;
+          esac
           if [[ "$PIPELINE_WINDOW_GATE_ENABLED" != "true" || -n "$INPUT_RECOVERY_ID" ]]; then
             exit 0
           fi

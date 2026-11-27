@@ -1,7 +1,11 @@
 """Recovery and ordinary pipeline heartbeat contracts."""
 import json
 import io
+import os
+import re
+import subprocess
 import sys
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
@@ -377,3 +381,89 @@ def test_collect_and_publish_workflows_start_and_stop_ordinary_heartbeat():
     assert "attempt_count" in publish
     assert "steps.lease_heartbeat_wait.outcome == 'success'" in collect
     assert "steps.lease_heartbeat_wait.outcome == 'success'" in publish
+
+
+def _publisher_heartbeat_shell(tmp_path, *, gate="true", recovery="", confirm=False, attempt="2"):
+    """Execute the real YAML shell with its job-scoped flag, without network IO.
+
+    The python3 stub records startup arguments and emits a local healthy
+    receipt. It tests shell wiring only; renewal HTTP/identity behavior is
+    covered by the existing renew tests above, not claimed as production.
+    """
+    workflow = PUBLISH_WORKFLOW.read_text()
+    job = workflow.split("\n  publish:\n", 1)[1]
+    environment = job.split("    env:\n", 1)[1].split("    steps:\n", 1)[0]
+    env = {k: v for k, v in os.environ.items() if k != "PIPELINE_WINDOW_GATE_ENABLED"}
+    binding = re.search(r"(?m)^      PIPELINE_WINDOW_GATE_ENABLED: (.+)$", environment)
+    if binding:
+        assert binding[1] == "${{ needs.publish_window_gate.outputs.gate_enabled }}"
+        env["PIPELINE_WINDOW_GATE_ENABLED"] = gate
+    env.update({"INPUT_RECOVERY_ID": recovery, "INPUT_PIPELINE_ATTEMPT_COUNT": attempt,
+        "INPUT_RUN_KEY": "daily-market-data:2026-11-27:reconcile:v1", "INPUT_LEASE_OWNER": "fixture-owner",
+        "FLOW_PIPELINE_WINDOW_URL": "https://offline.invalid/pipeline-window"})
+    name = "Confirm ordinary publish lease heartbeat" if confirm else "Start ordinary pipeline-window lease heartbeat"
+    step = job.split(f"      - name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+    shell = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    receipt = json.dumps({"status": "RUNNING", "renewalCount": 1, "runKey": env["INPUT_RUN_KEY"],
+                         "leaseOwner": env["INPUT_LEASE_OWNER"], "attemptCount": 2})
+    fixture = (
+        "date() { printf '%s\\n' '2099-01-01T00:00:00Z'; };\n"
+        "sleep() { :; };\n"
+        "python3() { printf '%s\\n' \"$@\" > invocation.txt; "
+        + "printf '%s\\n' '" + receipt + "' > pipeline-window-lease-heartbeat.json; };\n"
+    )
+    return subprocess.run(["bash", "-c", fixture + shell], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=10)
+
+
+def test_publish_job_verified_flag_reaches_start_and_confirm_shells(tmp_path):
+    start = _publisher_heartbeat_shell(tmp_path)
+    assert start.returncode == 0, start.stderr
+    args = (tmp_path / "invocation.txt").read_text().splitlines()
+    assert args[:3] == ["scripts/recovery_lease_renew.py", "--mode", "ordinary"]
+    assert args[args.index("--attempt") + 1] == "2"
+    assert args[args.index("--interval-seconds") + 1] == "300"
+    confirm = _publisher_heartbeat_shell(tmp_path, confirm=True)
+    assert confirm.returncode == 0, confirm.stderr
+    assert "heartbeat started" in confirm.stdout
+
+
+def test_missing_job_binding_reproduces_production_unbound_variable(tmp_path, monkeypatch):
+    legacy = tmp_path / "missing-job-binding.yml"
+    legacy.write_text(PUBLISH_WORKFLOW.read_text().replace(
+        "      PIPELINE_WINDOW_GATE_ENABLED: ${{ needs.publish_window_gate.outputs.gate_enabled }}\n", "", 1))
+    monkeypatch.setattr(sys.modules[__name__], "PUBLISH_WORKFLOW", legacy)
+    result = _publisher_heartbeat_shell(tmp_path)
+    assert result.returncode != 0
+    assert "PIPELINE_WINDOW_GATE_ENABLED: unbound variable" in result.stderr
+    assert not (tmp_path / "invocation.txt").exists()
+
+
+@pytest.mark.parametrize("gate,recovery", [("false", ""), ("true", "fixture-recovery")])
+def test_publish_disabled_or_recovery_mode_skips_ordinary_heartbeat(tmp_path, gate, recovery):
+    for confirm in (False, True):
+        result = _publisher_heartbeat_shell(tmp_path, gate=gate, recovery=recovery, confirm=confirm)
+        assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "invocation.txt").exists()
+
+
+@pytest.mark.parametrize("gate", ["", "1", "unknown"])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_publish_unknown_gate_does_not_silently_disable_heartbeat(tmp_path, gate, confirm):
+    result = _publisher_heartbeat_shell(tmp_path, gate=gate, confirm=confirm)
+    assert result.returncode != 0
+    assert "missing or invalid" in result.stderr
+    assert not (tmp_path / "invocation.txt").exists()
+
+
+def test_publish_enabled_heartbeat_still_requires_attempt_and_matching_receipt(tmp_path):
+    result = _publisher_heartbeat_shell(tmp_path, attempt="0")
+    assert result.returncode != 0 and "valid ordinary attempt" in result.stderr
+    assert not (tmp_path / "invocation.txt").exists()
+    assert _publisher_heartbeat_shell(tmp_path).returncode == 0
+    receipt = tmp_path / "pipeline-window-lease-heartbeat.json"
+    value = json.loads(receipt.read_text())
+    value["leaseOwner"] = "wrong-owner"
+    receipt.write_text(json.dumps(value))
+    result = _publisher_heartbeat_shell(tmp_path, confirm=True)
+    assert result.returncode != 0 and "was not confirmed" in result.stderr
