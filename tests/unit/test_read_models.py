@@ -17,6 +17,78 @@ from trading_desk.read_models import (
 )
 
 
+def test_typed_pressure_block_keeps_dashboard_independent_and_original_gate(tmp_path):
+    from scripts.build_read_models import write_full_with_coverage_status
+    snapshot, catalog = _snapshot(), _stock_catalog()
+    _, previous = build_read_models(snapshot, require_materialized=True, stock_catalog=catalog)
+    previous["coverage"]["pressure"]["availableDateCount"] = 2
+    catalog_path, previous_path = tmp_path / "catalog.json", tmp_path / "previous.json"
+    catalog_path.write_text(json.dumps(catalog))
+    previous_path.write_text(json.dumps(previous))
+    status = tmp_path / "penetration-build-status.json"
+    kwargs = {"require_materialized": True, "stock_catalog_path": catalog_path,
+              "previous_manifest_path": previous_path}
+    with pytest.raises(SystemExit) as error:
+        write_full_with_coverage_status(snapshot, tmp_path / "full", coverage_status_path=status, **kwargs)
+    assert error.value.code == 42
+    report = json.loads(status.read_text())
+    assert report == {"schemaVersion": 1, "scope": "etf_penetration", "status": "BLOCKED_QUALITY",
+        "errorCode": "read_model_coverage_pressure_availableDateCount_regressed", "asOf": snapshot["asOf"],
+        "availableDateCount": 1, "previousAvailableDateCount": 2}
+    assert not (tmp_path / "full").exists()
+    # No opt-in means the exact original gate still raises.
+    with pytest.raises(ReadModelError, match="pressure_availableDateCount_regressed"):
+        write_full_with_coverage_status(snapshot, tmp_path / "legacy", **kwargs)
+    payloads, manifest = build_market_read_models(snapshot, require_materialized=True, previous_manifest=previous)
+    assert manifest["slot"] == "dashboard" and manifest["asOf"] == snapshot["asOf"]
+    assert "pressure" not in payloads and "pressure" not in manifest["coverage"]
+
+
+def test_typed_pressure_block_does_not_swallow_date_qa_or_unknown_errors(tmp_path):
+    from scripts.build_read_models import write_full_with_coverage_status
+    status = tmp_path / "status.json"
+    with pytest.raises(ReadModelError, match="snapshot_as_of_invalid"):
+        write_full_with_coverage_status({**_snapshot(), "asOf": "invalid"}, tmp_path / "full",
+                                       coverage_status_path=status, require_materialized=True)
+    assert not status.exists() and not (tmp_path / "full").exists()
+
+
+def test_typed_pressure_block_refuses_stale_candidate_directory(tmp_path):
+    from scripts.build_read_models import write_full_with_coverage_status
+    output = tmp_path / "full"
+    output.mkdir()
+    with pytest.raises(ValueError, match="already_exists"):
+        write_full_with_coverage_status(_snapshot(), output, coverage_status_path=tmp_path / "status.json")
+
+
+def test_typed_pressure_block_keeps_core_coverage_failures_fatal(tmp_path):
+    from scripts.build_read_models import write_full_with_coverage_status
+    snapshot, catalog = _snapshot(), _stock_catalog()
+    _, previous = build_read_models(snapshot, require_materialized=True, stock_catalog=catalog)
+    previous["coverage"]["etf"]["tradingDays"] += 1
+    catalog_path, previous_path = tmp_path / "catalog.json", tmp_path / "previous.json"
+    catalog_path.write_text(json.dumps(catalog))
+    previous_path.write_text(json.dumps(previous))
+    status = tmp_path / "status.json"
+    with pytest.raises(ReadModelError, match="coverage_etf_tradingDays_regressed"):
+        write_full_with_coverage_status(snapshot, tmp_path / "full", coverage_status_path=status,
+            require_materialized=True, stock_catalog_path=catalog_path, previous_manifest_path=previous_path)
+    assert not status.exists() and not (tmp_path / "full").exists()
+
+
+def test_typed_pressure_opt_in_does_not_change_successful_candidate(tmp_path):
+    from scripts.build_read_models import write_full_with_coverage_status
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(_stock_catalog()))
+    status = tmp_path / "status.json"
+    result = write_full_with_coverage_status(_snapshot(), tmp_path / "full", coverage_status_path=status,
+        require_materialized=True, stock_catalog_path=catalog_path)
+    baseline = write_read_models(_snapshot(), tmp_path / "baseline", require_materialized=True,
+                                 stock_catalog_path=catalog_path)
+    assert result["manifest"] == baseline["manifest"]
+    assert not status.exists()
+
+
 def _state() -> dict:
     return {
         "version": 1,

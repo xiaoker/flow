@@ -3,6 +3,50 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+
+def _official_dates_evidence(days):
+    import base64
+    import hashlib
+    import json
+    from trading_desk.etf_period_dependencies import OFFICIAL_MARGIN_DATES_SOURCE
+    raw = json.dumps({"result": [{"opDate": day.replace("-", "")} for day in days],
+        "beginDate": days[0].replace("-", ""), "endDate": days[-1].replace("-", ""),
+        "pageHelp": {"pageCount": 1, "total": len(days)}}).encode()
+    encoded = json.dumps(days, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return {"sourceId": OFFICIAL_MARGIN_DATES_SOURCE, "dates": days,
+        "sha256": hashlib.sha256(raw).hexdigest(), "datesSha256": hashlib.sha256(encoded).hexdigest(),
+        "evidence": {"rangeStart": days[0], "rangeEnd": days[-1],
+                     "contentBase64": base64.b64encode(raw).decode()}}
+
+
+def test_official_pressure_calendar_keeps_dates_missing_from_cache():
+    from scripts.select_recent_trading_dates import select_stock_flow_dates
+    days = pd.bdate_range("2026-10-26", "2026-11-26").strftime("%Y-%m-%d").tolist()
+    # Fixture evidence, not an assertion about production exchange holidays.
+    selected = select_stock_flow_dates(_official_dates_evidence(days), target=days[-1])
+    assert len(selected) == 22
+    assert "2026-11-20" in selected and "2026-11-23" in selected
+    assert selected == days[-22:]
+
+
+def test_official_pressure_calendar_rejects_unproved_or_short_window():
+    from scripts.select_recent_trading_dates import select_stock_flow_dates
+    days = pd.bdate_range("2026-10-26", "2026-11-26").strftime("%Y-%m-%d").tolist()
+    evidence = _official_dates_evidence(days)
+    evidence["dates"].remove("2026-11-20")
+    with pytest.raises(ValueError, match="hash_mismatch"):
+        select_stock_flow_dates(evidence, target=days[-1])
+    with pytest.raises(ValueError, match="calendar_incomplete"):
+        select_stock_flow_dates(_official_dates_evidence(days[-20:]), target=days[-1])
+
+
+def test_missing_previous_official_share_is_not_replaced_by_older_share():
+    shares = _shares()
+    shares = shares[shares["trade_date"] != "2026-08-04"]
+    result = build_daily_partitions(shares, _pcf(), ["2026-08-03", "2026-08-04", "2026-08-05"], as_of="2026-08-05")
+    assert "2026-08-05" not in result["availableDates"]
+    assert any(item["asOf"] == "2026-08-05" for item in result["missingDates"])
+
 from trading_desk.stock_flow_history import (
     StockFlowHistoryError,
     build_daily_partitions,
