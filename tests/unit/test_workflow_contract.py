@@ -4,10 +4,98 @@ import subprocess
 import sys
 import json
 import textwrap
+import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPOSITORY_ROOT / ".github/workflows"
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "recovery_dashboard", "recovery_full", "unknown", "bad_report"])
+def test_publisher_actual_build_shell_isolates_only_typed_pressure_block(tmp_path, mode):
+    workflow = (WORKFLOWS / "market-data-publish.yml").read_text()
+    step = workflow.split("      - name: Build immutable read-model candidates offline\n", 1)[1].split(
+        "      - name: Check dashboard capability contract", 1)[0]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1]).replace(
+        "${{ needs.publish_window_gate.outputs.gate_enabled }}", "true")
+    snapshot = {"asOf": "2026-11-26", "publication": {"status": "confirmed"}}
+    for name, payload in (("dashboard-snapshot.json", snapshot), ("market-history.json", {}), ("stock-flow-catalog.json", {}),
+                          ("stock-flow-history.json", {})):
+        (tmp_path / name).write_text(json.dumps(payload))
+    stages = ["dashboard", "publish"] if mode == "recovery_dashboard" else ["etf_penetration", "publish"]
+    (tmp_path / "recovery-execution.json").write_text(json.dumps({"requiredStages": stages}))
+    report = {"schemaVersion": 1, "scope": "etf_penetration", "status": "BLOCKED_QUALITY",
+              "errorCode": "read_model_coverage_pressure_availableDateCount_regressed", "asOf": "2026-11-26",
+              "availableDateCount": 20, "previousAvailableDateCount": 21}
+    if mode == "bad_report":
+        report["asOf"] = "2026-11-25"
+    # Stub only external script boundaries; execute the real branching shell.
+    # Actual builder/candidate behavior is tested separately with real inputs.
+    (tmp_path / "fixture-report.json").write_text(json.dumps(report))
+    stub = r'''python() {
+      printf '%s\n' "$*" >> calls.txt
+      case "$1" in
+        scripts/verify_stock_flow_bundle.py) printf '%s\n' '{"valid":true,"status":"READY"}' ;;
+        scripts/build_stock_pressure_state.py) : ;;
+        scripts/build_read_models.py)
+          if [[ " $* " == *" --output-dir read-models-full "* ]]; then
+            if [[ "$FIXTURE_MODE" == "unknown" ]]; then return 7; fi
+            command cp fixture-report.json penetration-build-status.json
+            return 42
+          fi
+          mkdir -p read-models-dashboard
+          printf '%s\n' '{"slot":"dashboard"}' > read-models-dashboard/manifest.json ;;
+        scripts/report_read_model_sizes.py) printf '{}\n' > artifact-size-report.json ;;
+        *) return 99 ;;
+      esac
+    }
+    '''
+    env = {**os.environ, "INPUT_RECOVERY_ID": "fixture" if mode.startswith("recovery") else "",
+           "INPUT_TARGET_DATE": "2026-11-26", "PRODUCER_BUILD_SHA": "a" * 40,
+           "GITHUB_OUTPUT": str(tmp_path / "outputs.txt"), "FIXTURE_MODE": mode}
+    result = subprocess.run(["bash", "-c", stub + script], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=10)
+    output = (tmp_path / "outputs.txt").read_text() if (tmp_path / "outputs.txt").exists() else ""
+    if mode in {"ordinary", "recovery_dashboard"}:
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "read-models-dashboard/manifest.json").is_file()
+        assert not (tmp_path / "read-models-penetration").exists()
+        assert "penetration_status=" + ("NOT_REQUIRED" if mode == "recovery_dashboard" else "BLOCKED_QUALITY") in output
+        if mode == "recovery_dashboard":
+            assert "--output-dir read-models-full" not in (tmp_path / "calls.txt").read_text()
+    else:
+        assert result.returncode != 0
+        assert not (tmp_path / "read-models-dashboard").exists()
+        assert "ready=true" not in output
+
+
+def test_publisher_terminal_preserves_partial_block_instead_of_completed(tmp_path):
+    import re
+    workflow = (WORKFLOWS / "market-data-publish.yml").read_text()
+    step = workflow.split("      - name: Mark pipeline window terminal status\n", 1)[1].split(
+        "      - name: Preserve publish evidence", 1)[0]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    values = {"steps.build_models.outputs.penetration_status": "BLOCKED_QUALITY",
+              "job.status": "success", "github.run_id": "fixture"}
+    script = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values[match[1]], script)
+    for name, value in (("dashboard-snapshot.json", {"asOf": "2026-11-26", "publication": {"status": "confirmed"}}),
+                        ("stock-flow-history-status.json", {"status": "READY"}),
+                        ("stock-flow-gate.json", {"valid": True}),
+                        ("penetration-build-status.json", {"status": "BLOCKED_QUALITY", "errorCode":
+                            "read_model_coverage_pressure_availableDateCount_regressed"})):
+        (tmp_path / name).write_text(json.dumps(value))
+    env = {**os.environ, "INPUT_RECOVERY_ID": "", "INPUT_TARGET_DATE": "2026-11-26",
+           "INPUT_RUN_KEY": "daily-market-data:2026-11-27:reconcile:v1", "INPUT_LEASE_OWNER": "fixture",
+           "FLOW_INGEST_API_KEY": "fixture", "FLOW_CF_ACCESS_CLIENT_ID": "fixture",
+           "FLOW_CF_ACCESS_CLIENT_SECRET": "fixture", "FLOW_PIPELINE_WINDOW_URL": "https://offline.invalid"}
+    # Prevent remote mutation; inspect the payload the real shell would submit.
+    result = subprocess.run(["bash", "-c", "curl() { :; };\n" + script], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    payload = json.loads((tmp_path / "pipeline-window-terminal.json").read_text())
+    assert payload["status"] == "BLOCKED_QUALITY"
+    assert payload["errorCode"] == "read_model_coverage_pressure_availableDateCount_regressed"
+    assert payload["completionAsOf"] is None and payload["publicationStatus"] is None
 LEGACY_WORKFLOW = WORKFLOWS / "daily-data.yml"
 COLLECT_WORKFLOW = WORKFLOWS / "market-data-collect.yml"
 PUBLISH_WORKFLOW = WORKFLOWS / "market-data-publish.yml"
@@ -657,10 +745,10 @@ def test_stock_flow_history_uses_etf_snapshot_dates_for_previous_share_anchor() 
         maxsplit=1,
     )[1].split("Publish ETF-to-stock daily partitions", maxsplit=1)[0]
 
-    assert "--slurpfile manifest reports/phase0/latest-manifest.json" in history_step
-    assert ".sourceSnapshots[]?.date" in history_step
-    assert '.source.source_id == "sse"' in history_step
-    assert '.source.dataset == "etf_scale"' in history_step
+    assert "scripts/select_recent_trading_dates.py" in history_step
+    assert '--end-date "$AS_OF" --count 22' in history_step
+    assert "--stock-flow-calendar stock-flow-calendar.json" in history_step
+    assert ".sourceSnapshots[]?.date" not in history_step
     assert "market-history.json > stock-flow-dates.txt" not in history_step
 
 
@@ -747,11 +835,10 @@ def test_daily_collection_does_not_publish_empty_stock_flow_over_a_complete_inde
 def test_stock_flow_history_is_bounded_and_current_partition_is_required() -> None:
     workflow = COLLECT_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "stock-flow-history/available-dates" in workflow
-    assert "--slurpfile previous previous-stock-flow-dates.json" in workflow
-    assert "$previous[0].availableDates" in workflow
+    assert "--stock-flow-calendar stock-flow-calendar.json" in workflow
+    assert "$previous[0].availableDates" not in workflow
     assert "stock-flow-dates.txt" in workflow
-    assert "| .[-22:][]" in workflow
+    assert '--end-date "$AS_OF" --count 22' in workflow
     assert "--require-current" in workflow
     assert "stock-flow-history.json" in workflow
     assert "availableDates | index($asOf) != null" in workflow

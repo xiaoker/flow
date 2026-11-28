@@ -2,10 +2,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
-from trading_desk.read_models import write_market_read_models, write_read_models
+from trading_desk.read_models import ReadModelError, write_market_read_models, write_read_models
 from trading_desk.read_model_capabilities import CAPABILITY_CONTRACT_VERSION
+
+
+def write_full_with_coverage_status(snapshot, output_dir, *, coverage_status_path=None, **kwargs):
+    """Expose one penetration-only block without relaxing QA or writing a candidate."""
+    if coverage_status_path is not None:
+        if coverage_status_path.exists() or output_dir.exists():
+            raise ValueError("penetration_coverage_output_already_exists")
+    try:
+        return write_read_models(snapshot, output_dir, **kwargs)
+    except ReadModelError as error:
+        match = re.fullmatch(r"read_model_coverage_pressure_availableDateCount_regressed:(\d+)<(\d+)", str(error))
+        if coverage_status_path is None or match is None or int(match[1]) >= int(match[2]):
+            raise
+        report = {"schemaVersion": 1, "scope": "etf_penetration", "status": "BLOCKED_QUALITY",
+                  "errorCode": "read_model_coverage_pressure_availableDateCount_regressed",
+                  "asOf": snapshot["asOf"], "availableDateCount": int(match[1]),
+                  "previousAvailableDateCount": int(match[2])}
+        with coverage_status_path.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, sort_keys=True)
+        raise SystemExit(42) from error
 
 
 def main() -> None:
@@ -44,6 +65,8 @@ def main() -> None:
         action="store_true",
         help="Emit the schema-v4 v0.7 capability contract for an explicitly staged candidate",
     )
+    parser.add_argument("--penetration-coverage-status", type=Path,
+                        help="Opt-in typed penetration history block report (exit 42); all other failures remain fatal")
     parser.add_argument("--rolling-checkpoint", type=Path,
                         help="Pinned current-day checkpoint; rebuild native production dashboard cells")
     parser.add_argument("--rolling-calendar", type=Path)
@@ -54,6 +77,8 @@ def main() -> None:
     parser.add_argument("--rolling-unavailable-status", type=Path,
                         help="Explicit scoped unavailability; never blocks unrelated confirmed daily facts")
     args = parser.parse_args()
+    if args.penetration_coverage_status and (args.slot != "full" or args.capability_contract_v07):
+        parser.error("penetration coverage report requires the native full slot")
     rolling_args = (args.rolling_checkpoint, args.rolling_calendar,
                     args.rolling_checkpoint_sha256, args.rolling_calculation_version)
     rolling_input = None
@@ -126,9 +151,10 @@ def main() -> None:
             rolling_unavailable_reason=unavailable_reason,
         )
     else:
-        result = write_read_models(
+        result = write_full_with_coverage_status(
             snapshot,
             args.output_dir,
+            coverage_status_path=args.penetration_coverage_status,
             require_materialized=args.require_materialized,
             object_prefix=args.object_prefix,
             stock_catalog_path=args.stock_catalog,

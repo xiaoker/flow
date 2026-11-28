@@ -668,23 +668,51 @@ jobs:
             jq . <<<"$STOCK_FLOW_DECISION" >&2
             exit 1
           fi
-          if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]]; then
+          DASHBOARD_ONLY_RECOVERY=false
+          if [[ -n "$INPUT_RECOVERY_ID" ]] && jq -e '
+            (.requiredStages | length > 0) and
+            all(.requiredStages[]; . == "dashboard" or . == "publish")
+          ' recovery-execution.json >/dev/null; then
+            DASHBOARD_ONLY_RECOVERY=true
+          fi
+          if [[ "$HISTORY_STATUS" == "READY" && -s stock-flow-catalog.json && -s stock-flow-history.json ]] && [[ "$DASHBOARD_ONLY_RECOVERY" != "true" ]]; then
             python scripts/build_stock_pressure_state.py \
               --catalog stock-flow-catalog.json \
               --output stock-pressure-catalog.json \
               --daily-partitions stock-flow-history.json
+            FULL_BUILD_EXIT=0
             python scripts/build_read_models.py \
               --snapshot dashboard-snapshot.json \
               --output-dir read-models-full \
               --stock-catalog stock-pressure-catalog.json \
+              --penetration-coverage-status penetration-build-status.json \
               --require-materialized \
               --producer-build-sha "${PRODUCER_BUILD_SHA}" \
-              "${HISTORY_ARGS[@]}"
-            python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-dashboard --slot dashboard
-            python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
-            python scripts/report_read_model_sizes.py --read-model-dir read-models-full --output artifact-size-report.json
+              "${HISTORY_ARGS[@]}" || FULL_BUILD_EXIT=$?
+            if (( FULL_BUILD_EXIT == 0 )); then
+              python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-dashboard --slot dashboard
+              python scripts/split_read_model_slots.py --source-dir read-models-full --output-dir read-models-penetration --slot etf_penetration
+              python scripts/report_read_model_sizes.py --read-model-dir read-models-full --output artifact-size-report.json
+            elif (( FULL_BUILD_EXIT == 42 )) && [[ -z "$INPUT_RECOVERY_ID" ]]; then
+              jq -e --arg asOf "$INPUT_TARGET_DATE" '
+                .schemaVersion == 1 and .scope == "etf_penetration" and .status == "BLOCKED_QUALITY" and
+                .errorCode == "read_model_coverage_pressure_availableDateCount_regressed" and .asOf == $asOf and
+                (.availableDateCount < .previousAvailableDateCount)
+              ' penetration-build-status.json >/dev/null
+              test ! -e read-models-full
+              test ! -e read-models-penetration
+              HISTORY_STATUS="BLOCKED_QUALITY"
+              python scripts/build_read_models.py --slot dashboard --snapshot dashboard-snapshot.json \
+                --output-dir read-models-dashboard --require-materialized \
+                --producer-build-sha "${PRODUCER_BUILD_SHA}" "${HISTORY_ARGS[@]}"
+              python scripts/report_read_model_sizes.py --read-model-dir read-models-dashboard --output artifact-size-report.json
+            else
+              exit "$FULL_BUILD_EXIT"
+            fi
           else
-            if [[ "$HISTORY_STATUS" == "READY" ]]; then
+            if [[ "$DASHBOARD_ONLY_RECOVERY" == "true" ]]; then
+              HISTORY_STATUS="NOT_REQUIRED"
+            elif [[ "$HISTORY_STATUS" == "READY" ]]; then
               HISTORY_STATUS="BLOCKED_QUALITY"
             fi
             python scripts/build_read_models.py \
@@ -991,6 +1019,9 @@ jobs:
           PUBLICATION_STATUS="$(jq -r '.publication.status // empty' "$SNAPSHOT_PATH" 2>/dev/null || true)"
           PENETRATION_STATUS="${{ steps.build_models.outputs.penetration_status }}"
           HISTORY_ERROR_CODE="$(jq -r '.errorCode // empty' stock-flow-history-status.json 2>/dev/null || true)"
+          if [[ -s penetration-build-status.json ]]; then
+            HISTORY_ERROR_CODE="$(jq -er '.errorCode' penetration-build-status.json)"
+          fi
           STOCK_FLOW_GATE_VALID="$(jq -r '.valid // "unknown"' stock-flow-gate.json 2>/dev/null || echo "unknown")"
           STOCK_FLOW_GATE_REASON="$(jq -r '.reason // empty' stock-flow-gate.json 2>/dev/null || true)"
           if [[ "$PENETRATION_STATUS" == "BLOCKED_QUALITY" ]]; then
@@ -1121,6 +1152,7 @@ jobs:
             stock-flow-history-status.json
             stock-pressure-catalog.json
             artifact-size-report.json
+            penetration-build-status.json
             dashboard-capabilities.json
             dashboard-read-model-publish.json
             rolling-publication-input.json
