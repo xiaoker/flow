@@ -390,6 +390,33 @@ export async function sharedBudgetRequest(request: Request, runtime: { DB?: DB; 
     const input = request.method === "POST" ? await body(request) : { ...query, attemptCount: Number(query.attemptCount) } as Input;
     const now = clock(); const cutoff = new Date(now.getTime() + 30000).toISOString();
     const db = runtime.DB.withSession?.("first-primary") ?? runtime.DB;
+    // Administrative observation is not task admission and grants no allowance.
+    if (request.method === "GET" && query.operation === "diagnostic_summary") {
+      if (Object.keys(query).some(key => key !== "operation")) fail("budget_diagnostic_query_invalid");
+      const result = await db.prepare("SELECT revision,state_json FROM pipeline_budget_account WHERE scope=? LIMIT 1")
+        .bind(BUDGET_SCOPE).all<{ revision: number; state_json: string }>();
+      count(result.meta);
+      const row = result.results[0];
+      if (!row) return response({ contract: "flow-budget-diagnostic-v1", initialized: false,
+        evidenceReady: false, executionAllowed: false, rowsRead, rowsWritten });
+      if (!integer(row.revision) || new TextEncoder().encode(row.state_json).length > MAX_STATE_BYTES) fail("budget_state_corrupt", 503);
+      const state = JSON.parse(row.state_json) as SharedBudgetState;
+      validateState(state);
+      for (const d of DIMENSIONS) {
+        if (!(limits[d] === null || integer(limits[d]))) fail("invalid_budget_policy", 503);
+        state.caps[d] = limits[d] === null || state.caps[d] === null ? null : Math.min(limits[d]!, state.caps[d]!);
+      }
+      const statuses: Record<string, number> = {};
+      let held = zero();
+      for (const reservation of Object.values(state.reservations)) {
+        statuses[reservation.status] = (statuses[reservation.status] ?? 0) + 1;
+        if (["RESERVED", "RUNNING", "UNKNOWN", "OVER_BUDGET"].includes(reservation.status)) held = add(held, reservation.cost);
+      }
+      return response({ contract: "flow-budget-diagnostic-v1", initialized: true, revision: row.revision,
+        epochDay: state.epochDay, epochMonth: state.epochMonth, evidenceReady: evidenceReady(state, now),
+        executionAllowed: false, evidence: state.evidence, caps: state.caps, settled: state.settled, held,
+        reservationStatusCounts: statuses, rowsRead, rowsWritten });
+    }
     if (request.method === "POST" && input.operation === "account_reconcile") {
       return await reconcileBudgetAccount(input as unknown as AccountReconciliation, db, now, limits, count,
         () => ({ rowsRead, rowsWritten }));

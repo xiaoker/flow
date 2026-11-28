@@ -39,6 +39,35 @@ function adapter(sqlite, options = {}) {
 const request = (payload, token = "fixture-key") => new Request("https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 const call = (db, p, opts) => sharedBudgetRequest(request(p), { DB: adapter(db, opts), INGEST_API_KEY: "fixture-key" }, () => now, nums(100));
 function readState(db) { return JSON.parse(db.prepare("SELECT state_json FROM pipeline_budget_account WHERE scope=?").get(BUDGET_SCOPE).state_json); }
+test("administrative summary is bounded, read-only and never execution authority", async () => {
+  const db = seed();
+  const p = input(); await call(db, p);
+  await call(db, { ...p, operation: "settle", outcome: "UNKNOWN", operationId: "d".repeat(64), expectedRevision: 1 });
+  const before = readState(db); const queries = [];
+  const get = (token = "fixture-key", suffix = "") => sharedBudgetRequest(new Request(
+    "https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget?operation=diagnostic_summary" + suffix,
+    { headers: { Authorization: `Bearer ${token}` } }),
+  { DB: adapter(db, { before(sql) { queries.push(sql); assert(sql.startsWith("SELECT")); assert(sql.endsWith("LIMIT 1")); } }), INGEST_API_KEY: "fixture-key" }, () => now);
+  assert.equal((await get("bad")).status, 401); assert.equal(queries.length, 0);
+  assert.equal((await get("fixture-key", "&runKey=invalid")).status, 422); assert.equal(queries.length, 0);
+  const result = await (await get()).json();
+  assert.equal(queries.length, 1); assert.equal(result.executionAllowed, false);
+  assert.equal(result.reservationStatusCounts.UNKNOWN, 1); assert.deepEqual(result.held, nums(70));
+  assert(!JSON.stringify(result).includes("owner0")); assert.equal(result.rowsWritten, 0);
+  assert.deepEqual(readState(db), before);
+  const unknown = await sharedBudgetRequest(new Request("https://flow.xiaoker.com/api/v1/admin/pipeline-window/budget?operation=diagnostic_summary",
+    { headers: { Authorization: "Bearer fixture-key" } }), { DB: adapter(db, { unknownMeta: true }), INGEST_API_KEY: "fixture-key" },
+    () => now, { ...nums(100), r2ClassA: null });
+  const unknownResult = await unknown.json();
+  assert.equal(unknownResult.evidenceReady, false); assert.equal(unknownResult.caps.r2ClassA, null);
+  assert.equal(unknownResult.rowsRead, null); assert.equal(unknownResult.rowsWritten, null);
+  assert.equal(unknownResult.executionAllowed, false); assert.deepEqual(readState(db), before);
+  db.prepare("UPDATE pipeline_budget_account SET state_json=?").run(JSON.stringify({ ...before, epochDay: "2026-10-02" }));
+  assert.equal((await (await get()).json()).evidenceReady, false);
+  db.prepare("DELETE FROM pipeline_budget_account").run();
+  const missing = await (await get()).json(); assert.equal(missing.initialized, false); assert.equal(missing.executionAllowed, false);
+  db.close();
+});
 const stable = p => ({ ...p, taskContract: "flow-budget-task-v2", taskInputSha256: "a".repeat(64) });
 
 test("stable reservation without owner metadata fails closed", async () => {
