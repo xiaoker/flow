@@ -36,7 +36,14 @@ def diagnose(run_key, headers, opener=None):
                 results[name] = {"status": "NOT_FOUND"}
                 continue
             if response.code != 200:
-                raise ValueError("diagnostic_http_" + str(response.code))
+                # Never log bodies, redirects, cookies or arbitrary header values.
+                import re
+                metadata = getattr(response, "headers", {})
+                ray = metadata.get("CF-Ray", "")
+                ray = ray if re.fullmatch(r"[0-9a-fA-F]{16,32}(?:-[A-Z]{3})?", ray) else "unavailable"
+                media = metadata.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                media = media if media in {"application/json", "text/html", "text/plain"} else "other"
+                raise ValueError(f"diagnostic_http_{response.code} stage={name} contentType={media} rayId={ray}")
             value = json.loads(raw)
             if not isinstance(value, dict):
                 raise ValueError("diagnostic_response_shape")

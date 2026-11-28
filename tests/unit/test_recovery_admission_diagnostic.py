@@ -40,6 +40,34 @@ def test_response_limit():
         diagnose(KEY, {}, Opener())
 
 
+def test_http_failure_metadata_is_allowlisted_and_does_not_retry():
+    class Opener:
+        count = 0
+        def open(self, *args, **kwargs):
+            self.count += 1
+            response = Response(b"secret-body")
+            response.code = 403
+            response.headers = {"CF-Ray": "a61709459cb8a1f7-SJC", "Content-Type": "text/html; charset=utf-8",
+                                "Set-Cookie": "secret-cookie", "Location": "https://secret"}
+            return response
+    opener = Opener()
+    with pytest.raises(ValueError) as error:
+        diagnose(KEY, {}, opener)
+    assert str(error.value) == "diagnostic_http_403 stage=pipeline contentType=text/html rayId=a61709459cb8a1f7-SJC"
+    assert opener.count == 1
+
+
+def test_untrusted_metadata_cannot_leak_into_error():
+    class Opener:
+        def open(self, *args, **kwargs):
+            response = Response(b"hidden")
+            response.code = 403
+            response.headers = {"CF-Ray": "secret\nInjected", "Content-Type": "secret-type"}
+            return response
+    with pytest.raises(ValueError, match="contentType=other rayId=unavailable"):
+        diagnose(KEY, {}, Opener())
+
+
 @pytest.mark.parametrize("fault", ["redirect", "unauthorized", "wrong_key", "budget_authority", "bad_json"])
 def test_fail_closed(fault):
     class Opener:
