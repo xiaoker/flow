@@ -63,5 +63,5 @@ def test_diagnostic_is_bounded_read_only_and_does_not_expose_secrets():
     assert '/dev/null' in code and 'response.close()' in code
     assert 'print(json.dumps(results' in code
     assert '.read(' not in code
-    assert text.count('if: ${{ inputs.auth_diagnostic_only != true }}') == 3
+    assert text.count("if: ${{ inputs.auth_diagnostic_only != true && inputs.recovery_run_key == '' }}") == 3
     assert 'renewLease' not in code

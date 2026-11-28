@@ -3,6 +3,10 @@ name: Cloudflare Access smoke
 on:
   workflow_dispatch:
     inputs:
+      recovery_run_key:
+        description: Optional single runKey for GET-only lease and budget diagnostics
+        type: string
+        default: ""
       auth_diagnostic_only:
         description: Two read-only status probes (curl and Python); no source request
         type: boolean
@@ -29,6 +33,7 @@ jobs:
       INGEST_API_KEY: ${{ secrets.FLOW_INGEST_API_KEY }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.FLOW_CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.FLOW_CF_ACCESS_CLIENT_SECRET }}
+      DIAGNOSTIC_RUN_KEY: ${{ inputs.recovery_run_key || '' }}
     steps:
       - name: Verify service identity secrets are configured
         shell: bash
@@ -38,8 +43,16 @@ jobs:
             exit 1
           fi
 
+      - name: Checkout bounded diagnostic
+        if: ${{ inputs.recovery_run_key != '' }}
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+
+      - name: Observe one recovery admission
+        if: ${{ inputs.recovery_run_key != '' }}
+        run: python3 scripts/diagnose_recovery_admission.py
+
       - name: Request the private data status endpoint
-        if: ${{ inputs.auth_diagnostic_only != true }}
+        if: ${{ inputs.auth_diagnostic_only != true && inputs.recovery_run_key == '' }}
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
@@ -49,7 +62,7 @@ jobs:
             "$STATUS_URL"
 
       - name: Validate the response contract
-        if: ${{ inputs.auth_diagnostic_only != true }}
+        if: ${{ inputs.auth_diagnostic_only != true && inputs.recovery_run_key == '' }}
         shell: bash
         run: |
           jq -e '
@@ -61,7 +74,7 @@ jobs:
           echo "Cloudflare Access service identity and private read endpoint are healthy."
 
       - name: Request an allowlisted SSE source through Cloudflare
-        if: ${{ inputs.auth_diagnostic_only != true }}
+        if: ${{ inputs.auth_diagnostic_only != true && inputs.recovery_run_key == '' }}
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
@@ -85,7 +98,7 @@ jobs:
           echo "Authenticated, allowlisted SSE fallback transport is healthy."
 
       - name: Compare read-only authenticated transports
-        if: ${{ inputs.auth_diagnostic_only == true }}
+        if: ${{ inputs.auth_diagnostic_only == true && inputs.recovery_run_key == '' }}
         shell: bash
         run: |
           python3 - <<'PY'
