@@ -7,6 +7,15 @@ R2, D1, release, or receipt evidence.
 
 ## Current stage
 
+### 2026-11-28: safe diagnostic HTTP failure metadata (local validation)
+
+- PR #270 merged at `914894d`; Worker deployment `46112976322` succeeded, with no pending migration. The single authorized diagnostic `46113498780` failed with HTTP403 before producing status/budget evidence; it has not been retried. No recovery, collection, flag or pointer change was performed.
+- Correct Cloudflare account `21004860…` was verified in Chrome. The Flow Access app covers the whole host and has a Service Auth policy. The observed allowed service login at 13:40:09 is for `/api/v2/releases/latest`, not the failed 13:45 diagnostic. No matching denial was found; Dashboard displayed a major-outage banner. These facts do not establish the 403 root cause or justify weakening authentication.
+- Independent worktree `/private/tmp/flow-diagnostic-errors-20261128`, branch `codex/diagnostic-errors-20261128`, from latest main `914894d`. Narrow repair adds only stage, allowlisted media type and validated CF-Ray to HTTP errors; no response body, arbitrary headers, cookies, redirects or credentials. Request limits/no retries/fail-closed behavior remain unchanged. Two regression cases cover safe metadata and hostile header rejection; related suite 13 passes. Web lint and build/all 295 tests pass. Complete Python regression exited 0 with loopback-fixture permission; log `/private/tmp/flow-diagnostic-errors-python-final.log`. Web evidence: `/private/tmp/flow-diagnostic-errors-{lint,web}.log`.
+- User authorized one PR and one CI run. This source/tests/index-only change does not match automatic Worker deployment filters and adds no migration. No merge, deployment or diagnostic retry is authorized. Production diagnosis remains unresolved; do not replay the consumed attempt or claim page recovery.
+
+### Previous handoff (historical)
+
 ### 2026-11-28: bounded recovery admission diagnostics (local validation)
 
 - PR #269 merged as `17fa4e71e215a52bd5cabc2a464bed448744f45f`; PR and main CI passed. It did not trigger Worker deployment. No production recovery, collection, registration, claim, flag or pointer write occurred. Original protected paths remain untouched.
